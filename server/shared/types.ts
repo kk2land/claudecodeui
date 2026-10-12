@@ -637,6 +637,8 @@ export type ProviderRuntimeContext = {
   getProviderModels(): Promise<ProviderModelsDefinition>;
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   isProviderInstalled(): Promise<boolean>;
+  /** Tests may supply a scripted app-server transport; production spawns the bundled CLI. */
+  createCodexAppServer?: (options: CodexAppServerClientOptions) => CodexAppServerConnection;
   /**
    * Builds the SDK query for a run. Production leaves this unset and the
    * runtime uses the SDK's own; tests supply a scripted stream so the hold
@@ -647,6 +649,25 @@ export type ProviderRuntimeContext = {
     stopTask?(taskId: string): Promise<void>;
   };
 };
+
+//----------------- CODEX APP SERVER TRANSPORT ------------
+/** A single stdio JSON-RPC connection, owned and closed by its fork operation or chat run. */
+export type CodexAppServerConnection = {
+  initialize(experimentalApi?: boolean): Promise<void>;
+  call(method: string, params: unknown): Promise<AnyRecord>;
+  respond(id: string | number, result: unknown): void;
+  respondError(id: string | number, message: string): void;
+  close(): void;
+};
+
+/** Callbacks receive server notifications/requests and process failures, including between RPC calls. */
+export type CodexAppServerClientOptions = {
+  cwd?: string;
+  onMessage?(message: AnyRecord): void;
+  onExit?(error: Error): void;
+};
+
+// ---------------------------
 
 export type ProviderRunFunction = (
   command: string,

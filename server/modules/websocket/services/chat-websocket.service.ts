@@ -73,6 +73,7 @@ export type ProviderRuntimeGateway = {
     writer: ProviderRuntimeWriter,
   ): Promise<unknown>;
   abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
+  steer?(provider: LLMProvider, sessionId: string, command: string, options: AnyRecord): Promise<boolean>;
   stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
   /** Whether a provider runtime still holds background work for the session after its turn ended. */
   hasBackgroundWork(sessionId: string): boolean;
@@ -440,6 +441,39 @@ async function handleChatAbort(
   });
 }
 
+/** Appends validated input to the registered run without registering or completing a new run. */
+async function handleChatSteer(ws: WebSocket, data: AnyRecord, dependencies: ChatWebSocketDependencies): Promise<void> {
+  const resolved = resolveSendTarget(ws, data, dependencies, 'chat.steer');
+  if (!resolved) return;
+  const { sessionId, provider } = resolved;
+  const run = chatRunRegistry.getRun(sessionId);
+  if (!run || run.status !== 'running') {
+    sendProtocolError(ws, 'STEER_NO_ACTIVE_RUN', `The turn has already ended. Unsent prompt: ${typeof data.content === 'string' ? data.content : ''}`, sessionId);
+    return;
+  }
+  const content = typeof data.content === 'string' ? data.content : '';
+  const options = data.options ?? {};
+  const attachments = filterAttachmentsToUploadStore([
+    ...normalizeAttachmentDescriptors(options.attachments),
+    ...normalizeAttachmentDescriptors(options.images),
+    ...normalizeAttachmentDescriptors(options.files),
+  ]);
+  if (!content.trim() && !attachments.length) {
+    sendProtocolError(ws, 'STEER_EMPTY_INPUT', 'Steer requires text or an attachment.', sessionId);
+    return;
+  }
+  try {
+    const accepted = await dependencies.runtime.steer?.(provider, sessionId, content, {
+      images: attachments.filter(isImageAttachmentDescriptor),
+      files: attachments.filter((attachment) => !isImageAttachmentDescriptor(attachment)),
+    });
+    if (!accepted) sendProtocolError(ws, 'STEER_UNAVAILABLE', `No steerable turn is available. Unsent prompt: ${content}`, sessionId);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    sendProtocolError(ws, 'STEER_FAILED', `Could not confirm appended input: ${reason}\nPrompt: ${content}`, sessionId);
+  }
+}
+
 /**
  * Handles `chat.stop-task`: stops one background task of a session — an
  * agent, a workflow or a backgrounded command that is still going after its
@@ -580,6 +614,7 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
  * Inbound protocol (client to server):
  * - `chat.send`                { sessionId, content, options? }
  * - `chat.abort`               { sessionId }
+ * - `chat.steer`               { sessionId, content, options?: { attachments? } }
  * - `chat.stop-task`           { sessionId, taskId }
  * - `chat.subscribe`           { sessions: [{ sessionId, lastSeq? }] }
  * - `chat.permission-response` { requestId, allow, updatedInput?, message?, rememberEntry? }
@@ -683,6 +718,9 @@ export function handleChatConnection(
           return;
         case 'chat.abort':
           await handleChatAbort(ws, data, dependencies);
+          return;
+        case 'chat.steer':
+          await handleChatSteer(ws, data, dependencies);
           return;
         case 'chat.stop-task':
           await handleChatStopTask(ws, data, dependencies);

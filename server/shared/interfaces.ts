@@ -37,6 +37,8 @@ export interface IProviderRuntime {
     context: ProviderRuntimeContext,
   ): Promise<unknown>;
   abort(sessionId: string): boolean | Promise<boolean>;
+  /** Appends input to the current turn; false means there is no steerable active turn. */
+  steer?(sessionId: string, command: string, options: AnyRecord): Promise<boolean>;
   permissions?: ProviderRuntimePermissionGateway;
   /**
    * Sessions with background tasks still outstanding, whether or not their

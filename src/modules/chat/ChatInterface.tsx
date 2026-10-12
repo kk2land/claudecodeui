@@ -124,6 +124,7 @@ function ChatInterface({
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
+    supportsSteer,
   } = useChatProviderState({
     selectedSession,
     selectedProject,
@@ -243,6 +244,8 @@ function ChatInterface({
     provider,
     permissionMode,
     cyclePermissionMode,
+    selectPermissionMode,
+    supportsSteer,
     currentProviderModel,
     currentProviderEffort,
     isLoading: isProcessing,
@@ -532,6 +535,7 @@ function ChatInterface({
           )}
 
           <ChatComposer
+          supportsSteer={supportsSteer}
           pendingPermissionRequests={pendingPermissionRequests}
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}

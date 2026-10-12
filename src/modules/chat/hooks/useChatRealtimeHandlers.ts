@@ -177,7 +177,7 @@ export function useChatRealtimeHandlers({
             // A refused stop request is not about the run: the task had
             // already settled, and idling here would drop a response in
             // flight on that session.
-            if (msg.code !== 'NO_SUCH_TASK' && msg.code !== 'TASK_ID_REQUIRED') {
+            if (msg.code !== 'NO_SUCH_TASK' && msg.code !== 'TASK_ID_REQUIRED' && !String(msg.code).startsWith('STEER_')) {
               onSessionIdle?.(sid);
             }
             sessionStore.appendRealtime(sid, {
@@ -319,6 +319,7 @@ export function useChatRealtimeHandlers({
             const previousPendingPermissionRequests = pendingPermissionRequestsRef.current;
             if (!previousPendingPermissionRequests.some((request) => request.requestId === msg.requestId)) {
               const nextPendingPermissionRequests = [...previousPendingPermissionRequests, {
+                provider: msg.provider as LLMProvider,
                 requestId: msg.requestId as string,
                 toolName: (msg.toolName as string) || 'UnknownTool',
                 input: msg.input,

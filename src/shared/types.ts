@@ -442,6 +442,8 @@ export type PermissionGrantResult = {
 
 /** A tool-permission request awaiting the user's decision, identified by its requestId and carrying the tool name, input and context needed to render the prompt and reply to the backend. */
 export type PendingPermissionRequest = {
+  /** Originating provider, used to label shared approval and question panels. */
+  provider?: LLMProvider;
   requestId: string;
   toolName: string;
   input?: unknown;
@@ -452,6 +454,8 @@ export type PendingPermissionRequest = {
 
 /** One question asked by the AskUserQuestion tool, with its answer options and whether more than one option may be selected. */
 export type Question = {
+  /** Provider-native question key, used when returning Codex Plan answers. */
+  id?: string;
   question: string;
   header?: string;
   options: QuestionOption[];

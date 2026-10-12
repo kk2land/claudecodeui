@@ -16,6 +16,7 @@ type UseSlashCommandsOptions = {
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
   onExecuteCommand: (command: SlashCommand, rawInput?: string) => void | Promise<void>;
+  enablePlanCommand?: boolean;
 };
 
 const getCommandHistoryKey = (projectName: string) => `command_history_${projectName}`;
@@ -82,6 +83,7 @@ export function useSlashCommands({
   setInput,
   textareaRef,
   onExecuteCommand,
+  enablePlanCommand = false,
 }: UseSlashCommandsOptions) {
   const { commands: projectCommands } = useProjectSlashCommands(selectedProject, provider);
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
@@ -115,12 +117,15 @@ export function useSlashCommands({
     }
 
     const parsedHistory = readCommandHistory(selectedProject.projectId);
-    return [...projectCommands].sort((commandA, commandB) => {
+    const commands = enablePlanCommand
+      ? [...projectCommands.filter((command) => command.name !== '/plan'), { name: '/plan', description: 'Toggle Codex Plan mode', namespace: 'builtin', type: 'builtin' as const }]
+      : projectCommands;
+    return [...commands].sort((commandA, commandB) => {
       const commandAUsage = parsedHistory[commandA.name] || 0;
       const commandBUsage = parsedHistory[commandB.name] || 0;
       return commandBUsage - commandAUsage;
     });
-  }, [projectCommands, selectedProject]);
+  }, [projectCommands, selectedProject, enablePlanCommand]);
 
   useEffect(() => {
     if (!showCommandMenu) {

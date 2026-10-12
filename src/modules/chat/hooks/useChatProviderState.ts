@@ -54,6 +54,7 @@ const FALLBACK_PERMISSION_MODES: Record<LLMProvider, PermissionMode[]> = {
 };
 
 type ProviderCapabilities = {
+  supportsSteer?: boolean;
   provider: LLMProvider;
   permissionModes: string[];
   defaultPermissionMode: string;
@@ -471,6 +472,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
    */
   const supportsMessageEditing = Boolean(providerCapabilities?.[provider]?.supportsMessageEditing);
   const supportsSessionForking = Boolean(providerCapabilities?.[provider]?.supportsSessionForking);
+  const supportsSteer = Boolean(providerCapabilities?.[provider]?.supportsSteer);
 
   const resolvePermissionModeForProvider = useCallback((
     targetProvider: LLMProvider,
@@ -830,5 +832,6 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
+    supportsSteer,
   };
 }

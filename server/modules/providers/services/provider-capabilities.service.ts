@@ -1,4 +1,5 @@
 import type { LLMProvider } from '@/shared/types.js';
+import { isCodexAppServerEnabled } from '@/shared/utils.js';
 
 /**
  * Static, backend-owned description of what one provider integration supports.
@@ -42,6 +43,8 @@ type ProviderCapabilities = {
    * Whether a session's transcript can be branched into an independent one.
    */
   supportsSessionForking: boolean;
+  /** Whether input can be appended to a live turn using chat.steer. */
+  supportsSteer?: boolean;
 };
 
 /**
@@ -127,10 +130,14 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
  */
 export const providerCapabilitiesService = {
   getProviderCapabilities(provider: LLMProvider): ProviderCapabilities {
-    return PROVIDER_CAPABILITIES[provider];
+    const capabilities = PROVIDER_CAPABILITIES[provider];
+    if (provider === 'codex' && isCodexAppServerEnabled()) {
+      return { ...capabilities, permissionModes: [...capabilities.permissionModes, 'plan'], supportsPermissionRequests: true, supportsSteer: true };
+    }
+    return { ...capabilities, supportsSteer: false };
   },
 
   listAllProviderCapabilities(): ProviderCapabilities[] {
-    return Object.values(PROVIDER_CAPABILITIES);
+    return (Object.keys(PROVIDER_CAPABILITIES) as LLMProvider[]).map((provider) => this.getProviderCapabilities(provider));
   },
 };

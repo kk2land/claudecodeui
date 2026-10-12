@@ -51,6 +51,7 @@ type ChatComposerProps = {
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
   activity: SessionActivity | null;
   isLoading: boolean;
+  supportsSteer?: boolean;
   onAbortSession: () => void;
   permissionMode: PermissionMode;
   availablePermissionModes: PermissionMode[];
@@ -126,6 +127,7 @@ export default function ChatComposer({
   handleGrantToolPermission,
   activity,
   isLoading,
+  supportsSteer = false,
   onAbortSession,
   permissionMode,
   availablePermissionModes,
@@ -254,14 +256,18 @@ export default function ChatComposer({
   const hasQueuedDraft = Boolean(queuedDraft);
   const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
   const submitHint = canQueueDraft
-    ? hasQueuedDraft
+    ? supportsSteer
+      ? t('input.hintText.steer', { defaultValue: 'Enter to guide the current turn' })
+      : hasQueuedDraft
       ? t('input.hintText.updateQueued', { defaultValue: 'Enter to update queued message' })
       : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
     : sendByCtrlEnter
       ? t('input.hintText.ctrlEnter')
       : t('input.hintText.enter');
   const submitAriaLabel = canQueueDraft
-    ? hasQueuedDraft
+    ? supportsSteer
+      ? t('input.steer', { defaultValue: 'Guide current turn' })
+      : hasQueuedDraft
       ? t('input.queue.update', { defaultValue: 'Update queued message' })
       : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
     : isLoading

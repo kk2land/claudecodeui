@@ -1335,3 +1335,13 @@ export function findApplicationRoot(startDirectory: string): string {
     ? path.dirname(parentDirectory)
     : parentDirectory;
 }
+
+//----------------- CODEX RUNTIME SELECTION ------------
+/**
+ * Used by Codex runtime dispatch and provider capabilities. CODEX_RUNTIME=app-server
+ * opts chat runs into the stdio protocol; unset or exec preserves the SDK/exec path.
+ * Read at call time so environment bootstrap can finish before providers are imported.
+ */
+export function isCodexAppServerEnabled(): boolean {
+  return process.env.CODEX_RUNTIME?.trim().toLowerCase() === 'app-server';
+}

@@ -39,6 +39,8 @@ type UseChatComposerStateArgs = {
   provider: LLMProvider;
   permissionMode: PermissionMode | string;
   cyclePermissionMode: () => void;
+  selectPermissionMode?: (mode: PermissionMode) => void;
+  supportsSteer?: boolean;
   resolvePermissionModeForProvider: (provider: LLMProvider, requestedMode: PermissionMode | string) => PermissionMode;
   /**
    * Model every send and command carries: the open session's model when there
@@ -174,6 +176,8 @@ export function useChatComposerState({
   provider,
   permissionMode,
   cyclePermissionMode,
+  selectPermissionMode,
+  supportsSteer = false,
   resolvePermissionModeForProvider,
   currentProviderModel,
   currentProviderEffort,
@@ -416,6 +420,19 @@ export function useChatComposerState({
         return;
       }
 
+      if (command.name === '/plan' && supportsSteer) {
+        const effectiveInput = rawInput ?? inputValueRef.current;
+        if (/^\/plan\s+\S/.test(effectiveInput)) {
+          inputValueRef.current = effectiveInput;
+          await handleSubmitRef.current?.(createFakeSubmitEvent());
+        } else {
+          selectPermissionMode?.(permissionMode === 'plan' ? 'default' : 'plan');
+          setInput('');
+          inputValueRef.current = '';
+        }
+        return;
+      }
+
       try {
         const effectiveInput = rawInput ?? input;
         const commandMatch = effectiveInput.match(new RegExp(`${escapeRegExp(command.name)}\\s*(.*)`));
@@ -474,6 +491,10 @@ export function useChatComposerState({
     [
       currentProviderModel,
       currentSessionId,
+      supportsSteer,
+      selectPermissionMode,
+      permissionMode,
+      setInput,
       handleBuiltInCommand,
       handleCustomCommand,
       input,
@@ -518,6 +539,7 @@ export function useChatComposerState({
     setInput,
     textareaRef,
     onExecuteCommand: executeCommand,
+    enablePlanCommand: supportsSteer,
   });
 
   const {
@@ -682,6 +704,42 @@ export function useChatComposerState({
         return;
       }
 
+      // /plan toggles the native collaboration mode without creating a turn.
+      // A prompt following it selects Plan for that turn immediately, before React updates.
+      const planCommand = supportsSteer && currentInput.trim().match(/^\/plan(?:\s+([\s\S]*))?$/);
+      if (planCommand && !planCommand[1]) {
+        selectPermissionMode?.(permissionMode === 'plan' ? 'default' : 'plan');
+        setInput('');
+        inputValueRef.current = '';
+        resetCommandMenuState();
+        return;
+      }
+      if (planCommand && isLoading) {
+        addMessage({ type: 'error', content: 'Wait for the current turn to finish before starting a planning turn.', timestamp: new Date() });
+        return;
+      }
+
+      if (isLoading && supportsSteer && !queuedSubmission && !editingAnchorId) {
+        const targetSessionId = selectedSession?.id || currentSessionId;
+        if (!targetSessionId) return;
+        let attachments: unknown[];
+        try { attachments = await uploadAttachmentFiles(currentAttachments); } catch (error) {
+          addMessage({ type: 'error', content: `Failed to upload files: ${String(error)}`, timestamp: new Date() });
+          return;
+        }
+        sendMessage({ type: 'chat.steer', sessionId: targetSessionId, content: currentInput, options: { attachments } });
+        recordSentMessage(currentInput, targetSessionId);
+        // Upload may finish after navigation; retain the newly opened session's draft.
+        if (sessionKeyRef.current !== targetSessionId) return;
+        setInput('');
+        inputValueRef.current = '';
+        setAttachedFiles([]);
+        setFileErrors(new Map());
+        resetCommandMenuState();
+        if (draftScopeRef.current) writeDraftText(draftScopeRef.current, '');
+        return;
+      }
+
       // A turn is already in flight: stash this message instead of sending it.
       // Upload attached files now so the queued record contains durable image
       // descriptors that can be sent even if another session is open later.
@@ -760,7 +818,7 @@ export function useChatComposerState({
       // Also accept exact "help" as a convenience alias for users who expect CLI-style help.
       const commandInput = currentInput.trimEnd();
       const isHelpAlias = commandInput.trim().toLowerCase() === 'help';
-      if (commandInput.startsWith('/') || isHelpAlias) {
+      if ((!planCommand && commandInput.startsWith('/')) || isHelpAlias) {
         const firstSpace = commandInput.indexOf(' ');
         const commandName = isHelpAlias
           ? '/help'
@@ -791,7 +849,8 @@ export function useChatComposerState({
         }
       }
 
-      const messageContent = currentInput;
+      const messageContent = planCommand ? planCommand[1] : currentInput;
+      if (planCommand) selectPermissionMode?.('plan');
 
       let uploadedAttachments = previouslyUploadedAttachments;
       if (uploadedAttachments.length === 0 && currentAttachments.length > 0) {
@@ -886,7 +945,7 @@ export function useChatComposerState({
       const attachmentRecords = uploadedAttachments as ChatAttachment[];
       const userMessage: ChatMessage = {
         type: 'user',
-        content: currentInput,
+        content: messageContent,
         images: attachmentRecords.filter(isImageAttachment),
         files: attachmentRecords.filter((attachment) => !isImageAttachment(attachment)),
         timestamp: new Date(),
@@ -921,6 +980,7 @@ export function useChatComposerState({
         content: messageContent,
         options: {
           ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
+          ...(planCommand ? { permissionMode: 'plan' } : {}),
           attachments: uploadedAttachments,
         },
       });
@@ -948,6 +1008,10 @@ export function useChatComposerState({
     },
     [
       selectedSession,
+      supportsSteer,
+      permissionMode,
+      selectPermissionMode,
+      setInput,
       attachedFiles,
       buildSendOptions,
       currentSessionId,

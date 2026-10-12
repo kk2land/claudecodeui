@@ -267,3 +267,26 @@ CloudCLI UI - (https://cloudcli.ai).
 <div align="center">
  <strong>Made with care for the Claude Code, Cursor and Codex community.</strong>
 </div>
+
+### Codex app-server transport
+
+Codex chats use the SDK/`codex exec` by default. To enable the bundled CLI's
+stdio app-server transport, set this in your environment or `.env` and restart CloudCLI:
+
+```bash
+CODEX_RUNTIME=app-server cloudcli
+```
+
+- `/plan` toggles native Codex Plan mode. `/plan <prompt>` starts a planning turn.
+  The permission-mode menu also offers Plan; select Default to return to implementation.
+- During a running Codex turn, sending another prompt immediately steers that turn.
+  Its model and permissions remain those of the running turn. Text, images and files
+  are supported. Other transports retain their existing queued-message behavior.
+- Command/file approvals and Plan clarification questions appear inline and survive
+  browser reconnects while the run remains active. Stop interrupts the current turn.
+- Each running session owns its app-server process. Existing threads are resumed;
+  idle processes are closed. The process inherits `CODEX_HOME`, authentication and
+  proxy environment variables, and uses the CLI version bundled with CloudCLI.
+
+Unset `CODEX_RUNTIME` or use `CODEX_RUNTIME=exec` to keep the default transport.
+A late or rejected steer is reported with the original prompt; it does not start another turn.

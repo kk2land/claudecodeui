@@ -23,6 +23,8 @@ import {
 } from '@/shared/index.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import type { AnyRecord, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/index.js';
+import { isCodexAppServerEnabled } from '@/shared/utils.js';
+import { codexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server-runtime.provider.js';
 
 type ActiveCodexSession = {
   thread: Thread;
@@ -523,10 +525,18 @@ function abortCodexSession(sessionId: string) {
   return true;
 }
 
-/** Used by the providers module's CodexProvider to run and abort SDK turns. */
+/** Used by CodexProvider; exec stays the default, with app-server explicitly enabled by environment. */
 export const codexRuntime = {
-  run: queryCodex,
-  abort: abortCodexSession,
+  run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext) {
+    return isCodexAppServerEnabled()
+      ? codexAppServerRuntime.run(command, options, writer, context)
+      : queryCodex(command, options, writer, context);
+  },
+  async abort(sessionId: string) {
+    return await codexAppServerRuntime.abort(sessionId) || abortCodexSession(sessionId);
+  },
+  steer: codexAppServerRuntime.steer,
+  permissions: codexAppServerRuntime.permissions,
 };
 
 /**
