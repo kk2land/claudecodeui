@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { providerRuntimeService } from '@/modules/providers/index.js';
 import type { ProviderRuntimeGateway } from '@/shared/index.js';
 import { dispatchDueScheduledMessages, dispatchQueuedMessages } from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
@@ -140,6 +141,32 @@ test('a provider-owned queue hold blocks dispatch until explicitly released', as
     held = false;
     assert.equal(await dispatchQueuedMessages(runtime), 1);
     assert.equal(runs.length, 1);
+  });
+});
+
+test('stopping app-server preserves another session queue while SDK and Claude queues keep dispatching', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    for (const id of ['stop-session', 'native-queue', 'sdk-queue']) sessionsDb.createAppSession(id, 'codex', '/tmp');
+    sessionRuntimeDb.update('stop-session', { runtime: 'app-server' });
+    sessionRuntimeDb.update('native-queue', { runtime: 'app-server' });
+    sessionRuntimeDb.update('sdk-queue', { runtime: 'sdk' });
+    for (const id of ['native-queue', 'sdk-queue', SESSION_ID]) {
+      sessionDraftsDb.saveDraft(userId, id, { text: '', queuedMessage: { id, content: `pending ${id}` } });
+    }
+    const runs: RunCall[] = [];
+    const runtime = createRuntime(runs) as ProviderRuntimeGateway;
+    runtime.isQueueBlocked = providerRuntimeService.isQueueBlocked;
+    const stopping = providerRuntimeService.control('codex', 'stop-session', { action: 'stop-app-server' }, {}, { send() {} });
+    assert.equal(await dispatchQueuedMessages(runtime), 2);
+    await stopping;
+    assert.deepEqual(runs.map(({ command }) => command).sort(), [`pending ${SESSION_ID}`, 'pending sdk-queue'].sort());
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages().map(({ queuedMessage }) => queuedMessage), [
+      { id: 'native-queue', content: 'pending native-queue' },
+    ]);
+    sessionRuntimeDb.update('native-queue', { queueHeld: false });
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.equal(runs.at(-1)?.command, 'pending native-queue');
   });
 });
 

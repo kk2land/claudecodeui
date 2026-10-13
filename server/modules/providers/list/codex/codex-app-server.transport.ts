@@ -25,12 +25,16 @@ export class CodexAppServerTransport implements CodexRpcClient {
   private exits = new Set<(error: Error) => void>();
   private stderr = '';
   private closed = false;
+  private stopping: Promise<void> | null = null;
+  // Keep a timed-out SIGTERM target blocked until its exit is confirmed.
+  private stopTarget: ChildProcessWithoutNullStreams | null = null;
   private launcherPath: string | null = null;
   private cliVersion: string | null = null;
 
   constructor(private readonly options: {
     spawn?: () => ChildProcessWithoutNullStreams;
     timeoutMs?: number;
+    stopTimeoutMs?: number;
   } = {}) {}
 
   onNotification(listener: (frame: CodexRpcFrame) => void) {
@@ -64,8 +68,14 @@ export class CodexAppServerTransport implements CodexRpcClient {
     };
   }
 
+  /** The router excludes native queues and sends until a SIGTERM target has actually exited. */
+  get isStopping(): boolean {
+    return Boolean(this.stopping || this.stopTarget);
+  }
+
   private ensureReady(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Codex app-server is shutting down.'));
+    if (this.isStopping) return Promise.reject(new AppError('Codex app-server is stopping.', { code: 'CODEX_APP_SERVER_STOPPING', statusCode: 409 }));
     if (this.ready) return this.ready;
     const ready = this.start();
     this.ready = ready;
@@ -110,12 +120,15 @@ export class CodexAppServerTransport implements CodexRpcClient {
       }
     });
     child.stderr.on('data', (chunk) => { this.stderr = (this.stderr + String(chunk)).slice(-2000); });
-    const fail = (error: Error) => {
+    const fail = (error: Error, exited = false) => {
       if (this.child !== child) return;
+      // Pipe errors during SIGTERM are not proof that the process has exited.
+      if (this.stopTarget === child && !exited) return;
       reader.close();
       // A broken pipe does not prove the child has exited; release the process too.
-      if (!child.killed) child.kill('SIGTERM');
+      if (!exited && !child.killed) child.kill('SIGTERM');
       this.child = null;
+      if (this.stopTarget === child) this.stopTarget = null;
       this.startedAt = null;
       this.ready = null;
       for (const entry of this.pending.values()) {
@@ -126,7 +139,9 @@ export class CodexAppServerTransport implements CodexRpcClient {
       for (const listener of this.exits) listener(error);
     };
     child.on('error', fail);
-    child.on('exit', (code, signal) => fail(new Error(`Codex app-server exited (${code ?? signal}). ${this.stderr.trim().split('\n').at(-1) ?? ''}`)));
+    child.on('exit', (code, signal) => fail(this.stopTarget === child
+      ? new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED', statusCode: 409 })
+      : new Error(`Codex app-server exited (${code ?? signal}). ${this.stderr.trim().split('\n').at(-1) ?? ''}`), true));
     child.stdin.on('error', fail);
     child.stdout.on('error', fail);
     child.stderr.on('error', () => {});
@@ -140,12 +155,13 @@ export class CodexAppServerTransport implements CodexRpcClient {
       this.cliVersion = initialized?.userAgent?.match(/codex[^/]*\/v?(\d+\.\d+\.\d+)/)?.[1] ?? this.cliVersion;
       await this.write({ method: 'initialized', params: {} }, child);
     } catch (error) {
-      child.kill('SIGTERM');
+      if (this.child === child && this.stopTarget !== child && !child.killed) child.kill('SIGTERM');
       throw error;
     }
   }
 
   private call(method: string, params?: unknown): Promise<unknown> {
+    if (this.isStopping) return Promise.reject(new AppError('Codex app-server is stopping.', { code: 'CODEX_APP_SERVER_STOPPING', statusCode: 409 }));
     const child = this.child;
     if (!child) return Promise.reject(new Error('Codex app-server is disconnected.'));
     const id = ++this.nextId;
@@ -212,11 +228,39 @@ export class CodexAppServerTransport implements CodexRpcClient {
     });
   }
 
-  async restart(): Promise<void> {
-    if (this.pending.size) throw new AppError('Codex app-server is busy.', { code: 'CODEX_APP_SERVER_BUSY', statusCode: 409 });
-    await this.close();
-    this.closed = false;
-    await this.ensureReady();
+  /** The runtime router stops the managed PID without eagerly launching a replacement. */
+  async stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    const child = this.child;
+    if (!child) return;
+    this.stopTarget = child;
+    const stopping = new Promise<void>((resolve, reject) => {
+      const cleanup = () => {
+        clearTimeout(timer);
+        child.off('exit', onExit);
+        child.off('error', onError);
+      };
+      const onExit = () => { cleanup(); resolve(); };
+      const onError = (error: Error) => {
+        cleanup();
+        if (!child.killed && this.stopTarget === child) this.stopTarget = null;
+        reject(error);
+      };
+      const timer = setTimeout(() => {
+        cleanup();
+        reject(new AppError('Codex app-server has not exited after SIGTERM. Retry stopping it.', { code: 'CODEX_APP_SERVER_STOP_TIMEOUT', statusCode: 504 }));
+      }, this.options.stopTimeoutMs ?? 5000);
+      child.once('exit', onExit);
+      child.once('error', onError);
+      try {
+        if (!child.kill('SIGTERM')) onError(new Error('Could not send SIGTERM to Codex app-server.'));
+      } catch (error) {
+        onError(error instanceof Error ? error : new Error(String(error)));
+      }
+    });
+    this.stopping = stopping;
+    try { await stopping; }
+    finally { if (this.stopping === stopping) this.stopping = null; }
   }
 }
 

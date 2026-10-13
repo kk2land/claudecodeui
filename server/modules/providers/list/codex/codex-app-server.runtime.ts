@@ -81,6 +81,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private controls = new Map<string, Promise<CodexSessionState>>();
   private stopVersions = new Map<string, number>();
   private threadClosures = new Map<string, () => void>();
+  private stopExitWaiters = new Set<() => void>();
   private unsubscribe: Array<() => void>;
 
   constructor(
@@ -95,17 +96,23 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       client.onNotification((frame) => this.onNotification(frame)),
       client.onRequest((frame) => this.onRequest(frame)),
       client.onExit((error) => {
+        const stopped = error instanceof AppError && error.code === 'CODEX_APP_SERVER_STOPPED';
+        for (const exited of this.stopExitWaiters) exited();
         for (const closed of this.threadClosures.values()) closed();
         for (const session of this.sessions.values()) {
-          if (session.state.phase !== 'idle' || session.state.goal?.status === 'active') this.settings.update(session.id, { queueHeld: true });
-          session.state.error = error.message;
-          session.state.phase = 'failed';
+          if (stopped || session.state.phase !== 'idle' || session.state.goal?.status === 'active') this.settings.update(session.id, { queueHeld: true });
+          // Cancel work already awaiting setup/model resolution before process exit.
+          if (stopped) this.stopVersions.set(session.id, (this.stopVersions.get(session.id) ?? 0) + 1);
+          session.state.error = stopped ? undefined : error.message;
+          session.state.phase = stopped ? 'stopping' : 'failed';
           session.stopRequested = true;
-          if (session.turn && !session.turn.terminal) this.complete(session, 'failed', error.message);
+          if (stopped) session.state.goal = null;
+          if (session.turn && !session.turn.terminal) this.complete(session, stopped ? 'interrupted' : 'failed', stopped ? undefined : error.message);
           this.cancelRequests(session);
-          session.state.phase = 'failed';
+          session.state.phase = stopped ? 'idle' : 'failed';
           this.publish(session);
-          this.failures.set(session.id, { state: this.getState(session.id), writer: session.writer });
+          if (stopped) this.failures.delete(session.id);
+          else this.failures.set(session.id, { state: this.getState(session.id), writer: session.writer });
         }
         this.sessions.clear();
       }),
@@ -125,6 +132,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session.writer.send(createNormalizedMessage({
       provider: 'codex', sessionId: session.id, kind: 'status', text: 'codex_control', codexState: this.getState(session.id),
     }));
+  }
+
+  private assertLiveSession(session: NativeSession): void {
+    if (this.sessions.get(session.id) !== session) {
+      throw new AppError('Codex app-server session was closed.', { code: 'CODEX_APP_SERVER_SESSION_CLOSED', statusCode: 409 });
+    }
   }
 
   private async ensure(sessionId: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<NativeSession> {
@@ -154,14 +167,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.publish(target);
     target.setup = (async () => {
       target.model = await context.resolveResumeModel(sessionId, options.model) ?? '';
+      this.assertLiveSession(target);
       if (target.stopRequested && !providerId) return;
       const permission = this.permissionOptions(options);
       const result = await this.client.request(providerId ? 'thread/resume' : 'thread/start', {
-        // History is read separately. Some native stores cannot enumerate turns
-        // in a resume response even though the thread itself is resumable.
-        ...(providerId ? { threadId: providerId, excludeTurns: true } : {}), cwd: options.cwd ?? options.projectPath,
+        // Select readable history for new threads; this creation-only setting
+        // cannot migrate existing threads. Resume reads their history separately.
+        ...(providerId ? { threadId: providerId, excludeTurns: true } : { historyMode: 'legacy' }),
+        cwd: options.cwd ?? options.projectPath,
         ...(target.model ? { model: target.model } : {}), ...permission,
       });
+      this.assertLiveSession(target);
       if (!result.thread?.id) throw new Error('Codex did not return a thread id.');
       target.threadId = result.thread.id;
       target.model = result.model || result.thread.model || target.model;
@@ -170,6 +186,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       const { goal } = isCodexGoalEnabled()
         ? await this.client.request('thread/goal/get', { threadId: target.threadId })
         : { goal: null };
+      this.assertLiveSession(target);
       target.state.goal = goal ?? null;
       if (providerId && goal?.status === 'active') {
         // Restoring a persisted thread after a backend restart must not resume its goal implicitly.
@@ -183,10 +200,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       target.state.phase = target.stopRequested ? 'stopping' : 'idle';
       this.publish(target);
     })().catch((error: Error) => {
-      target.state.phase = 'failed';
-      target.state.error = error.message;
-      this.publish(target);
-      this.sessions.delete(sessionId);
+      if (this.sessions.get(sessionId) === target) {
+        target.state.phase = 'failed';
+        target.state.error = error.message;
+        this.publish(target);
+        this.sessions.delete(sessionId);
+      }
       throw error;
     });
     await target.setup;
@@ -236,7 +255,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<void> {
     const sessionId = options.sessionId ?? randomUUID();
     const stopVersion = this.stopVersions.get(sessionId) ?? 0;
-    const session = await this.ensure(sessionId, options, writer, context);
+    let session: NativeSession;
+    try {
+      session = await this.ensure(sessionId, options, writer, context);
+    } catch (error) {
+      if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0) && error instanceof AppError
+        && ['CODEX_APP_SERVER_STOPPED', 'CODEX_APP_SERVER_SESSION_CLOSED'].includes(error.code)) {
+        writer.send(createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }));
+        return;
+      }
+      throw error;
+    }
     // Stop may have finished while thread initialization was still pending. Only
     // a new user submission, captured after that Stop, may clear its intent.
     if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
@@ -277,6 +306,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       }
       await turn.done;
     } catch (error) {
+      if (turn.terminal && error instanceof AppError && error.code === 'CODEX_APP_SERVER_STOPPED') return;
       // An uncertain start must be reconciled instead of opening a duplicate turn.
       if (error instanceof AppError && error.code === 'CODEX_APP_SERVER_TIMEOUT') {
         session.state.phase = 'stopFailed';
@@ -418,6 +448,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   private async interrupt(session: NativeSession, turn: NativeTurn): Promise<void> {
     if (!turn.id || turn.terminal) return;
+    this.assertLiveSession(session);
     await this.client.request('turn/interrupt', { threadId: session.threadId, turnId: turn.id });
   }
 
@@ -432,13 +463,28 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.publish(session);
     session.stop = (async () => {
       const deadline = Date.now() + this.stopTimeoutMs;
+      // Process exit settles parent/child waits and invalidates their remaining cleanup RPCs.
+      let processExited = false;
+      let onExit!: () => void;
+      const exited = new Promise<void>((resolve) => {
+        onExit = () => { processExited = true; resolve(); };
+      });
+      this.stopExitWaiters.add(onExit);
+      const exitError = new AppError('Codex app-server session was closed.', { code: 'CODEX_APP_SERVER_SESSION_CLOSED', statusCode: 409 });
       const bounded = async <T>(promise: Promise<T>): Promise<T> => {
         let timer: ReturnType<typeof setTimeout> | undefined;
         try {
-          return await Promise.race([promise, new Promise<never>((_, reject) => {
+          const result = await Promise.race([promise, exited.then(() => { throw exitError; }), new Promise<never>((_, reject) => {
             timer = setTimeout(() => reject(new Error('Codex has not confirmed the stop. Retry to check its state.')), Math.max(1, deadline - Date.now()));
           })]);
+          if (processExited) throw exitError;
+          return result;
         } finally { clearTimeout(timer); }
+      };
+      const request = (method: string, params: AnyRecord): Promise<AnyRecord> => {
+        // Check before creating the promise: request() can lazily spawn a process.
+        this.assertLiveSession(session);
+        return bounded(this.client.request(method, params));
       };
       try {
         await bounded(session.setup ?? Promise.resolve());
@@ -447,13 +493,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         let pauseError: unknown;
         if (session.threadId && session.state.goal && !['paused', 'complete'].includes(session.state.goal.status)) {
           try {
-            const result = await bounded(this.client.request('thread/goal/set', { threadId: session.threadId, status: 'paused' }));
+            const result = await request('thread/goal/set', { threadId: session.threadId, status: 'paused' });
             session.state.goal = result.goal;
           } catch (error) { pauseError = error; }
         }
         // Retrying an uncertain turn/start recovers its id before interrupting it.
         if (session.threadId && session.turn && !session.turn.id && !session.setup) {
-          const result = await bounded(this.client.request('thread/read', { threadId: session.threadId, includeTurns: true }));
+          const result = await request('thread/read', { threadId: session.threadId, includeTurns: true });
           const active = result.thread?.turns?.find((turn: AnyRecord) => turn.status === 'inProgress');
           if (active) session.turn.id = active.id;
         }
@@ -470,10 +516,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
           while ([...session.children].some((id) => !cleaned.has(id))) {
             for (const childId of session.children) {
               if (cleaned.has(childId)) continue;
-              const { thread } = await bounded(this.client.request('thread/read', { threadId: childId, includeTurns: true }));
+              const { thread } = await request('thread/read', { threadId: childId, includeTurns: true });
               if (isCodexGoalEnabled() && !thread?.ephemeral) {
-                const { goal } = await bounded(this.client.request('thread/goal/get', { threadId: childId }));
-                if (goal?.status === 'active') await bounded(this.client.request('thread/goal/set', { threadId: childId, status: 'paused' }));
+                const { goal } = await request('thread/goal/get', { threadId: childId });
+                if (goal?.status === 'active') await request('thread/goal/set', { threadId: childId, status: 'paused' });
               }
               const childTurn = thread?.turns?.find((entry: AnyRecord) => entry.status === 'inProgress');
               if (childTurn) {
@@ -481,16 +527,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
                 const done = new Promise<void>((resolve) => { this.terminalWaiters.set(key, resolve); });
                 try {
                   if (!this.nativeTerminals.has(key)) {
-                    await bounded(this.client.request('turn/interrupt', { threadId: childId, turnId: childTurn.id }));
+                    await request('turn/interrupt', { threadId: childId, turnId: childTurn.id });
                     if (!this.nativeTerminals.has(key)) await bounded(done);
                   }
                 } finally { this.terminalWaiters.delete(key); }
               }
-              await bounded(this.client.request('thread/backgroundTerminals/clean', { threadId: childId }));
+              await request('thread/backgroundTerminals/clean', { threadId: childId });
               cleaned.add(childId);
             }
           }
-          if (session.threadId) await bounded(this.client.request('thread/backgroundTerminals/clean', { threadId: session.threadId }));
+          if (session.threadId) await request('thread/backgroundTerminals/clean', { threadId: session.threadId });
         } while (session.turn && !session.turn.terminal);
         this.cancelRequests(session);
         session.state.phase = 'idle';
@@ -498,11 +544,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         this.publish(session);
         return true;
       } catch (error) {
+        // Exit already published the terminal state. Old stops must not overwrite a replacement session.
+        if (processExited) return true;
         session.state.phase = 'stopFailed';
         session.state.error = error instanceof Error ? error.message : String(error);
         this.publish(session);
         return false;
-      } finally { session.stop = null; }
+      } finally {
+        this.stopExitWaiters.delete(onExit);
+        session.stop = null;
+      }
     })();
     return session.stop;
   }
@@ -557,7 +608,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         code: 'CODEX_GOAL_DISABLED', statusCode: 403,
       });
     }
-    if (action.action === 'runtime' || action.action === 'restart') throw new Error('Runtime selection belongs to the provider router.');
+    if (action.action === 'runtime' || action.action === 'stop-app-server') throw new Error('Process and runtime controls belong to the provider router.');
     if (action.action === 'steer') {
       const session = this.sessions.get(sessionId);
       if (!session || session.stopRequested || !session.turn || session.turn.terminal || session.turn.id !== action.expectedTurnId) {
@@ -593,10 +644,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     }
     if (action.operation === 'get' && !context.resolveProviderSessionId(sessionId) && !this.sessions.has(sessionId)) return this.getState(sessionId);
     const session = await this.ensure(sessionId, options, writer, context);
+    this.assertLiveSession(session);
     if (action.operation === 'get') {
       const { goal } = isCodexGoalEnabled()
         ? await this.client.request('thread/goal/get', { threadId: session.threadId })
         : { goal: null };
+      this.assertLiveSession(session);
       session.state.goal = goal ?? null;
       await this.restoreHistory(session);
     } else if (action.operation === 'pause' || action.operation === 'clear') {
@@ -711,16 +764,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       .map((session) => ({ sessionId: session.id, startedAt: session.startedAt, statusText: session.state.phase === 'stopFailed' ? 'Stop not confirmed' : session.state.phase === 'stopping' ? 'Stopping…' : undefined }));
   }
 
-  /** The router calls this only after an explicit, idle app-server restart succeeds. */
-  resetAfterRestart(): void {
-    for (const [sessionId, failure] of this.failures) {
-      failure.writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'status', text: 'codex_control',
-        codexState: { ...failure.state, phase: 'idle', turnId: null, goal: null, questions: [], error: undefined } }));
-    }
-    this.failures.clear();
-  }
-
-  /** The router checks one session for switching and all sessions for process restart. */
+  /** The router checks session activity before switching runtimes. */
   isBusy(sessionId?: string): boolean {
     return [...this.sessions.values()].some((s) => (!sessionId || s.id === sessionId) && Boolean(s.setup || s.stop || s.goalMutation || ['stopping', 'stopFailed'].includes(s.state.phase) || (s.turn && !s.turn.terminal) || s.state.goal?.status === 'active'))
       || [...this.requests.values()].some((request) => !sessionId || request.session.id === sessionId)
@@ -736,6 +780,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     const stopVersion = this.stopVersions.get(sessionId) ?? 0;
     if (session && !await this.abort(sessionId, false)) throw new Error('Could not stop the previous Codex runtime.');
     if (!threadId) return;
+    if (session) this.assertLiveSession(session);
     if (session) { session.state.phase = 'stopping'; this.publish(session); }
     let timer: ReturnType<typeof setTimeout> | undefined;
     const closed = new Promise<void>((resolve, reject) => {

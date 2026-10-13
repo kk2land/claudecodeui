@@ -1,6 +1,6 @@
 import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, RotateCw, Settings2 } from 'lucide-react';
+import { ChevronDown, Square, Settings2 } from 'lucide-react';
 
 import type { CodexControls, CodexUserInputRequest } from '@/shared/types';
 import { cn } from '@/shared/utils';
@@ -89,9 +89,9 @@ export function CodexControlPanel({ controls, onExecutePlan }: { controls: Codex
             </select>
           </label>
           <button type="button" className={cn(button, 'h-9 gap-2 self-start px-3 sm:self-auto')}
-            disabled={pending || (busy && state?.phase !== 'failed')} onClick={() => void controls.control({ action: 'restart' }).catch(() => {})}>
-            <RotateCw className="h-3.5 w-3.5" aria-hidden="true" />
-            {t('codex.restart')}
+            disabled={pending || !state?.diagnostics?.running} onClick={() => void controls.control({ action: 'stop-app-server' }).catch(() => {})}>
+            <Square className="h-3.5 w-3.5" aria-hidden="true" />
+            {t('codex.stopAppServer')}
           </button>
         </div>
         {state?.diagnostics && <div className="mt-3 min-w-0 border-t border-border/60 pt-3 text-xs text-muted-foreground">

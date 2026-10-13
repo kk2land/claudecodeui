@@ -41,11 +41,21 @@ function harness(timeout = 100) {
     onRequest(fn) { request = fn; return () => {}; },
     onExit(fn) { exit = fn; return () => {}; },
   };
-  let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
+  const settings = new Map<string, SessionRuntimeSettings>();
   const accepted: string[] = [];
   const storedMessages: NormalizedMessage[] = [];
   const historyReads: string[] = [];
-  const settingsDb = { get: () => settings, update: (_: string, patch: Partial<SessionRuntimeSettings>) => settings = { ...settings, ...patch } };
+  const settingsDb = {
+    get: (id: string): SessionRuntimeSettings => settings.get(id) ?? { runtime: 'app-server', mode: 'default', queueHeld: false },
+    update(id: string, patch: Partial<SessionRuntimeSettings>) {
+      const value = { ...this.get(id), ...patch };
+      settings.set(id, value);
+      return value;
+    },
+    holdCodexAppServerQueues() {
+      for (const [id, value] of settings) if (value.runtime === 'app-server') this.update(id, { queueHeld: true });
+    },
+  };
   const runtime = new CodexAppServerRuntime(rpc, settingsDb, timeout, (_, id) => accepted.push(id), async (sessionId) => {
     historyReads.push(sessionId);
     return storedMessages;
@@ -61,7 +71,7 @@ function harness(timeout = 100) {
   const event = (method: string, params: AnyRecord = {}) => notify({ method, params: { threadId: 'native-thread', ...params } });
   const finish = (id = 'turn-1', status = 'completed') => event('turn/completed', { turn: { id, status } });
   return { runtime, calls, handlers, events, event, finish, request: (frame: CodexRpcFrame) => request(frame), exit: (error: Error) => exit(error), accepted,
-    options, writer, context, settingsDb, storedMessages, historyReads, settings: () => settings,
+    options, writer, context, settingsDb, storedMessages, historyReads, settings: () => settingsDb.get('app-session'),
     control: (action: Parameters<CodexAppServerRuntime['control']>[1]) => runtime.control('app-session', action, options, writer, context),
     run: (text = 'hello', extra: AnyRecord = {}) => runtime.run(text, { ...options, ...extra }, writer, context) };
 }
@@ -104,6 +114,8 @@ test('restoring an existing thread confirms persisted steer receipts with Goals 
 
   await h.control({ action: 'goal', operation: 'get' });
   assert.deepEqual(h.calls.map(({ method }) => method), ['thread/resume', 'thread/read']);
+  assert.equal(h.calls[0].params.excludeTurns, true);
+  assert.equal('historyMode' in h.calls[0].params, false);
   assert.deepEqual(h.accepted, ['lost-steer-receipt']);
   assert.deepEqual(h.historyReads, []);
   assert.equal(h.runtime.getState('app-session').goal, null);
@@ -194,6 +206,7 @@ test('native turn uses independent Plan/permission settings and stable message i
   const h = harness();
   const running = h.run('design a page', { collaborationMode: 'plan', permissionMode: 'acceptEdits', clientMessageId: 'client-1' });
   await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+  assert.equal(h.calls.find((call) => call.method === 'thread/start')?.params.historyMode, 'legacy');
   const start = h.calls.find((call) => call.method === 'turn/start')!.params;
   assert.equal(start.collaborationMode.mode, 'plan');
   assert.equal(start.collaborationMode.settings.model, 'test-model');
@@ -536,6 +549,187 @@ test('the Codex router holds automatic queues during turns, goal gaps and persis
   assert.equal(router.isQueueBlocked!('app-session'), true);
   h.settingsDb.update('app-session', { queueHeld: false });
   assert.equal(router.isQueueBlocked!('app-session'), false);
+});
+
+test('process stop interrupts a running turn, holds its queue and stays stopped during history polling', async () => {
+  const h = harness();
+  let confirmStop!: () => void;
+  let stops = 0;
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => {
+    stops++;
+    await new Promise<void>((resolve) => { confirmStop = resolve; });
+    h.exit(new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED' }));
+  } });
+  const control = (action: Parameters<NonNullable<typeof router.control>>[1]) => router.control!('app-session', action, h.options, h.writer, h.context);
+  const running = router.run('hello', h.options, h.writer, h.context);
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  const stopping = control({ action: 'stop-app-server' });
+  const duplicate = control({ action: 'stop-app-server' });
+  await assert.rejects(router.run('racing', h.options, h.writer, h.context), { code: 'CODEX_APP_SERVER_STOPPING' });
+  assert.equal(stops, 1);
+  confirmStop();
+  const [state] = await Promise.all([stopping, duplicate, running]);
+  assert.equal(state.phase, 'idle');
+  assert.equal(state.turnId, null);
+  assert.equal(state.error, undefined);
+  assert.equal(state.queueHeld, true);
+  assert.equal(h.events.filter((event) => event.kind === 'error').length, 0);
+  assert.equal(h.events.find((event) => event.kind === 'complete')?.aborted, true);
+  assert.equal(router.isQueueBlocked!('app-session'), true);
+  const calls = h.calls.length;
+  await control({ action: 'goal', operation: 'get' });
+  assert.equal(h.calls.length, calls);
+
+  const next = router.run('explicit continuation', h.options, h.writer, h.context);
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-2');
+  assert.equal(h.calls.filter((call) => call.method === 'thread/resume').length, 1);
+  h.finish('turn-2'); await next;
+});
+
+test('process stop holds idle native sessions too, preventing queued work from restarting the process', async () => {
+  const h = harness();
+  const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  h.finish(); await running;
+  h.exit(new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED' }));
+  assert.equal(h.settings().queueHeld, true);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+});
+
+test('process stop blocks other native queues through SIGTERM timeout without blocking SDK or other providers', async () => {
+  const h = harness();
+  h.settingsDb.update('other-codex', { queueHeld: false });
+  h.settingsDb.update('sdk-session', { runtime: 'sdk' });
+  let rejectStop!: (error: Error) => void;
+  let signalPending = false;
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb,
+    isCodexSession: (id) => id !== 'claude-session', isStopping: () => signalPending,
+    stop: () => {
+      assert.equal(h.settingsDb.get('other-codex').queueHeld, true, 'hold every native queue before signaling');
+      signalPending = true;
+      return new Promise<void>((_resolve, reject) => { rejectStop = reject; });
+    },
+  });
+  const stopping = assert.rejects(router.control!('app-session', { action: 'stop-app-server' }, h.options, h.writer, h.context), /not exited/);
+  assert.equal(router.isQueueBlocked!('other-codex'), true);
+  assert.equal(router.isQueueBlocked!('sdk-session'), false);
+  assert.equal(router.isQueueBlocked!('claude-session'), false);
+  // Even an explicit queue resume cannot dispatch into a process still stopping.
+  h.settingsDb.update('other-codex', { queueHeld: false });
+  assert.equal(router.isQueueBlocked!('other-codex'), true);
+  rejectStop(new Error('Codex has not exited'));
+  await stopping;
+  assert.equal(router.isQueueBlocked!('other-codex'), true);
+  await assert.rejects(router.run('queued', { ...h.options, sessionId: 'other-codex' }, h.writer, h.context), { code: 'CODEX_APP_SERVER_STOPPING' });
+  signalPending = false;
+  assert.equal(router.isQueueBlocked!('other-codex'), false);
+  assert.equal(router.isQueueBlocked!('app-session'), true);
+  assert.equal(h.calls.length, 0);
+});
+
+test('process exit finishes an abort waiting for a child turn without sending cleanup or publishing stale state', async () => {
+  const h = harness(1000);
+  const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  h.event('thread/started', { thread: { id: 'child', parentThreadId: 'native-thread' } });
+  h.handlers.set('thread/read', async () => ({ thread: { ephemeral: true, turns: [{ id: 'child-turn', status: 'inProgress' }] } }));
+  h.handlers.set('turn/interrupt', async ({ threadId }) => {
+    if (threadId === 'native-thread') h.finish('turn-1', 'interrupted');
+    return {};
+  });
+  const aborting = h.runtime.abort('app-session');
+  await eventually(() => h.calls.some(({ method, params }) => method === 'turn/interrupt' && params.threadId === 'child'));
+  h.exit(new AppError('Stopped', { code: 'CODEX_APP_SERVER_STOPPED' }));
+  const callsAtExit = h.calls.length;
+  const eventsAtExit = h.events.length;
+  await running;
+  assert.equal(await Promise.race([aborting, new Promise((resolve) => setTimeout(() => resolve('timed out'), 50))]), true);
+  assert.equal(h.calls.length, callsAtExit);
+  assert.equal(h.events.length, eventsAtExit);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
+
+test('late abort setup completion cannot mutate a replacement session after process exit', async () => {
+  const h = harness();
+  let resolveModel!: (model: string) => void;
+  h.context.resolveResumeModel = () => new Promise((resolve) => { resolveModel = resolve; });
+  const running = h.run();
+  await eventually(() => Boolean(resolveModel));
+  const aborting = h.runtime.abort('app-session');
+  h.exit(new AppError('Stopped', { code: 'CODEX_APP_SERVER_STOPPED' }));
+  assert.equal(await aborting, true);
+  h.context.resolveResumeModel = async () => 'test-model';
+  const next = h.run('explicit continuation');
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  const calls = h.calls.length;
+  resolveModel('test-model');
+  await running;
+  assert.equal(h.calls.length, calls);
+  assert.equal(h.runtime.getState('app-session').phase, 'running');
+  h.finish(); await next;
+});
+
+test('process exit prevents a pending resume lookup from reopening the native process', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  let resolveModel!: (model: string) => void;
+  h.context.resolveResumeModel = () => new Promise((resolve) => { resolveModel = resolve; });
+  const restoring = assert.rejects(h.control({ action: 'goal', operation: 'get' }), { code: 'CODEX_APP_SERVER_SESSION_CLOSED' });
+  await eventually(() => Boolean(resolveModel));
+  h.exit(new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED' }));
+  resolveModel('test-model');
+  await restoring;
+  assert.equal(h.calls.length, 0);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
+
+test('a stopped initialization cannot delete a replacement session started by a later send', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  let resolveModel!: (model: string) => void;
+  h.context.resolveResumeModel = () => new Promise((resolve) => { resolveModel = resolve; });
+  const first = h.run('cancel this initialization');
+  await eventually(() => Boolean(resolveModel));
+  h.exit(new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED' }));
+  h.context.resolveResumeModel = async () => 'test-model';
+  const next = h.run('explicit replacement');
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  resolveModel('test-model'); await first;
+  assert.equal(h.runtime.getState('app-session').phase, 'running');
+  assert.equal(h.events.find((event) => event.kind === 'complete')?.aborted, true);
+  h.finish(); await next;
+});
+
+test('process stop cancels an unacknowledged turn without reporting it as a failed turn', async () => {
+  const h = harness();
+  let rejectStart!: (error: Error) => void;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  const running = h.run();
+  await eventually(() => Boolean(rejectStart));
+  const error = new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED' });
+  h.exit(error);
+  rejectStart(error);
+  await running;
+  assert.equal(h.events.filter((event) => event.kind === 'complete').length, 1);
+  assert.equal(h.events.find((event) => event.kind === 'complete')?.aborted, true);
+  assert.equal(h.events.filter((event) => event.kind === 'error').length, 0);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
+
+test('stopping the process cancels a runtime handoff before it can resume a native thread', async (t) => {
+  const h = harness();
+  h.settingsDb.update('app-session', { runtime: 'sdk' });
+  h.writer.setSessionId!('native-thread');
+  let release!: () => void;
+  t.mock.method(h.runtime, 'releaseSession', () => new Promise<void>((resolve) => { release = resolve; }));
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => {} });
+  const switching = assert.rejects(router.control!('app-session', { action: 'runtime', runtime: 'app-server' }, h.options, h.writer, h.context), /cancelled by stopping/);
+  await eventually(() => Boolean(release));
+  await router.control!('app-session', { action: 'stop-app-server' }, h.options, h.writer, h.context);
+  release(); await switching;
+  assert.equal(h.settings().runtime, 'sdk');
+  assert.equal(h.calls.length, 0);
 });
 
 test('runtime handoff waits for thread closure, excludes racing sends and resumes after SDK use', async () => {

@@ -36,7 +36,7 @@ type ControlResult = {
 /** Validates control input before any native RPC or durable queue mutation. */
 function parseControl(raw: AnyRecord): CodexControlAction {
   switch (raw.action) {
-    case 'state': case 'restart': return { action: raw.action };
+    case 'state': case 'stop-app-server': return { action: raw.action };
     case 'mode':
       if (raw.mode === 'default' || raw.mode === 'plan') return { action: 'mode', mode: raw.mode };
       break;

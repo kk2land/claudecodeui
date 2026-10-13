@@ -1911,7 +1911,7 @@ export type CodexSessionState = {
 /** Validated user control action; provider-native thread ids are resolved on the server. */
 export type CodexControlAction =
   | { action: 'state' }
-  | { action: 'restart' }
+  | { action: 'stop-app-server' }
   | { action: 'mode'; mode: ('default' | 'plan') }
   | { action: 'runtime'; runtime: ('app-server' | 'sdk') }
   | { action: 'goal'; operation: 'get' | 'set' | 'pause' | 'resume' | 'clear'; objective?: string; tokenBudget?: number }

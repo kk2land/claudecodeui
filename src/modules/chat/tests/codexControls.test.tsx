@@ -68,6 +68,23 @@ test('execute plan changes mode and fills a prompt for review', async () => {
   expect(codex.control).toHaveBeenCalledWith({ action: 'mode', mode: 'default' });
 });
 
+test('the process stop button works during a turn and disables once the process exits', async () => {
+  const diagnostics = { running: true, pid: 43210, startedAt: 1_800_000_000_000, pendingRequests: 0, launcherPath: null, cliVersion: null };
+  const codex = controls({ diagnostics });
+  const view = render(<CodexControlPanel controls={codex} onExecutePlan={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
+  expect(screen.queryByRole('button', { name: 'Restart app-server' })).toBeNull();
+  const button = screen.getByRole('button', { name: 'Stop app-server' }) as HTMLButtonElement;
+  expect(button.disabled).toBe(false);
+  fireEvent.click(button);
+  await waitFor(() => expect(codex.control).toHaveBeenCalledWith({ action: 'stop-app-server' }));
+  view.rerender(<CodexControlPanel controls={{ ...codex, pending: true }} onExecutePlan={() => {}} />);
+  expect(button.disabled).toBe(true);
+  view.rerender(<CodexControlPanel controls={controls({ phase: 'idle', turnId: null, diagnostics: { ...diagnostics, running: false, pid: null, startedAt: null } })} onExecutePlan={() => {}} />);
+  expect(button.disabled).toBe(true);
+  expect(screen.queryByText('PID 43210')).toBeNull();
+});
+
 function composer(codex: CodexControls, isLoading = true) {
   const send = vi.fn(); const add = vi.fn();
   const view = renderHook(() => useChatComposerState({ selectedProject: project, selectedSession: { id: 'codex-session' } as ProjectSession,

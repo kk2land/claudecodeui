@@ -42,6 +42,14 @@ async function harness(runTest: (h: {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const queued = { id: 'message-1', content: 'guide this', attachments: [{ path: '/etc/passwd' }] };
 
+test('the process stop control reaches the Codex runtime without accepting a client PID', async () => {
+  await harness(async (h) => {
+    h.send({ action: 'stop-app-server', pid: 1 }); await settle();
+    assert.deepEqual(h.calls[0].action, { action: 'stop-app-server' });
+    assert.equal(h.frames.at(-1)?.ok, true);
+  });
+});
+
 test('a delayed stop for a previous execution cannot interrupt its replacement', async () => {
   await harness(async (h) => {
     let aborts = 0;

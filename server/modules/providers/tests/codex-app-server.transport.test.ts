@@ -7,7 +7,8 @@ import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
 
 import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
-import type { CodexRpcFrame } from '@/shared/index.js';
+import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
+import type { CodexRpcFrame, SessionRuntimeSettings } from '@/shared/index.js';
 
 function fakeProcess(pid = 43210) {
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;
@@ -80,14 +81,16 @@ test('transport lazily initializes once, correlates out-of-order responses and h
   assert.equal(h.transport.status.startedAt, null);
 });
 
-test('process identity and start time remain stable until restart and clear on exit', async (t) => {
+test('stopping signals the current PID and a later request lazily starts a new process', async (t) => {
   let now = 1_800_000_000_000;
   t.mock.method(Date, 'now', () => now);
   const first = fakeProcess(43210);
   const replacement = fakeProcess(43211);
   const children = [first.child, replacement.child];
   const transport = new CodexAppServerTransport({ spawn: () => children.shift()!, timeoutMs: 100 });
+  const kill = t.mock.method(first.child, 'kill');
   first.onFrame((frame) => { if (frame.id !== undefined) first.reply({ id: frame.id, result: {} }); });
+  replacement.onFrame((frame) => { if (frame.id !== undefined) replacement.reply({ id: frame.id, result: {} }); });
   try {
     await transport.request('ping');
     assert.equal(transport.status.pid, first.child.pid);
@@ -96,7 +99,14 @@ test('process identity and start time remain stable until restart and clear on e
     now += 60_000;
     await transport.request('ping');
     assert.equal(transport.status.startedAt, firstStartedAt);
-    await transport.restart();
+    await transport.stop();
+    assert.deepEqual(kill.mock.calls.map((call) => call.arguments), [['SIGTERM']]);
+    assert.equal(transport.status.running, false);
+    assert.equal(transport.status.pid, null);
+    assert.equal(transport.status.startedAt, null);
+    assert.equal(children.length, 1);
+    assert.equal(replacement.frames.length, 0);
+    await transport.request('ping');
     assert.equal(transport.status.running, true);
     assert.equal(transport.status.pid, replacement.child.pid);
     assert.equal(transport.status.startedAt, now);
@@ -104,6 +114,137 @@ test('process identity and start time remain stable until restart and clear on e
     assert.equal(transport.status.running, false);
     assert.equal(transport.status.pid, null);
     assert.equal(transport.status.startedAt, null);
+  } finally {
+    await transport.close();
+  }
+});
+
+test('stopping interrupts pending RPCs, deduplicates signals and excludes racing requests', async (t) => {
+  const h = fakeProcess();
+  const kill = t.mock.method(h.child, 'kill', () => true);
+  let exits = 0;
+  h.transport.onExit(() => { exits++; });
+  const pending = assert.rejects(h.transport.request('pending'), { code: 'CODEX_APP_SERVER_STOPPED' });
+  await new Promise((resolve) => setImmediate(resolve));
+  const stopping = h.transport.stop();
+  const duplicate = h.transport.stop();
+  await assert.rejects(h.transport.request('racing'), { code: 'CODEX_APP_SERVER_STOPPING' });
+  assert.equal(h.transport.status.pid, h.child.pid);
+  assert.equal(kill.mock.calls.length, 1);
+  h.child.stdin.emit('error', new Error('EPIPE'));
+  assert.equal(h.transport.status.running, true);
+  assert.equal(exits, 0);
+  h.child.emit('exit', null, 'SIGTERM');
+  await Promise.all([stopping, duplicate, pending]);
+  assert.equal(h.transport.status.pendingRequests, 0);
+  assert.equal(h.transport.status.pid, null);
+  assert.equal(exits, 1);
+  assert.equal(h.frames.some((frame) => frame.method === 'racing'), false);
+});
+
+test('process stop during a turn abort never lets old cleanup spawn a replacement', async () => {
+  const first = fakeProcess(43210);
+  const replacement = fakeProcess(43211);
+  let spawns = 0;
+  const transport = new CodexAppServerTransport({ spawn: () => ++spawns === 1 ? first.child : replacement.child, timeoutMs: 100 });
+  let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
+  const runtime = new CodexAppServerRuntime(transport, {
+    get: () => settings,
+    update: (_id, patch) => settings = { ...settings, ...patch },
+  });
+  let interrupted!: () => void;
+  const interruptSent = new Promise<void>((resolve) => { interrupted = resolve; });
+  first.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    const result = frame.method === 'thread/start' ? { thread: { id: 'native-thread' } }
+      : frame.method === 'turn/start' ? { turn: { id: 'turn-1' } } : { goal: null };
+    first.reply({ id: frame.id, result });
+    if (frame.method === 'turn/interrupt') interrupted();
+  });
+  replacement.onFrame((frame) => { if (frame.id !== undefined) replacement.reply({ id: frame.id, result: {} }); });
+  try {
+    const running = runtime.run('hello', { sessionId: 'app-session', cwd: '/tmp' }, { send() {} }, {
+      resolveProviderSessionId: () => null,
+      resolveResumeModel: async () => 'test-model',
+      getProviderModels: async () => ({ DEFAULT: 'test-model', OPTIONS: [] }),
+      normalizeMessage: () => [], isProviderInstalled: async () => true,
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runtime.getState('app-session').turnId, 'turn-1');
+    const aborting = runtime.abort('app-session');
+    await interruptSent;
+    await new Promise((resolve) => setImmediate(resolve));
+    await transport.stop();
+    assert.equal(await aborting, true);
+    await running;
+    assert.equal(spawns, 1);
+    assert.equal(transport.status.running, false);
+    assert.equal(transport.status.pid, null);
+    assert.equal(replacement.frames.length, 0);
+    assert.equal(first.frames.some(({ method }) => method === 'thread/backgroundTerminals/clean'), false);
+    assert.equal(runtime.getState('app-session').phase, 'idle');
+  } finally {
+    await runtime.close();
+    await transport.close();
+  }
+});
+
+test('an unconfirmed SIGTERM retains the process identity without sending SIGKILL', async (t) => {
+  const h = fakeProcess();
+  const kill = t.mock.method(h.child, 'kill', () => true);
+  const transport = new CodexAppServerTransport({ spawn: () => h.child, stopTimeoutMs: 10 });
+  h.onFrame((frame) => { if (frame.id !== undefined) h.reply({ id: frame.id, result: {} }); });
+  await transport.request('ping');
+  await assert.rejects(transport.stop(), { code: 'CODEX_APP_SERVER_STOP_TIMEOUT' });
+  assert.equal(transport.isStopping, true);
+  assert.equal(transport.status.pid, h.child.pid);
+  assert.equal(transport.status.running, true);
+  await assert.rejects(transport.request('ping'), { code: 'CODEX_APP_SERVER_STOPPING' });
+  assert.deepEqual(kill.mock.calls.map((call) => call.arguments), [['SIGTERM']]);
+  h.child.emit('exit', null, 'SIGTERM');
+  assert.equal(transport.status.pid, null);
+  assert.equal(transport.isStopping, false);
+});
+
+test('a failed signal is reported without pretending the process stopped', async (t) => {
+  const h = fakeProcess();
+  const kill = t.mock.method(h.child, 'kill', () => false);
+  h.onFrame((frame) => { if (frame.id !== undefined) h.reply({ id: frame.id, result: {} }); });
+  await h.transport.request('ping');
+  await assert.rejects(h.transport.stop(), /Could not send SIGTERM/);
+  assert.equal(h.transport.status.pid, h.child.pid);
+  await h.transport.request('still-running');
+  kill.mock.restore();
+  await h.transport.stop();
+});
+
+test('stopping before the first request does not spawn a process', async () => {
+  let spawns = 0;
+  const transport = new CodexAppServerTransport({ spawn: () => { spawns++; return fakeProcess().child; } });
+  await transport.stop();
+  assert.equal(spawns, 0);
+  assert.equal(transport.status.pid, null);
+});
+
+test('SIGTERM terminates a real managed child before stop resolves', async () => {
+  let managedChild: ChildProcessWithoutNullStreams | undefined;
+  const transport = new CodexAppServerTransport({ spawn: () => {
+    managedChild = childProcess.spawn(process.execPath, ['-e', `
+      require('node:readline').createInterface({ input: process.stdin }).on('line', (line) => {
+        const frame = JSON.parse(line);
+        if (frame.id !== undefined) process.stdout.write(JSON.stringify({ id: frame.id, result: {} }) + '\\n');
+      });
+    `], { stdio: ['pipe', 'pipe', 'pipe'] });
+    return managedChild;
+  }, timeoutMs: 2000 });
+  try {
+    await transport.request('ping');
+    const pid = transport.status.pid;
+    assert.ok(pid);
+    await transport.stop();
+    assert.equal(managedChild?.signalCode, 'SIGTERM');
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' });
+    assert.equal(transport.status.pid, null);
   } finally {
     await transport.close();
   }

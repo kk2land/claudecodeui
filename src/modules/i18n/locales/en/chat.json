@@ -142,7 +142,7 @@
     "runtime": "Runtime",
     "runtimeSettings": "Codex runtime settings",
     "launcherPath": "Launcher path",
-    "restart": "Restart app-server",
+    "stopAppServer": "Stop app-server",
     "goal": "Goal",
     "goalDisabled": "Goals are not enabled on this server.",
     "usage": "{{used}} / {{budget}} tokens · {{seconds}}s",

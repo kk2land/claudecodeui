@@ -162,14 +162,19 @@ test('pinned native runtime reloads SDK additions after a confirmed runtime hand
     stdio: ['pipe', 'pipe', 'pipe'], env,
   }), timeoutMs: 5000 });
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
-  const settingsDb = { get: () => settings, update: (_: string, patch: Partial<SessionRuntimeSettings>) => settings = { ...settings, ...patch } };
+  const settingsDb = {
+    get: () => settings,
+    update: (_: string, patch: Partial<SessionRuntimeSettings>) => settings = { ...settings, ...patch },
+    holdCodexAppServerQueues: () => { if (settings.runtime === 'app-server') settings = { ...settings, queueHeld: true }; },
+  };
   const runtime = new CodexAppServerRuntime(transport, settingsDb, 5000, () => {});
   let threadId: string | null = null;
   const writer = { send: () => {}, setSessionId: (id: string) => { threadId = id; } };
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => threadId, resolveResumeModel: async () => 'gpt-5.4',
     normalizeMessage: () => [], getProviderModels: async () => ({ DEFAULT: 'gpt-5.4', OPTIONS: [] }), isProviderInstalled: async () => true };
   const sdk = new Codex({ env });
-  const router = createCodexRuntimeRouter({ native: runtime, settings: settingsDb, sdk: {
+  const router = createCodexRuntimeRouter({ native: runtime, settings: settingsDb,
+    stop: () => transport.stop(), isStopping: () => transport.isStopping, isCodexSession: () => true, sdk: {
     async run(command) {
       return sdk.resumeThread(threadId!, { workingDirectory: root, skipGitRepoCheck: true, model: 'gpt-5.4' })
         .run(command, { signal: AbortSignal.timeout(10_000) });

@@ -129,7 +129,7 @@
     "runtime": "运行方式",
     "runtimeSettings": "Codex 运行设置",
     "launcherPath": "启动程序路径",
-    "restart": "重启 app-server",
+    "stopAppServer": "停止 app-server",
     "goal": "目标",
     "goalDisabled": "此服务器尚未开启目标功能。",
     "usage": "{{used}} / {{budget}} token · {{seconds}} 秒",
