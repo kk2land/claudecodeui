@@ -574,6 +574,7 @@ test('Codex history restores user prompts from typed item_completed rows', { con
         item: {
           type: 'UserMessage',
           id: 'item-user-1',
+          client_id: 'client-message-1',
           content: [
             { type: 'text', text: prompt, text_elements: [] },
             { type: 'local_image', path: '/tmp/prompt-picture.png', detail: null },
@@ -602,6 +603,8 @@ test('Codex history restores user prompts from typed item_completed rows', { con
       const images = users[0]?.images as Array<{ path?: string; data?: string }> | undefined;
 
       assert.equal(users.length, 1, 'the wire user echo must not duplicate the typed prompt');
+      assert.equal(users[0]?.id, 'client-message-1');
+      assert.equal(users[0]?.clientMessageId, 'client-message-1');
       assert.equal(users[0]?.content, prompt);
       assert.equal(images?.[0]?.path, '/tmp/prompt-picture.png');
     });

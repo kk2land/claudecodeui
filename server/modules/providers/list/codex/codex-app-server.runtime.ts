@@ -4,6 +4,7 @@ import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index
 import { sessionRuntimeDb, sessionDraftsDb } from '@/modules/database/index.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app-server.events.js';
+import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
 import { appendFilesInputTag, normalizeAttachmentDescriptors, isImageAttachmentDescriptor } from '@/shared/image-attachments.js';
 import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEnabled } from '@/shared/index.js';
 import type {
@@ -15,6 +16,7 @@ import type {
   CodexSessionState,
   CodexUserInputRequest,
   IProviderRuntime,
+  NormalizedMessage,
   ProviderPermissionDecision,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
@@ -86,6 +88,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     private readonly settings: Pick<typeof sessionRuntimeDb, 'get' | 'update'> = sessionRuntimeDb,
     private readonly stopTimeoutMs = 10_000,
     private readonly confirmSteer = (sessionId: string, requestId: string) => sessionDraftsDb.confirmSteer(sessionId, requestId),
+    private readonly readStoredMessages = async (sessionId: string): Promise<NormalizedMessage[]> =>
+      (await new CodexSessionsProvider().fetchHistory(sessionId)).messages,
   ) {
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
@@ -153,7 +157,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (target.stopRequested && !providerId) return;
       const permission = this.permissionOptions(options);
       const result = await this.client.request(providerId ? 'thread/resume' : 'thread/start', {
-        ...(providerId ? { threadId: providerId } : {}), cwd: options.cwd ?? options.projectPath,
+        // History is read separately. Some native stores cannot enumerate turns
+        // in a resume response even though the thread itself is resumable.
+        ...(providerId ? { threadId: providerId, excludeTurns: true } : {}), cwd: options.cwd ?? options.projectPath,
         ...(target.model ? { model: target.model } : {}), ...permission,
       });
       if (!result.thread?.id) throw new Error('Codex did not return a thread id.');
@@ -517,6 +523,32 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     finally { if (this.controls.get(sessionId) === operation) this.controls.delete(sessionId); }
   }
 
+  private async restoreHistory(session: NativeSession): Promise<void> {
+    let thread: AnyRecord | undefined;
+    try {
+      ({ thread } = await this.client.request('thread/read', { threadId: session.threadId, includeTurns: true }));
+    } catch (error) {
+      // Opening/reconnecting restores receipts, not active-turn state. Only this
+      // known history limitation can use the same persisted rows as the UI;
+      // Stop still requires native confirmation and other RPC errors propagate.
+      if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED'
+        || !error.message.includes('list_turns is not supported yet')) throw error;
+      for (const message of await this.readStoredMessages(session.id)) {
+        if (message.role === 'user' && typeof message.clientMessageId === 'string' && message.clientMessageId) {
+          this.confirmSteer(session.id, message.clientMessageId);
+        }
+        if (message.subagent?.id && message.subagent.id !== session.threadId) session.children.add(message.subagent.id);
+      }
+      return;
+    }
+    for (const turn of thread?.turns ?? []) for (const item of turn.items ?? []) {
+      if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') {
+        for (const child of item.receiverThreadIds ?? []) if (child !== session.threadId) session.children.add(child);
+      }
+      if (item.type === 'userMessage' && item.clientId) this.confirmSteer(session.id, item.clientId);
+    }
+  }
+
   private async applyControl(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext, stopVersion?: number): Promise<CodexSessionState> {
     if (action.action === 'state') return this.getState(sessionId);
     // Keep read/pause/clear available for reconciling goals saved before disablement.
@@ -566,11 +598,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         ? await this.client.request('thread/goal/get', { threadId: session.threadId })
         : { goal: null };
       session.state.goal = goal ?? null;
-      const { thread } = await this.client.request('thread/read', { threadId: session.threadId, includeTurns: true });
-      for (const turn of thread?.turns ?? []) for (const item of turn.items ?? []) {
-        if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') for (const child of item.receiverThreadIds ?? []) if (child !== session.threadId) session.children.add(child);
-      if (item.type === 'userMessage' && item.clientId) this.confirmSteer(sessionId, item.clientId);
-      }
+      await this.restoreHistory(session);
     } else if (action.operation === 'pause' || action.operation === 'clear') {
       if (!await this.abort(sessionId)) throw new Error(session.state.error ?? 'Could not stop Codex.');
       if (action.operation === 'clear') {

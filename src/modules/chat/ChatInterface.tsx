@@ -437,9 +437,9 @@ function ChatInterface({
   }, [currentSessionId, provider, selectProviderEffort, selectedSession?.id]);
 
   // Mirrors ChatComposer's own visibility check so the message pane can
-  // reserve enough bottom space to keep the floating status tab from
-  // overlapping the last message.
-  const hasActivityIndicator = Boolean(sessionActivity && pendingPermissionRequests.length === 0);
+  // reserve space for floating status tabs. Codex's status is inside the input
+  // and already contributes to the composer's height.
+  const hasActivityIndicator = Boolean(provider !== 'codex' && sessionActivity && pendingPermissionRequests.length === 0);
 
   const selectedProviderLabel =
     provider === 'cursor'

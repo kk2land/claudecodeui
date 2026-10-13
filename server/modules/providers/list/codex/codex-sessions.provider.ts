@@ -1812,6 +1812,7 @@ async function attachCodexSubagentTranscripts(
   }
 }
 
+/** The providers module serves Codex transcripts here; its native runtime also uses them to recover delivery receipts when RPC history is unavailable. */
 export class CodexSessionsProvider implements IProviderSessions {
   /**
    * Resolves the last turn to keep when the turn `anchorId` names is replaced.
@@ -1954,6 +1955,8 @@ export class CodexSessionsProvider implements IProviderSessions {
         provider: PROVIDER,
         kind: 'text',
         role: 'user',
+        // Match live confirmations and keep later identical sends distinct on refresh.
+        clientMessageId: readNonEmptyString(raw.uuid),
         content: parsedFiles.text,
         images: rawImages,
         files,

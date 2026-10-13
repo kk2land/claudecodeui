@@ -140,7 +140,8 @@ function chatMessageToNormalized(
   sessionId: string,
   provider: LLMProvider,
 ): NormalizedMessage | null {
-  const id = `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  // Native user echoes carry the composer's ID and must replace this same row.
+  const id = msg.id || `local_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   const ts = msg.timestamp instanceof Date
     ? msg.timestamp.toISOString()
     : typeof msg.timestamp === 'number'
@@ -175,6 +176,7 @@ function chatMessageToNormalized(
     ...base,
     kind: 'text',
     role: msg.type === 'user' ? 'user' : 'assistant',
+    isOptimistic: msg.type === 'user',
     content: msg.content || '',
     // Keep attachment references on the local echo so the user bubble shows
     // its files immediately, before the server-backed copy replaces it.

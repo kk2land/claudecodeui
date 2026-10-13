@@ -70,6 +70,28 @@ test('keeps the existing optimistic text reconciliation behavior', () => {
   assert.deepEqual(removeOptimisticUserEchoes([persisted], [local]), []);
 });
 
+test('reconciles optimistic send IDs with history from providers that assign their own IDs', () => {
+  const local = createUserMessage('composer-uuid', '2026-07-28T20:30:21.000Z', {
+    content: 'hello', isOptimistic: true,
+  });
+  const persisted = createUserMessage('claude-id', '2026-07-28T20:30:26.000Z', { content: 'hello' });
+
+  assert.deepEqual(removeOptimisticUserEchoes([persisted], [local]), []);
+});
+
+test('reserves exact history identities before matching another identical send by content', () => {
+  const confirmed = createUserMessage('first-send', '2026-07-28T20:30:21.000Z', {
+    provider: 'codex', content: 'continue',
+  });
+  const pending = createUserMessage('second-send', '2026-07-28T20:30:22.000Z', {
+    provider: 'codex', content: 'continue', isOptimistic: true,
+  });
+
+  for (const realtime of [[confirmed, pending], [pending, confirmed]]) {
+    assert.deepEqual(removeOptimisticUserEchoes([confirmed], realtime), [pending]);
+  }
+});
+
 test('a replacement echo survives a kept turn that repeats its text', () => {
   // The exact shape a rewind that branches produces: the turn that survived
   // the cut is re-stamped to the moment of the copy, one second before the

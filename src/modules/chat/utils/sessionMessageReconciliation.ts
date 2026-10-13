@@ -67,6 +67,10 @@ function findServerEchoForLocalUser(
     if (claimedServerIds.has(serverMessage.id)) {
       continue;
     }
+    // A provider-confirmed send ID is stronger evidence than matching text.
+    if (serverMessage.clientMessageId && serverMessage.clientMessageId !== localMessage.id) {
+      continue;
+    }
 
     const serverFingerprint = userTurnFingerprint(serverMessage);
     if (!serverFingerprint || !userTurnFingerprintsMatch(localFingerprint, serverFingerprint)) {
@@ -94,16 +98,25 @@ function findServerEchoForLocalUser(
 
 /**
  * Removes local optimistic user rows once a corresponding persisted turn is
- * available. Matches are one-to-one so repeated sends cannot claim one row.
+ * available. Used by the session store; exact IDs take precedence over the
+ * one-to-one content fallback for providers that do not preserve send IDs.
  */
 export function removeOptimisticUserEchoes(
   serverMessages: NormalizedMessage[],
   realtimeMessages: NormalizedMessage[],
 ): NormalizedMessage[] {
-  const claimedServerIds = new Set<string>();
+  const serverIds = new Set(serverMessages.map((message) => message.id));
+  // Reserve exact matches before comparing text, so a second identical send
+  // cannot claim the persisted confirmation of the first send.
+  const claimedServerIds = new Set(
+    realtimeMessages.filter((message) => serverIds.has(message.id)).map((message) => message.id),
+  );
 
   return realtimeMessages.filter((message) => {
-    if (!message.id.startsWith('local_')) {
+    if (serverIds.has(message.id)) {
+      return false;
+    }
+    if (!message.isOptimistic && !message.id.startsWith('local_')) {
       return true;
     }
 

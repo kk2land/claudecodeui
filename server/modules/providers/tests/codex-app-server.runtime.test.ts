@@ -3,7 +3,8 @@ import test, { afterEach, beforeEach } from 'node:test';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { createCodexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
-import type { AnyRecord, CodexRpcClient, CodexRpcFrame, ProviderRuntimeContext, ProviderRuntimeWriter, SessionRuntimeSettings } from '@/shared/index.js';
+import { AppError } from '@/shared/index.js';
+import type { AnyRecord, CodexRpcClient, CodexRpcFrame, NormalizedMessage, ProviderRuntimeContext, ProviderRuntimeWriter, SessionRuntimeSettings } from '@/shared/index.js';
 
 const originalGoalSetting = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
 beforeEach(() => { process.env.CLOUDCLI_CODEX_GOAL_ENABLED = 'true'; });
@@ -42,8 +43,13 @@ function harness(timeout = 100) {
   };
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
   const accepted: string[] = [];
+  const storedMessages: NormalizedMessage[] = [];
+  const historyReads: string[] = [];
   const settingsDb = { get: () => settings, update: (_: string, patch: Partial<SessionRuntimeSettings>) => settings = { ...settings, ...patch } };
-  const runtime = new CodexAppServerRuntime(rpc, settingsDb, timeout, (_, id) => accepted.push(id));
+  const runtime = new CodexAppServerRuntime(rpc, settingsDb, timeout, (_, id) => accepted.push(id), async (sessionId) => {
+    historyReads.push(sessionId);
+    return storedMessages;
+  });
   const events: AnyRecord[] = [];
   let writerNumber = 1;
   const writer: ProviderRuntimeWriter = { send: (data) => events.push({ ...data as AnyRecord, writer: 1 }), setSessionId: (id) => { nativeId = id; }, nextTurn: () => {
@@ -55,7 +61,7 @@ function harness(timeout = 100) {
   const event = (method: string, params: AnyRecord = {}) => notify({ method, params: { threadId: 'native-thread', ...params } });
   const finish = (id = 'turn-1', status = 'completed') => event('turn/completed', { turn: { id, status } });
   return { runtime, calls, handlers, events, event, finish, request: (frame: CodexRpcFrame) => request(frame), exit: (error: Error) => exit(error), accepted,
-    options, writer, context, settingsDb, settings: () => settings,
+    options, writer, context, settingsDb, storedMessages, historyReads, settings: () => settings,
     control: (action: Parameters<CodexAppServerRuntime['control']>[1]) => runtime.control('app-session', action, options, writer, context),
     run: (text = 'hello', extra: AnyRecord = {}) => runtime.run(text, { ...options, ...extra }, writer, context) };
 }
@@ -99,8 +105,89 @@ test('restoring an existing thread confirms persisted steer receipts with Goals 
   await h.control({ action: 'goal', operation: 'get' });
   assert.deepEqual(h.calls.map(({ method }) => method), ['thread/resume', 'thread/read']);
   assert.deepEqual(h.accepted, ['lost-steer-receipt']);
+  assert.deepEqual(h.historyReads, []);
   assert.equal(h.runtime.getState('app-session').goal, null);
   assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
+
+test('restoring a thread without list_turns uses persisted receipts and allows another native send', async () => {
+  delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.handlers.set('thread/resume', async (params) => {
+    if (!params.excludeTurns) throw new AppError('list_turns is not supported yet', { code: 'CODEX_APP_SERVER_REJECTED' });
+    return { thread: { id: 'native-thread' } };
+  });
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('list_turns is not supported yet', { code: 'CODEX_APP_SERVER_REJECTED' });
+  });
+  h.storedMessages.push({
+    id: 'received-steer', clientMessageId: 'received-steer', kind: 'text', role: 'user',
+    provider: 'codex', sessionId: 'app-session', timestamp: '2026-10-13T00:00:00.000Z', content: 'continue',
+  }, {
+    id: 'legacy-user-id', kind: 'text', role: 'user', provider: 'codex', sessionId: 'app-session',
+    timestamp: '2026-10-13T00:00:00.000Z', content: 'continue',
+  });
+
+  const restored = await h.control({ action: 'goal', operation: 'get' });
+  assert.equal(restored.phase, 'idle');
+  assert.deepEqual(h.accepted, ['received-steer']);
+  assert.deepEqual(h.historyReads, ['app-session']);
+  assert.equal(h.calls.some(({ method }) => method === 'thread/start'), false);
+
+  const running = h.run('next prompt');
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  assert.equal(h.calls.find(({ method }) => method === 'turn/start')?.params.threadId, 'native-thread');
+  h.finish();
+  await running;
+});
+
+test('unsupported history restoration preserves the running turn and never confirms missing receipts', async () => {
+  const h = harness();
+  const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('list_turns is not supported yet', { code: 'CODEX_APP_SERVER_REJECTED' });
+  });
+
+  const restored = await h.control({ action: 'goal', operation: 'get' });
+  assert.equal(restored.phase, 'running');
+  assert.equal(restored.turnId, 'turn-1');
+  assert.deepEqual(h.accepted, []);
+  assert.equal(h.events.some((event) => event.kind === 'complete'), false);
+  h.finish();
+  await running;
+});
+
+test('history restoration still reports unrelated RPC failures', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('Unable to read the thread', { code: 'CODEX_APP_SERVER_REJECTED' });
+  });
+
+  await assert.rejects(h.control({ action: 'goal', operation: 'get' }), /Unable to read the thread/);
+  assert.deepEqual(h.historyReads, []);
+  assert.deepEqual(h.accepted, []);
+});
+
+test('stored history never substitutes for native confirmation of an uncertain stop', async () => {
+  const h = harness();
+  h.handlers.set('turn/start', async () => {
+    throw new AppError('Start acknowledgement timed out', { code: 'CODEX_APP_SERVER_TIMEOUT' });
+  });
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('list_turns is not supported yet', { code: 'CODEX_APP_SERVER_REJECTED' });
+  });
+  const running = h.run();
+  await eventually(() => h.runtime.getState('app-session').phase === 'stopFailed');
+
+  assert.equal(await h.runtime.abort('app-session'), false);
+  assert.equal(h.runtime.getState('app-session').phase, 'stopFailed');
+  assert.deepEqual(h.historyReads, []);
+  assert.equal(h.events.some((event) => event.kind === 'complete'), false);
+  h.finish('turn-1', 'interrupted');
+  await running;
 });
 
 test('native turn uses independent Plan/permission settings and stable message identity', async () => {

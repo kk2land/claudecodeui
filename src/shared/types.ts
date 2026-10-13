@@ -500,7 +500,11 @@ type QuestionOption = {
 export type NormalizedMessage = {
   /** Native item snapshots update in place until completion. */
   isStreaming?: boolean;
+  /** Client-only user echo awaiting confirmation; enables history reconciliation when the provider does not preserve its send ID. */
+  isOptimistic?: boolean;
   id: string;
+  /** Original send ID returned by the provider; distinct IDs identify distinct submissions even when their text matches. */
+  clientMessageId?: string;
   /**
    * The provider's own id for the transcript row behind this message, when the
    * provider has stable per-row identity (today: Claude). Sent back as the
