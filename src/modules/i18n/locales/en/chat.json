@@ -110,6 +110,8 @@
   "codex": {
     "processRunning": "Process running",
     "processIdle": "Process stopped",
+    "processId": "Codex launcher process ID",
+    "processStartedAt": "Started at",
     "permissionMode": "Permission Mode",
     "modes": {
       "default": "Default Mode",
@@ -138,8 +140,11 @@
     "stopFailed": "Stop not confirmed — retry Stop",
     "resumeQueue": "Resume queue",
     "runtime": "Runtime",
+    "runtimeSettings": "Codex runtime settings",
+    "launcherPath": "Launcher path",
     "restart": "Restart app-server",
     "goal": "Goal",
+    "goalDisabled": "Goals are not enabled on this server.",
     "usage": "{{used}} / {{budget}} tokens · {{seconds}}s",
     "pause": "Pause",
     "resume": "Resume",

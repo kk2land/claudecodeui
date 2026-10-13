@@ -97,6 +97,8 @@
   "codex": {
     "processRunning": "进程运行中",
     "processIdle": "进程未启动",
+    "processId": "Codex 启动进程 PID",
+    "processStartedAt": "启动时间",
     "permissionMode": "权限模式",
     "modes": {
       "default": "默认模式",
@@ -125,8 +127,11 @@
     "stopFailed": "尚未确认停止，请再次点击停止",
     "resumeQueue": "恢复排队",
     "runtime": "运行方式",
+    "runtimeSettings": "Codex 运行设置",
+    "launcherPath": "启动程序路径",
     "restart": "重启 app-server",
     "goal": "目标",
+    "goalDisabled": "此服务器尚未开启目标功能。",
     "usage": "{{used}} / {{budget}} token · {{seconds}} 秒",
     "pause": "暂停",
     "resume": "继续目标",

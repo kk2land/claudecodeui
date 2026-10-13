@@ -117,6 +117,19 @@ beforeEach(() => {
   listSkills.mockResolvedValue(jsonResponse({ success: true, data: { skills: [] } }));
 });
 
+it('only lists /goal for Codex after the server enables Goals', async () => {
+  const { result, rerender } = renderHook(({ goalsEnabled }: { goalsEnabled?: boolean }) => useSlashCommands({
+    selectedProject: project, provider: 'codex', goalsEnabled, input: '', setInput: () => {},
+    textareaRef: { current: null }, onExecuteCommand: () => {},
+  }), { initialProps: { goalsEnabled: undefined as boolean | undefined } });
+  assert.equal(result.current.slashCommands.some((command) => command.name === '/goal'), false);
+  assert.equal(result.current.slashCommands.some((command) => command.name === '/plan'), true);
+  rerender({ goalsEnabled: true });
+  await waitFor(() => assert.equal(result.current.slashCommands.some((command) => command.name === '/goal'), true));
+  rerender({ goalsEnabled: false });
+  assert.equal(result.current.slashCommands.some((command) => command.name === '/goal'), false);
+});
+
 afterEach(() => {
   document.body.innerHTML = '';
 });

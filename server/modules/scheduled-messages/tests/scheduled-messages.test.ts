@@ -4,8 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
-import type { CodexSessionState, ProviderRuntimeGateway } from '@/shared/index.js';
+import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import type { ProviderRuntimeGateway } from '@/shared/index.js';
 import { dispatchDueScheduledMessages, dispatchQueuedMessages } from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
@@ -124,23 +124,20 @@ test('a queued message stays pending while its session is busy', async () => {
   });
 });
 
-test('native goal gaps and persistent stop holds block dispatch until explicitly released', async () => {
+test('a provider-owned queue hold blocks dispatch until explicitly released', async () => {
   await withIsolatedDatabase(async (userId) => {
-    sessionDraftsDb.saveDraft(userId, SESSION_ID, { text: '', queuedMessage: { content: 'after the goal' } });
+    sessionDraftsDb.saveDraft(userId, SESSION_ID, { text: '', queuedMessage: { content: 'after the hold' } });
     const runs: RunCall[] = [];
     const runtime = createRuntime(runs) as ProviderRuntimeGateway;
-    const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: null, phase: 'idle', questions: [],
-      goal: { threadId: SESSION_ID, objective: 'work', status: 'active', tokenBudget: null, tokensUsed: 5, timeUsedSeconds: 1 } };
-    runtime.getState = () => state;
-    assert.equal(await dispatchQueuedMessages(runtime), 0);
-    state.goal!.status = 'paused';
-    state.phase = 'stopFailed';
-    assert.equal(await dispatchQueuedMessages(runtime), 0);
-    state.phase = 'idle';
-    sessionRuntimeDb.update(SESSION_ID, { queueHeld: true });
+    let held = true;
+    runtime.isQueueBlocked = (sessionId) => {
+      assert.equal(sessionId, SESSION_ID);
+      return held;
+    };
     assert.equal(await dispatchQueuedMessages(runtime), 0);
     assert.equal(runs.length, 0);
-    sessionRuntimeDb.update(SESSION_ID, { queueHeld: false });
+    assert.equal(sessionDraftsDb.listQueuedMessages().length, 1);
+    held = false;
     assert.equal(await dispatchQueuedMessages(runtime), 1);
     assert.equal(runs.length, 1);
   });

@@ -71,6 +71,21 @@ test('steer atomically owns the persisted message and repeats do not resend or r
   });
 });
 
+test('invalid native controls are acknowledged without reserving a run or changing the queue', async () => {
+  await harness(async (h) => {
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: 'draft', queuedMessage: queued });
+    for (const action of [{ action: 'mode', mode: 'invalid' }, { action: 'goal', operation: 'set', tokenBudget: -1 }, { action: 'unknown' }]) {
+      h.send(action);
+      await settle();
+      assert.equal(h.frames.at(-1)?.kind, 'control_result');
+      assert.equal(h.frames.at(-1)?.ok, false);
+      assert.equal(chatRunRegistry.getRun(h.sessionId), undefined);
+      assert.deepEqual(sessionDraftsDb.getDrafts(h.userId)[0].queuedMessage, queued);
+      assert.equal(h.calls.length, 0);
+    }
+  });
+});
+
 test('the queue dispatcher cannot claim a message while its steer acknowledgement is pending', async () => {
   await harness(async (h) => {
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: queued });

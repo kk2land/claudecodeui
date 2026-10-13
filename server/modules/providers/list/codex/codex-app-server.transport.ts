@@ -5,7 +5,7 @@ import path from 'node:path';
 import { createInterface } from 'node:readline';
 
 import type { CodexRpcClient, CodexRpcFrame } from '@/shared/index.js';
-import { AppError, findApplicationRoot, getModuleDirectory } from '@/shared/index.js';
+import { AppError, findApplicationRoot, getModuleDirectory, isCodexGoalEnabled } from '@/shared/index.js';
 
 type PendingRequest = {
   resolve(value: unknown): void;
@@ -16,6 +16,7 @@ type PendingRequest = {
 /** Providers' runtime and fork adapter share this lazy, bidirectional stdio connection. */
 export class CodexAppServerTransport implements CodexRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null;
+  private startedAt: number | null = null;
   private ready: Promise<void> | null = null;
   private nextId = 0;
   private pending = new Map<string | number, PendingRequest>();
@@ -53,7 +54,14 @@ export class CodexAppServerTransport implements CodexRpcClient {
   }
 
   get status() {
-    return { running: this.child !== null, pendingRequests: this.pending.size, launcherPath: this.launcherPath, cliVersion: this.cliVersion };
+    return {
+      running: this.child !== null,
+      pid: this.child?.pid ?? null,
+      startedAt: this.startedAt,
+      pendingRequests: this.pending.size,
+      launcherPath: this.launcherPath,
+      cliVersion: this.cliVersion,
+    };
   }
 
   private ensureReady(): Promise<void> {
@@ -81,12 +89,14 @@ export class CodexAppServerTransport implements CodexRpcClient {
       }
       // This private connection owns every subscription. Release unsubscribed
       // threads promptly so SDK compatibility can resume their latest rollout.
-      child = spawn(process.execPath, [launcher, 'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0'], {
+      child = spawn(process.execPath, [launcher, 'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0',
+        '-c', `features.goals=${isCodexGoalEnabled()}`], {
         env: process.env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     }
     this.child = child;
+    this.startedAt = child.pid != null ? Date.now() : null;
     this.stderr = '';
     const reader = createInterface({ input: child.stdout });
     reader.on('line', (line) => {
@@ -106,6 +116,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
       // A broken pipe does not prove the child has exited; release the process too.
       if (!child.killed) child.kill('SIGTERM');
       this.child = null;
+      this.startedAt = null;
       this.ready = null;
       for (const entry of this.pending.values()) {
         clearTimeout(entry.timer);

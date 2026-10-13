@@ -1,4 +1,4 @@
-import { Database } from 'better-sqlite3';
+import type { Database } from 'better-sqlite3';
 
 import {
   APP_CONFIG_TABLE_SCHEMA_SQL,
@@ -6,8 +6,10 @@ import {
   NOTIFICATION_CHANNEL_ENDPOINTS_TABLE_SCHEMA_SQL,
   PROJECTS_TABLE_SCHEMA_SQL,
   PROVIDER_MODELS_TABLE_SCHEMA_SQL,
+  QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL,
   PUSH_SUBSCRIPTIONS_TABLE_SCHEMA_SQL,
   SESSION_DRAFTS_TABLE_SCHEMA_SQL,
+  SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL,
   SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL,
   SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL,
   SESSIONS_TABLE_SCHEMA_SQL,
@@ -489,6 +491,21 @@ const ensureProjectsForSessionPaths = (db: Database): void => {
   `);
 };
 
+/** Upgrades existing draft rows and holds deliveries whose acknowledgement was lost on shutdown. */
+const migrateCodexSessionControls = (db: Database): void => {
+  const columns = getTableInfo(db, 'session_drafts').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'session_drafts', columns, 'queue_status', "TEXT NOT NULL DEFAULT 'queued'");
+  addColumnToTableIfNotExists(db, 'session_drafts', columns, 'queue_request_id', 'TEXT');
+  addColumnToTableIfNotExists(db, 'session_drafts', columns, 'queue_error', 'TEXT');
+  db.exec(SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL);
+  db.exec(QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL);
+  db.exec(`
+    UPDATE queued_steer_receipts SET status = 'unknown' WHERE status = 'steering';
+    UPDATE session_drafts SET queue_status = 'unknown', queue_error = 'Awaiting delivery confirmation after server restart.' WHERE queue_status = 'steering';
+  `);
+};
+
+/** Database initialization and integration tests upgrade existing installations in place. */
 export const runMigrations = (db: Database) => {
   try {
     const usersTableInfo = db.prepare('PRAGMA table_info(users)').all() as { name: string }[];
@@ -520,30 +537,7 @@ export const runMigrations = (db: Database) => {
     addProviderModelEffortColumns(db);
     db.exec(USER_PREFERENCES_TABLE_SCHEMA_SQL);
     db.exec(SESSION_DRAFTS_TABLE_SCHEMA_SQL);
-    const draftColumns = (db.prepare('PRAGMA table_info(session_drafts)').all() as TableInfoRow[]).map((column) => column.name);
-    addColumnToTableIfNotExists(db, 'session_drafts', draftColumns, 'queue_status', "TEXT NOT NULL DEFAULT 'queued'");
-    addColumnToTableIfNotExists(db, 'session_drafts', draftColumns, 'queue_request_id', 'TEXT');
-    addColumnToTableIfNotExists(db, 'session_drafts', draftColumns, 'queue_error', 'TEXT');
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS session_runtime_settings (
-        session_id TEXT PRIMARY KEY,
-        runtime TEXT NOT NULL DEFAULT 'app-server',
-        mode TEXT NOT NULL DEFAULT 'default',
-        queue_held INTEGER NOT NULL DEFAULT 0
-      );
-      CREATE TABLE IF NOT EXISTS queued_steer_receipts (
-        request_id TEXT PRIMARY KEY,
-        user_id INTEGER NOT NULL,
-        session_id TEXT NOT NULL,
-        message_id TEXT NOT NULL,
-        status TEXT NOT NULL,
-        error TEXT,
-        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
-      );
-      UPDATE queued_steer_receipts SET status = 'unknown' WHERE status = 'steering';
-      UPDATE session_drafts SET queue_status = 'unknown', queue_error = 'Awaiting delivery confirmation after server restart.' WHERE queue_status = 'steering';
-      CREATE INDEX IF NOT EXISTS idx_steer_message ON queued_steer_receipts(user_id, session_id, message_id);
-    `);
+    migrateCodexSessionControls(db);
     db.exec(SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL);
     addSupersededTranscriptPathColumn(db);
 

@@ -12,7 +12,6 @@ import type {
   ProviderRuntimeWriter,
 } from '@/shared/index.js';
 
-
 type ProviderRuntimeServiceDependencies = {
   listProviders(): IProvider[];
   resolveProvider(provider: string): IProvider;
@@ -79,6 +78,10 @@ export function createProviderRuntimeService(
 
     getState(providerName: LLMProvider, sessionId: string) {
       return dependencies.resolveProvider(providerName).runtime.getState?.(sessionId);
+    },
+
+    isQueueBlocked(sessionId: string): boolean {
+      return dependencies.listProviders().some((provider) => provider.runtime.isQueueBlocked?.(sessionId));
     },
 
     async control(providerName: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter) {

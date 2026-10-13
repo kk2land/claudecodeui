@@ -7,16 +7,22 @@ Codex app-server 接入实施记录与计划
 **当前实现与使用**
 
 - 输入框上方提供 Plan/执行模式切换；`/plan` 仅切换模式，`/plan <任务>` 使用原生协作模式执行。运行中的 Plan 任务保持排队。选择“执行计划”会切回执行模式并填入实施提示词，用户发送后开始执行。
-- `/goal` 打开目标编辑器；`/goal <目标>`、`/goal pause|resume|clear` 和面板控件共用服务。展示全部六种原生状态、累计 token 和时间。预算仅在明确填写时设置；耗尽后不自动清零或提高。Plan 中创建的 Goal 保存为 paused。
+- Goal 默认关闭。仅设置服务端环境变量 `CLOUDCLI_CODEX_GOAL_ENABLED=true` 后开启；修改后重启后端并刷新浏览器，无需为切换开关重新构建前端。后端 capabilities 决定目标面板、`/goal` 提示及请求入口；服务端同时拒绝关闭状态下的目标创建/继续，并将开关传给原生进程的 `features.goals`，包含 SDK 兼容运行器。Plan、steer 和普通聊天独立于此开关。
+- 开启后，`/goal` 打开目标编辑器；`/goal <目标>`、`/goal pause|resume|clear` 和面板控件共用服务。展示全部六种原生状态、累计 token 和时间。预算仅在明确填写时设置；耗尽后不自动清零或提高。Plan 中创建的 Goal 保存为 paused。
 - 排队卡片保留删除及更多菜单中的编辑操作；只有活跃且可引导的 turn 显示可用的“引导”。服务端原子占用消息，accepted 才消费；拒绝保留，结果未知挂起，重连读取原生历史核对。无法证明是否接收时，停止任务后可明确选择重新排队或丢弃。
 - Stop 暂停目标、挂起队列、等待 turn 真实终态，并清理本线程的后台终端和已知所属子线程。超过确认期限显示“停止未确认”，支持重试；不会将 interrupt RPC 的空响应当成停止成功。定时抢占发送也必须先得到停止确认。
 - Goal 自动 turn 建立新的 executionId 和 writer，订阅、流式消息及重连回放沿用现有 WebSocket。普通队列在 Goal 活跃及停止挂起时不派发。停止前已排队的旧控制动作不能在停止完成后重新激活目标。
-- 保留 SDK 显式兼容选项，在聊天区 Codex 详情中切换；SDK 模式不提供原生控制。`CLOUDCLI_CODEX_RUNTIME_MODE=sdk` 可设置尚未持久化选择的会话默认值。详情同时展示运行状态、实际 bundled launcher 路径及 CLI 版本，并提供空闲重启。
+- 保留 SDK 显式兼容选项，在聊天区 Codex 详情中切换；SDK 模式不提供原生控制。`CLOUDCLI_CODEX_RUNTIME_MODE=sdk` 可设置尚未持久化选择的会话默认值。详情同时展示运行状态、启动进程 PID、按浏览器本地时区显示的启动时间、实际 bundled launcher 路径及 CLI 版本，并提供空闲重启。
 - 沿用 JSONL 历史、搜索与现有 turn 级编辑/分叉。原生 userMessage 的 client_id 在历史加载中保留，实时文件工具与历史共享工具 ID，减少刷新重复。fork 使用同一条受管理连接。
 
 应用控制统一使用 `chat.control` + `control.action` 的类型化联合，而不是分别新增多个消息名；独立 `control_result` 携带 requestId 和状态。原有 `chat.send`、`chat.abort`、`chat.subscribe` 保持兼容。runtime 设置放在会话的 Codex 详情中，确保运行时与会话绑定。所有数据迁移随现有数据库初始化执行；没有新增服务端端口。
 
 **审查修复（2026-10-13）**
+
+- Goal 关闭时仍在首次进入会话及断线重连后核对 steer 历史回执；沿用现有恢复入口，服务端跳过原生 Goal RPC，不再让已送达消息长期停留在未知状态。新增前端两种恢复场景及后端历史确认回归测试。
+- 项目安装脚本白名单保留 bcrypt、better-sqlite3、node-pty 的既有许可，同时允许固定版本的 @vscode/ripgrep，避免 npm 用项目白名单覆盖本地许可后阻止原生依赖安装。
+- 为便于持续合并 main，Codex 控制校验、排队占用与回执处理集中在 WebSocket 模块的 `codex-chat-control.service.ts`，通用入口只委派和返回结果。调度器通过可选的 `isQueueBlocked` 运行器契约判断是否等待；Codex 的 Goal、停止阶段和持久化 hold 由 Codex 运行器解释。
+- 新建表沿用 `schema.ts`，旧草稿补列和重启恢复集中在具名迁移函数，初始化入口只增加调用。非 app-server 的排队卡片保留直接编辑按钮；Codex 保留引导及更多菜单。草稿顺序、账号隔离、消息标识和停止确认修复继续保留。
 
 - Goal 设置与恢复共用普通发送的 sandbox/approval 映射，激活前同步当前权限，避免沿用上一轮的完整访问权限。
 - 普通发送记录 Stop 代次，在 thread 初始化和模型解析后核对；已经取消的提交不再启动 turn，之后的明确新提交仍可正常运行。
@@ -27,6 +33,12 @@ Codex app-server 接入实施记录与计划
 受管理的私有 app-server 使用 `thread_unload_delay_secs=0`，让取消订阅后的空闲线程立即开始卸载；仍等待关闭通知而不是仅信任 unsubscribe ACK。固定版本的延迟卸载语义见[原生生命周期实现](https://github.com/openai/codex/blob/rust-v0.156.1/codex-rs/app-server/src/request_processors/thread_lifecycle.rs)。新增真实二进制测试经过 app-server → SDK → app-server 三轮，检查 SDK 新增回答确实进入下一轮模型输入；两个执行器均使用独立 CODEX_HOME 和本地模拟模型。
 
 **验证记录**
+
+2026-10-13 最终审查修复验证：后端专项 65 项、前端专项 25 项通过；新增首次加载/重连回执恢复测试在修复前失败、修复后通过。前端全量 110 个文件、756 项通过，构建、类型检查、lint 和差异检查通过。npm 策略检查确认四个依赖的脚本均被允许；通过正常 `npm rebuild @vscode/ripgrep` 成功补装二进制，搜索测试恢复通过。后端全量 671 项，668 通过、1 跳过、2 失败；仅剩两个原生 smoke 在启动时被 `codex-proxy` 以 `invalid app-server sandbox configuration` 拒绝，未修改测试以掩盖此环境限制。
+
+2026-10-13 合并维护整理验证：后端 runtime/dispatcher/WebSocket/迁移专项 56 项通过，覆盖旧草稿升级、重复迁移、重启后的未知回执保留及无效控制请求隔离；前端 110 个文件、754 项通过；构建、类型检查、lint 和差异检查通过。完整 `npm test` 为 670 项，666 通过、1 跳过、3 失败：两项原生 smoke 仍被宿主 sandbox 配置拒绝，一项既有搜索测试因 `@vscode/ripgrep` 缺少二进制而失败，单独复跑确认同一原因。尝试重新构建该依赖时，安装脚本被环境的 `allowScripts` 策略阻止；未更改此策略或将失败测试标记为通过。
+
+2026-10-13 后续 Goal env 开关验证：前端 110 个文件、754 项通过；后端 capability/runtime/transport/WebSocket 专项 41 项通过；构建、类型检查、lint 通过。包含默认关闭、仅 `true` 开启、隐藏面板和 slash 提示、手输 `/goal` 拦截、服务端激活拒绝、普通 Plan/steer 可用，以及进程启动参数覆盖。当前宿主的 `codex-proxy` 以 `invalid app-server sandbox configuration` 拒绝 app-server 启动，两个既有真实进程 smoke 未能执行到功能验证；下方真实 smoke 通过记录属于此前环境，不能视作本次开关的真实进程验证。
 
 验证使用安装后的仓库依赖；没有调用 PATH 中另一个版本的 Codex，也没有使用真实账号进行付费推理。
 

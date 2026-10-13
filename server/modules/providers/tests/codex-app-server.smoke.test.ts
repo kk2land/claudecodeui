@@ -25,6 +25,12 @@ async function until(check: () => boolean, description: string) {
 
 /** Uses the pinned binary, an isolated CODEX_HOME and a localhost model; no account or paid inference. */
 test('pinned app-server steers, stops a real background process, forks and persists native goals', { timeout: 30_000 }, async (t) => {
+  const originalGoalSetting = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  process.env.CLOUDCLI_CODEX_GOAL_ENABLED = 'true';
+  t.after(() => {
+    if (originalGoalSetting === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+    else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = originalGoalSetting;
+  });
   const require = createRequire(import.meta.url);
   let launcher: string;
   try { launcher = require.resolve('@openai/codex/bin/codex.js'); }

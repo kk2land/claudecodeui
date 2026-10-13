@@ -43,17 +43,19 @@ export interface IProviderRuntime {
   control?(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<CodexSessionState>;
   /** Read without starting a process; used by reconnect and scheduling. */
   getState?(sessionId: string): CodexSessionState;
+  /** Holds automatic queue dispatch during provider-owned activity or a persistent user pause. */
+  isQueueBlocked?(sessionId: string): boolean;
   /** Releases managed subprocesses when the application shuts down. */
   close?(): Promise<void>;
   permissions?: ProviderRuntimePermissionGateway;
+  /** Native controllers can stay active between individual registered turns. */
+  listActiveSessions?(): Array<{ sessionId: string; startedAt: number; statusText?: string }>;
   /**
    * Sessions with background tasks still outstanding, whether or not their
    * turn has ended. Only a runtime that keeps its process open past a turn for
    * such work has anything to report; the others leave this undefined and the
    * running-sessions list falls back to chat runs alone.
    */
-  /** Native controllers can stay active between individual registered turns. */
-  listActiveSessions?(): Array<{ sessionId: string; startedAt: number; statusText?: string }>;
   listBackgroundWork?(): Array<{ sessionId: string; tasks: BackgroundTaskSummary[] }>;
   /**
    * Stops one outstanding background task. Resolves false when the session has

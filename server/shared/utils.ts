@@ -40,6 +40,15 @@ import type {
  */
 export const IS_PLATFORM = process.env.VITE_IS_PLATFORM === 'true';
 
+/**
+ * Providers use this opt-in for Goal capabilities, control requests and the
+ * private app-server's native goals feature. Only the literal value `true`
+ * enables it; changing the deployment setting requires a backend restart.
+ */
+export function isCodexGoalEnabled(): boolean {
+  return process.env.CLOUDCLI_CODEX_GOAL_ENABLED === 'true';
+}
+
 // ---------------------------
 //----------------- NORMALIZED MESSAGE HELPER INPUT TYPES ------------
 /**

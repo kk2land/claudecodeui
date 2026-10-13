@@ -1,18 +1,7 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 import { api } from '@/shared/api';
-import type { LLMProvider } from '@/shared/types';
-
-/**
- * The backend-owned answer to "what can this provider actually do".
- *
- * Only the fields consumers outside chat need are declared; the matrix itself
- * is larger and lives in `provider-capabilities.service.ts`.
- */
-type ProviderCapabilityRow = {
-  provider: LLMProvider;
-  supportsSessionForking?: boolean;
-};
+import type { LLMProvider, ProviderCapabilityRow } from '@/shared/types';
 
 /**
  * Cached at module scope because the matrix is static for the life of the
@@ -54,6 +43,20 @@ async function loadCapabilities(): Promise<Partial<Record<LLMProvider, ProviderC
   return inFlightRequest;
 }
 
+/** Chat and sidebar use the server's capability matrix; unloaded capabilities grant no features. */
+export function useProviderCapabilities(): Partial<Record<LLMProvider, ProviderCapabilityRow>> {
+  // Keep feature entry points hidden until the backend advertises their support.
+  const [capabilities, setCapabilities] = useState<Partial<Record<LLMProvider, ProviderCapabilityRow>>>({});
+  useEffect(() => {
+    let cancelled = false;
+    void loadCapabilities().then((capabilities) => {
+      if (!cancelled) setCapabilities(capabilities);
+    });
+    return () => { cancelled = true; };
+  }, []);
+  return capabilities;
+}
+
 /**
  * Reports which providers can branch a session's transcript.
  *
@@ -61,26 +64,8 @@ async function loadCapabilities(): Promise<Partial<Record<LLMProvider, ProviderC
  * withdrawn.
  */
 export function useSessionForkingProviders(): Set<LLMProvider> {
-  const [providers, setProviders] = useState<Set<LLMProvider>>(() => new Set());
-
-  useEffect(() => {
-    let cancelled = false;
-
-    void loadCapabilities().then((capabilities) => {
-      if (cancelled) return;
-      const forkable = new Set<LLMProvider>();
-      for (const row of Object.values(capabilities)) {
-        if (row?.supportsSessionForking) {
-          forkable.add(row.provider);
-        }
-      }
-      setProviders(forkable);
-    });
-
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return providers;
+  const capabilities = useProviderCapabilities();
+  return useMemo(() => new Set(Object.values(capabilities)
+    .filter((row) => row?.supportsSessionForking)
+    .map((row) => row.provider)), [capabilities]);
 }

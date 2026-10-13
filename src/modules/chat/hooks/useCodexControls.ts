@@ -1,7 +1,9 @@
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
 
 import { api } from '@/shared/api';
+import { createUuid } from '@/shared/utils';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
+import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
 import { hydrateChatDrafts, persistQueuedMessage, readQueuedDelivery, readQueuedMessage, subscribeToChatDrafts, writeQueuedMessage } from '@/shared/chatDrafts';
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
@@ -17,6 +19,8 @@ type Args = {
 /** ChatInterface owns this controller; all native controls wait for a scoped server acknowledgement. */
 export function useCodexControls({ enabled, sessionId, project, options, sendMessage, onSessionEstablished }: Args): CodexControls {
   const { subscribe } = useWebSocket();
+  const capabilities = useProviderCapabilities();
+  const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
   // A control failure belongs to the action, independently of the model's running state.
@@ -61,7 +65,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   }, []);
 
   const send = useCallback(async (sid: string, action: unknown) => {
-    const requestId = crypto.randomUUID();
+    const requestId = createUuid();
     setErrors((old) => ({ ...old, [sid]: null }));
     setPendingSessions((old) => new Set([...old, sid]));
     await new Promise<void>((resolve, reject) => {
@@ -103,7 +107,8 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
 
   useEffect(() => subscribe((event) => {
     if (!enabled || !sessionId || event.kind !== 'websocket_reconnected') return;
-    // Re-read native receipts as well as the run snapshot after a lost steer ACK.
+    // goal/get also reconciles persisted steer receipts. The server skips native
+    // Goal RPCs when disabled, but history recovery must always remain available.
     void send(sessionId, { action: 'state' }).then(() => send(sessionId, { action: 'goal', operation: 'get' }))
       .then(() => hydrateChatDrafts()).catch(() => {});
   }), [enabled, sessionId, send, subscribe]);
@@ -112,6 +117,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     if (!enabled) throw new Error('Select Codex to use this command.');
     let sid = sessionId ?? '';
     try {
+      if (action.action === 'goal' && !goalsEnabled) throw new Error('Codex Goals are disabled.');
       sid = await ensureSession();
       if (action.action === 'goal') setVisibleGoals((old) => new Set([...old, sid]));
       await send(sid, action);
@@ -119,12 +125,12 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
       setErrors((old) => ({ ...old, [sid]: error instanceof Error ? error.message : String(error) }));
       throw error;
     }
-  }, [enabled, sessionId, ensureSession, send]);
+  }, [enabled, sessionId, ensureSession, send, goalsEnabled]);
 
   useEffect(() => {
     if (!enabled || !sessionId) return;
     let active = true;
-    // Query after subscription is installed; state restoration is a transport side effect.
+    // Restore persisted receipts after subscription, independently of the Goal UI.
     queueMicrotask(() => {
       if (!active) return;
       void send(sessionId, { action: 'state' }).then(() => {
@@ -140,7 +146,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     const state = snapshots[sessionId];
     if (!message || !state?.turnId) return;
     if (!message.id) {
-      message.id = crypto.randomUUID();
+      message.id = createUuid();
       writeQueuedMessage(sessionId, message);
     }
     try {
@@ -153,6 +159,6 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     }
   }, [sessionId, snapshots, send]);
 
-  return { sessionId, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
+  return { sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
     pending: creatingSession || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

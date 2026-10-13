@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
-import test from 'node:test';
+import test, { afterEach, beforeEach } from 'node:test';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { createCodexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
 import type { AnyRecord, CodexRpcClient, CodexRpcFrame, ProviderRuntimeContext, ProviderRuntimeWriter, SessionRuntimeSettings } from '@/shared/index.js';
+
+const originalGoalSetting = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+beforeEach(() => { process.env.CLOUDCLI_CODEX_GOAL_ENABLED = 'true'; });
+afterEach(() => {
+  if (originalGoalSetting === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = originalGoalSetting;
+});
 
 function harness(timeout = 100) {
   const calls: Array<{ method: string; params: AnyRecord }> = [];
@@ -57,6 +64,44 @@ async function eventually(predicate: () => boolean) {
   for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 1)); }
   assert.ok(predicate(), 'expected state was never reached');
 }
+
+test('disabled Goals reject activation before any native call, while Plan and normal turns still work', async () => {
+  delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  const h = harness();
+  for (const operation of ['set', 'resume'] as const) {
+    await assert.rejects(h.control({ action: 'goal', operation, objective: 'disabled' }), { code: 'CODEX_GOAL_DISABLED' });
+  }
+  assert.equal(h.calls.length, 0);
+  await h.control({ action: 'mode', mode: 'plan' });
+  const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  assert.equal(h.calls.find((call) => call.method === 'turn/start')?.params.collaborationMode.mode, 'plan');
+  assert.equal(h.calls.some((call) => call.method.startsWith('thread/goal/')), false);
+  h.event('thread/goal/updated', { goal: { objective: 'old persisted goal', status: 'active' } });
+  assert.equal(h.runtime.getState('app-session').goal, null);
+  h.finish();
+  await running;
+  assert.equal(h.runtime.listActiveSessions().length, 0);
+});
+
+test('restoring an existing thread confirms persisted steer receipts with Goals disabled', async () => {
+  delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.handlers.set('thread/read', async () => ({ thread: { turns: [
+    { items: [{ type: 'userMessage', clientId: 'lost-steer-receipt' }] },
+  ] } }));
+
+  await h.control({ action: 'state' });
+  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.accepted, []);
+
+  await h.control({ action: 'goal', operation: 'get' });
+  assert.deepEqual(h.calls.map(({ method }) => method), ['thread/resume', 'thread/read']);
+  assert.deepEqual(h.accepted, ['lost-steer-receipt']);
+  assert.equal(h.runtime.getState('app-session').goal, null);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
 
 test('native turn uses independent Plan/permission settings and stable message identity', async () => {
   const h = harness();
@@ -381,6 +426,29 @@ test('a successful retry clears the prior failure before streaming the new turn'
   assert.equal(h.runtime.getState('app-session').error, undefined);
   h.finish('turn-2'); await next;
   assert.equal(h.runtime.getState('app-session').error, undefined);
+});
+
+test('the Codex router holds automatic queues during turns, goal gaps and persisted pauses', async () => {
+  const h = harness();
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb });
+  assert.equal(router.isQueueBlocked!('app-session'), false);
+  assert.equal(h.calls.length, 0);
+
+  const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  assert.equal(router.isQueueBlocked!('app-session'), true);
+  h.finish();
+  await running;
+  assert.equal(router.isQueueBlocked!('app-session'), false);
+
+  await h.control({ action: 'goal', operation: 'set', objective: 'continue across turns' });
+  assert.equal(h.runtime.getState('app-session').turnId, null);
+  assert.equal(router.isQueueBlocked!('app-session'), true);
+  await h.control({ action: 'goal', operation: 'pause' });
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(router.isQueueBlocked!('app-session'), true);
+  h.settingsDb.update('app-session', { queueHeld: false });
+  assert.equal(router.isQueueBlocked!('app-session'), false);
 });
 
 test('runtime handoff waits for thread closure, excludes racing sends and resumes after SDK use', async () => {

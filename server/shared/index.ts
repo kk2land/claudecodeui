@@ -52,6 +52,7 @@ export {
   findApplicationRoot,
   generateMessageId,
   getModuleDirectory,
+  isCodexGoalEnabled,
   parseIncomingJsonObject,
   readObjectRecord,
   sliceTailPage,

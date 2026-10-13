@@ -432,7 +432,7 @@ export function useChatRealtimeHandlers({
     streamTimerRef,
     accumulatedStreamRef,
     lastSeqRef,
-  executionIdsRef,
+    executionIdsRef,
     statusCheckSentAtRef,
     onSessionProcessing,
     onSessionIdle,

@@ -13,6 +13,7 @@ const COMMAND_QUERY_DEBOUNCE_MS = 150;
 type UseSlashCommandsOptions = {
   selectedProject: Project | null;
   provider: LLMProvider;
+  goalsEnabled?: boolean;
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
@@ -79,6 +80,7 @@ const filterSlashCommands = (
 export function useSlashCommands({
   selectedProject,
   provider,
+  goalsEnabled = false,
   input,
   setInput,
   textareaRef,
@@ -119,14 +121,14 @@ export function useSlashCommands({
     const parsedHistory = readCommandHistory(selectedProject.projectId);
     const nativeCommands: SlashCommand[] = provider === 'codex' ? [
       { name: '/plan', description: t('codex.planCommand'), type: 'built-in', metadata: { nativeControl: true } },
-      { name: '/goal', description: t('codex.goalCommand'), type: 'built-in', metadata: { nativeControl: true } },
+      ...(goalsEnabled ? [{ name: '/goal', description: t('codex.goalCommand'), type: 'built-in', metadata: { nativeControl: true } }] : []),
     ] : [];
-    return [...nativeCommands, ...projectCommands.filter((command) => !nativeCommands.some((native) => native.name === command.name))].sort((commandA, commandB) => {
+    return [...nativeCommands, ...projectCommands.filter((command) => !(provider === 'codex' && !goalsEnabled && command.name === '/goal') && !nativeCommands.some((native) => native.name === command.name))].sort((commandA, commandB) => {
       const commandAUsage = parsedHistory[commandA.name] || 0;
       const commandBUsage = parsedHistory[commandB.name] || 0;
       return commandBUsage - commandAUsage;
     });
-  }, [projectCommands, selectedProject, provider, t]);
+  }, [projectCommands, selectedProject, provider, goalsEnabled, t]);
 
   useEffect(() => {
     if (!showCommandMenu) {

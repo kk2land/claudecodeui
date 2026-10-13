@@ -14,6 +14,7 @@ import { useDropzone } from 'react-dropzone';
 import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
+import { createUuid } from '@/shared/utils';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
 import type { ToolPermissionDecision, CodexControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
@@ -435,7 +436,7 @@ export function useChatComposerState({
           projectId: selectedProject.projectId,
           sessionId: currentSessionId || selectedSession?.id || null,
           provider,
-      model: currentProviderModel,
+          model: currentProviderModel,
           tokenUsage: tokenBudget,
         };
 
@@ -520,6 +521,7 @@ export function useChatComposerState({
   } = useSlashCommands({
     selectedProject,
     provider,
+    goalsEnabled: codexControls?.goalsEnabled,
     input,
     setInput,
     textareaRef,
@@ -698,6 +700,7 @@ export function useChatComposerState({
         if (command) {
           const argument = command[2]?.trim() ?? '';
           try {
+            if (command[1] === '/goal' && !codexControls.goalsEnabled) throw new Error(t('codex.goalDisabled'));
             if (command[1] === '/plan' && argument) {
               if (codexControls.state?.runtime === 'sdk') throw new Error('Plan requires the app-server runtime.');
               planTask = true;
@@ -749,7 +752,7 @@ export function useChatComposerState({
         }
 
         const durableDraft: QueuedDraft = {
-          id: crypto.randomUUID(),
+          id: createUuid(),
           content: currentInput,
           attachments: currentAttachments,
           uploadedAttachments,
@@ -923,7 +926,7 @@ export function useChatComposerState({
       }
 
       const attachmentRecords = uploadedAttachments as ChatAttachment[];
-      const clientMessageId = crypto.randomUUID();
+      const clientMessageId = createUuid();
       const userMessage: ChatMessage = {
         id: clientMessageId,
         type: 'user',
@@ -1305,7 +1308,7 @@ export function useChatComposerState({
     sendMessage({
       type: 'chat.abort',
       sessionId: targetSessionId,
-      requestId: crypto.randomUUID(),
+      requestId: createUuid(),
       executionId: executionIdsRef?.current.get(targetSessionId),
     });
   }, [canAbortSession, currentSessionId, selectedSession?.id, sendMessage, executionIdsRef]);

@@ -1,7 +1,9 @@
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import { ChevronDown, RotateCw, Settings2 } from 'lucide-react';
 
 import type { CodexControls, CodexUserInputRequest } from '@/shared/types';
+import { cn } from '@/shared/utils';
 
 function NativeQuestion({ request, controls }: { request: CodexUserInputRequest; controls: CodexControls }) {
   const { t } = useTranslation('chat');
@@ -37,8 +39,11 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
 
 /** ChatComposer displays native Plan, Goal, runtime selection and request_user_input controls here. */
 export function CodexControlPanel({ controls, onExecutePlan }: { controls: CodexControls; onExecutePlan(): void }) {
-  const { t } = useTranslation('chat');
+  const { t, i18n } = useTranslation('chat');
   const { state, error, pending } = controls;
+  const runtimePanelId = useId();
+  // Keep advanced runtime controls out of the toolbar until the user opens them.
+  const [runtimeOpen, setRuntimeOpen] = useState(false);
   // The objective editor supports both creation and explicit replacement of a native goal.
   const [objective, setObjective] = useState('');
   // A blank budget means no user-specified cap; editing it never changes native usage by itself.
@@ -46,38 +51,73 @@ export function CodexControlPanel({ controls, onExecutePlan }: { controls: Codex
   const goal = state?.goal;
   const busy = Boolean(state?.turnId || state?.goal?.status === 'active' || ['starting', 'stopping', 'stopFailed'].includes(state?.phase ?? ''));
   const native = state?.runtime !== 'sdk';
-  const button = 'rounded-md border border-border px-2 py-1 text-xs hover:bg-accent disabled:opacity-40';
+  const startedAt = state?.diagnostics?.startedAt != null ? new Date(state.diagnostics.startedAt) : null;
+  const button = 'inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-border/60 bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40';
   return (
-    <div className="mx-auto mb-2 max-w-[54.25rem] space-y-2 text-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        {native && <>
-          <button type="button" className={button} disabled={pending || state?.phase === 'stopping'}
-            aria-pressed={state?.mode === 'plan'} onClick={() => void controls.control({ action: 'mode', mode: state?.mode === 'plan' ? 'default' : 'plan' }).catch(() => {})}>
-            {t(state?.mode === 'plan' ? 'codex.planMode' : 'codex.executeMode')}
-          </button>
-          {state?.mode === 'plan' && <button type="button" className={button} disabled={pending || busy}
-            onClick={() => void controls.control({ action: 'mode', mode: 'default' }).then(onExecutePlan).catch(() => {})}>{t('codex.executePlan')}</button>}
-          {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
-          {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
-          {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
-            onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
-        </>}
-        <details className="ml-auto text-xs">
-          <summary className="cursor-pointer rounded px-2 py-1 text-muted-foreground">Codex</summary>
-          <div className="mt-1 flex flex-wrap items-center gap-2 rounded-md border border-border bg-background p-2">
-            <label>{t('codex.runtime')} <select aria-label={t('codex.runtime')} disabled={pending || busy} value={state?.runtime ?? 'app-server'}
-              className="rounded border border-input bg-background p-1" onChange={(event) => void controls.control({ action: 'runtime', runtime: event.target.value as 'sdk' | 'app-server' }).catch(() => {})}>
-              <option value="app-server">app-server</option><option value="sdk">SDK</option>
-            </select></label>
-            <button type="button" className={button} disabled={pending || (busy && state?.phase !== 'failed')} onClick={() => void controls.control({ action: 'restart' }).catch(() => {})}>{t('codex.restart')}</button>
-            {state?.diagnostics && <div className="w-full space-y-1 break-all text-muted-foreground">
-              <p>{t(state.diagnostics.running ? 'codex.processRunning' : 'codex.processIdle')}{state.diagnostics.cliVersion && ` · v${state.diagnostics.cliVersion}`}</p>
-              {state.diagnostics.launcherPath && <p>{state.diagnostics.launcherPath}</p>}
-            </div>}
-          </div>
-        </details>
+    <div className="mx-auto mb-2 w-full min-w-0 max-w-[54.25rem] space-y-2 text-sm">
+      <div className="flex items-start gap-2">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          {native && <>
+            <button type="button" className={button} disabled={pending || state?.phase === 'stopping'}
+              aria-pressed={state?.mode === 'plan'} onClick={() => void controls.control({ action: 'mode', mode: state?.mode === 'plan' ? 'default' : 'plan' }).catch(() => {})}>
+              {t(state?.mode === 'plan' ? 'codex.planMode' : 'codex.executeMode')}
+            </button>
+            {state?.mode === 'plan' && <button type="button" className={button} disabled={pending || busy}
+              onClick={() => void controls.control({ action: 'mode', mode: 'default' }).then(onExecutePlan).catch(() => {})}>{t('codex.executePlan')}</button>}
+            {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
+            {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
+            {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
+              onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
+          </>}
+        </div>
+        <button type="button" className={`${button} gap-1.5`} aria-expanded={runtimeOpen}
+          aria-controls={runtimePanelId} onClick={() => setRuntimeOpen((open) => !open)}>
+          <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+          Codex
+          <ChevronDown className={`h-3.5 w-3.5 transition-transform ${runtimeOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
+        </button>
       </div>
-      {native && <details open={Boolean(goal) || controls.goalVisible} className="rounded-lg border border-border px-3 py-2">
+      {runtimeOpen && <section id={runtimePanelId} aria-label={t('codex.runtimeSettings')}
+        className="min-w-0 rounded-xl border border-border bg-muted/20 p-3">
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
+          <label className="flex min-w-0 flex-col gap-1.5 text-xs font-medium sm:w-56">
+            <span>{t('codex.runtime')}</span>
+            <select disabled={pending || busy} value={state?.runtime ?? 'app-server'}
+              className="h-9 w-full min-w-0 rounded-lg border border-input bg-background pl-3 pr-10 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
+              onChange={(event) => void controls.control({ action: 'runtime', runtime: event.target.value as 'sdk' | 'app-server' }).catch(() => {})}>
+              <option value="app-server">app-server</option><option value="sdk">SDK</option>
+            </select>
+          </label>
+          <button type="button" className={cn(button, 'h-9 gap-2 self-start px-3 sm:self-auto')}
+            disabled={pending || (busy && state?.phase !== 'failed')} onClick={() => void controls.control({ action: 'restart' }).catch(() => {})}>
+            <RotateCw className="h-3.5 w-3.5" aria-hidden="true" />
+            {t('codex.restart')}
+          </button>
+        </div>
+        {state?.diagnostics && <div className="mt-3 min-w-0 border-t border-border/60 pt-3 text-xs text-muted-foreground">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-2">
+                <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${state.diagnostics.running ? 'bg-emerald-500' : 'bg-muted-foreground/50'}`} aria-hidden="true" />
+                {t(state.diagnostics.running ? 'codex.processRunning' : 'codex.processIdle')}
+              </span>
+              {state.diagnostics.running && state.diagnostics.pid != null && <code title={t('codex.processId')} className="select-text whitespace-nowrap rounded-md bg-muted px-2 py-0.5 text-[11px]">PID {state.diagnostics.pid}</code>}
+              {state.diagnostics.running && startedAt && <span className="inline-flex flex-wrap items-center gap-1">
+                {t('codex.processStartedAt')}
+                <time dateTime={startedAt.toISOString()} className="select-text whitespace-nowrap tabular-nums">
+                  {startedAt.toLocaleString(i18n.language, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}
+                </time>
+              </span>}
+            </div>
+            {state.diagnostics.cliVersion && <code className="rounded-md bg-muted px-2 py-0.5 text-[11px]">v{state.diagnostics.cliVersion}</code>}
+          </div>
+          {state.diagnostics.launcherPath && <details className="mt-2 min-w-0">
+            <summary className="cursor-pointer rounded py-1 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring">{t('codex.launcherPath')}</summary>
+            <code className="mt-1 block max-w-full select-text whitespace-pre-wrap break-all rounded-lg bg-background p-2 text-[11px] leading-relaxed">{state.diagnostics.launcherPath}</code>
+          </details>}
+        </div>}
+      </section>}
+      {native && controls.goalsEnabled && <details open={Boolean(goal) || controls.goalVisible} className="rounded-lg border border-border px-3 py-2">
         <summary className="cursor-pointer text-xs font-medium">{t('codex.goal')}{goal && ` · ${t(`codex.status.${goal.status}`)}`}</summary>
         {goal && <div className="mt-2 space-y-2">
           <p className="whitespace-pre-wrap break-words">{goal.objective}</p>

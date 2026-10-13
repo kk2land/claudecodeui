@@ -647,7 +647,16 @@ export type CodexUserInputRequest = {
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Resolved launcher and CLI identity; reading this never starts a process. */
-  diagnostics?: { running: boolean; pendingRequests: number; launcherPath: string | null; cliVersion: string | null };
+  diagnostics?: {
+    running: boolean;
+    /** PID of the managed Codex launcher process; null until started or after exit. */
+    pid: number | null;
+    /** Server-recorded launcher spawn time in Unix milliseconds; null when no process is running. */
+    startedAt: number | null;
+    pendingRequests: number;
+    launcherPath: string | null;
+    cliVersion: string | null;
+  };
   runtime: CodexRuntimeMode;
   mode: CodexCollaborationMode;
   queueHeld?: boolean;
@@ -1693,6 +1702,8 @@ export type SandboxCommandService = {
 //----------------- CHAT RUNTIME GATEWAY ------------
 /** Application boundary for dispatching provider runs and approvals. */
 export type ProviderRuntimeGateway = {
+  /** Scheduling asks providers whether a session must keep its automatic queue on hold. */
+  isQueueBlocked?(sessionId: string): boolean;
   getState?(provider: LLMProvider, sessionId: string): CodexSessionState | undefined;
   control?(provider: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter): Promise<CodexSessionState>;
   hasRuntime(provider: string): boolean;

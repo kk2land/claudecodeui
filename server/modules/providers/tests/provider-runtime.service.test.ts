@@ -3,8 +3,7 @@ import test from 'node:test';
 
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { createProviderRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
-import type { IProvider, IProviderRuntime } from '@/shared/interfaces.js';
-import type { LLMProvider } from '@/shared/types.js';
+import type { IProvider, IProviderRuntime, LLMProvider } from '@/shared/index.js';
 
 function createRuntime(overrides: Partial<IProviderRuntime> = {}): IProviderRuntime {
   return {
@@ -135,4 +134,17 @@ test('routes permission decisions through provider-owned runtime capabilities', 
   assert.deepEqual(service.getPendingApprovalsForSession('session-1'), [
     { requestId: 'request-1', sessionId: 'session-1' },
   ]);
+});
+
+test('queue blocking is optional and follows each provider-owned session policy', () => {
+  let held = true;
+  const service = createService([
+    createProvider('claude', createRuntime()),
+    createProvider('codex', createRuntime({ isQueueBlocked: (sessionId) => sessionId === 'codex-session' && held })),
+  ]);
+
+  assert.equal(service.isQueueBlocked('claude-session'), false);
+  assert.equal(service.isQueueBlocked('codex-session'), true);
+  held = false;
+  assert.equal(service.isQueueBlocked('codex-session'), false);
 });

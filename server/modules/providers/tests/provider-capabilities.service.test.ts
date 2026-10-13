@@ -35,3 +35,21 @@ test('capability effort levels cover every level a curated model declares', () =
     assert.deepEqual(missingLevels, [], `${provider}: effortLevels misses curated levels`);
   }
 });
+
+test('Goals require an explicit environment opt-in in both capability endpoints', () => {
+  const original = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  try {
+    for (const value of [undefined, '', 'false', '1', 'TRUE', 'true']) {
+      if (value === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+      else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = value;
+      const expected = value === 'true';
+      assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.goal, expected);
+      assert.equal(providerCapabilitiesService.listAllProviderCapabilities().find((row) => row.provider === 'codex')?.nativeControls?.goal, expected);
+      assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.plan, true);
+      assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.steer, true);
+    }
+  } finally {
+    if (original === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+    else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = original;
+  }
+});

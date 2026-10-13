@@ -7,6 +7,13 @@ import type { NavigateFunction } from 'react-router-dom';
 /** Identifies which coding-agent CLI backs a session, project selection or model list. */
 export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode';
 
+/** Backend capability fields used by chat controls and sidebar session actions. */
+export type ProviderCapabilityRow = {
+  provider: LLMProvider;
+  supportsSessionForking?: boolean;
+  nativeControls?: { goal?: boolean };
+};
+
 /** One selectable model in a provider's model menu, including its optional reasoning-effort choices. */
 export type ProviderModelOption = {
   value: string;
@@ -1877,7 +1884,16 @@ export type CodexUserInputRequest = {
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Process details are exposed only in the advanced Codex controls. */
-  diagnostics?: { running: boolean; pendingRequests: number; launcherPath: string | null; cliVersion: string | null };
+  diagnostics?: {
+    running: boolean;
+    /** PID of the managed Codex launcher process; null until started or after exit. */
+    pid: number | null;
+    /** Server-recorded launcher spawn time in Unix milliseconds; render in the user's local timezone. */
+    startedAt: number | null;
+    pendingRequests: number;
+    launcherPath: string | null;
+    cliVersion: string | null;
+  };
   runtime: 'app-server' | 'sdk';
   mode: 'default' | 'plan';
   queueHeld?: boolean;
@@ -1903,6 +1919,8 @@ export type QueuedDelivery = { status: string; requestId: string | null; error: 
 /** Chat controls shared between the session hook, composer and native control panel. */
 export type CodexControls = {
   sessionId?: string | null;
+  /** Server-owned deployment opt-in; missing means Goals are disabled. */
+  goalsEnabled?: boolean;
   goalVisible?: boolean;
   state: CodexSessionState | null;
   error: string | null;

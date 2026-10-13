@@ -40,6 +40,11 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
     getState(sessionId) {
       return { ...native.getState(sessionId), ...settings.get(sessionId) };
     },
+    isQueueBlocked(sessionId) {
+      const state = native.getState(sessionId);
+      return Boolean(state.queueHeld || state.goal?.status === 'active'
+        || ['starting', 'running', 'stopping', 'stopFailed'].includes(state.phase));
+    },
     async control(sessionId, action, options, writer, context) {
       const current = native.getState(sessionId);
       if (action.action === 'state') return { ...current, ...settings.get(sessionId) };

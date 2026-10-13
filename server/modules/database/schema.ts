@@ -227,10 +227,37 @@ CREATE TABLE IF NOT EXISTS session_drafts (
     draft_scope TEXT NOT NULL,
     draft_text TEXT NOT NULL DEFAULT '',
     queued_message TEXT,
+    queue_status TEXT NOT NULL DEFAULT 'queued',
+    queue_request_id TEXT,
+    queue_error TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, draft_scope),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+`;
+
+/** Database initialization and migrations persist each Codex session's runtime, mode and queue hold. */
+export const SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS session_runtime_settings (
+    session_id TEXT PRIMARY KEY,
+    runtime TEXT NOT NULL DEFAULT 'app-server',
+    mode TEXT NOT NULL DEFAULT 'default',
+    queue_held INTEGER NOT NULL DEFAULT 0
+);
+`;
+
+/** Database initialization and migrations retain steer outcomes to prevent duplicate queue delivery. */
+export const QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS queued_steer_receipts (
+    request_id TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL,
+    session_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_steer_message ON queued_steer_receipts(user_id, session_id, message_id);
 `;
 
 /**
@@ -308,6 +335,10 @@ ON provider_models(provider, sort_order, id);
 ${USER_PREFERENCES_TABLE_SCHEMA_SQL}
 
 ${SESSION_DRAFTS_TABLE_SCHEMA_SQL}
+
+${SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL}
+
+${QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL}
 
 ${SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL}
 `;

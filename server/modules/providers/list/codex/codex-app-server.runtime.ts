@@ -5,7 +5,7 @@ import { sessionRuntimeDb, sessionDraftsDb } from '@/modules/database/index.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app-server.events.js';
 import { appendFilesInputTag, normalizeAttachmentDescriptors, isImageAttachmentDescriptor } from '@/shared/image-attachments.js';
-import { AppError, createCompleteMessage, createNormalizedMessage } from '@/shared/index.js';
+import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEnabled } from '@/shared/index.js';
 import type {
   AnyRecord,
   CodexControlAction,
@@ -161,7 +161,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       target.model = result.model || result.thread.model || target.model;
       writer.setSessionId?.(target.threadId!);
       if (!providerId) writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'session_created', newSessionId: target.threadId! }));
-      const { goal } = await this.client.request('thread/goal/get', { threadId: target.threadId });
+      const { goal } = isCodexGoalEnabled()
+        ? await this.client.request('thread/goal/get', { threadId: target.threadId })
+        : { goal: null };
       target.state.goal = goal ?? null;
       if (providerId && goal?.status === 'active') {
         // Restoring a persisted thread after a backend restart must not resume its goal implicitly.
@@ -343,7 +345,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       return;
     }
     if (frame.method === 'thread/goal/updated' || frame.method === 'thread/goal/cleared') {
-      session.state.goal = frame.method.endsWith('cleared') ? null : p.goal;
+      // A saved goal must not keep a disabled deployment's ordinary chat busy.
+      session.state.goal = !isCodexGoalEnabled() || frame.method.endsWith('cleared') ? null : p.goal;
       this.publish(session);
       return;
     }
@@ -462,7 +465,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
             for (const childId of session.children) {
               if (cleaned.has(childId)) continue;
               const { thread } = await bounded(this.client.request('thread/read', { threadId: childId, includeTurns: true }));
-              if (!thread?.ephemeral) {
+              if (isCodexGoalEnabled() && !thread?.ephemeral) {
                 const { goal } = await bounded(this.client.request('thread/goal/get', { threadId: childId }));
                 if (goal?.status === 'active') await bounded(this.client.request('thread/goal/set', { threadId: childId, status: 'paused' }));
               }
@@ -516,6 +519,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   private async applyControl(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext, stopVersion?: number): Promise<CodexSessionState> {
     if (action.action === 'state') return this.getState(sessionId);
+    // Keep read/pause/clear available for reconciling goals saved before disablement.
+    if (action.action === 'goal' && ['set', 'resume'].includes(action.operation) && !isCodexGoalEnabled()) {
+      throw new AppError('Codex Goals are disabled. Set CLOUDCLI_CODEX_GOAL_ENABLED=true to enable them.', {
+        code: 'CODEX_GOAL_DISABLED', statusCode: 403,
+      });
+    }
     if (action.action === 'runtime' || action.action === 'restart') throw new Error('Runtime selection belongs to the provider router.');
     if (action.action === 'steer') {
       const session = this.sessions.get(sessionId);
@@ -553,7 +562,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (action.operation === 'get' && !context.resolveProviderSessionId(sessionId) && !this.sessions.has(sessionId)) return this.getState(sessionId);
     const session = await this.ensure(sessionId, options, writer, context);
     if (action.operation === 'get') {
-      const { goal } = await this.client.request('thread/goal/get', { threadId: session.threadId });
+      const { goal } = isCodexGoalEnabled()
+        ? await this.client.request('thread/goal/get', { threadId: session.threadId })
+        : { goal: null };
       session.state.goal = goal ?? null;
       const { thread } = await this.client.request('thread/read', { threadId: session.threadId, includeTurns: true });
       for (const turn of thread?.turns ?? []) for (const item of turn.items ?? []) {

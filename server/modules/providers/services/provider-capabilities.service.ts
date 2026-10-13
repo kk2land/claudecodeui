@@ -1,4 +1,5 @@
 import type { LLMProvider } from '@/shared/index.js';
+import { isCodexGoalEnabled } from '@/shared/index.js';
 
 /**
  * Static, backend-owned description of what one provider integration supports.
@@ -91,7 +92,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsFiles: true,
     supportsAbort: true,
     supportsPermissionRequests: true,
-    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: true, userInput: true },
+    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true },
     supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
@@ -130,10 +131,14 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
  */
 export const providerCapabilitiesService = {
   getProviderCapabilities(provider: LLMProvider): ProviderCapabilities {
-    return PROVIDER_CAPABILITIES[provider];
+    const capabilities = PROVIDER_CAPABILITIES[provider];
+    return capabilities.nativeControls ? {
+      ...capabilities,
+      nativeControls: { ...capabilities.nativeControls, goal: isCodexGoalEnabled() },
+    } : capabilities;
   },
 
   listAllProviderCapabilities(): ProviderCapabilities[] {
-    return Object.values(PROVIDER_CAPABILITIES);
+    return Object.values(PROVIDER_CAPABILITIES).map(({ provider }) => providerCapabilitiesService.getProviderCapabilities(provider));
   },
 };

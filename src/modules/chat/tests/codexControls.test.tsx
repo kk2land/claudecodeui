@@ -13,11 +13,13 @@ import type { CodexControls, CodexSessionState, Project, ProjectSession, ServerE
 const project: Project = { projectId: 'codex-project', displayName: 'Test', fullPath: '/tmp/project' };
 function controls(patch: Partial<CodexSessionState> = {}): CodexControls {
   return { state: { runtime: 'app-server', mode: 'default', phase: 'running', turnId: 'turn-1', goal: null, questions: [], ...patch },
-    pending: false, error: null, delivery: null, control: vi.fn().mockResolvedValue(undefined), steer: vi.fn().mockResolvedValue(undefined) };
+    goalsEnabled: true, pending: false, error: null, delivery: null, control: vi.fn().mockResolvedValue(undefined), steer: vi.fn().mockResolvedValue(undefined) };
 }
 
 beforeEach(() => {
   localStorage.clear(); resetChatDrafts();
+  // Model HTTP access: randomUUID is absent, but getRandomValues remains available.
+  vi.stubGlobal('crypto', { getRandomValues: globalThis.crypto.getRandomValues.bind(globalThis.crypto) });
   vi.stubGlobal('fetch', vi.fn().mockImplementation((url: string) => Promise.resolve(new Response(JSON.stringify(url.includes('/files') ? [] : { data: [], drafts: [] }), { status: 200 }))));
 });
 afterEach(() => { vi.unstubAllGlobals(); });
@@ -36,8 +38,14 @@ test('the queued card steers its saved message and locks edits while confirmatio
 
 test('SDK compatibility hides steer; Plan tasks cannot be promoted into a running turn', () => {
   const codex = controls({ runtime: 'sdk' });
-  const view = render(<QueuedMessageCard content="queued" controls={codex} onEdit={() => {}} onDelete={() => {}} />);
+  const edit = vi.fn();
+  const view = render(<QueuedMessageCard content="queued" controls={codex} onEdit={edit} onDelete={() => {}} />);
   expect(screen.queryByRole('button', { name: 'Steer' })).toBeNull();
+  fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+  expect(edit).toHaveBeenCalledTimes(1);
+  view.rerender(<QueuedMessageCard content="queued" onEdit={edit} onDelete={() => {}} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Edit queued message' }));
+  expect(edit).toHaveBeenCalledTimes(2);
   view.rerender(<QueuedMessageCard content="queued" controls={controls()} canSteerMode={false} onEdit={() => {}} onDelete={() => {}} />);
   expect((screen.getByRole('button', { name: 'Steer' }) as HTMLButtonElement).disabled).toBe(true);
 });
@@ -60,12 +68,12 @@ test('execute plan changes mode and fills a prompt for review', async () => {
   expect(codex.control).toHaveBeenCalledWith({ action: 'mode', mode: 'default' });
 });
 
-function composer(codex: CodexControls) {
+function composer(codex: CodexControls, isLoading = true) {
   const send = vi.fn(); const add = vi.fn();
   const view = renderHook(() => useChatComposerState({ selectedProject: project, selectedSession: { id: 'codex-session' } as ProjectSession,
     currentSessionId: 'codex-session', provider: 'codex', codexControls: codex, permissionMode: 'default', cyclePermissionMode: () => {},
     resolvePermissionModeForProvider: () => 'default', currentProviderModel: 'test-model', currentProviderEffort: 'high',
-    isLoading: true, canAbortSession: true, tokenBudget: null, sendMessage: send, scrollToBottom: () => {}, addMessage: add,
+    isLoading, canAbortSession: true, tokenBudget: null, sendMessage: send, scrollToBottom: () => {}, addMessage: add,
     setIsUserScrolledUp: () => {}, setPendingPermissionRequests: () => {} }));
   const submit = async (text: string) => {
     await act(async () => { view.result.current.setInput(text); });
@@ -80,6 +88,25 @@ test('/goal pause bypasses the busy queue and does not send model text', async (
   expect(codex.control).toHaveBeenCalledWith({ action: 'goal', operation: 'pause' });
   expect(h.result.current.queuedDraft).toBeNull();
   expect(h.send).not.toHaveBeenCalled();
+});
+
+test('the Goal panel stays hidden by default and appears only with server opt-in', () => {
+  const codex = controls();
+  const view = render(<CodexControlPanel controls={{ ...codex, goalsEnabled: undefined }} onExecutePlan={() => {}} />);
+  expect(screen.queryByPlaceholderText('Goal objective')).toBeNull();
+  expect(screen.queryByRole('button', { name: 'Set goal', hidden: true })).toBeNull();
+  view.rerender(<CodexControlPanel controls={codex} onExecutePlan={() => {}} />);
+  expect(screen.getByRole('button', { name: 'Set goal', hidden: true })).toBeTruthy();
+});
+
+test('typing /goal while disabled reports an error without queuing or sending work', async () => {
+  const codex = { ...controls(), goalsEnabled: false };
+  const h = composer(codex);
+  await h.submit('/goal build a feature');
+  expect(codex.control).not.toHaveBeenCalled();
+  expect(h.send).not.toHaveBeenCalled();
+  expect(h.result.current.queuedDraft).toBeNull();
+  expect(h.add).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', content: 'Goals are not enabled on this server.' }));
 });
 
 test('/plan alone is a control; /plan task becomes a durable Plan queue entry while busy', async () => {
@@ -100,6 +127,21 @@ test('ordinary busy input stays queued and retains its identity across store upd
   await act(async () => { h.result.current.setInput('another draft'); });
   expect(h.result.current.queuedDraft?.id).toBe(id);
   expect(codex.control).not.toHaveBeenCalled(); expect(codex.steer).not.toHaveBeenCalled();
+});
+
+test('sending and stopping work without native randomUUID', async () => {
+  const h = composer(controls({ phase: 'idle', turnId: null }), false);
+  await h.submit('send over HTTP');
+  const message = h.add.mock.calls.find(([entry]) => entry.type === 'user')?.[0];
+  expect(message?.id).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+  expect(h.send).toHaveBeenCalledWith(expect.objectContaining({
+    type: 'chat.send', options: expect.objectContaining({ clientMessageId: message.id }),
+  }));
+
+  act(() => h.result.current.handleAbortSession());
+  const abort = h.send.mock.calls.find(([entry]) => entry.type === 'chat.abort')?.[0];
+  expect(abort?.requestId).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
+  expect(abort.requestId).not.toBe(message.id);
 });
 
 test('control errors and native goal turn completion preserve busy state until the authoritative snapshot is idle', () => {
