@@ -19,6 +19,8 @@ import type {
   ProviderRuntimeWriter,
   UpsertProviderMcpServerInput,
   WorkflowAgentActivity,
+  CodexControlAction,
+  CodexSessionState,
 } from '@/shared/types.js';
 
 //----------------- PROVIDER CONTRACT INTERFACES ------------
@@ -37,6 +39,12 @@ export interface IProviderRuntime {
     context: ProviderRuntimeContext,
   ): Promise<unknown>;
   abort(sessionId: string): boolean | Promise<boolean>;
+  /** Optional rich controls implemented by Codex's app-server adapter. */
+  control?(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<CodexSessionState>;
+  /** Read without starting a process; used by reconnect and scheduling. */
+  getState?(sessionId: string): CodexSessionState;
+  /** Releases managed subprocesses when the application shuts down. */
+  close?(): Promise<void>;
   permissions?: ProviderRuntimePermissionGateway;
   /**
    * Sessions with background tasks still outstanding, whether or not their
@@ -44,6 +52,8 @@ export interface IProviderRuntime {
    * such work has anything to report; the others leave this undefined and the
    * running-sessions list falls back to chat runs alone.
    */
+  /** Native controllers can stay active between individual registered turns. */
+  listActiveSessions?(): Array<{ sessionId: string; startedAt: number; statusText?: string }>;
   listBackgroundWork?(): Array<{ sessionId: string; tasks: BackgroundTaskSummary[] }>;
   /**
    * Stops one outstanding background task. Resolves false when the session has

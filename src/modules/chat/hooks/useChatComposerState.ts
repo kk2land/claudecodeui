@@ -6,6 +6,7 @@ import type {
   FormEvent,
   KeyboardEvent,
   MouseEvent,
+  MutableRefObject,
   SetStateAction,
   TouchEvent,
 } from 'react';
@@ -15,7 +16,7 @@ import { useTranslation } from 'react-i18next';
 import { api } from '@/shared/api';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
-import type { CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import type { ToolPermissionDecision, CodexControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   clearQueuedMessage,
@@ -46,6 +47,8 @@ type UseChatComposerStateArgs = {
    */
   currentProviderModel: string;
   currentProviderEffort: string;
+  codexControls?: CodexControls;
+  executionIdsRef?: MutableRefObject<Map<string, string>>;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
   canAbortSession: boolean;
@@ -129,6 +132,7 @@ const restoreQueuedDraft = (sessionKey: string): QueuedDraft | null => {
   const saved = readQueuedMessage(sessionKey);
   return saved
     ? {
+        id: saved.id,
         content: saved.content,
         attachments: [],
         uploadedAttachments: saved.attachments ?? saved.images,
@@ -178,6 +182,8 @@ export function useChatComposerState({
   currentProviderModel,
   currentProviderEffort,
   isLoading,
+  codexControls,
+  executionIdsRef,
   processingSessions,
   canAbortSession,
   tokenBudget,
@@ -429,7 +435,7 @@ export function useChatComposerState({
           projectId: selectedProject.projectId,
           sessionId: currentSessionId || selectedSession?.id || null,
           provider,
-          model: currentProviderModel,
+      model: currentProviderModel,
           tokenUsage: tokenBudget,
         };
 
@@ -626,6 +632,7 @@ export function useChatComposerState({
   // send time for immediate sends and at queue time for queued ones, so a
   // queued message keeps the provider settings it was composed under even if
   // it is later dispatched outside this composer (app-level auto-send).
+  const codexMode = codexControls?.state?.mode;
   const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
     const getToolsSettings = () => readUserPreference(
       PROVIDER_PERMISSION_PREFERENCE_KEYS[provider],
@@ -639,6 +646,7 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
+      ...(provider === 'codex' && codexMode ? { collaborationMode: codexMode } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
@@ -647,6 +655,7 @@ export function useChatComposerState({
       sessionSummary: getNotificationSessionSummary(selectedSession, currentInput),
     };
   }, [
+    codexMode,
     currentProviderEffort,
     currentProviderModel,
     permissionMode,
@@ -668,7 +677,7 @@ export function useChatComposerState({
       queuedSubmission?: QueuedDraft,
     ) => {
       event.preventDefault();
-      const currentInput = queuedSubmission?.content ?? inputValueRef.current;
+      let currentInput = queuedSubmission?.content ?? inputValueRef.current;
       const currentAttachments = queuedSubmission?.attachments ?? attachedFiles;
       const previouslyUploadedAttachments = queuedSubmission?.uploadedAttachments ?? [];
       if (
@@ -680,6 +689,34 @@ export function useChatComposerState({
         || !selectedProject
       ) {
         return;
+      }
+
+      // Native controls precede the busy queue branch; pause must never wait behind a turn.
+      let planTask = false;
+      if (provider === 'codex' && codexControls && !queuedSubmission) {
+        const command = /^(\/plan|\/goal)(?:\s+([\s\S]*))?$/.exec(currentInput.trimEnd());
+        if (command) {
+          const argument = command[2]?.trim() ?? '';
+          try {
+            if (command[1] === '/plan' && argument) {
+              if (codexControls.state?.runtime === 'sdk') throw new Error('Plan requires the app-server runtime.');
+              planTask = true;
+              currentInput = argument;
+              if (codexControls.state?.goal?.status === 'active') await codexControls.control({ action: 'goal', operation: 'pause' });
+            } else {
+              if (command[1] === '/plan') await codexControls.control({ action: 'mode', mode: 'plan' });
+              else await codexControls.control({ action: 'goal', operation: !argument ? 'get' : ['pause', 'resume', 'clear'].includes(argument) ? argument as 'pause' | 'resume' | 'clear' : 'set',
+                ...(!['', 'pause', 'resume', 'clear'].includes(argument) ? { objective: argument } : {}) });
+              setInput('');
+              inputValueRef.current = '';
+              resetCommandMenuState();
+              return;
+            }
+          } catch (error) {
+            addMessage({ type: 'error', content: error instanceof Error ? error.message : String(error), timestamp: new Date() });
+            return;
+          }
+        }
       }
 
       // A turn is already in flight: stash this message instead of sending it.
@@ -695,7 +732,7 @@ export function useChatComposerState({
           return;
         }
 
-        const queuedOptions = buildSendOptions(currentInput);
+        const queuedOptions = { ...buildSendOptions(currentInput), ...(planTask ? { collaborationMode: 'plan' } : {}) };
         const queuedSessionKey = sessionKey;
         let uploadedAttachments: unknown[] = [];
         try {
@@ -712,6 +749,7 @@ export function useChatComposerState({
         }
 
         const durableDraft: QueuedDraft = {
+          id: crypto.randomUUID(),
           content: currentInput,
           attachments: currentAttachments,
           uploadedAttachments,
@@ -721,6 +759,7 @@ export function useChatComposerState({
           // Write the claim ticket synchronously after upload; this closes the
           // gap before React's persistence effect runs.
           writeQueuedMessage(queuedSessionKey, {
+            id: durableDraft.id,
             content: durableDraft.content,
             options: durableDraft.options,
             attachments: durableDraft.uploadedAttachments,
@@ -760,7 +799,7 @@ export function useChatComposerState({
       // Also accept exact "help" as a convenience alias for users who expect CLI-style help.
       const commandInput = currentInput.trimEnd();
       const isHelpAlias = commandInput.trim().toLowerCase() === 'help';
-      if (commandInput.startsWith('/') || isHelpAlias) {
+      if (!planTask && (commandInput.startsWith('/') || isHelpAlias)) {
         const firstSpace = commandInput.indexOf(' ');
         const commandName = isHelpAlias
           ? '/help'
@@ -884,7 +923,9 @@ export function useChatComposerState({
       }
 
       const attachmentRecords = uploadedAttachments as ChatAttachment[];
+      const clientMessageId = crypto.randomUUID();
       const userMessage: ChatMessage = {
+        id: clientMessageId,
         type: 'user',
         content: currentInput,
         images: attachmentRecords.filter(isImageAttachment),
@@ -921,6 +962,8 @@ export function useChatComposerState({
         content: messageContent,
         options: {
           ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
+          clientMessageId,
+          ...(planTask ? { collaborationMode: 'plan' } : {}),
           attachments: uploadedAttachments,
         },
       });
@@ -954,6 +997,7 @@ export function useChatComposerState({
       editingAnchorId,
       executeCommand,
       isLoading,
+      codexControls,
       onSessionProcessing,
       onSessionEstablished,
       provider,
@@ -1098,6 +1142,7 @@ export function useChatComposerState({
       && (queuedDraft.content.trim() || (queuedDraft.uploadedAttachments?.length ?? 0) > 0)
     ) {
       writeQueuedMessage(sessionKey, {
+        id: queuedDraft.id,
         content: queuedDraft.content,
         options: queuedDraft.options,
         attachments: queuedDraft.uploadedAttachments,
@@ -1116,7 +1161,15 @@ export function useChatComposerState({
       setQueuedDraft(null);
       return;
     }
-    setQueuedDraft(restoreQueuedDraft(sessionKey));
+    const restore = () => {
+      const saved = restoreQueuedDraft(sessionKey);
+      setQueuedDraft((previous) => {
+        const comparable = (draft: QueuedDraft | null) => draft && JSON.stringify({ id: draft.id, content: draft.content, options: draft.options, attachments: draft.uploadedAttachments });
+        return comparable(previous) === comparable(saved) ? previous : saved;
+      });
+    };
+    restore();
+    return subscribeToChatDrafts(restore);
   }, [sessionKey]);
 
   useEffect(() => {
@@ -1252,8 +1305,10 @@ export function useChatComposerState({
     sendMessage({
       type: 'chat.abort',
       sessionId: targetSessionId,
+      requestId: crypto.randomUUID(),
+      executionId: executionIdsRef?.current.get(targetSessionId),
     });
-  }, [canAbortSession, currentSessionId, selectedSession?.id, sendMessage]);
+  }, [canAbortSession, currentSessionId, selectedSession?.id, sendMessage, executionIdsRef]);
 
   const handleGrantToolPermission = useCallback(
     (suggestion: { entry: string; toolName: string }) => {
@@ -1268,7 +1323,7 @@ export function useChatComposerState({
   const handlePermissionDecision = useCallback(
     (
       requestIds: string | string[],
-      decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
+      decision: ToolPermissionDecision,
     ) => {
       const ids = Array.isArray(requestIds) ? requestIds : [requestIds];
       const validIds = ids.filter(Boolean);
@@ -1284,6 +1339,7 @@ export function useChatComposerState({
           updatedInput: decision?.updatedInput,
           message: decision?.message,
           rememberEntry: decision?.rememberEntry,
+          nativeDecision: decision?.nativeDecision,
         });
       });
 

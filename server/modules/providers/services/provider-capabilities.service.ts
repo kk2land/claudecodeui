@@ -1,4 +1,4 @@
-import type { LLMProvider } from '@/shared/types.js';
+import type { LLMProvider } from '@/shared/index.js';
 
 /**
  * Static, backend-owned description of what one provider integration supports.
@@ -19,6 +19,8 @@ type ProviderCapabilities = {
   supportsFiles: boolean;
   /** Whether an in-flight run can be cancelled via chat.abort. */
   supportsAbort: boolean;
+  /** Native controls require the app-server runtime; SDK compatibility does not provide them. */
+  nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean };
   /** Whether interactive tool permission prompts can reach the UI. */
   supportsPermissionRequests: boolean;
   /** Whether the token-usage endpoint has data for this provider. */
@@ -88,7 +90,8 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsImages: true,
     supportsFiles: true,
     supportsAbort: true,
-    supportsPermissionRequests: false,
+    supportsPermissionRequests: true,
+    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: true, userInput: true },
     supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],

@@ -2,7 +2,7 @@ import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients, WS_OPEN_STATE } from '@/modules/websocket/services/websocket-state.service.js';
@@ -16,10 +16,11 @@ import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   LLMProvider,
-  ProviderPermissionDecision,
+  ProviderRuntimeGateway,
+  CodexControlAction,
   ProviderRuntimeWriter,
-} from '@/shared/types.js';
-import { parseIncomingJsonObject } from '@/shared/utils.js';
+} from '@/shared/index.js';
+import { AppError, parseIncomingJsonObject } from '@/shared/index.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -62,23 +63,6 @@ export function filterImagesToUploadStore(
 ): ChatAttachmentDescriptor[] {
   return filterAttachmentsToUploadStore(images, assetsRootOverride);
 }
-
-/** Application boundary for dispatching provider runs and approvals. */
-export type ProviderRuntimeGateway = {
-  hasRuntime(provider: string): boolean;
-  run(
-    provider: LLMProvider,
-    command: string,
-    options: AnyRecord,
-    writer: ProviderRuntimeWriter,
-  ): Promise<unknown>;
-  abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
-  stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
-  /** Whether a provider runtime still holds background work for the session after its turn ended. */
-  hasBackgroundWork(sessionId: string): boolean;
-  resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
-  getPendingApprovalsForSession(sessionId: string): unknown[];
-};
 
 type ChatWebSocketDependencies = {
   /** Central dispatcher for every provider SDK/CLI runtime. */
@@ -220,6 +204,11 @@ async function dispatchRun(
 ): Promise<{ started: boolean; error: string | null }> {
   const provider = session.provider as LLMProvider;
 
+  const state = dependencies.runtime.getState?.(provider, sessionId);
+  if (state?.runtime === 'app-server' && (state.goal?.status === 'active' || ['stopping', 'stopFailed'].includes(state.phase))) {
+    if (ws) sendProtocolError(ws, 'RUN_IN_PROGRESS', 'Pause the active goal or confirm the stop before starting another turn.', sessionId);
+    return { started: false, error: 'A run was already in progress for this session.' };
+  }
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
@@ -427,17 +416,105 @@ async function handleChatAbort(
   }
 
   const run = chatRunRegistry.getRun(sessionId);
-  if (!run || run.status !== 'running') {
+  const session = sessionsDb.getSessionById(sessionId);
+  const provider = session?.provider as LLMProvider | undefined;
+  const state = provider && dependencies.runtime.getState?.(provider, sessionId);
+  if (typeof data.executionId === 'string' && run && run.executionId !== data.executionId && state?.goal?.status !== 'active') {
+    sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId, ok: false,
+      error: 'The previous run already ended. This task has a different execution id.', codexState: state });
+    return;
+  }
+  if (!provider || ((!run || run.status !== 'running') && state?.runtime !== 'app-server')) {
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
     return;
   }
+  if (state?.runtime === 'app-server') sessionRuntimeDb.update(sessionId, { queueHeld: true });
+  const success = await dependencies.runtime.abort(provider, sessionId);
+  if (success && run) chatRunRegistry.completeRunIfCurrent(run, { exitCode: 0, aborted: true });
+  sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId,
+    ok: success, error: success ? undefined : 'Stop has not been confirmed. Retry to check the running task.',
+    codexState: dependencies.runtime.getState?.(provider, sessionId) });
+}
 
-  const success = await dependencies.runtime.abort(run.provider, sessionId);
+/** Validates control input before any native RPC or durable queue mutation. */
+function parseControl(raw: AnyRecord): CodexControlAction {
+  switch (raw.action) {
+    case 'state': case 'restart': return { action: raw.action };
+    case 'mode':
+      if (raw.mode === 'default' || raw.mode === 'plan') return { action: 'mode', mode: raw.mode };
+      break;
+    case 'runtime':
+      if (raw.runtime === 'sdk' || raw.runtime === 'app-server') return { action: 'runtime', runtime: raw.runtime };
+      break;
+    case 'goal':
+      if (['get', 'set', 'pause', 'resume', 'clear'].includes(raw.operation)
+        && (raw.objective === undefined || typeof raw.objective === 'string')
+        && (raw.tokenBudget === undefined || Number.isSafeInteger(raw.tokenBudget) && raw.tokenBudget > 0)) {
+        return { action: 'goal', operation: raw.operation, objective: raw.objective, tokenBudget: raw.tokenBudget };
+      }
+      break;
+    case 'answer':
+      if (typeof raw.requestId === 'string' && raw.answers && typeof raw.answers === 'object' && !Array.isArray(raw.answers)) {
+        return { action: 'answer', requestId: raw.requestId, answers: raw.answers };
+      }
+  }
+  throw new AppError('Invalid Codex control request.', { code: 'INVALID_CONTROL', statusCode: 400 });
+}
 
-  chatRunRegistry.completeRun(sessionId, {
-    exitCode: success ? 0 : 1,
-    aborted: true,
-  });
+/** Controls use their own acknowledgement channel; failures never complete a live model run. */
+async function handleChatControl(ws: WebSocket, userId: string | number | null, data: AnyRecord, dependencies: ChatWebSocketDependencies): Promise<void> {
+  const sessionId = readRequiredSessionId(data);
+  let steering = false;
+  let requestId = typeof data.requestId === 'string' ? data.requestId : '';
+  const numericUserId = Number(userId);
+  try {
+    const session = sessionId && sessionsDb.getSessionById(sessionId);
+    if (!sessionId || !session || session.provider !== 'codex' || !dependencies.runtime.control) throw new Error('Codex session controls are unavailable.');
+    if (!requestId || requestId.length > 160) throw new Error('A control request id is required.');
+    const raw = data.control;
+    if (!raw || typeof raw !== 'object') throw new Error('A control action is required.');
+    if (raw.action === 'queue-resume' || raw.action === 'queue-recover') {
+      if (!Number.isSafeInteger(numericUserId) || userId === null) throw new Error('Authentication required.');
+      if (raw.action === 'queue-recover') {
+        const state = dependencies.runtime.getState?.('codex', sessionId);
+        if (chatRunRegistry.isProcessing(sessionId) || state?.goal?.status === 'active' || ['starting', 'running', 'stopping', 'stopFailed'].includes(state?.phase ?? '')) throw new Error('Confirm the current task has stopped before resolving delivery.');
+        if (raw.decision !== 'queue' && raw.decision !== 'discard') throw new Error('Choose queue or discard.');
+        sessionDraftsDb.recoverUnknown(numericUserId, sessionId, raw.decision);
+      } else sessionDraftsDb.resumeQueue(numericUserId, sessionId);
+      sessionRuntimeDb.update(sessionId, { queueHeld: false });
+    } else {
+      let action: CodexControlAction;
+      if (raw.action === 'steer') {
+        if (userId === null || !Number.isSafeInteger(numericUserId) || typeof raw.messageId !== 'string' || typeof raw.expectedTurnId !== 'string') throw new Error('A queued message and target turn are required.');
+        const claim = sessionDraftsDb.beginSteer(numericUserId, sessionId, raw.messageId, requestId);
+        if (!claim.queuedMessage) {
+          sendJson(ws, { kind: 'control_result', sessionId, requestId, ok: claim.status === 'accepted', delivery: claim.status, error: claim.error,
+            codexState: dependencies.runtime.getState?.('codex', sessionId) });
+          return;
+        }
+        steering = true;
+        const message = claim.queuedMessage as AnyRecord;
+        action = { action: 'steer', expectedTurnId: raw.expectedTurnId, requestId, content: typeof message.content === 'string' ? message.content : '',
+          attachments: filterAttachmentsToUploadStore(message.attachments ?? message.images) };
+      } else action = parseControl(raw);
+      const run = chatRunRegistry.getRun(sessionId) ?? chatRunRegistry.startRun({ appSessionId: sessionId, provider: 'codex',
+        providerSessionId: session.provider_session_id, connection: ws, userId, passive: true })!;
+      run.writer.updateWebSocket(ws);
+      const options = { ...(data.options ?? {}), sessionId, cwd: session.project_path, projectPath: session.project_path };
+      await dependencies.runtime.control('codex', sessionId, action, options, run.writer);
+      if (steering) sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, 'accepted');
+    }
+    sendJson(ws, { kind: 'control_result', sessionId, requestId, ok: true, delivery: steering ? 'accepted' : undefined,
+      codexState: dependencies.runtime.getState?.('codex', sessionId) });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    // Only an explicit RPC rejection proves non-delivery; disconnects and timeouts remain held.
+    const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL'].includes(error.code));
+    const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;
+    sendJson(ws, { kind: 'control_result', sessionId, requestId, ok: delivery === 'accepted', error: delivery === 'accepted' ? undefined : message,
+      delivery,
+      codexState: sessionId ? dependencies.runtime.getState?.('codex', sessionId) : undefined });
+  }
 }
 
 /**
@@ -527,7 +604,7 @@ function handleChatSubscribe(
     // keeps producing events through the same writer (task progress, the
     // turn the CLI pushes when a task reports), so a tab opened during that
     // work attaches too; the registry keeps the run while the work lasts.
-    if (isProcessing || dependencies.runtime.hasBackgroundWork(sessionId)) {
+    if (isProcessing || dependencies.runtime.hasBackgroundWork(sessionId) || run?.provider === 'codex') {
       chatRunRegistry.attachConnection(sessionId, ws);
     }
 
@@ -541,6 +618,8 @@ function handleChatSubscribe(
       isProcessing,
       lastSeq: run?.lastSeq ?? 0,
       pendingPermissions,
+      executionId: run?.executionId,
+      codexState: sessionsDb.getSessionById(sessionId)?.provider === 'codex' ? dependencies.runtime.getState?.('codex', sessionId) : undefined,
       timestamp: new Date().toISOString(),
     });
 
@@ -549,7 +628,7 @@ function handleChatSubscribe(
     // replaying them (e.g. after a page reload where the client's lastSeq is
     // 0) would duplicate messages the history fetch already returned.
     if (isProcessing) {
-      for (const event of chatRunRegistry.replayEvents(sessionId, lastSeq)) {
+      for (const event of chatRunRegistry.replayEvents(sessionId, (target as AnyRecord).executionId === run?.executionId ? lastSeq : 0)) {
         sendJson(ws, event);
       }
     }
@@ -568,6 +647,7 @@ function handlePermissionResponse(data: AnyRecord, dependencies: ChatWebSocketDe
 
   dependencies.runtime.resolveToolApproval(data.requestId, {
     allow: Boolean(data.allow),
+    nativeDecision: ['accept', 'acceptForSession', 'decline', 'cancel'].includes(data.nativeDecision) ? data.nativeDecision : undefined,
     updatedInput: data.updatedInput,
     message: typeof data.message === 'string' ? data.message : undefined,
     rememberEntry: data.rememberEntry,
@@ -628,7 +708,8 @@ export async function runDetachedChatTurn(
   }
 
   const activeRun = chatRunRegistry.getRun(input.sessionId);
-  if (activeRun && activeRun.status === 'running') {
+  const nativeState = dependencies.runtime.getState?.(provider, input.sessionId);
+  if (activeRun?.status === 'running' || nativeState?.goal?.status === 'active' || ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '')) {
     if (!input.interruptActiveRun) {
       return { started: false, error: 'A run was already in progress for this session.' };
     }
@@ -637,11 +718,9 @@ export async function runDetachedChatTurn(
     // interrupted run end before this turn's stream begins. The interrupted
     // run's own dispatch settles later through completeRunIfCurrent, which is
     // scoped to that run and cannot touch the one started here.
-    const aborted = await dependencies.runtime.abort(activeRun.provider, input.sessionId);
-    chatRunRegistry.completeRun(input.sessionId, {
-      exitCode: aborted ? 0 : 1,
-      aborted: true,
-    });
+    const aborted = await dependencies.runtime.abort(provider, input.sessionId);
+    if (!aborted) return { started: false, error: 'The previous run has not confirmed its stop.' };
+    if (activeRun) chatRunRegistry.completeRunIfCurrent(activeRun, { exitCode: 0, aborted: true });
   }
 
   return dispatchRun(
@@ -675,6 +754,9 @@ export function handleChatConnection(
       const messageType = typeof data.type === 'string' ? data.type : '';
 
       switch (messageType) {
+        case 'chat.control':
+          await handleChatControl(ws, userId, data, dependencies);
+          return;
         case 'chat.edit-send':
           await handleChatEditSend(ws, userId, data, dependencies);
           return;

@@ -2,7 +2,7 @@ import { AbstractProvider } from '@/modules/providers/shared/base/abstract.provi
 import { CodexProviderAuth } from '@/modules/providers/list/codex/codex-auth.provider.js';
 import { CodexForkProvider } from '@/modules/providers/list/codex/codex-fork.provider.js';
 import { CodexProviderModels } from '@/modules/providers/list/codex/codex-models.provider.js';
-import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
+import { codexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
 import { CodexMcpProvider } from '@/modules/providers/list/codex/codex-mcp.provider.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
@@ -15,10 +15,10 @@ import type {
   IProviderSessionSynchronizer,
   IProviderSkills,
   IProviderSessions,
-} from '@/shared/interfaces.js';
+} from '@/shared/index.js';
 
 export class CodexProvider extends AbstractProvider {
-  readonly runtime: IProviderRuntime = codexRuntime;
+  readonly runtime: IProviderRuntime = codexRuntimeRouter;
   readonly models: IProviderModels = new CodexProviderModels();
   readonly mcp = new CodexMcpProvider();
   readonly auth: IProviderAuth = new CodexProviderAuth();

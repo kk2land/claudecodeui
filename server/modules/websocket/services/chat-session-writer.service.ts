@@ -3,8 +3,9 @@ import type {
   LLMProvider,
   NormalizedMessage,
   RealtimeClientConnection,
-} from '@/shared/types.js';
-import { createCompleteMessage, readObjectRecord } from '@/shared/utils.js';
+  ProviderRuntimeWriter,
+} from '@/shared/index.js';
+import { createCompleteMessage, readObjectRecord } from '@/shared/index.js';
 
 type ChatSessionWriterOptions = {
   connection: RealtimeClientConnection | null;
@@ -44,6 +45,7 @@ type ChatSessionWriterOptions = {
  *   intercepted and recorded as the provider-id mapping as well.
  */
 export class ChatSessionWriter {
+  nextTurn?: () => ProviderRuntimeWriter;
   userId: string | number | null;
   /**
    * Some runtimes feature-detect their writer with this flag; keep it so the
@@ -138,6 +140,11 @@ export class ChatSessionWriter {
    */
   updateWebSocket(newConnection: RealtimeClientConnection): void {
     this.connections.add(newConnection);
+  }
+
+  /** The run registry transfers subscribers when a native goal starts another turn. */
+  copyConnectionsTo(writer: ChatSessionWriter): void {
+    for (const connection of this.connections) if (connection.readyState === WS_OPEN_STATE) writer.updateWebSocket(connection);
   }
 
   setSessionId(sessionId: string): void {

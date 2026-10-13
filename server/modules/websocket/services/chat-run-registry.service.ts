@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { sessionsDb } from '@/modules/database/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
@@ -5,7 +7,7 @@ import type {
   LLMProvider,
   NormalizedMessage,
   RealtimeClientConnection,
-} from '@/shared/types.js';
+} from '@/shared/index.js';
 
 type ChatRunStatus = 'running' | 'completed';
 
@@ -24,6 +26,7 @@ type ChatRunStatus = 'running' | 'completed';
  *   can replay exactly the events it missed via `chat.subscribe`.
  */
 type ChatRun = {
+  executionId: string;
   appSessionId: string;
   provider: LLMProvider;
   providerSessionId: string | null;
@@ -115,6 +118,7 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     ...message,
     sessionId: run.appSessionId,
     seq: run.lastSeq,
+    executionId: run.executionId,
   };
 
   if (message.kind === 'complete') {
@@ -198,6 +202,7 @@ export const chatRunRegistry = {
      * buffer still records everything, so a client that subscribes later
      * replays the run from its start.
      */
+    passive?: boolean;
     connection: RealtimeClientConnection | null;
     userId: string | number | null;
   }): ChatRun | null {
@@ -207,10 +212,11 @@ export const chatRunRegistry = {
     }
 
     const run: ChatRun = {
+      executionId: randomUUID(),
       appSessionId: input.appSessionId,
       provider: input.provider,
       providerSessionId: input.providerSessionId,
-      status: 'running',
+      status: input.passive ? 'completed' : 'running',
       lastSeq: 0,
       events: [],
       writer: null as unknown as ChatSessionWriter,
@@ -229,6 +235,12 @@ export const chatRunRegistry = {
       decorateOutboundEvent: (message) => decorateAndRecordEvent(run, message),
     });
 
+    existing?.writer.copyConnectionsTo(run.writer);
+    run.writer.nextTurn = () => {
+      const current = runs.get(input.appSessionId);
+      if (current?.status === 'running') return current.writer;
+      return this.startRun({ ...input, passive: false, providerSessionId: run.providerSessionId })!.writer;
+    };
     runs.set(input.appSessionId, run);
     return run;
   },

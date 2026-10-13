@@ -520,6 +520,30 @@ export const runMigrations = (db: Database) => {
     addProviderModelEffortColumns(db);
     db.exec(USER_PREFERENCES_TABLE_SCHEMA_SQL);
     db.exec(SESSION_DRAFTS_TABLE_SCHEMA_SQL);
+    const draftColumns = (db.prepare('PRAGMA table_info(session_drafts)').all() as TableInfoRow[]).map((column) => column.name);
+    addColumnToTableIfNotExists(db, 'session_drafts', draftColumns, 'queue_status', "TEXT NOT NULL DEFAULT 'queued'");
+    addColumnToTableIfNotExists(db, 'session_drafts', draftColumns, 'queue_request_id', 'TEXT');
+    addColumnToTableIfNotExists(db, 'session_drafts', draftColumns, 'queue_error', 'TEXT');
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS session_runtime_settings (
+        session_id TEXT PRIMARY KEY,
+        runtime TEXT NOT NULL DEFAULT 'app-server',
+        mode TEXT NOT NULL DEFAULT 'default',
+        queue_held INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS queued_steer_receipts (
+        request_id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL,
+        session_id TEXT NOT NULL,
+        message_id TEXT NOT NULL,
+        status TEXT NOT NULL,
+        error TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      UPDATE queued_steer_receipts SET status = 'unknown' WHERE status = 'steering';
+      UPDATE session_drafts SET queue_status = 'unknown', queue_error = 'Awaiting delivery confirmation after server restart.' WHERE queue_status = 'steering';
+      CREATE INDEX IF NOT EXISTS idx_steer_message ON queued_steer_receipts(user_id, session_id, message_id);
+    `);
     db.exec(SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL);
     addSupersededTranscriptPathColumn(db);
 

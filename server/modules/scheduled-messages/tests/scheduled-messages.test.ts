@@ -4,7 +4,8 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import type { CodexSessionState, ProviderRuntimeGateway } from '@/shared/index.js';
 import { dispatchDueScheduledMessages, dispatchQueuedMessages } from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
@@ -120,6 +121,28 @@ test('a queued message stays pending while its session is busy', async () => {
     assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessage, {
       content: 'send after this run',
     });
+  });
+});
+
+test('native goal gaps and persistent stop holds block dispatch until explicitly released', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    sessionDraftsDb.saveDraft(userId, SESSION_ID, { text: '', queuedMessage: { content: 'after the goal' } });
+    const runs: RunCall[] = [];
+    const runtime = createRuntime(runs) as ProviderRuntimeGateway;
+    const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: null, phase: 'idle', questions: [],
+      goal: { threadId: SESSION_ID, objective: 'work', status: 'active', tokenBudget: null, tokensUsed: 5, timeUsedSeconds: 1 } };
+    runtime.getState = () => state;
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    state.goal!.status = 'paused';
+    state.phase = 'stopFailed';
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    state.phase = 'idle';
+    sessionRuntimeDb.update(SESSION_ID, { queueHeld: true });
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.equal(runs.length, 0);
+    sessionRuntimeDb.update(SESSION_ID, { queueHeld: false });
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.equal(runs.length, 1);
   });
 });
 

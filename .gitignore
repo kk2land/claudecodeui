@@ -28,6 +28,8 @@ out/
 *.swp
 *.swo
 *~
+.stfolder
+.stignore
 
 # OS generated files
 .DS_Store

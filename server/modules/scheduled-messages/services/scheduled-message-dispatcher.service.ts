@@ -1,4 +1,4 @@
-import { scheduledMessagesDb, sessionDraftsDb } from '@/modules/database/index.js';
+import { scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb } from '@/modules/database/index.js';
 import type { QueuedSessionMessageRecord, ScheduledMessageRow } from '@/modules/database/index.js';
 import { chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
 import type { ProviderRuntimeGateway } from '@/modules/websocket/index.js';
@@ -91,7 +91,10 @@ async function sendClaimedQueuedMessage(
  * turn was promised to go "when this finishes", so it waits for that work too.
  */
 function isSessionBusy(sessionId: string, runtime: ProviderRuntimeGateway): boolean {
-  return chatRunRegistry.isProcessing(sessionId) || runtime.hasBackgroundWork(sessionId);
+  const state = runtime.getState?.('codex', sessionId);
+  return sessionRuntimeDb.get(sessionId).queueHeld || state?.goal?.status === 'active'
+    || ['starting', 'running', 'stopping', 'stopFailed'].includes(state?.phase ?? '')
+    || chatRunRegistry.isProcessing(sessionId) || runtime.hasBackgroundWork(sessionId);
 }
 
 /** Sends every persisted queued turn whose session is currently idle. */

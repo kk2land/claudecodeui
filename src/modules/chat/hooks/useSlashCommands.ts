@@ -1,3 +1,4 @@
+import { useTranslation } from 'react-i18next';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { Dispatch, KeyboardEvent, RefObject, SetStateAction } from 'react';
 
@@ -83,6 +84,7 @@ export function useSlashCommands({
   textareaRef,
   onExecuteCommand,
 }: UseSlashCommandsOptions) {
+  const { t } = useTranslation('chat');
   const { commands: projectCommands } = useProjectSlashCommands(selectedProject, provider);
   const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
   const [showCommandMenu, setShowCommandMenu] = useState(false);
@@ -115,12 +117,16 @@ export function useSlashCommands({
     }
 
     const parsedHistory = readCommandHistory(selectedProject.projectId);
-    return [...projectCommands].sort((commandA, commandB) => {
+    const nativeCommands: SlashCommand[] = provider === 'codex' ? [
+      { name: '/plan', description: t('codex.planCommand'), type: 'built-in', metadata: { nativeControl: true } },
+      { name: '/goal', description: t('codex.goalCommand'), type: 'built-in', metadata: { nativeControl: true } },
+    ] : [];
+    return [...nativeCommands, ...projectCommands.filter((command) => !nativeCommands.some((native) => native.name === command.name))].sort((commandA, commandB) => {
       const commandAUsage = parsedHistory[commandA.name] || 0;
       const commandBUsage = parsedHistory[commandB.name] || 0;
       return commandBUsage - commandAUsage;
     });
-  }, [projectCommands, selectedProject]);
+  }, [projectCommands, selectedProject, provider, t]);
 
   useEffect(() => {
     if (!showCommandMenu) {
@@ -211,7 +217,7 @@ export function useSlashCommands({
 
   const selectCommandFromKeyboard = useCallback(
     (command: SlashCommand) => {
-      if (isSkillCommand(command)) {
+      if (isSkillCommand(command) || command.metadata?.nativeControl) {
         insertCommandIntoInput(command);
         return;
       }
@@ -233,7 +239,7 @@ export function useSlashCommands({
       }
 
       trackCommandUsage(command);
-      if (isSkillCommand(command)) {
+      if (isSkillCommand(command) || command.metadata?.nativeControl) {
         insertCommandIntoInput(command);
         return;
       }

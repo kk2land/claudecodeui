@@ -1,3 +1,60 @@
-export { appendFilesInputTag, buildCodexInputItems, normalizeImageDescriptors } from './image-attachments.js';
-export { createCompleteMessage, createNormalizedMessage } from './utils.js';
-export type { AnyRecord, ProviderRuntimeContext, ProviderRuntimeWriter } from './types.js';
+export {
+  appendFilesInputTag,
+  buildCodexInputItems,
+  normalizeImageDescriptors,
+  parseFilesInputTag,
+} from './image-attachments.js';
+
+export type {
+  AnyRecord,
+  AuthenticatedWebSocketRequest,
+  BackgroundTaskSummary,
+  CodexControlAction,
+  CodexGoal,
+  CodexRpcClient,
+  CodexRpcFrame,
+  CodexSessionState,
+  CodexUserInputRequest,
+  FetchHistoryOptions,
+  FetchHistoryResult,
+  LLMProvider,
+  MemoryCitation,
+  NormalizedMessage,
+  ProviderPermissionDecision,
+  ProviderRunFunction,
+  ProviderRuntimeContext,
+  ProviderRuntimeGateway,
+  ProviderRuntimeWriter,
+  QueuedSessionMessageRecord,
+  RealtimeClientConnection,
+  SessionDraftRecord,
+  SessionRuntimeSettings,
+  SubagentActivity,
+  SubagentInfo,
+  WorkflowAgentActivity,
+} from './types.js';
+
+export type {
+  IProvider,
+  IProviderAuth,
+  IProviderFork,
+  IProviderModels,
+  IProviderRuntime,
+  IProviderSessionSynchronizer,
+  IProviderSessions,
+  IProviderSkills,
+} from './interfaces.js';
+
+export {
+  AppError,
+  createCompleteMessage,
+  createNormalizedMessage,
+  findApplicationRoot,
+  generateMessageId,
+  getModuleDirectory,
+  parseIncomingJsonObject,
+  readObjectRecord,
+  sliceTailPage,
+  truncateSubagentActivity,
+  unifiedDiffToTexts,
+} from './utils.js';

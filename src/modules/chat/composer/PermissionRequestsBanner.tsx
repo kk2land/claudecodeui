@@ -2,7 +2,7 @@ import React from 'react';
 import { useTranslation } from 'react-i18next';
 import { ShieldAlertIcon } from 'lucide-react';
 
-import type { PendingPermissionRequest } from '@/shared/types';
+import type { ToolPermissionDecision, PendingPermissionRequest } from '@/shared/types';
 import { buildClaudeToolPermissionEntry, formatToolInputForDisplay } from '@/modules/chat/utils/chatPermissions';
 import { getClaudeSettings } from '@/modules/chat/utils/chatStorage';
 import { getPermissionPanel, registerPermissionPanel } from '@/modules/chat/tools/configs/permissionPanelRegistry';
@@ -21,7 +21,7 @@ type PermissionRequestsBannerProps = {
   pendingPermissionRequests: PendingPermissionRequest[];
   handlePermissionDecision: (
     requestIds: string | string[],
-    decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
+    decision: ToolPermissionDecision,
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
 };
@@ -60,7 +60,10 @@ export default function PermissionRequestsBanner({
         }
 
         const rawInput = formatToolInputForDisplay(request.input);
-        const permissionEntry = buildClaudeToolPermissionEntry(request.toolName, rawInput);
+        const context = request.context as { provider?: string; availableDecisions?: unknown[] } | undefined;
+        const native = context?.provider === 'codex';
+        const nativeDecisions = context?.availableDecisions ?? ['accept', 'acceptForSession', 'decline', 'cancel'];
+        const permissionEntry = native ? null : buildClaudeToolPermissionEntry(request.toolName, rawInput);
         const settings = getClaudeSettings();
         const alreadyAllowed = permissionEntry ? settings.allowedTools.includes(permissionEntry) : false;
         const rememberLabel = alreadyAllowed ? 'Allow (saved)' : 'Allow & remember';
@@ -106,11 +109,11 @@ export default function PermissionRequestsBanner({
             <ConfirmationActions>
               <ConfirmationAction
                 variant="outline"
-                onClick={() => handlePermissionDecision(request.requestId, { allow: false, message: t('chat:misc.userDeniedTool') })}
+                onClick={() => handlePermissionDecision(request.requestId, { allow: false, ...(native ? { nativeDecision: nativeDecisions.includes('decline') ? 'decline' as const : 'cancel' as const } : {}), message: t('chat:misc.userDeniedTool') })}
               >
                 Deny
               </ConfirmationAction>
-              <ConfirmationAction
+              {!native && <ConfirmationAction
                 variant="outline"
                 onClick={() => {
                   if (permissionEntry && !alreadyAllowed) {
@@ -121,9 +124,11 @@ export default function PermissionRequestsBanner({
                 disabled={!permissionEntry}
               >
                 {rememberLabel}
-              </ConfirmationAction>
+              </ConfirmationAction>}
+              {native && nativeDecisions.includes('acceptForSession') && <ConfirmationAction variant="outline" onClick={() => handlePermissionDecision(request.requestId, { allow: true, nativeDecision: 'acceptForSession' })}>{t('chat:codex.allowSession')}</ConfirmationAction>}
               <ConfirmationAction
                 variant="default"
+                disabled={native && !nativeDecisions.includes('accept')}
                 onClick={() => handlePermissionDecision(request.requestId, { allow: true })}
               >
                 Allow once

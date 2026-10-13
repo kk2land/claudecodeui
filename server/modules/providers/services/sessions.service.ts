@@ -14,8 +14,8 @@ import type {
   LLMProvider,
   NormalizedMessage,
   WorkflowAgentActivity,
-} from '@/shared/types.js';
-import { AppError, sliceTailPage } from '@/shared/utils.js';
+} from '@/shared/index.js';
+import { AppError, sliceTailPage } from '@/shared/index.js';
 
 /**
  * One session the running-sessions poll reports as busy.
@@ -38,7 +38,7 @@ type RunningSessionEntry = {
   startedAt: number;
   lastSeq: number;
   background?: true;
-  canInterrupt?: false;
+  canInterrupt?: boolean;
   statusText?: string;
   tasks?: BackgroundTaskSummary[];
 };
@@ -165,6 +165,13 @@ export const sessionsService = {
     const runningById = new Map(entries.map((entry) => [entry.sessionId, entry]));
 
     for (const provider of providerRegistry.listProviders()) {
+      for (const active of provider.runtime.listActiveSessions?.() ?? []) {
+        if (!runningById.has(active.sessionId)) {
+          const entry = { ...active, provider: provider.id, canInterrupt: true, lastSeq: chatRunRegistry.getRun(active.sessionId)?.lastSeq ?? 0 };
+          entries.push(entry);
+          runningById.set(active.sessionId, entry);
+        }
+      }
       for (const { sessionId, tasks } of provider.runtime.listBackgroundWork?.() ?? []) {
         const running = runningById.get(sessionId);
         if (running) {

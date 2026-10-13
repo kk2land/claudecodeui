@@ -168,6 +168,7 @@ test('a queued message round-trips alongside the draft text', async () => {
     content: 'send this next',
     attachments: [],
   });
+  await vi.advanceTimersByTimeAsync(0);
   assert.equal(savedDrafts.length, 1, 'queue actions persist without waiting for the draft debounce');
   assert.deepEqual(savedDrafts, [{
     scope: 'session-a',
@@ -228,4 +229,86 @@ test('reset clears the drafts so the next user does not see them', async () => {
 
   assert.equal(store.readDraftText('session-a'), '');
   assert.equal(localStorage.getItem('chat-drafts'), null);
+});
+
+
+test('hydrate preserves the newest draft while successive writes to the same scope are still pending', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  const releases: Array<() => void> = [];
+  const save = vi.spyOn(api.user, 'saveDraft').mockImplementation(async () => {
+    await new Promise<void>((resolve) => releases.push(resolve));
+    return new Response('{}', { status: 200 });
+  });
+  store.writeDraftText('session-a', 'first');
+  const first = store.persistQueuedMessage('session-a');
+  await vi.advanceTimersByTimeAsync(0);
+  store.writeDraftText('session-a', 'newest');
+  const second = store.persistQueuedMessage('session-a');
+  releases[0]();
+  await first;
+  await vi.advanceTimersByTimeAsync(0);
+  serverDrafts = [{ scope: 'session-a', text: 'stale server value', queuedMessage: null }];
+  await store.hydrateChatDrafts();
+  assert.equal(store.readDraftText('session-a'), 'newest');
+  releases[1]();
+  await second;
+  save.mockRestore();
+});
+
+test('sign-out cancels queued saves and deletes without blocking the next account', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  let account = 'A';
+  const calls: Array<{ account: string; text: string }> = [];
+  const releases: Array<() => void> = [];
+  const save = vi.spyOn(api.user, 'saveDraft').mockImplementation(async (_scope, draft) => {
+    calls.push({ account, text: draft.text });
+    await new Promise<void>((resolve) => releases.push(resolve));
+    return new Response('{}', { status: 200 });
+  });
+  try {
+    store.writeDraftText('session-a', 'A in flight');
+    const first = store.persistQueuedMessage('session-a');
+    const firstCancelled = assert.rejects(first, /sign-out/);
+    await vi.advanceTimersByTimeAsync(0);
+    store.writeDraftText('session-a', 'A queued');
+    const queued = store.persistQueuedMessage('session-a');
+    const queuedCancelled = assert.rejects(queued, /sign-out/);
+    store.writeDraftText('session-a', '');
+    const deletion = store.persistQueuedMessage('session-a');
+    const deletionCancelled = assert.rejects(deletion, /sign-out/);
+
+    store.resetChatDrafts();
+    account = 'B';
+    store.writeDraftText('session-a', 'B own draft');
+    const nextAccount = store.persistQueuedMessage('session-a');
+    await vi.advanceTimersByTimeAsync(0);
+    assert.deepEqual(calls, [{ account: 'A', text: 'A in flight' }, { account: 'B', text: 'B own draft' }]);
+    releases[0]();
+    await Promise.all([firstCancelled, queuedCancelled, deletionCancelled]);
+    // Completion of A's old request must not release B's in-flight protection.
+    serverDrafts = [{ scope: 'session-a', text: 'stale B value', queuedMessage: null }];
+    await store.hydrateChatDrafts();
+    assert.equal(store.readDraftText('session-a'), 'B own draft');
+    releases[1](); await nextAccount;
+    assert.equal(calls.length, 2);
+    assert.deepEqual(deletedScopes, []);
+  } finally { save.mockRestore(); }
+});
+
+test('sign-out discards a former account’s late draft hydration', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  let release!: (response: Response) => void;
+  const request = vi.spyOn(api.user, 'drafts').mockImplementationOnce(() => new Promise((resolve) => { release = resolve; }));
+  try {
+    const hydration = store.hydrateChatDrafts();
+    store.resetChatDrafts();
+    store.writeDraftText('session-b', 'B draft');
+    release(new Response(JSON.stringify({ drafts: [{ scope: 'session-a', text: 'A private draft', queuedMessage: null }] }), { status: 200 }));
+    await hydration;
+    assert.equal(store.readDraftText('session-a'), '');
+    assert.equal(store.readDraftText('session-b'), 'B draft');
+  } finally { request.mockRestore(); }
 });

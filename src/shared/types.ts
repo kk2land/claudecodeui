@@ -491,6 +491,8 @@ type QuestionOption = {
 
 /** A provider-agnostic transcript event as normalized by the backend adapters, with all kind-specific fields kept flat; it is the shape the session store holds and that chat converts into ChatMessage for rendering, so treat it as the wire contract rather than a view model. */
 export type NormalizedMessage = {
+  /** Native item snapshots update in place until completion. */
+  isStreaming?: boolean;
   id: string;
   /**
    * The provider's own id for the transcript row behind this message, when the
@@ -765,6 +767,7 @@ export type CommandModalPayload = {
 
 /** A composer message queued while its session is still busy, holding the text, the in-memory and already-uploaded attachments and the send options snapshotted at queue time so it can be auto-sent unchanged once the session goes idle. */
 export type QueuedDraft = {
+  id?: string;
   content: string;
   /** Browser files retained while this composer stays mounted, for editing. */
   attachments: File[];
@@ -1844,3 +1847,79 @@ type TaskStatus =
 
 /** A TaskMaster task's priority; high, medium and low are the known values and the string fallback tolerates anything else TaskMaster emits. */
 type TaskPriority = 'high' | 'medium' | 'low' | string;
+
+//----------------- CODEX NATIVE CONTROLS ------------
+/** Native goal progress used by chat controls; token budget is optional. */
+export type CodexGoal = {
+  threadId: string;
+  objective: string;
+  status: 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+};
+
+/** One native request_user_input prompt, retained until app-server resolves its RPC. */
+export type CodexUserInputRequest = {
+  requestId: string;
+  turnId: string;
+  isBlocking: boolean;
+  questions: Array<{
+    id: string;
+    header: string;
+    question: string;
+    isOther: boolean;
+    isSecret: boolean;
+    options: Array<{ label: string; description: string }> | null;
+  }>;
+};
+
+/** Authoritative control snapshot sent to every subscriber, including between goal turns. */
+export type CodexSessionState = {
+  /** Process details are exposed only in the advanced Codex controls. */
+  diagnostics?: { running: boolean; pendingRequests: number; launcherPath: string | null; cliVersion: string | null };
+  runtime: 'app-server' | 'sdk';
+  mode: 'default' | 'plan';
+  queueHeld?: boolean;
+  turnId: string | null;
+  phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
+  goal: CodexGoal | null;
+  questions: CodexUserInputRequest[];
+  error?: string;
+};
+
+/** Validated user control action; provider-native thread ids are resolved on the server. */
+export type CodexControlAction =
+  | { action: 'state' }
+  | { action: 'restart' }
+  | { action: 'mode'; mode: ('default' | 'plan') }
+  | { action: 'runtime'; runtime: ('app-server' | 'sdk') }
+  | { action: 'goal'; operation: 'get' | 'set' | 'pause' | 'resume' | 'clear'; objective?: string; tokenBudget?: number }
+  | { action: 'steer'; expectedTurnId: string; requestId: string; content: string; attachments: unknown[] }
+  | { action: 'answer'; requestId: string; answers: Record<string, { answers: string[] }> };
+
+/** Durable queue delivery metadata; unknown outcomes must never auto-send. */
+export type QueuedDelivery = { status: string; requestId: string | null; error: string | null };
+/** Chat controls shared between the session hook, composer and native control panel. */
+export type CodexControls = {
+  sessionId?: string | null;
+  goalVisible?: boolean;
+  state: CodexSessionState | null;
+  error: string | null;
+  pending: boolean;
+  delivery: QueuedDelivery | null;
+  control(action: CodexControlAction | { action: 'queue-resume' } | { action: 'queue-recover'; decision: 'queue' | 'discard' }): Promise<void>;
+  steer(): Promise<void>;
+};
+// ---------------------------
+
+//----------------- TOOL APPROVAL DECISIONS ------------
+/** Chat permission panels use this result without applying one provider's saved rules to another. */
+export type ToolPermissionDecision = {
+  allow?: boolean;
+  message?: string;
+  rememberEntry?: string | null;
+  updatedInput?: unknown;
+  nativeDecision?: 'accept' | 'acceptForSession' | 'decline' | 'cancel';
+};
+// ---------------------------

@@ -7,6 +7,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
@@ -409,6 +410,7 @@ test('codex app-server forks a real thread at a turn', { concurrency: false }, a
     const source = await readFile(path.join(sessionsDir, path.basename(fixture)), 'utf8');
     assert.equal(source, transcript);
   } finally {
+    await codexAppServerTransport.close();
     if (previousCodexHome === undefined) {
       delete process.env.CODEX_HOME;
     } else {
@@ -416,4 +418,18 @@ test('codex app-server forks a real thread at a turn', { concurrency: false }, a
     }
     await rm(tempRoot, { recursive: true, force: true });
   }
+});
+
+
+test('native user-message ids survive history loading without adding a second edit anchor', { concurrency: false }, async () => {
+  await withIndexedSession([
+    { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-native' } },
+    ...['first-id', 'steer-id'].map((id) => ({ type: 'event_msg', payload: { type: 'item_completed', turn_id: 'turn-native',
+      item: { type: 'UserMessage', id: `native-${id}`, client_id: id, content: [{ type: 'text', text: 'same text' }] } } })),
+    { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-native' } },
+  ], async ({ sessionId }) => {
+    const history = await new CodexSessionsProvider().fetchHistory(sessionId);
+    const prompts = history.messages.filter((message) => message.role === 'user');
+    assert.deepEqual(prompts.map((message) => [message.id, message.transcriptAnchorId]), [['first-id', 'turn-native'], ['steer-id', undefined]]);
+  });
 });

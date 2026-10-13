@@ -608,10 +608,96 @@ export type ProviderRuntimeWriter = {
   setSessionId?(sessionId: string): void;
   userId?: string | number | null;
   isWebSocketWriter?: boolean;
+  /** Gateway supplies a fresh run writer for a native, automatically started turn. */
+  nextTurn?(): ProviderRuntimeWriter;
 };
+
+//----------------- CODEX APP SERVER CONTROL ------------
+/** Selected Codex transport. A live thread retains its transport until it is idle. */
+export type CodexRuntimeMode = 'app-server' | 'sdk';
+
+/** Native collaboration mode, independent of sandbox and approval permissions. */
+export type CodexCollaborationMode = 'default' | 'plan';
+
+/** Persisted native goal returned by app-server; never infer its status from assistant text. */
+export type CodexGoal = {
+  threadId: string;
+  objective: string;
+  status: 'active' | 'paused' | 'blocked' | 'usageLimited' | 'budgetLimited' | 'complete';
+  tokenBudget: number | null;
+  tokensUsed: number;
+  timeUsedSeconds: number;
+};
+
+/** One native request_user_input prompt, retained until app-server resolves its RPC. */
+export type CodexUserInputRequest = {
+  requestId: string;
+  turnId: string;
+  isBlocking: boolean;
+  questions: Array<{
+    id: string;
+    header: string;
+    question: string;
+    isOther: boolean;
+    isSecret: boolean;
+    options: Array<{ label: string; description: string }> | null;
+  }>;
+};
+
+/** Authoritative control snapshot sent to every subscriber, including between goal turns. */
+export type CodexSessionState = {
+  /** Resolved launcher and CLI identity; reading this never starts a process. */
+  diagnostics?: { running: boolean; pendingRequests: number; launcherPath: string | null; cliVersion: string | null };
+  runtime: CodexRuntimeMode;
+  mode: CodexCollaborationMode;
+  queueHeld?: boolean;
+  turnId: string | null;
+  phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
+  goal: CodexGoal | null;
+  questions: CodexUserInputRequest[];
+  error?: string;
+};
+
+/** Validated user control action; provider-native thread ids are resolved on the server. */
+export type CodexControlAction =
+  | { action: 'state' }
+  | { action: 'restart' }
+  | { action: 'mode'; mode: CodexCollaborationMode }
+  | { action: 'runtime'; runtime: CodexRuntimeMode }
+  | { action: 'goal'; operation: 'get' | 'set' | 'pause' | 'resume' | 'clear'; objective?: string; tokenBudget?: number }
+  | { action: 'steer'; expectedTurnId: string; requestId: string; content: string; attachments: unknown[] }
+  | { action: 'answer'; requestId: string; answers: Record<string, { answers: string[] }> };
+
+/** Application session settings, stored separately from the native goal's source of truth. */
+export type SessionRuntimeSettings = {
+  runtime: CodexRuntimeMode;
+  mode: CodexCollaborationMode;
+  queueHeld: boolean;
+};
+
+/** Bidirectional app-server frame after JSON parsing. RPC ids are strings or numbers. */
+export type CodexRpcFrame = {
+  id?: string | number;
+  method?: string;
+  params?: AnyRecord;
+  result?: unknown;
+  error?: { code?: number; message: string; data?: unknown };
+};
+
+/** Injectable transport contract used by the native runtime and scripted protocol tests. */
+export type CodexRpcClient = {
+  readonly status?: NonNullable<CodexSessionState['diagnostics']>;
+  request<T = AnyRecord>(method: string, params?: unknown): Promise<T>;
+  onNotification(listener: (frame: CodexRpcFrame) => void): () => void;
+  onRequest(listener: (frame: CodexRpcFrame) => Promise<unknown>): () => void;
+  onExit(listener: (error: Error) => void): () => void;
+};
+// ---------------------------
 
 export type ProviderPermissionDecision = {
   allow: boolean;
+  /** Explicit native approval scope; absent for providers using a boolean decision. */
+  nativeDecision?: 'accept' | 'acceptForSession' | 'decline' | 'cancel';
   updatedInput?: unknown;
   message?: string;
   rememberEntry?: unknown;
@@ -1603,3 +1689,49 @@ export type CliApplication = {
 export type SandboxCommandService = {
   execute(argumentsList: string[]): Promise<number>;
 };
+
+//----------------- CHAT RUNTIME GATEWAY ------------
+/** Application boundary for dispatching provider runs and approvals. */
+export type ProviderRuntimeGateway = {
+  getState?(provider: LLMProvider, sessionId: string): CodexSessionState | undefined;
+  control?(provider: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter): Promise<CodexSessionState>;
+  hasRuntime(provider: string): boolean;
+  run(
+    provider: LLMProvider,
+    command: string,
+    options: AnyRecord,
+    writer: ProviderRuntimeWriter,
+  ): Promise<unknown>;
+  abort(provider: LLMProvider, sessionId: string): Promise<boolean>;
+  stopBackgroundTask(provider: LLMProvider, sessionId: string, taskId: string): Promise<boolean>;
+  /** Whether a provider runtime still holds background work for the session after its turn ended. */
+  hasBackgroundWork(sessionId: string): boolean;
+  resolveToolApproval(requestId: string, payload: ProviderPermissionDecision): void;
+  getPendingApprovalsForSession(sessionId: string): unknown[];
+};
+
+// ---------------------------
+
+//----------------- DURABLE CHAT DRAFTS ------------
+/**
+ * One chat scope's unsent state: the text still in the composer, plus the
+ * message queued behind an in-flight turn. Both are optional — a scope can
+ * hold only a draft, only a queued message, or both.
+ */
+export type SessionDraftRecord = {
+  scope: string;
+  text: string;
+  queuedMessage: unknown | null;
+  updatedAt: string;
+  queuedDelivery: { status: string; requestId: string | null; error: string | null };
+};
+
+/** A server-owned queued turn together with the exact stored value used to claim it once. */
+export type QueuedSessionMessageRecord = {
+  userId: number;
+  sessionId: string;
+  queuedMessage: unknown;
+  claimToken: string;
+};
+
+// ---------------------------

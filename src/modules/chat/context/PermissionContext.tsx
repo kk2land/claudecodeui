@@ -1,17 +1,18 @@
 import { createContext, useContext } from 'react';
 
-import type { PendingPermissionRequest } from '@/shared/types';
+import type { ToolPermissionDecision, PendingPermissionRequest } from '@/shared/types';
 
-export type PermissionContextValue = {
+type PermissionContextValue = {
   pendingPermissionRequests: PendingPermissionRequest[];
   handlePermissionDecision: (
     requestIds: string | string[],
-    decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
+    decision: ToolPermissionDecision,
   ) => void;
 };
 
 const PermissionContext = createContext<PermissionContextValue | null>(null);
 
+/** Chat tool renderers read the current approval requests and response handler. */
 export function usePermission(): PermissionContextValue | null {
   return useContext(PermissionContext);
 }

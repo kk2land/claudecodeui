@@ -101,7 +101,7 @@ const agentRoutes = createAgentModule({
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.
 // A completed run stays subscribable while its session's background work
 // (agents, workflows, backgrounded commands) is still reporting through it.
-chatRunRegistry.setRetentionGuard((sessionId) => providerRuntimeService.hasBackgroundWork(sessionId));
+chatRunRegistry.setRetentionGuard((sessionId) => providerRuntimeService.hasBackgroundWork(sessionId) || providerRuntimeService.hasActiveController(sessionId));
 
 createWebSocketServer(server, {
     verifyClient: {
@@ -383,6 +383,7 @@ async function startServer() {
         closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            await providerRuntimeService.close().catch((error) => console.error("[Providers] Shutdown failed", error));
             try {
                 await browserUseService.stopAllSessions();
             } catch (err) {

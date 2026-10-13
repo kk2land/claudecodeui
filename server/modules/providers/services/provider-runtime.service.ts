@@ -1,15 +1,17 @@
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import type { IProvider } from '@/shared/interfaces.js';
 import type {
   AnyRecord,
+  CodexControlAction,
+  IProvider,
   LLMProvider,
   ProviderPermissionDecision,
   ProviderRunFunction,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
-} from '@/shared/types.js';
+} from '@/shared/index.js';
+
 
 type ProviderRuntimeServiceDependencies = {
   listProviders(): IProvider[];
@@ -75,6 +77,20 @@ export function createProviderRuntimeService(
   return {
     run,
 
+    getState(providerName: LLMProvider, sessionId: string) {
+      return dependencies.resolveProvider(providerName).runtime.getState?.(sessionId);
+    },
+
+    async control(providerName: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter) {
+      const provider = dependencies.resolveProvider(providerName);
+      if (!provider.runtime.control) throw new Error('This provider does not support runtime controls.');
+      return provider.runtime.control(sessionId, action, options, writer, createRuntimeContext(provider));
+    },
+
+    async close(): Promise<void> {
+      await Promise.all(dependencies.listProviders().map((provider) => provider.runtime.close?.()));
+    },
+
     hasRuntime(providerName: string): boolean {
       try {
         return Boolean(dependencies.resolveProvider(providerName).runtime);
@@ -95,6 +111,10 @@ export function createProviderRuntimeService(
       // A runtime that never holds background work has no task to stop.
       const { runtime } = dependencies.resolveProvider(providerName);
       return Boolean(await runtime.stopBackgroundTask?.(sessionId, taskId));
+    },
+
+    hasActiveController(sessionId: string): boolean {
+      return dependencies.listProviders().some((provider) => provider.runtime.listActiveSessions?.().some((entry) => entry.sessionId === sessionId));
     },
 
     hasBackgroundWork(sessionId: string): boolean {

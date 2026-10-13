@@ -327,8 +327,8 @@ function pruneRealtimeSupersededByServer(
       return true;
     }
 
-    if (message.kind === 'tool_use' && message.toolId) {
-      if (serverMessages.some((serverMessage) => serverMessage.kind === 'tool_use' && serverMessage.toolId === message.toolId)) {
+    if ((message.kind === 'tool_use' || message.kind === 'tool_result') && message.toolId) {
+      if (serverMessages.some((serverMessage) => serverMessage.kind === message.kind && serverMessage.toolId === message.toolId)) {
         return false;
       }
     }
@@ -754,7 +754,11 @@ export function useSessionStore() {
       msg.sessionId === sessionId
         ? msg
         : { ...msg, sessionId };
-    let updated = [...slot.realtimeMessages, normalizedMessage];
+    const index = slot.realtimeMessages.findIndex((entry) => entry.id === normalizedMessage.id);
+    // Native items are full snapshots. Replace by identity, preserving first appearance order.
+    let updated = [...slot.realtimeMessages];
+    if (index >= 0) updated[index] = { ...normalizedMessage, timestamp: updated[index].timestamp };
+    else updated.push(normalizedMessage);
     if (updated.length > MAX_REALTIME_MESSAGES) {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
     }

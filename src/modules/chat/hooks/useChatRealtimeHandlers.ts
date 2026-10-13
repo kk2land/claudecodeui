@@ -1,7 +1,7 @@
 import { useEffect, useRef } from 'react';
 import type { Dispatch, MutableRefObject, SetStateAction } from 'react';
 
-import type { ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
+import type { CodexSessionState, ServerEvent,MarkSessionIdle,MarkSessionProcessing,PendingPermissionRequest,ProjectSession,LLMProvider,NormalizedMessage,GetSessionActivity,MarkSessionBackground } from '@/shared/types';
 import { showCompletionTitleIndicator } from '@/modules/chat/utils/pageTitleNotification';
 import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
@@ -34,6 +34,7 @@ type UseChatRealtimeHandlersArgs = {
    * frame; read wherever a `chat.subscribe` is sent (session open, reconnect).
    */
   lastSeqRef: MutableRefObject<Map<string, number>>;
+  executionIdsRef: MutableRefObject<Map<string, string>>;
   /** When each session's `chat.subscribe` was last sent; guards stale idle acks. */
   statusCheckSentAtRef: MutableRefObject<Map<string, number>>;
   onSessionProcessing?: MarkSessionProcessing;
@@ -71,6 +72,7 @@ export function useChatRealtimeHandlers({
   streamTimerRef,
   accumulatedStreamRef,
   lastSeqRef,
+  executionIdsRef,
   statusCheckSentAtRef,
   onSessionProcessing,
   onSessionIdle,
@@ -115,6 +117,19 @@ export function useChatRealtimeHandlers({
       const activeViewSessionId = activeViewSessionIdRef.current;
       const sid = (typeof msg.sessionId === 'string' && msg.sessionId) || activeViewSessionId;
 
+      if (sid && typeof msg.executionId === 'string' && executionIdsRef.current.get(sid) !== msg.executionId) {
+        executionIdsRef.current.set(sid, msg.executionId);
+        lastSeqRef.current.set(sid, 0);
+      }
+      const nativeState = msg.codexState as CodexSessionState | undefined;
+      const reportNativeState = () => {
+        if (!sid || !nativeState || nativeState.runtime !== 'app-server') return false;
+        const busy = nativeState.goal?.status === 'active' || ['running', 'starting', 'stopping', 'stopFailed'].includes(nativeState.phase);
+        if (busy) onSessionProcessing?.(sid, { statusText: nativeState.phase === 'stopping' ? 'Stopping…' : nativeState.phase === 'stopFailed' ? 'Stop not confirmed' : null, canInterrupt: true });
+        else onSessionIdle?.(sid);
+        return true;
+      };
+
       // Record replay progress for every sequenced live event.
       if (sid && typeof msg.seq === 'number') {
         const known = lastSeqRef.current.get(sid) ?? 0;
@@ -122,6 +137,9 @@ export function useChatRealtimeHandlers({
           lastSeqRef.current.set(sid, msg.seq);
         }
       }
+
+      if (msg.kind === 'control_result') { reportNativeState(); return; }
+      if (msg.kind === 'status' && msg.text === 'codex_control') { reportNativeState(); return; }
 
       switch (msg.kind) {
         case 'websocket_reconnected':
@@ -143,7 +161,9 @@ export function useChatRealtimeHandlers({
           // pending tool-permission prompts for the run.
           if (!sid) return;
 
-          if (msg.isProcessing) {
+          if (reportNativeState()) {
+            // Native snapshots include goal gaps and stopping states beyond the current run.
+          } else if (msg.isProcessing) {
             onSessionProcessing?.(sid);
           } else {
             // Idle ack: ignore it if a newer request started after the
@@ -177,7 +197,7 @@ export function useChatRealtimeHandlers({
             // A refused stop request is not about the run: the task had
             // already settled, and idling here would drop a response in
             // flight on that session.
-            if (msg.code !== 'NO_SUCH_TASK' && msg.code !== 'TASK_ID_REQUIRED') {
+            if (!['NO_SUCH_TASK', 'TASK_ID_REQUIRED', 'RUN_IN_PROGRESS', 'NO_ACTIVE_RUN'].includes(String(msg.code))) {
               onSessionIdle?.(sid);
             }
             sessionStore.appendRealtime(sid, {
@@ -273,7 +293,9 @@ export function useChatRealtimeHandlers({
           // running leaves the session as background work — the CLI is held
           // open for them — and any other leaves it idle. An abort releases
           // the CLI and takes that work down with it.
-          if (sid && !msg.aborted) {
+          if (sid && (msg.goalActive || msg.stopping)) {
+            onSessionProcessing?.(sid, { statusText: msg.stopping ? 'Stopping…' : null, canInterrupt: true });
+          } else if (sid && !msg.aborted) {
             reportRemainingBackgroundWork(sid);
           } else {
             onSessionIdle?.(sid);
@@ -283,7 +305,7 @@ export function useChatRealtimeHandlers({
             setPendingPermissionRequests([]);
           }
 
-          if (msg.aborted) {
+          if (msg.aborted || msg.stopping || msg.goalActive) {
             // Abort was requested — the complete event confirms it. No
             // further UI action is needed beyond clearing the entry above.
             break;
@@ -410,6 +432,7 @@ export function useChatRealtimeHandlers({
     streamTimerRef,
     accumulatedStreamRef,
     lastSeqRef,
+  executionIdsRef,
     statusCheckSentAtRef,
     onSessionProcessing,
     onSessionIdle,

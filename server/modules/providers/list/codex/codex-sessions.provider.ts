@@ -6,17 +6,17 @@ import readline from 'node:readline';
 import { sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
-import type { IProviderSessions } from '@/shared/interfaces.js';
-import { prepareTranscriptMessages } from '@/shared/message-unification.js';
 import type {
   AnyRecord,
   FetchHistoryOptions,
   FetchHistoryResult,
+  IProviderSessions,
   MemoryCitation,
   NormalizedMessage,
   SubagentActivity,
   SubagentInfo,
-} from '@/shared/types.js';
+} from '@/shared/index.js';
+import { prepareTranscriptMessages } from '@/shared/message-unification.js';
 import {
   AppError,
   createNormalizedMessage,
@@ -24,7 +24,8 @@ import {
   readObjectRecord,
   sliceTailPage,
   truncateSubagentActivity,
-} from '@/shared/utils.js';
+  unifiedDiffToTexts,
+} from '@/shared/index.js';
 
 const PROVIDER = 'codex';
 
@@ -682,48 +683,6 @@ type CodexFileChange = {
 };
 
 /**
- * Rebuilds the before/after text of one unified diff.
- *
- * Only the hunks are available — never the whole file — so the reconstruction
- * keeps context lines in both sides and drops hunk headers. Feeding that pair
- * to the frontend's line differ reproduces exactly the additions, removals and
- * surrounding context the patch described, which is what Claude's `Edit` rows
- * already show.
- *
- * Exported for tests.
- */
-export function unifiedDiffToTexts(unifiedDiff: string): { oldText: string; newText: string } {
-  const oldLines: string[] = [];
-  const newLines: string[] = [];
-
-  for (const line of unifiedDiff.split('\n')) {
-    if (line.startsWith('@@') || line.startsWith('\\ No newline')) {
-      continue;
-    }
-    if (line.startsWith('+')) {
-      newLines.push(line.slice(1));
-      continue;
-    }
-    if (line.startsWith('-')) {
-      oldLines.push(line.slice(1));
-      continue;
-    }
-    const contextLine = line.startsWith(' ') ? line.slice(1) : line;
-    oldLines.push(contextLine);
-    newLines.push(contextLine);
-  }
-
-  // A unified diff ends with a newline, which would otherwise reconstruct as a
-  // phantom trailing blank line on both sides.
-  if (oldLines[oldLines.length - 1] === '' && newLines[newLines.length - 1] === '') {
-    oldLines.pop();
-    newLines.pop();
-  }
-
-  return { oldText: oldLines.join('\n'), newText: newLines.join('\n') };
-}
-
-/**
  * Splits a `*** Begin Patch` body into one change per file.
  *
  * Exported for tests.
@@ -1364,6 +1323,7 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
             }
             const row: AnyRecord = {
               type: 'user',
+              uuid: readNonEmptyString(item.client_id),
               timestamp,
               message: { role: 'user', content },
               ...(images ? { images } : {}),

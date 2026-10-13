@@ -14,7 +14,8 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
-import type { QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
+import type { ToolPermissionDecision, CodexControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -46,7 +47,7 @@ type ChatComposerProps = {
   pendingPermissionRequests: PendingPermissionRequest[];
   handlePermissionDecision: (
     requestIds: string | string[],
-    decision: { allow?: boolean; message?: string; rememberEntry?: string | null; updatedInput?: unknown },
+    decision: ToolPermissionDecision,
   ) => void;
   handleGrantToolPermission: (suggestion: { entry: string; toolName: string }) => { success: boolean };
   activity: SessionActivity | null;
@@ -72,6 +73,8 @@ type ChatComposerProps = {
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
   queuedDraft: QueuedDraft | null;
+  codexControls?: CodexControls;
+  onExecutePlan?: () => void;
   /** Set while the composer is replacing an already-sent message. */
   isEditingSentMessage: boolean;
   onCancelEditMessage: () => void;
@@ -147,6 +150,8 @@ export default function ChatComposer({
   onSubmit,
   isDragActive,
   queuedDraft,
+  codexControls,
+  onExecutePlan,
   isEditingSentMessage,
   onCancelEditMessage,
   scheduledMessages,
@@ -309,12 +314,15 @@ export default function ChatComposer({
         </div>
       )}
 
+      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} onExecutePlan={onExecutePlan ?? (() => {})} />}
       {queuedDraft && (
         <QueuedMessageCard
           content={queuedDraft.content}
           attachmentCount={
             queuedDraft.uploadedAttachments?.length ?? queuedDraft.attachments.length
           }
+          controls={codexControls}
+          canSteerMode={queuedDraft.options?.collaborationMode !== 'plan'}
           onEdit={onEditQueuedDraft}
           onDelete={onDeleteQueuedDraft}
         />
