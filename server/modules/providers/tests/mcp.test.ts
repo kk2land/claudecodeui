@@ -313,7 +313,9 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
       workspacePath,
     });
 
-    assert.equal(globalResult.length, 4);
+    assert.equal(globalResult.length, 5);
+    const dshProject = await readJson(path.join(workspacePath, '.dsh', 'cloudcli-mcp.json'));
+    assert.ok(dshProject['global-http']);
     assert.ok(globalResult.every((entry) => entry.created === true));
 
     const claudeProject = await readJson(path.join(workspacePath, '.mcp.json'));

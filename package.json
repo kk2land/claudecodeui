@@ -149,6 +149,8 @@
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/merge": "^6.11.1",
     "@codemirror/theme-one-dark": "^6.1.2",
+    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
+    "@deepseek-ai/dsh-session-format-catalog": "0.2.1-rc.2",
     "@iarna/toml": "^2.2.5",
     "@octokit/rest": "^22.0.0",
     "@openai/codex": "0.156.1",
@@ -201,7 +203,8 @@
     "remark-math": "^6.0.0",
     "tailwind-merge": "^3.3.1",
     "web-push": "^3.6.7",
-    "ws": "^8.14.2"
+    "ws": "^8.14.2",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.5.0",

@@ -505,6 +505,29 @@ const migrateCodexSessionControls = (db: Database): void => {
   `);
 };
 
+/** Expands the existing constraint while retaining upstream columns, rows, indexes, and triggers. */
+const migrateDshProviderModels = (db: Database): void => {
+  const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_models'").get() as { sql: string };
+  const constraint = table.sql.match(/\bprovider\s+IN\s*\(([^)]*)\)/i);
+  if (!constraint || /'dsh'/.test(constraint[1])) return;
+  const replacement = table.sql.replace(/CREATE TABLE\s+(?:IF NOT EXISTS\s+)?["`\[]?provider_models["`\]]?/i, 'CREATE TABLE provider_models_dsh_upgrade')
+    .replace(constraint[0], `provider IN (${constraint[1]}, 'dsh')`);
+  const objects = db.prepare("SELECT sql FROM sqlite_master WHERE tbl_name = 'provider_models' AND type IN ('index', 'trigger') AND sql IS NOT NULL").all() as { sql: string }[];
+  const columns = getTableInfo(db, 'provider_models').map(({ name }) => `"${name.replaceAll('"', '""')}"`).join(', ');
+  const sequence = db.prepare("SELECT seq FROM sqlite_sequence WHERE name = 'provider_models'").get() as { seq: number } | undefined;
+  db.transaction(() => {
+    db.exec(replacement);
+    db.exec(`INSERT INTO provider_models_dsh_upgrade (${columns}) SELECT ${columns} FROM provider_models`);
+    db.exec('DROP TABLE provider_models');
+    db.exec('ALTER TABLE provider_models_dsh_upgrade RENAME TO provider_models');
+    for (const object of objects) db.exec(object.sql);
+    if (sequence) {
+      const updated = db.prepare("UPDATE sqlite_sequence SET seq = max(seq, ?) WHERE name = 'provider_models'").run(sequence.seq);
+      if (updated.changes === 0) db.prepare('INSERT INTO sqlite_sequence(name, seq) VALUES (?, ?)').run('provider_models', sequence.seq);
+    }
+  })();
+};
+
 /** Database initialization and integration tests upgrade existing installations in place. */
 export const runMigrations = (db: Database) => {
   try {
@@ -535,6 +558,7 @@ export const runMigrations = (db: Database) => {
       ON provider_models(provider, sort_order, id)
     `);
     addProviderModelEffortColumns(db);
+    migrateDshProviderModels(db);
     db.exec(USER_PREFERENCES_TABLE_SCHEMA_SQL);
     db.exec(SESSION_DRAFTS_TABLE_SCHEMA_SQL);
     migrateCodexSessionControls(db);

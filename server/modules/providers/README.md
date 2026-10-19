@@ -378,3 +378,8 @@ alongside the implementation.
 - Assuming one provider's MCP config file format works for the others.
 
 
+
+
+## DeepSeek Harness (`dsh`)
+
+The DSH adapter lives in `list/dsh/` and supports only ACP and headless execution. It owns its subprocesses, converts native/ACP/headless events through one normalizer, and reads native versioned/compressed logs through the pinned official format catalog. Capabilities intentionally omit unsupported native controls. CloudCLI-owned MCP declarations are passed to ACP sessions or mounted by a temporary headless overlay; they do not rewrite native profile files. See [implementation and configuration](../../../docs/deepseek-harness-provider-plan.md).

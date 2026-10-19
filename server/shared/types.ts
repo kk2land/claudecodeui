@@ -66,7 +66,32 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  * Use this as the source of truth whenever a function or payload needs to identify
  * a specific LLM integration.
  */
-export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode';
+export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
+
+//----------------- DEEPSEEK HARNESS ------------
+/** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
+export type DshRuntimeMode = 'acp' | 'headless';
+
+/** Launch snapshot shared by DSH configuration, process ownership, and native history readers. */
+export type DshConfiguration = {
+  mode: DshRuntimeMode;
+  bin: string;
+  home: string;
+  sessionsRoot: string;
+  patches: string[];
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  idleMs: number;
+};
+
+/** Read-only native DSH artifact, decoded through its official format catalog. */
+export type DshSessionLog = {
+  filePath: string;
+  header: { id: string; cwd?: string; createdAt: number; origin?: string; parentSession?: string };
+  events: AnyRecord[];
+};
+
+// ---------------------------
 
 /**
  * One selectable model row in a provider model catalog.

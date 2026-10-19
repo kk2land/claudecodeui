@@ -706,6 +706,13 @@ export const sessionsService = {
 
     let removedFromDisk = false;
     if (options.deletedFromDisk) {
+      if (session.provider === 'dsh') {
+        // One generation file is not the whole native conversation. Removing
+        // it alone can expose an older generation again on the next scan.
+        throw new AppError('Deleting native DSH logs is unavailable; archive the session instead.', {
+          code: 'DSH_NATIVE_DELETE_UNSUPPORTED', statusCode: 409,
+        });
+      }
       // Every file the conversation has lived in, not just the one the row
       // points at now: editing a message on a provider that rewinds by
       // branching moves the session onto a copy and leaves the earlier

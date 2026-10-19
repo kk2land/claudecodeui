@@ -4,6 +4,7 @@ import { promises as fsPromises } from 'node:fs';
 
 import chokidar, { type FSWatcher } from 'chokidar';
 
+import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-configuration.provider.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { broadcastSessionUpsertedBatch } from '@/modules/websocket/index.js';
 import type { LLMProvider } from '@/shared/types.js';
@@ -11,6 +12,7 @@ import type { LLMProvider } from '@/shared/types.js';
 type WatcherEventType = 'add' | 'change';
 
 const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> = [
+  { provider: 'dsh', rootPath: new DshConfigurationProvider().sessionsRoot },
   {
     provider: 'claude',
     rootPath: path.join(os.homedir(), '.claude', 'projects'),
@@ -67,6 +69,7 @@ let watcherRescheduleAfterRefresh = false;
  * Filters watcher events to provider-specific session artifact file types.
  */
 function isWatcherTargetFile(provider: LLMProvider, filePath: string): boolean {
+  if (provider === 'dsh') return /^session(?:\.v[1-9]\d*)?\.jsonl(?:\.zstd)?$/.test(path.basename(filePath));
   if (provider === 'opencode') {
     return path.basename(filePath) === 'opencode.db';
   }

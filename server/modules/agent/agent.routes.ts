@@ -38,6 +38,7 @@ type AgentRouterDependencies = {
   queryCursor: ProviderRunFunction;
   queryCodex: ProviderRunFunction;
   queryOpenCode: ProviderRunFunction;
+  queryDsh?: ProviderRunFunction;
   GithubClient: typeof import('@octokit/rest').Octokit;
 };
 
@@ -886,8 +887,8 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       return res.status(400).json({ error: 'message is required' });
     }
 
-    if (requestedProvider !== null && !['claude', 'cursor', 'codex', 'opencode'].includes(requestedProvider)) {
-      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", or "opencode"' });
+    if (requestedProvider !== null && !['claude', 'cursor', 'codex', 'opencode', 'dsh'].includes(requestedProvider)) {
+      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", "opencode", or "dsh"' });
     }
 
     // Validate GitHub branch/PR creation requirements
@@ -1052,6 +1053,12 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
           model: model || codexModels.DEFAULT,
           effort,
           permissionMode: 'bypassPermissions'
+        }, run.writer);
+      } else if (provider === 'dsh') {
+        if (!dependencies.queryDsh) throw new Error('DSH runtime is not configured.');
+        await dependencies.queryDsh(message.trim(), {
+          projectPath: finalProjectPath, cwd: finalProjectPath, sessionId: appSessionId,
+          model: model || 'default', effort, permissionMode: 'bypassPermissions',
         }, run.writer);
       } else if (provider === 'opencode') {
         console.log('Starting OpenCode CLI session');
