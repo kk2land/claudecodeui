@@ -10,6 +10,13 @@ type AgentConnectionsStepProps = {
 
 const providerCards = [
   {
+    provider: 'dsh' as const,
+    title: 'DeepSeek Harness',
+    connectedClassName: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',
+    iconContainerClassName: 'bg-blue-100 dark:bg-blue-900/30',
+    loginButtonClassName: 'bg-blue-600 hover:bg-blue-700',
+  },
+  {
     provider: 'claude' as const,
     title: 'Claude Code',
     connectedClassName: 'bg-blue-50 dark:bg-blue-900/20 border-blue-200 dark:border-blue-800',

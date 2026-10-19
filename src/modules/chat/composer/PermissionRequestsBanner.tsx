@@ -61,7 +61,7 @@ export default function PermissionRequestsBanner({
 
         const rawInput = formatToolInputForDisplay(request.input);
         const context = request.context as { provider?: string; availableDecisions?: unknown[] } | undefined;
-        const native = context?.provider === 'codex';
+        const native = context?.provider === 'codex' || context?.provider === 'dsh';
         const nativeDecisions = context?.availableDecisions ?? ['accept', 'acceptForSession', 'decline', 'cancel'];
         const permissionEntry = native ? null : buildClaudeToolPermissionEntry(request.toolName, rawInput);
         const settings = getClaudeSettings();

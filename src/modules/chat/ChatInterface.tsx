@@ -446,7 +446,7 @@ function ChatInterface({
       ? t('messageTypes.cursor')
       : provider === 'codex'
         ? t('messageTypes.codex')
-        : provider === 'opencode'
+        : provider === 'dsh' ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' }) : provider === 'opencode'
             ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
           : t('messageTypes.claude');
 

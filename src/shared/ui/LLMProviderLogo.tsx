@@ -1,3 +1,4 @@
+import { Waves } from 'lucide-react';
 import type { LLMProvider } from '@/shared/types';
 import ClaudeLogo from '@/shared/ui/ClaudeLogo';
 import CodexLogo from '@/shared/ui/CodexLogo';
@@ -21,6 +22,8 @@ export function LLMProviderLogo({
   if (provider === 'codex') {
     return <CodexLogo className={className} />;
   }
+
+  if (provider === 'dsh') return <Waves aria-label="DeepSeek Harness" className={className} />;
 
   if (provider === 'opencode') {
     return <OpenCodeLogo className={className} />;

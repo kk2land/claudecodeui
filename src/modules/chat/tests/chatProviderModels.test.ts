@@ -82,7 +82,9 @@ test('a provider with no stored model falls back to its own default, not another
     assert.ok(result.current.providerModels.claude);
   });
 
-  const models = result.current.providerModels;
+  const { dsh, ...models } = result.current.providerModels;
+  // DSH deliberately delegates its default selection to its own profile.
+  assert.equal(dsh, 'default');
   assert.equal(
     new Set(Object.values(models)).size,
     Object.keys(models).length,

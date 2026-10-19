@@ -267,3 +267,22 @@ CloudCLI UI - (https://cloudcli.ai).
 <div align="center">
  <strong>Made with care for the Claude Code, Cursor and Codex community.</strong>
 </div>
+
+
+### DeepSeek Harness provider
+
+Select **DeepSeek Harness** in the provider picker. Install `@deepseek-ai/dsh` on the machine running CloudCLI and configure the same DSH home and credentials used by that service:
+
+```bash
+npm install -g @deepseek-ai/dsh@0.2.1-rc.2
+export DEEPSEEK_API_KEY="your-key"
+export CLOUDCLI_DSH_RUNTIME=acp
+# Optional: export CLOUDCLI_DSH_BIN=/absolute/path/to/dsh
+# Optional: export DSH_HOME=/absolute/path/to/.dsh
+```
+
+Restart CloudCLI after changing launch settings. `acp` is the default persistent stdio transport; set `CLOUDCLI_DSH_RUNTIME=headless` for one-shot JSON execution with session resume. Both use the existing chat queue for prompts submitted during a run. The DSH CLI is installed separately; CloudCLI includes only its pinned read-only session format libraries.
+
+ACP exposes one-time tool approvals in the chat. Headless uses environment/`.env` credentials by default and has no interactive approval channel. Connection status checks credential presence; the model runtime validates it when a task starts. Use `default` for DSH's configured selection, or add a custom `provider/model` entry in the model library.
+
+See [DSH configuration, supported features and checks](docs/deepseek-harness-provider-plan.md) for patch overlays, native compressed history, MCP/skills, and deployment details.

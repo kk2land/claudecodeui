@@ -67,6 +67,7 @@ const getProviderTitle = (provider: LLMProvider) => {
   if (provider === 'cursor') return 'Cursor CLI Login';
   if (provider === 'codex') return 'Codex CLI Login';
   if (provider === 'opencode') return 'OpenCode CLI Login';
+  if (provider === 'dsh') return 'DeepSeek Harness setup';
   return 'Claude CLI Login';
 };
 
@@ -110,7 +111,14 @@ export default function ProviderLoginModal({
         </div>
 
         <div className="flex-1 overflow-hidden">
-          <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />
+          {provider === 'dsh' ? (
+            <div className="space-y-4 p-6 text-sm text-foreground">
+              <p>{t('auth:dsh.setup')}</p>
+              <pre className="overflow-auto rounded bg-muted p-3">npm install -g @deepseek-ai/dsh</pre>
+              <p>{t('auth:dsh.credentials')}</p>
+              <p>{t('auth:dsh.runtime')}</p>
+            </div>
+          ) : <StandaloneShell project={DEFAULT_PROJECT_FOR_EMPTY_SHELL} command={command} onComplete={handleComplete} minimal={true} />}
         </div>
       </div>
     </div>

@@ -25,6 +25,7 @@ const PROVIDERS: Array<{ id: LLMProvider; label: string }> = [
   { id: 'codex', label: 'Codex' },
   { id: 'cursor', label: 'Cursor' },
   { id: 'opencode', label: 'OpenCode' },
+  { id: 'dsh', label: 'DeepSeek Harness' },
 ];
 
 type ModelLibraryPanelProps = {
