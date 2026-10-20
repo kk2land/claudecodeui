@@ -30,13 +30,18 @@ if (process.argv.includes('headless')) {
     output({type:'text',text:'中文'});
     output({type:'status',phase:'step_end'});
     output({type:'final',text:'中文完成✅'});
+    if(input==='broken-final'||input==='broken-hang') {
+      process.on('SIGTERM',()=>{if(input==='broken-final')process.exit(0);});
+      process.stdout.write('not json\\n');
+      setInterval(()=>{},1000);
+    }
     process.exitCode=input==='fail'?1:0;
   });
 } else {
   const rl=createInterface({input:process.stdin});
   let pending;
   let permission;
-  const choices=[{id:'model',currentValue:'["deepseek-official","flash"]',options:[{group:'deepseek-official',options:[{value:'["deepseek-official","flash"]'},{value:'["deepseek-official","pro"]'}]}]},{id:'reasoning_effort',options:[{value:'high'},{value:'low'}]}];
+  const choices=[{id:'model',currentValue:'["deepseek-official","flash"]',options:[{group:'deepseek-official',options:[{value:'["deepseek-official","flash"]'},{value:'["deepseek-official","pro"]'}]},{group:'other',options:[{value:'["other","flash"]'}]}]},{id:'reasoning_effort',options:[{value:'high'},{value:'low'}]}];
   const complete=()=>{
     output({method:'session/update',params:{sessionId:'native-acp',update:{sessionUpdate:'agent_message_chunk',content:{type:'text',text:'中文✅'}}}});
     output({id:pending,result:{stopReason:'end_turn'}});pending=undefined;
@@ -57,23 +62,23 @@ if (process.argv.includes('headless')) {
       if(text==='permission') {permission='ask';output({id:permission,method:'session/request_permission',params:{sessionId:'native-acp',toolCall:{title:'bash',rawInput:{command:'pwd'}},options:[{kind:'allow_once',optionId:'once'},{kind:'allow_always',optionId:'always'},{kind:'reject_once',optionId:'reject'}]}});return;}
       complete();
     } else if(f.method==='session/cancel') {if(pending!==undefined)output({id:pending,result:{stopReason:'cancelled'}});pending=undefined;}
-    else if(f.method==='session/close') output({id:f.id,result:{}});
+    else if(f.method==='session/close') setTimeout(()=>output({id:f.id,result:{}}),100);
     else if(f.id===permission && f.result) {log({approval:f.result});complete();}
   });
   rl.on('close',()=>process.exit(0));
 }
 `;
 
-async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = null) {
+async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = null, synchronize?: () => Promise<number>, environment: NodeJS.ProcessEnv = {}) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh runtime '));
   const bin = path.join(root, 'fake-dsh.mjs'), log = path.join(root, 'calls.jsonl');
   await writeFile(bin, actor, { mode: 0o755 });
   const config = new DshConfigurationProvider({ ...process.env, CLOUDCLI_DSH_RUNTIME: mode, CLOUDCLI_DSH_BIN: bin,
-    DSH_HOME: root, CLOUDCLI_DSH_PATCHES: '[]', CLOUDCLI_DSH_TIMEOUT_MS: '2000', FAKE_DSH_LOG: log });
+    DSH_HOME: root, CLOUDCLI_DSH_PATCHES: '[]', CLOUDCLI_DSH_TIMEOUT_MS: '2000', FAKE_DSH_LOG: log, ...environment });
   const messages: AnyRecord[] = [];
   let captured = nativeId;
   let syncs = 0;
-  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), new DshMcpProvider(config), { synchronize: async () => { syncs++; return 0; } });
+  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), new DshMcpProvider(config), { synchronize: async () => { syncs++; return synchronize ? synchronize() : 0; } });
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => captured, resolveResumeModel: async (_id, model) => model || 'default',
     getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default' }), normalizeMessage: () => [], isProviderInstalled: async () => true };
   const run = (prompt: string, options: AnyRecord = {}) => runtime.run(prompt, { sessionId: 'app', cwd: root, ...options },
@@ -83,8 +88,8 @@ async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = n
     close: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
 }
 
-async function until(condition: () => boolean): Promise<void> {
-  for (let n = 0; n < 200; n++) { if (condition()) return; await delay(10); }
+async function until(condition: () => boolean | Promise<boolean>): Promise<void> {
+  for (let n = 0; n < 200; n++) { if (await condition()) return; await delay(10); }
   assert.fail('Timed out waiting for protocol state.');
 }
 
@@ -118,6 +123,60 @@ test('ACP resolves allow-once and drops stale approvals, including after a nonin
     const approvals = (await f.calls()).filter((call) => call.approval);
     assert.equal(approvals.length, 2);
     assert(approvals.every((call) => call.approval.outcome.optionId === 'once'));
+  } finally { await f.close(); }
+});
+
+for (const prompt of ['hello', 'broken']) test(`ACP keeps a session busy until indexing and completion finish after ${prompt}`, { skip: process.platform === 'win32' }, async () => {
+  let resume!: () => void;
+  const gate = new Promise<void>((resolve) => { resume = resolve; });
+  const f = await fixture('acp', null, async () => { await gate; return 0; });
+  try {
+    const running = prompt === 'broken' ? assert.rejects(f.run(prompt), /Invalid DSH stdout/) : f.run(prompt);
+    await until(() => f.syncs === 1);
+    assert.equal(f.runtime.listActiveSessions().length, 1);
+    await assert.rejects(f.run('too early'), /already running/);
+    assert.equal(f.messages.filter((message) => message.kind === 'complete').length, 0);
+    resume(); await running;
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+    assert.equal(f.messages.filter((message) => message.kind === 'complete').length, 1);
+  } finally { resume(); await f.close(); }
+});
+
+test('ACP waits for in-flight idle cleanup before resuming in a fresh process', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' });
+  try {
+    await f.run('hello');
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/close'));
+    const running = f.run('after idle');
+    await assert.rejects(f.run('concurrent restart'), /already running/);
+    await running;
+    const calls = await f.calls();
+    assert.equal(calls.filter((call) => call.method === 'initialize').length, 2);
+    assert.equal(calls.filter((call) => call.method === 'session/resume').length, 1);
+    assert.equal(calls.filter((call) => call.method === 'session/prompt').length, 2);
+  } finally { await f.close(); }
+});
+
+test('cancelling an ACP idle handoff prevents a replacement prompt from starting', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' });
+  try {
+    await f.run('hello');
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/close'));
+    const running = f.run('cancel this handoff');
+    assert.equal(await f.runtime.abort('app'), true);
+    await running;
+    assert.equal((await f.calls()).filter((call) => call.method === 'session/prompt').length, 1);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+  } finally { await f.close(); }
+});
+
+test('ACP rejects ambiguous bare model names before delivering the prompt', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await assert.rejects(f.run('hello', { model: 'flash' }), /ambiguous/);
+    assert.equal((await f.calls()).filter((call) => call.method === 'session/prompt').length, 0);
+    await f.run('hello', { model: 'deepseek-official/flash' });
+    assert.equal(f.messages.at(-1)?.success, true);
   } finally { await f.close(); }
 });
 
@@ -174,6 +233,23 @@ test('headless nonzero exit is a failure even after a final frame', { skip: proc
   const f = await fixture('headless');
   try { await assert.rejects(f.run('fail'), /headless failed/); assert.equal(f.messages.at(-1)?.success, false); }
   finally { await f.close(); }
+});
+
+test('headless protocol errors cannot become success after a final frame and zero exit', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture('headless');
+  try {
+    await assert.rejects(f.run('broken-final'), /Invalid DSH stdout/);
+    assert.equal(f.messages.at(-1)?.success, false);
+  } finally { await f.close(); }
+});
+
+test('headless protocol errors reap a peer that ignores SIGTERM', { skip: process.platform === 'win32', timeout: 10_000 }, async () => {
+  const f = await fixture('headless');
+  try {
+    await assert.rejects(f.run('broken-hang'), /Invalid DSH stdout/);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+    assert.equal(f.messages.at(-1)?.success, false);
+  } finally { await f.close(); }
 });
 
 test('headless cancellation reaps a waiting child without emitting a second terminal', { skip: process.platform === 'win32' }, async () => {

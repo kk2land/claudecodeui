@@ -54,6 +54,35 @@ test('compressed native history accepts complete checksummed frames before an un
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('native surface retains assistant tool calls and results without exposing runtime context as user input', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-tools-history-'));
+  try {
+    const directory = path.join(root, 'sessions', 'workspace', 'native-tools');
+    await mkdir(directory, { recursive: true });
+    const rows = [
+      { type: 'session', version: 4, id: 'native-tools', createdAt: 1, cwd: root, isSeeded: false, delegationDepth: 0 },
+      { type: 'user/message', seq: 0, time: 2, surfaceOp: 'append', data: { id: 'human', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Read the file.' }] } },
+      { type: 'user/message', seq: 1, time: 3, surfaceOp: 'append', data: { id: 'context', role: 'user', source: { kind: 'runtime-context', form: 'snapshot', sections: [] }, content: [{ type: 'text', text: 'Current runtime context.' }] } },
+      { type: 'assistant/message', seq: 2, time: 4, surfaceOp: 'append', data: { turn: 1, step: 1, message: { id: 'assistant', role: 'assistant', source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-v4-flash' }, content: [
+        { type: 'reasoning', text: 'Inspecting the file.' },
+        { type: 'tool-call', id: 'read-1', name: 'read', arguments: '{"path":"file.txt"}' },
+      ] } } },
+      { type: 'tool/call', seq: 3, time: 5, data: { turn: 1, step: 1, callId: 'read-1', name: 'read', arguments: '{"path":"file.txt"}' } },
+      { type: 'tool/result', seq: 4, time: 6, surfaceOp: 'append', sourceEventSeqs: [3], data: { turn: 1, step: 1, message: { id: 'result', role: 'tool', source: { kind: 'tool', callId: 'read-1' }, toolCallId: 'read-1', content: [{ type: 'text', text: 'file contents' }], isError: false } } },
+    ];
+    await writeFile(path.join(directory, 'session.v4.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    const store = new DshSessionStore(new DshConfigurationProvider({ DSH_HOME: root }));
+    const sessions = new DshSessionsProvider(store, new DshEventsProvider());
+    const history = await sessions.fetchHistory('app-tools', { providerSessionId: 'native-tools' });
+    assert.deepEqual(history.messages.map((message) => message.kind), ['text', 'thinking', 'tool_use', 'tool_result']);
+    assert.equal(history.messages[0].content, 'Read the file.');
+    assert.equal(history.messages[2].toolName, 'read');
+    assert.deepEqual(history.messages[2].toolInput, { path: 'file.txt' });
+    assert.equal(history.messages[2].toolId, history.messages[3].toolId);
+    assert.equal(history.messages[3].toolResult?.content, 'file contents');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test('native reader rejects unknown versions and paths escaping the configured root', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-invalid-history-'));
   try {

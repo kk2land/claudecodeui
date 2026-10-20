@@ -26,7 +26,16 @@ export class DshEventsProvider {
     if (type === 'text' || type === 'thinking') return event.text ? [make({ kind: type === 'thinking' ? 'thinking' : 'text', content: event.text })] : [];
     if (type === 'user/message' || type === 'assistant/message') {
       const message = type === 'user/message' ? data : data.message;
+      if (message?.source?.kind === 'runtime-context') return [];
       return (message?.content ?? []).flatMap((block: AnyRecord, index: number) => {
+        // Tool calls are surface blocks of the assistant message. The separate
+        // tool/call lifecycle event is not part of the visible history fold.
+        if (block.type === 'tool-call') {
+          let input = block.arguments;
+          try { input = JSON.parse(input); } catch { /* Preserve malformed model arguments as opaque input. */ }
+          return [make({ id: `dsh:${sessionId}:tool:${block.id}:call`, kind: 'tool_use',
+            toolId: block.id, toolName: block.name, toolInput: input })];
+        }
         if (block.type !== 'text' && block.type !== 'reasoning') return [];
         const parsed = type === 'user/message' ? parseFilesInputTag(block.text ?? '') : { text: block.text ?? '', attachments: [] };
         return [make({ id: `${baseId}:${index}`, kind: block.type === 'reasoning' ? 'thinking' : 'text', role: type === 'user/message' ? 'user' : 'assistant', content: parsed.text,

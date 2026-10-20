@@ -29,6 +29,7 @@ type DshOwner = {
   startedAt: number;
   idle?: NodeJS.Timeout;
   done?: Promise<void>;
+  releasing?: Promise<void>;
   configOptions?: AnyRecord[];
   defaultModel?: string;
   approvalBypass?: boolean;
@@ -55,19 +56,22 @@ export class DshRuntimeProvider implements IProviderRuntime {
     const cwd = path.resolve(options.cwd || options.projectPath || process.cwd());
     const signature = createHash('sha256').update(JSON.stringify({ config, cwd })).digest('hex');
     let owner = this.owners.get(id);
-    if (owner && (owner.signature !== signature || owner.child?.isClosed)) { await this.release(owner); owner = undefined; }
+    const previous = owner && (owner.signature !== signature || owner.child?.isClosed || owner.releasing) ? owner : undefined;
+    if (previous) owner = undefined;
     owner ??= { id, nativeId: context.resolveProviderSessionId(options.sessionId), cwd, signature, config, writer, busy: false, aborted: false, startedAt: Date.now() };
     clearTimeout(owner.idle);
     owner.writer = writer; owner.busy = true; owner.aborted = false; owner.startedAt = Date.now();
     owner.approvalBypass = options.permissionMode === 'bypassPermissions';
     this.owners.set(id, owner);
-    owner.done = this.execute(owner, command, options, context);
+    owner.done = this.execute(owner, command, options, context, previous);
     return owner.done;
   }
 
-  private async execute(owner: DshOwner, command: string, options: AnyRecord, context: ProviderRuntimeContext): Promise<void> {
+  private async execute(owner: DshOwner, command: string, options: AnyRecord, context: ProviderRuntimeContext, previous?: DshOwner): Promise<void> {
     let success = false;
     try {
+      if (previous) await this.release(previous);
+      if (owner.aborted) return;
       if (options.permissionMode && !['default', 'bypassPermissions'].includes(options.permissionMode)) throw new Error('DSH supports the default permission policy; native plan and permission modes are unavailable.');
       if (normalizeAttachmentDescriptors(options.images).length) throw new Error('DSH image uploads are not enabled for this integration.');
       const prompt = appendFilesInputTag(command, options.files);
@@ -89,25 +93,30 @@ export class DshRuntimeProvider implements IProviderRuntime {
         notifyRunFailed({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, error: message });
         // Never retry a prompt after a timeout or broken transport: delivery
         // may already have happened. Release the writer before any next run.
-        await this.release(owner);
+        await this.release(owner, false);
         throw error;
       }
     } finally {
-      this.cancelApprovals(owner);
-      owner.busy = false;
-      if (owner.nativeId) {
-        try { await this.synchronizer.synchronize(); } catch (error) { console.warn('[DSH] History indexing failed:', error instanceof Error ? error.message : String(error)); }
-      }
-      if (!owner.aborted) {
-        if (success) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
-        owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: success ? 0 : 1 }));
-      }
-      if (this.owners.get(owner.id) === owner) {
-        if (owner.config.mode === 'headless' || owner.aborted) await this.release(owner);
-        else {
-          owner.idle = setTimeout(() => { void this.release(owner).catch((error) => console.warn('[DSH] Idle cleanup failed:', error.message)); }, owner.config.idleMs);
-          owner.idle.unref();
+      try {
+        this.cancelApprovals(owner);
+        if (owner.nativeId) {
+          try { await this.synchronizer.synchronize(); } catch (error) { console.warn('[DSH] History indexing failed:', error instanceof Error ? error.message : String(error)); }
         }
+        if (!owner.aborted) {
+          if (success) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
+          owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: success ? 0 : 1 }));
+        }
+        if (this.owners.get(owner.id) === owner) {
+          if (owner.config.mode === 'headless' || owner.aborted || !success) await this.release(owner);
+          else {
+            owner.idle = setTimeout(() => { void this.release(owner).catch((error) => console.warn('[DSH] Idle cleanup failed:', error.message)); }, owner.config.idleMs);
+            owner.idle.unref();
+          }
+        }
+      } finally {
+        // Indexing and teardown belong to the same run. Releasing this guard
+        // early lets another prompt replace its writer and completion state.
+        owner.busy = false;
       }
     }
   }
@@ -193,10 +202,12 @@ export class DshRuntimeProvider implements IProviderRuntime {
     if (requestedModel) {
       const modelOption = owner.configOptions?.find((entry) => entry.id === 'model');
       const choices: AnyRecord[] = (modelOption?.options ?? []).flatMap((entry: AnyRecord) => entry.options ?? [entry]);
-      const match = choices.find((entry) => {
+      const matches = choices.filter((entry) => {
         if (entry.value === requestedModel) return true;
         try { const [provider, name] = JSON.parse(entry.value); return requestedModel === `${provider}/${name}` || requestedModel === name; } catch { return false; }
       });
+      if (matches.length > 1) throw new Error(`DSH model ${model} is ambiguous. Use provider/model or an advertised ACP value.`);
+      const match = matches[0];
       if (!match) throw new Error(`DSH does not advertise model ${model}. Use provider/model or an advertised ACP value.`);
       const selected = await child.request('session/set_config_option', { sessionId: owner.nativeId, configId: 'model', value: match.value }, timeout);
       owner.configOptions = selected.configOptions ?? owner.configOptions;
@@ -245,6 +256,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
     };
     child.child.stdin?.end(prompt);
     const code = await child.exited;
+    if (!owner.aborted && child.transportError) throw child.transportError;
     if (!owner.aborted && (code !== 0 || !final)) throw new Error(`DSH headless failed (${code ?? 'signal'}). ${child.errorTail}`);
   }
 
@@ -280,15 +292,19 @@ export class DshRuntimeProvider implements IProviderRuntime {
     return true;
   }
 
-  private async release(owner: DshOwner): Promise<void> {
-    clearTimeout(owner.idle);
-    this.cancelApprovals(owner);
-    if (owner.config.mode === 'acp' && !owner.busy && owner.nativeId && owner.child && !owner.child.isClosed) {
-      try { await owner.child.request('session/close', { sessionId: owner.nativeId }, owner.config.timeoutMs); } catch { /* EOF and signals still reap an unresponsive peer. */ }
+  private async release(owner: DshOwner, forget = true): Promise<void> {
+    owner.releasing ??= (async () => {
+      clearTimeout(owner.idle);
+      this.cancelApprovals(owner);
+      if (owner.config.mode === 'acp' && !owner.busy && owner.nativeId && owner.child && !owner.child.isClosed) {
+        try { await owner.child.request('session/close', { sessionId: owner.nativeId }, owner.config.timeoutMs); } catch { /* EOF and signals still reap an unresponsive peer. */ }
+      }
+      await owner.child?.close();
+      if (owner.directory) await rm(owner.directory, { recursive: true, force: true });
+    })();
+    try { await owner.releasing; } finally {
+      if (forget && this.owners.get(owner.id) === owner) this.owners.delete(owner.id);
     }
-    await owner.child?.close();
-    if (owner.directory) await rm(owner.directory, { recursive: true, force: true });
-    if (this.owners.get(owner.id) === owner) this.owners.delete(owner.id);
   }
 
   listActiveSessions() { return [...this.owners.values()].filter((owner) => owner.busy).map((owner) => ({ sessionId: owner.id, startedAt: owner.startedAt })); }

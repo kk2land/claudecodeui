@@ -30,7 +30,7 @@ export class DshProcess {
         const tail = this.buffer + this.decoder.end();
         if (tail.trim()) this.parse(tail);
         this.ended = true;
-        this.fail(new Error(`DSH exited (${code ?? 'signal'}).${this.stderr ? ` ${this.stderr}` : ''}`));
+        this.rejectPending(this.failure ?? new Error(`DSH exited (${code ?? 'signal'}).${this.stderr ? ` ${this.stderr}` : ''}`));
         resolve(code);
       });
     });
@@ -54,11 +54,19 @@ export class DshProcess {
 
   private fail(error: Error): void {
     this.failure ??= error;
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(this.failure); }
+    this.rejectPending(this.failure);
+    // Headless has no outstanding RPC to trigger runtime cleanup. Reap a
+    // broken peer here as well, including one that ignores the first SIGTERM.
+    void this.close();
+  }
+
+  private rejectPending(error: Error): void {
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(error); }
     this.pending.clear();
   }
 
   private parse(line: string): void {
+    if (this.failure) return;
     try {
       const frame = JSON.parse(line) as AnyRecord;
       if (!frame || typeof frame !== 'object' || Array.isArray(frame)) throw new Error('Expected a JSON object.');
@@ -105,6 +113,7 @@ export class DshProcess {
   notify(method: string, params: unknown): void { this.write({ jsonrpc: '2.0', method, params }); }
 
   get errorTail(): string { return this.stderr; }
+  get transportError(): Error | undefined { return this.failure; }
   get isClosed(): boolean { return this.ended || Boolean(this.failure); }
 
   close(): Promise<void> {
