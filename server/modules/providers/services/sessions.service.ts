@@ -94,10 +94,11 @@ type SessionDetails = {
 };
 
 const MAX_CLOUDCLI_SESSION_NAME_WORDS = 4;
+const UNTITLED_CLOUDCLI_SESSION_NAME = 'Untitled Session';
 
 function buildCloudCliSessionName(initialMessage: string): string {
   const words = initialMessage.trim().split(/\s+/).filter(Boolean);
-  return words.slice(0, MAX_CLOUDCLI_SESSION_NAME_WORDS).join(' ') || 'Untitled Session';
+  return words.slice(0, MAX_CLOUDCLI_SESSION_NAME_WORDS).join(' ') || UNTITLED_CLOUDCLI_SESSION_NAME;
 }
 
 /**
@@ -314,6 +315,26 @@ export const sessionsService = {
       projectPath: normalizedProjectPath,
       sessionName,
     };
+  },
+
+  /**
+   * Used by the websocket gateway to name sessions allocated before any text
+   * was sent, such as a new chat switched into Codex plan mode. Only a blank
+   * or default title is replaced; later prompts keep the established name.
+   */
+  async initializeSessionName(sessionId: string, initialMessage: string): Promise<void> {
+    if (!initialMessage.trim()) {
+      return;
+    }
+
+    const session = sessionsDb.getSessionById(sessionId);
+    const currentName = session?.custom_name?.trim();
+    if (!session || (currentName && currentName !== UNTITLED_CLOUDCLI_SESSION_NAME)) {
+      return;
+    }
+
+    sessionsDb.updateSessionCustomName(sessionId, buildCloudCliSessionName(initialMessage));
+    await broadcastSessionUpserted(sessionId);
   },
 
   /**

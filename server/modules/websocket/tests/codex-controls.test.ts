@@ -42,6 +42,34 @@ async function harness(runTest: (h: {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const queued = { id: 'message-1', content: 'guide this', attachments: [{ path: '/etc/passwd' }] };
 
+test('the first prompt names a session allocated for plan controls and broadcasts its title', async () => {
+  await harness(async (h) => {
+    sessionsDb.updateSessionCustomName(h.sessionId, 'Untitled Session');
+    h.state.phase = 'idle';
+    h.state.turnId = null;
+    h.runtime.control = async (_provider, _sessionId, action) => {
+      if (action.action === 'mode') h.state.mode = action.mode;
+      return h.state;
+    };
+    h.send({ action: 'mode', mode: 'plan' });
+    await settle();
+    assert.equal(sessionsDb.getSessionById(h.sessionId)?.custom_name, 'Untitled Session');
+    assert.equal(sessionsDb.getSessionById(h.sessionId)?.provider_session_id, null);
+
+    let dispatched!: () => void;
+    const dispatch = new Promise<void>((resolve) => { dispatched = resolve; });
+    h.runtime.run = async (_provider, content) => { h.calls.push({ run: content }); dispatched(); };
+    h.socket.emit('message', JSON.stringify({ type: 'chat.send', sessionId: h.sessionId, content: 'Design a reliable deployment plan' }));
+    await dispatch;
+
+    assert.equal(sessionsDb.getSessionById(h.sessionId)?.custom_name, 'Design a reliable deployment');
+    assert.ok(h.frames.some((frame) => frame.kind === 'session_upserted'
+      && frame.sessionId === h.sessionId && frame.session.summary === 'Design a reliable deployment'));
+    assert.equal(h.calls.at(-1)?.run, 'Design a reliable deployment plan');
+    assert.equal(h.state.mode, 'plan');
+  });
+});
+
 test('the process stop control reaches the Codex runtime without accepting a client PID', async () => {
   await harness(async (h) => {
     h.send({ action: 'stop-app-server', pid: 1 }); await settle();

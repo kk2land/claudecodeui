@@ -66,6 +66,45 @@ test('app sessions without message text receive a stable fallback name', { concu
   });
 });
 
+test('deferred session names use the first text and keep it for subsequent prompts', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    const { sessionId } = sessionsService.createAppSession('codex', '/tmp/deferred-session-name', '');
+    sessionsDb.assignProviderSessionId(sessionId, 'native-plan-session');
+
+    await sessionsService.initializeSessionName(sessionId, '  Design\na   reliable deployment plan  ');
+    await sessionsService.initializeSessionName(sessionId, 'Implement the selected plan');
+
+    assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Design a reliable deployment');
+  });
+});
+
+test('attachment-only prompts keep the fallback until text is available', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    const { sessionId } = sessionsService.createAppSession('codex', '/tmp/attachment-session-name', '');
+
+    await sessionsService.initializeSessionName(sessionId, '  \n ');
+    assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, 'Untitled Session');
+
+    await sessionsService.initializeSessionName(sessionId, '分析附件中的部署方案');
+    assert.equal(sessionsDb.getSessionById(sessionId)?.custom_name, '分析附件中的部署方案');
+  });
+});
+
+test('deferred naming preserves both initial titles and manual renames', { concurrency: false }, async () => {
+  await withIsolatedDatabase(async () => {
+    const named = sessionsService.createAppSession('codex', '/tmp/existing-session-name', 'Original request');
+    const renamed = sessionsService.createAppSession('codex', '/tmp/renamed-session-name', '');
+    sessionsService.renameSessionById(renamed.sessionId, 'My custom plan');
+
+    for (const { sessionId } of [named, renamed]) {
+      await sessionsService.initializeSessionName(sessionId, 'A later prompt');
+    }
+
+    assert.equal(sessionsDb.getSessionById(named.sessionId)?.custom_name, 'Original request');
+    assert.equal(sessionsDb.getSessionById(renamed.sessionId)?.custom_name, 'My custom plan');
+  });
+});
+
 test('provider session id is unavailable until the provider assigns one', { concurrency: false }, async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('pending-app-session', 'claude', '/tmp/session-id-copy-project');
