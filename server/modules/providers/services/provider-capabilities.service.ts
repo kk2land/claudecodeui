@@ -109,7 +109,8 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     provider: 'dsh',
     permissionModes: ['default'],
     defaultPermissionMode: 'default',
-    supportsImages: false,
+    // ACP/headless pass stored paths to DSH's model-gated read_image tool.
+    supportsImages: true,
     supportsFiles: true,
     supportsAbort: true,
     // ACP supports prompts; the per-session runtime snapshot reports whether they are currently available.

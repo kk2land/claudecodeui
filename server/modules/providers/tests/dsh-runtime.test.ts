@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,6 +10,7 @@ import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provi
 import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js';
 import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
 import type { AnyRecord, DshRuntimeMode, DshRuntimeSettings, ProviderRuntimeContext } from '@/shared/types.js';
+import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 
 const actor = `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -94,6 +95,50 @@ async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = n
 async function until(condition: () => boolean | Promise<boolean>): Promise<void> {
   for (let n = 0; n < 200; n++) { if (await condition()) return; await delay(10); }
   assert.fail('Timed out waiting for protocol state.');
+}
+
+for (const mode of ['acp', 'headless'] as const) {
+  test(`${mode} sends images and files as separate readable path references, including image-only turns`, { skip: process.platform === 'win32' }, async () => {
+    const f = await fixture(mode);
+    try {
+      const image = { path: path.join(f.root, 'screen shot.png'), name: '界面.png', mimeType: 'image/png' };
+      const file = { path: path.join(f.root, 'notes.txt'), name: 'notes.txt' };
+      await writeFile(image.path, 'fixture');
+      await writeFile(file.path, 'notes');
+      await f.run('Describe this screenshot.', { images: [{ ...image, path: 'screen shot.png' }], files: [file] });
+      await f.run('', { images: [image] });
+      const prompts = (await f.calls()).flatMap((call) => mode === 'acp'
+        ? call.method === 'session/prompt' ? [call.params.prompt[0].text] : []
+        : typeof call.prompt === 'string' ? [call.prompt] : []);
+      assert.equal(prompts.length, 2);
+      const files = parseFilesInputTag(prompts[0]);
+      const images = parseImagesInputTag(files.text);
+      assert.equal(images.text, 'Describe this screenshot.');
+      assert.deepEqual(images.attachments, [{ path: image.path, name: image.name }]);
+      assert.deepEqual(files.attachments, [file]);
+      assert.deepEqual(parseImagesInputTag(prompts[1]).attachments, images.attachments);
+      assert.equal(parseImagesInputTag(prompts[1]).text, '');
+      assert.equal(f.messages.filter((message) => message.kind === 'complete' && message.success).length, 2);
+    } finally { await f.close(); }
+  });
+
+  test(`${mode} rejects missing images and image paths or symlinks escaping allowed roots`, { skip: process.platform === 'win32' }, async () => {
+    const f = await fixture(mode);
+    const outside = await mkdtemp(path.join(os.tmpdir(), 'dsh-outside-'));
+    try {
+      const image = path.join(outside, 'private.png');
+      const linked = path.join(f.root, 'linked.png');
+      await writeFile(image, 'private');
+      await symlink(image, linked);
+      for (const imagePath of [image, linked]) {
+        await assert.rejects(f.run('describe', { images: [imagePath] }), /inside the upload store or working directory/);
+      }
+      await assert.rejects(f.run('describe', { images: ['missing.png'] }), /ENOENT/);
+      assert.equal(f.captured, null);
+      assert.equal(f.runtime.listActiveSessions().length, 0);
+      assert(f.messages.filter((message) => message.kind === 'complete').every((message) => !message.success));
+    } finally { await f.close(); await rm(outside, { recursive: true, force: true }); }
+  });
 }
 
 test('ACP reuses its process, maps ids, and selects an advertised model on later turns', { skip: process.platform === 'win32' }, async () => {

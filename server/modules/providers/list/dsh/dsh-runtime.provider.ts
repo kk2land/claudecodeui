@@ -1,5 +1,5 @@
 import { randomUUID, createHash } from 'node:crypto';
-import { access, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, realpath, rm, writeFile } from 'node:fs/promises';
 import { constants } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -14,7 +14,7 @@ import { sessionRuntimeDb } from '@/modules/database/index.js';
 import type { IProviderRuntime } from '@/shared/interfaces.js';
 import type { AnyRecord, DshConfiguration, ProviderPermissionDecision, ProviderRuntimeAction, ProviderRuntimeState, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/types.js';
 import { AppError, createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
-import { appendFilesInputTag, normalizeAttachmentDescriptors } from '@/shared/image-attachments.js';
+import { appendFilesInputTag, appendImagesInputTag, isAllowedImageSourcePath, normalizeAttachmentDescriptors, resolveImageAbsolutePath } from '@/shared/image-attachments.js';
 
 type DshOwner = {
   id: string;
@@ -81,8 +81,18 @@ export class DshRuntimeProvider implements IProviderRuntime {
       if (previous) await this.release(previous);
       if (owner.aborted) return;
       if (options.permissionMode && !['default', 'bypassPermissions'].includes(options.permissionMode)) throw new Error('DSH supports the default permission policy; native plan and permission modes are unavailable.');
-      if (normalizeAttachmentDescriptors(options.images).length) throw new Error('DSH image uploads are not enabled for this integration.');
-      const prompt = appendFilesInputTag(command, options.files);
+      const images = normalizeAttachmentDescriptors(options.images);
+      for (const image of images) {
+        const resolved = resolveImageAbsolutePath(owner.cwd, image.path);
+        if (!isAllowedImageSourcePath(resolved, owner.cwd)
+          || !isAllowedImageSourcePath(await realpath(resolved), owner.cwd)) {
+          throw new Error('DSH image attachments must be inside the upload store or working directory.');
+        }
+        image.path = resolved;
+      }
+      // Both transports can use DSH's read_image tool. It checks the selected
+      // model's image support and persists the image in native session history.
+      const prompt = appendFilesInputTag(appendImagesInputTag(command, images), options.files);
       const model = await context.resolveResumeModel(owner.id, options.model);
       const mcpSignature = JSON.stringify(await this.servers(owner));
       if (owner.child && owner.mcpSignature !== mcpSignature) {

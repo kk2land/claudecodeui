@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import type { AnyRecord, NormalizedMessage } from '@/shared/types.js';
 import { createNormalizedMessage, readObjectRecord } from '@/shared/utils.js';
-import { parseFilesInputTag } from '@/shared/image-attachments.js';
+import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 
 /** Normalizes ACP updates, headless events, and decoded native DSH history. */
 export class DshEventsProvider {
@@ -38,7 +38,9 @@ export class DshEventsProvider {
         }
         if (block.type !== 'text' && block.type !== 'reasoning') return [];
         const parsed = type === 'user/message' ? parseFilesInputTag(block.text ?? '') : { text: block.text ?? '', attachments: [] };
-        return [make({ id: `${baseId}:${index}`, kind: block.type === 'reasoning' ? 'thinking' : 'text', role: type === 'user/message' ? 'user' : 'assistant', content: parsed.text,
+        const images = type === 'user/message' ? parseImagesInputTag(parsed.text) : { text: parsed.text, attachments: [] };
+        return [make({ id: `${baseId}:${index}`, kind: block.type === 'reasoning' ? 'thinking' : 'text', role: type === 'user/message' ? 'user' : 'assistant', content: images.text,
+          ...(images.attachments.length ? { images: images.attachments } : {}),
           ...(parsed.attachments.length ? { files: parsed.attachments } : {}) })];
       });
     }

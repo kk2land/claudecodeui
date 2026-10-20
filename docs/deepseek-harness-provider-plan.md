@@ -63,7 +63,7 @@ headless 将完整多行 prompt 写入 stdin，避免 shell 转义和命令行�
 
 ## 能力边界
 
-DSH 当前集成不开放图片上传、原生 plan/steer、goal、elicitation、会话 fork、历史消息编辑重跑和累计 token 用量统计。普通文件以路径引用传入。ACP/headless 展示已提交的消息与工具事件，不承诺逐 token 展示。headless 没有交互审批通道，权限由 DSH profile 决定，需人工确认的工具可能被拒绝。
+DSH 当前集成不开放原生 plan/steer、goal、elicitation、会话 fork、历史消息编辑重跑和累计 token 用量统计。图片在 ACP/headless 中均通过已验证的本地路径引用传入，由 DSH 的 `read_image` 工具读取并持久化；需要 profile 启用该工具及附件存储，且所选模型声明支持图片，否则由 DSH 返回明确错误。该路径不依赖 ACP 初始化时的原生内联图片能力，历史消息还原图片附件并隐藏内部路径引用块。普通文件以路径引用传入。ACP/headless 展示已提交的消息与工具事件，不承诺逐 token 展示。headless 没有交互审批通道，权限由 DSH profile 决定，需人工确认的工具可能被拒绝。
 
 支持应用内归档。永久删除原生 DSH 日志明确返回不支持，避免只删除最新 generation 而重新暴露旧历史；不会假装调用 ACP 原生删除。未知格式或恢复失败保留原始日志，返回可定位的错误。
 

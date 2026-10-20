@@ -20,6 +20,13 @@ const CURATED_CATALOGS: Record<LLMProvider, ProviderModelsDefinition> = {
   dsh: { DEFAULT: 'default', OPTIONS: [{ value: 'default', label: 'Profile default' }] },
 };
 
+test('DSH advertises image attachments for both supported transports', () => {
+  const capabilities = providerCapabilitiesService.getProviderCapabilities('dsh');
+  assert.equal(capabilities.supportsImages, true);
+  assert.equal(capabilities.supportsFiles, true);
+  assert.deepEqual(capabilities.runtimeManagement?.modes, ['acp', 'headless']);
+});
+
 test('capability effort levels cover every level a curated model declares', () => {
   // Custom models may declare only these levels, so a level added to a curated
   // model has to be added here too, or users could not give it to their own.
