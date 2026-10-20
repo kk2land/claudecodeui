@@ -846,9 +846,6 @@ export function useProjectsState({
         typeof upsert.providerSessionId === 'string' && upsert.providerSessionId !== upsert.sessionId
           ? upsert.providerSessionId
           : null;
-      if (!aliasedSelectedSessionId) {
-        return;
-      }
 
       const normalizedSelectedSession: ProjectSession = {
         ...upsert.session,
@@ -858,6 +855,16 @@ export function useProjectsState({
       };
 
       setSelectedSession((previousSession) => {
+        if (previousSession?.id === upsert.sessionId) {
+          // Deferred naming must update the header as well as the sidebar.
+          // Keep the selection stable for transcript ticks with the same title.
+          if (typeof upsert.session.summary !== 'string' || previousSession.summary === upsert.session.summary) {
+            return previousSession;
+          }
+          // A title change must not replay a one-shot conversation search jump.
+          const { __searchTargetSnippet: _snippet, __searchTargetTimestamp: _timestamp, ...session } = previousSession;
+          return { ...session, summary: upsert.session.summary };
+        }
         if (previousSession?.id !== aliasedSelectedSessionId) {
           return previousSession;
         }

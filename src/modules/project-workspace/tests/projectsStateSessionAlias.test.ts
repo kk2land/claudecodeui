@@ -190,3 +190,35 @@ test('an upsert for a session that is already canonical does not renavigate', as
   assert.equal(result.current.selectedSession?.id, APP_SESSION_ID);
   assert.deepEqual(navigate.mock.calls, []);
 });
+
+test.each([null, PROVIDER_SESSION_ID])('a canonical title upsert updates the selection with provider id %s', async (providerSessionId) => {
+  const session: ProjectSession = { id: APP_SESSION_ID, summary: 'Untitled Session', __provider: 'codex' };
+  respondWith([buildProject([session])]);
+  const navigate = vi.fn();
+  const { result } = await renderProjectsState(navigate, APP_SESSION_ID);
+  await waitFor(() => assert.equal(result.current.projects.length, 1));
+
+  act(() => {
+    result.current.handleSessionSelect({ ...session, __projectId: 'project-1',
+      __searchTargetSnippet: 'matched text', __searchTargetTimestamp: '2026-01-01T00:00:00.000Z' });
+  });
+  navigate.mockClear();
+  const upsert = { ...buildUpsert(providerSessionId), provider: 'codex',
+    session: { ...buildUpsert(providerSessionId).session, summary: 'Design a reliable deployment' } };
+  await act(async () => { emit(upsert); });
+
+  assert.equal(result.current.selectedSession?.summary, 'Design a reliable deployment');
+  assert.equal(result.current.projects[0].sessions?.[0].summary, 'Design a reliable deployment');
+  assert.equal(result.current.selectedSession?.__provider, 'codex');
+  assert.equal('__searchTargetSnippet' in (result.current.selectedSession ?? {}), false);
+  assert.equal('__searchTargetTimestamp' in (result.current.selectedSession ?? {}), false);
+  assert.deepEqual(navigate.mock.calls, []);
+
+  const selected = result.current.selectedSession;
+  await act(async () => {
+    // Transcript activity and other conversations must not recreate the selection.
+    emit({ ...upsert, session: { ...upsert.session, messageCount: 4 } });
+    emit({ ...upsert, sessionId: 'other-session', session: { ...upsert.session, id: 'other-session', summary: 'Other title' } });
+  });
+  assert.equal(result.current.selectedSession, selected);
+});
