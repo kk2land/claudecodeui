@@ -95,7 +95,7 @@ function isSessionBusy(sessionId: string, runtime: ProviderRuntimeGateway): bool
     || Boolean(runtime.isQueueBlocked?.(sessionId));
 }
 
-/** Sends every persisted queued turn whose session is currently idle. */
+/** Sends idle sessions' persisted turns; used by the timer and providers' queue integration tests. */
 export async function dispatchQueuedMessages(runtime: ProviderRuntimeGateway): Promise<number> {
   const candidates = sessionDraftsDb.listQueuedMessages();
   let claimed = 0;

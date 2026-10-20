@@ -97,14 +97,11 @@ export class DshRuntimeProvider implements IProviderRuntime {
         throw error;
       }
     } finally {
+      let exitCode = 1;
       try {
         this.cancelApprovals(owner);
         if (owner.nativeId) {
           try { await this.synchronizer.synchronize(); } catch (error) { console.warn('[DSH] History indexing failed:', error instanceof Error ? error.message : String(error)); }
-        }
-        if (!owner.aborted) {
-          if (success) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
-          owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: success ? 0 : 1 }));
         }
         if (this.owners.get(owner.id) === owner) {
           if (owner.config.mode === 'headless' || owner.aborted || !success) await this.release(owner);
@@ -113,10 +110,16 @@ export class DshRuntimeProvider implements IProviderRuntime {
             owner.idle.unref();
           }
         }
+        exitCode = success ? 0 : 1;
       } finally {
-        // Indexing and teardown belong to the same run. Releasing this guard
-        // early lets another prompt replace its writer and completion state.
+        // Complete makes the registry idle and allows the queue to claim its
+        // next turn. Publish it only after teardown and this busy guard end.
+        // No owner mutation or asynchronous cleanup may follow the terminal.
         owner.busy = false;
+        if (!owner.aborted) {
+          if (exitCode === 0) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
+          owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode }));
+        }
       }
     }
   }
