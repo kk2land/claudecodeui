@@ -2,15 +2,17 @@ import os from 'node:os';
 import path from 'node:path';
 
 import { SkillsProvider } from '@/modules/providers/shared/skills/skills.provider.js';
-import type { ProviderSkillSource } from '@/shared/types.js';
+import type { CodexProviderId, ProviderSkillSource } from '@/shared/types.js';
 import {
   addUniqueProviderSkillSource,
+  getCodexHome,
   findTopmostGitRoot,
 } from '@/shared/utils.js';
 
+/** Codex and GPT Web provider composition reuse this adapter with their own profile identity. */
 export class CodexSkillsProvider extends SkillsProvider {
-  constructor() {
-    super('codex');
+  constructor(private readonly codexProvider: CodexProviderId = 'codex') {
+    super(codexProvider);
   }
 
   protected async getSkillSources(workspacePath: string): Promise<ProviderSkillSource[]> {
@@ -46,7 +48,7 @@ export class CodexSkillsProvider extends SkillsProvider {
     });
     addUniqueProviderSkillSource(sources, seenRootDirs, {
       scope: 'user',
-      rootDir: path.join(os.homedir(), '.codex', 'skills'),
+      rootDir: path.join(getCodexHome(this.codexProvider), 'skills'),
       commandPrefix: '$',
     });
     addUniqueProviderSkillSource(sources, seenRootDirs, {
@@ -56,7 +58,7 @@ export class CodexSkillsProvider extends SkillsProvider {
     });
     addUniqueProviderSkillSource(sources, seenRootDirs, {
       scope: 'system',
-      rootDir: path.join(os.homedir(), '.codex', 'skills', '.system'),
+      rootDir: path.join(getCodexHome(this.codexProvider), 'skills', '.system'),
       commandPrefix: '$',
     });
 

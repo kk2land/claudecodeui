@@ -1,10 +1,11 @@
 import { stat } from 'node:fs/promises';
 
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import type { CodexRpcClient } from '@/shared/index.js';
 import { AppError } from '@/shared/index.js';
 
-/** Session branching uses the runtime-owned persistent transport. */
-export const codexAppServer = {
+/** Codex and GPT Web session/fork adapters bind this client to their runtime-owned transport. */
+export function createCodexAppServerClient(client: CodexRpcClient = codexAppServerTransport) {
   /**
    * Copies a thread into a new one that ends at `lastTurnId`, or copies the
    * whole thread when it is omitted.
@@ -17,13 +18,13 @@ export const codexAppServer = {
    * omitting it would file every fork under whatever directory this server
    * happens to be running from.
    */
-  async forkThread(input: {
+  async function forkThread(input: {
     threadId: string;
     lastTurnId?: string;
     cwd: string;
   }): Promise<{ threadId: string; path: string }> {
 
-    const result = await codexAppServerTransport.request('thread/fork', {
+    const result = await client.request('thread/fork', {
       threadId: input.threadId,
       ...(input.lastTurnId ? { lastTurnId: input.lastTurnId } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
@@ -51,5 +52,9 @@ export const codexAppServer = {
     }
 
     return { threadId, path };
-  },
-};
+  }
+  return { forkThread };
+}
+
+/** Codex runtime and session adapters use the default profile client. */
+export const codexAppServer = createCodexAppServerClient();

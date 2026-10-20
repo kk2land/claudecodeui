@@ -1,6 +1,6 @@
 import { sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
-import { AppError } from '@/shared/index.js';
+import { AppError, isCodexProvider } from '@/shared/index.js';
 import type {
   AnyRecord,
   CodexControlAction,
@@ -66,10 +66,11 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
   const numericUserId = Number(userId);
   const response = { kind: 'control_result' as const, sessionId, requestId };
   let steering = false;
+  const session = sessionId ? sessionsDb.getSessionById(sessionId) : null;
+  const provider = session && isCodexProvider(session.provider) ? session.provider : null;
 
   try {
-    const session = sessionId && sessionsDb.getSessionById(sessionId);
-    if (!sessionId || !session || session.provider !== 'codex' || !runtime.control) throw new Error('Codex session controls are unavailable.');
+    if (!sessionId || !session || !provider || !runtime.control) throw new Error('Codex session controls are unavailable.');
     if (!requestId || requestId.length > 160) throw new Error('A control request id is required.');
     if (!input.control || typeof input.control !== 'object' || Array.isArray(input.control)) throw new Error('A control action is required.');
     const raw = input.control as AnyRecord;
@@ -77,7 +78,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
     if (raw.action === 'queue-resume' || raw.action === 'queue-recover') {
       if (!Number.isSafeInteger(numericUserId) || userId === null) throw new Error('Authentication required.');
       if (raw.action === 'queue-recover') {
-        const state = runtime.getState?.('codex', sessionId);
+        const state = runtime.getState?.(provider!, sessionId);
         if (chatRunRegistry.isProcessing(sessionId) || state?.goal?.status === 'active' || ['starting', 'running', 'stopping', 'stopFailed'].includes(state?.phase ?? '')) throw new Error('Confirm the current task has stopped before resolving delivery.');
         if (raw.decision !== 'queue' && raw.decision !== 'discard') throw new Error('Choose queue or discard.');
         sessionDraftsDb.recoverUnknown(numericUserId, sessionId, raw.decision);
@@ -92,7 +93,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
         const claim = sessionDraftsDb.beginSteer(numericUserId, sessionId, raw.messageId, requestId);
         if (!claim.queuedMessage) {
           return { ...response, ok: claim.status === 'accepted', delivery: claim.status, error: claim.error,
-            codexState: runtime.getState?.('codex', sessionId) };
+            codexState: runtime.getState?.(provider!, sessionId) };
         }
         steering = true;
         const message = claim.queuedMessage as AnyRecord;
@@ -101,21 +102,21 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
       } else {
         action = parseControl(raw);
       }
-      const run = chatRunRegistry.getRun(sessionId) ?? chatRunRegistry.startRun({ appSessionId: sessionId, provider: 'codex',
+      const run = chatRunRegistry.getRun(sessionId) ?? chatRunRegistry.startRun({ appSessionId: sessionId, provider: provider!,
         providerSessionId: session.provider_session_id, connection, userId, passive: true })!;
       run.writer.updateWebSocket(connection);
       const options = { ...(input.options ?? {}), sessionId, cwd: session.project_path, projectPath: session.project_path };
-      await runtime.control('codex', sessionId, action, options, run.writer);
+      await runtime.control(provider!, sessionId, action, options, run.writer);
       if (steering) sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, 'accepted');
     }
     return { ...response, ok: true, delivery: steering ? 'accepted' : undefined,
-      codexState: runtime.getState?.('codex', sessionId) };
+      codexState: runtime.getState?.(provider!, sessionId) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Only an explicit RPC rejection proves non-delivery; disconnects and timeouts remain held.
     const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL'].includes(error.code));
     const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;
     return { ...response, ok: delivery === 'accepted', error: delivery === 'accepted' ? undefined : message, delivery,
-      codexState: sessionId ? runtime.getState?.('codex', sessionId) : undefined };
+      codexState: sessionId && provider ? runtime.getState?.(provider!, sessionId) : undefined };
   }
 }

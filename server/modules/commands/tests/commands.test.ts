@@ -72,11 +72,15 @@ async function executeCommand(
   }
 }
 
-test('models command returns models only for the active provider using injected catalog', async () => {
-  const result = await executeCommand('/models', { provider: 'codex' });
-  const data = result.data as Record<string, unknown>;
-  assert.deepEqual(Object.keys(data.available as object), ['codex']);
-});
+for (const provider of ['codex', 'gptweb']) {
+  test(`models command uses the ${provider} catalog`, async () => {
+    const result = await executeCommand('/models', { provider });
+    const data = result.data as { available: object; current: { provider: string; providerLabel: string } };
+    assert.deepEqual(Object.keys(data.available), [provider]);
+    assert.equal(data.current.provider, provider);
+    assert.equal(data.current.providerLabel, provider === 'gptweb' ? 'GPT Web' : 'Codex');
+  });
+}
 
 test('models command falls back to claude for unsupported providers', async () => {
   const result = await executeCommand('/models', { provider: 'unknown-provider' });

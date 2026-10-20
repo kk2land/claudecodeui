@@ -15,6 +15,7 @@ import type { LLMProvider, ProviderModelsDefinition } from '@/shared/types.js';
 const CURATED_CATALOGS: Record<LLMProvider, ProviderModelsDefinition> = {
   claude: CLAUDE_PREDEFINED_MODELS,
   codex: CODEX_PREDEFINED_MODELS,
+  gptweb: { OPTIONS: [], DEFAULT: '' },
   cursor: CURSOR_PREDEFINED_MODELS,
   opencode: OPENCODE_PREDEFINED_MODELS,
   dsh: { DEFAULT: 'default', OPTIONS: [{ value: 'default', label: 'Profile default' }] },

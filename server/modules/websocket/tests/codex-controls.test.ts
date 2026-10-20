@@ -16,13 +16,13 @@ async function harness(runTest: (h: {
   userId: number; sessionId: string; runtime: ProviderRuntimeGateway; frames: AnyRecord[];
   socket: EventEmitter; calls: AnyRecord[]; state: CodexSessionState;
   send(control: AnyRecord, requestId?: string): void;
-}) => Promise<void>) {
+}) => Promise<void>, provider: 'codex' | 'gptweb' = 'codex') {
   const previous = process.env.DATABASE_PATH;
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-controls-'));
   closeConnection(); process.env.DATABASE_PATH = path.join(root, 'auth.db'); await initializeDatabase();
   const sessionId = 'app-codex';
   const userId = Number(userDb.createUser('codex-test', 'hash').id);
-  sessionsDb.createAppSession(sessionId, 'codex', root);
+  sessionsDb.createAppSession(sessionId, provider, root);
   const frames: AnyRecord[] = []; const calls: AnyRecord[] = [];
   const socket = Object.assign(new EventEmitter(), { readyState: 1, send: (text: string) => frames.push(JSON.parse(text)) });
   const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: 't1', phase: 'running', goal: null, questions: [] };
@@ -209,4 +209,14 @@ test('native turn continuation transfers subscribers and changes replay executio
     h.socket.emit('message', JSON.stringify({ type: 'chat.subscribe', sessions: [{ sessionId: h.sessionId, executionId: run.executionId, lastSeq: 999 }] })); await settle();
     assert.equal(h.frames.filter((frame) => frame.content === 'second').length, 2);
   });
+});
+
+
+test('GPT Web controls dispatch through the owning provider instead of the default Codex runtime', async () => {
+  await harness(async h => {
+    h.send({ action: 'mode', mode: 'plan' });
+    await settle();
+    assert.equal(h.calls[0].provider, 'gptweb');
+    assert.equal(h.frames.at(-1)?.ok, true);
+  }, 'gptweb');
 });

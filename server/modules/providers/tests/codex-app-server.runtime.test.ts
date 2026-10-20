@@ -13,7 +13,7 @@ afterEach(() => {
   else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = originalGoalSetting;
 });
 
-function harness(timeout = 100) {
+function harness(timeout = 100, provider: 'codex' | 'gptweb' = 'codex') {
   const calls: Array<{ method: string; params: AnyRecord }> = [];
   let notify: (frame: CodexRpcFrame) => void = () => {};
   let request: (frame: CodexRpcFrame) => Promise<unknown> = async () => ({});
@@ -59,7 +59,7 @@ function harness(timeout = 100) {
   const runtime = new CodexAppServerRuntime(rpc, settingsDb, timeout, (_, id) => accepted.push(id), async (sessionId) => {
     historyReads.push(sessionId);
     return storedMessages;
-  });
+  }, provider);
   const events: AnyRecord[] = [];
   let writerNumber = 1;
   const writer: ProviderRuntimeWriter = { send: (data) => events.push({ ...data as AnyRecord, writer: 1 }), setSessionId: (id) => { nativeId = id; }, nextTurn: () => {
@@ -772,4 +772,18 @@ test('an unconfirmed thread unload never commits the runtime switch', async () =
   h.handlers.set('thread/unsubscribe', async () => ({ status: 'notLoaded' }));
   await router.control!('app-session', { action: 'runtime', runtime: 'sdk' }, h.options, h.writer, h.context);
   assert.equal(h.settings().runtime, 'sdk');
+});
+
+
+test('GPT Web reuses native plan and steer while publishing only its own provider identity', async () => {
+  const h = harness(100, 'gptweb');
+  const running = h.run('design', { collaborationMode: 'plan' });
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  assert.equal(h.calls.find(call => call.method === 'turn/start')?.params.collaborationMode.mode, 'plan');
+  await h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'web-steer', content: 'also verify', attachments: [] });
+  h.event('item/completed', { turnId: 'turn-1', item: { type: 'agentMessage', id: 'web-answer', text: 'done' } });
+  h.finish(); await running;
+  assert.ok(h.events.some(event => event.kind === 'text' && event.content === 'done'));
+  assert.ok(h.events.every(event => event.provider === 'gptweb'));
+  assert.equal(h.calls.filter(call => call.method === 'turn/steer').length, 1);
 });

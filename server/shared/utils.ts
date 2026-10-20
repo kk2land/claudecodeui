@@ -21,6 +21,7 @@ import type { NextFunction, Request, RequestHandler, Response } from 'express';
 import { parseFrontMatter } from '@/shared/frontmatter.js';
 import type {
   AnyRecord,
+  CodexProviderId,
   ApiSuccessShape,
   AppErrorOptions,
   NormalizedMessage,
@@ -47,6 +48,29 @@ export const IS_PLATFORM = process.env.VITE_IS_PLATFORM === 'true';
  */
 export function isCodexGoalEnabled(): boolean {
   return process.env.CLOUDCLI_CODEX_GOAL_ENABLED === 'true';
+}
+
+/** Providers and WebSocket dispatch use this to recognize the shared Codex protocol family. */
+export function isCodexProvider(provider: unknown): provider is CodexProviderId {
+  return provider === 'codex' || provider === 'gptweb';
+}
+
+/** Providers resolve one profile's absolute home without changing the parent process environment. */
+export function getCodexHome(provider: CodexProviderId = 'codex'): string {
+  if (provider === 'codex') return path.join(os.homedir(), '.codex');
+  const configured = process.env.CODEX_GPTWEB_HOME?.trim();
+  if (!configured) throw new AppError('Set CODEX_GPTWEB_HOME before using GPT Web.', { code: 'GPTWEB_HOME_REQUIRED', statusCode: 503 });
+  const home = configured === '~' ? os.homedir()
+    : configured.startsWith('~/') ? path.join(os.homedir(), configured.slice(2)) : configured;
+  if (!path.isAbsolute(home)) throw new AppError('CODEX_GPTWEB_HOME must be an absolute directory.', { code: 'GPTWEB_HOME_INVALID', statusCode: 503 });
+  return path.resolve(home);
+}
+
+/** Codex SDK and app-server launchers need a complete environment because SDK env replaces inheritance. */
+export function getCodexProcessEnv(provider: CodexProviderId): Record<string, string> {
+  const env = Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string'));
+  if (provider === 'gptweb') env.CODEX_HOME = getCodexHome(provider);
+  return env;
 }
 
 // ---------------------------

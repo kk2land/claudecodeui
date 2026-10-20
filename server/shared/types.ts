@@ -66,8 +66,13 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  * Use this as the source of truth whenever a function or payload needs to identify
  * a specific LLM integration.
  */
-export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
+export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh' | 'gptweb';
 
+//----------------- CODEX PROVIDER PROFILES ------------
+/** Codex protocol users with separate process, configuration and transcript ownership. */
+export type CodexProviderId = 'codex' | 'gptweb';
+
+// ---------------------------
 //----------------- DEEPSEEK HARNESS ------------
 /** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
 export type DshRuntimeMode = 'acp' | 'headless';
@@ -757,6 +762,8 @@ export type CodexRpcFrame = {
 
 /** Injectable transport contract used by the native runtime and scripted protocol tests. */
 export type CodexRpcClient = {
+  /** Owned transports release their process when the runtime is closed. */
+  close?(): Promise<void>;
   readonly status?: NonNullable<CodexSessionState['diagnostics']>;
   request<T = AnyRecord>(method: string, params?: unknown): Promise<T>;
   onNotification(listener: (frame: CodexRpcFrame) => void): () => void;

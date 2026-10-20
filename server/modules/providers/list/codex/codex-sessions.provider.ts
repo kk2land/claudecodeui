@@ -8,6 +8,7 @@ import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
 import type {
   AnyRecord,
+  CodexProviderId,
   FetchHistoryOptions,
   FetchHistoryResult,
   IProviderSessions,
@@ -27,7 +28,6 @@ import {
   unifiedDiffToTexts,
 } from '@/shared/index.js';
 
-const PROVIDER = 'codex';
 
 /**
  * How far up the `~/.codex/sessions/<year>/<month>/<day>` tree a subagent
@@ -136,9 +136,9 @@ function createCodexTurnTracker() {
  * once when a message is edited, while the reader runs on every history fetch,
  * and both share the one rule for what a live turn is.
  */
-async function readCodexLiveTurnIds(filePath: string): Promise<string[]> {
+async function readCodexLiveTurnIds(filePath: string, provider: CodexProviderId = 'codex'): Promise<string[]> {
   const turns = createCodexTurnTracker();
-  for await (const line of readCodexRolloutLines(filePath)) {
+  for await (const line of readCodexRolloutLines(filePath, undefined, new Set(), provider)) {
     if (!line.trim()) {
       continue;
     }
@@ -158,9 +158,9 @@ async function readCodexLiveTurnIds(filePath: string): Promise<string[]> {
 }
 
 /** Resolve reference-backed history without requiring the source to remain indexed. */
-async function findCodexHistorySource(filePath: string, threadId: string): Promise<string | null> {
-  const indexed = sessionsDb.getSessionByProviderSessionId(threadId);
-  if (indexed?.provider === PROVIDER && indexed.jsonl_path) {
+async function findCodexHistorySource(filePath: string, threadId: string, provider: CodexProviderId): Promise<string | null> {
+  const indexed = sessionsDb.getSessionByProviderSessionId(threadId, provider);
+  if (indexed?.provider === provider && indexed.jsonl_path) {
     try {
       if ((await fsp.stat(indexed.jsonl_path)).isFile()) {
         return indexed.jsonl_path;
@@ -195,6 +195,7 @@ async function* readCodexRolloutLines(
   filePath: string,
   endByteOffset?: number,
   ancestors = new Set<string>(),
+  provider: CodexProviderId = 'codex',
 ): AsyncGenerator<string> {
   const canonicalPath = await fsp.realpath(filePath);
   if (ancestors.has(canonicalPath) || ancestors.size >= 128) {
@@ -235,13 +236,13 @@ async function* readCodexRolloutLines(
               code: 'CODEX_HISTORY_SOURCE_INVALID', statusCode: 502,
             });
           }
-          const sourcePath = await findCodexHistorySource(canonicalPath, threadId);
+          const sourcePath = await findCodexHistorySource(canonicalPath, threadId, provider);
           if (!sourcePath) {
             throw new AppError('The source transcript referenced by this Codex fork is unavailable.', {
               code: 'CODEX_HISTORY_SOURCE_UNAVAILABLE', statusCode: 502,
             });
           }
-          yield* readCodexRolloutLines(sourcePath, offset, nextAncestors);
+          yield* readCodexRolloutLines(sourcePath, offset, nextAncestors, provider);
         }
       }
       yield line;
@@ -1241,7 +1242,7 @@ const CODEX_COLLABORATION_CONTROL_TOOLS = new Set([
  * Reads one Codex rollout file and produces the compact per-message records
  * `normalizeHistoryEntry` turns into `NormalizedMessage`s.
  */
-async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryResult> {
+async function getCodexSessionMessages(sessionId: string, provider: CodexProviderId): Promise<CodexHistoryResult> {
   const sessionFilePath = sessionsDb.getSessionById(sessionId)?.jsonl_path;
 
   if (!sessionFilePath) {
@@ -1292,7 +1293,7 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
     messages.push({ type: 'tool_result', timestamp, toolCallId: callId, output, isError });
   };
 
-  for await (const line of readCodexRolloutLines(sessionFilePath)) {
+  for await (const line of readCodexRolloutLines(sessionFilePath, undefined, new Set(), provider)) {
     if (!line.trim()) {
       continue;
     }
@@ -1903,6 +1904,7 @@ async function attachCodexSubagentTranscripts(
 
 /** The provider registry uses this reader for session history and message edits; the native runtime also recovers delivery receipts here when RPC history is unavailable. */
 export class CodexSessionsProvider implements IProviderSessions {
+  constructor(private readonly provider: CodexProviderId = 'codex', private readonly client = codexAppServer) {}
   /**
    * Resolves the last turn to keep when the turn `anchorId` names is replaced.
    *
@@ -1921,7 +1923,7 @@ export class CodexSessionsProvider implements IProviderSessions {
       return { found: false, resumeThroughId: null };
     }
 
-    const liveTurnIds = await readCodexLiveTurnIds(jsonlPath);
+    const liveTurnIds = await readCodexLiveTurnIds(jsonlPath, this.provider);
     const anchorIndex = liveTurnIds.indexOf(anchorId);
     if (anchorIndex < 0) {
       return { found: false, resumeThroughId: null };
@@ -1958,7 +1960,7 @@ export class CodexSessionsProvider implements IProviderSessions {
     if (keepThroughId === null) {
       sessionsDb.markProviderSessionSuperseded({
         providerSessionId: supersededThreadId,
-        provider: PROVIDER,
+        provider: this.provider,
         sessionId,
         jsonlPath: session.jsonl_path ?? null,
       });
@@ -1966,7 +1968,7 @@ export class CodexSessionsProvider implements IProviderSessions {
       return;
     }
 
-    const fork = await codexAppServer.forkThread({
+    const fork = await this.client.forkThread({
       threadId: supersededThreadId,
       lastTurnId: keepThroughId,
       cwd: session.project_path ?? '',
@@ -1974,7 +1976,7 @@ export class CodexSessionsProvider implements IProviderSessions {
 
     sessionsDb.markProviderSessionSuperseded({
       providerSessionId: supersededThreadId,
-      provider: PROVIDER,
+      provider: this.provider,
       sessionId,
       jsonlPath: session.jsonl_path ?? null,
     });
@@ -2000,7 +2002,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'task_notification',
         summary: raw.content,
         status: 'info',
@@ -2016,7 +2018,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'thinking',
         content: thinkingContent,
       })];
@@ -2041,7 +2043,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'text',
         role: 'user',
         // Match live confirmations and keep later identical sends distinct on refresh.
@@ -2072,7 +2074,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'text',
         role: 'assistant',
         content,
@@ -2085,7 +2087,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'tool_use',
         toolName: raw.toolName || 'Unknown',
         toolInput: raw.toolInput,
@@ -2101,7 +2103,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'tool_result',
         toolId: raw.toolCallId || '',
         content: raw.output || '',
@@ -2145,7 +2147,7 @@ export class CodexSessionsProvider implements IProviderSessions {
               id: itemId,
               sessionId,
               timestamp: ts,
-              provider: PROVIDER,
+              provider: this.provider,
               kind: 'tool_use',
               toolName: 'ExitPlanMode',
               toolInput: { plan: proposedPlan },
@@ -2157,7 +2159,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'text',
             role: 'assistant',
             content: text,
@@ -2169,7 +2171,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'thinking',
             content: raw.message?.content || '',
           })];
@@ -2178,7 +2180,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_use',
             toolName: 'Bash',
             toolInput: { command: raw.command },
@@ -2197,7 +2199,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: `${itemId}_result`,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_result',
             toolId: itemId,
             content: partialOutput,
@@ -2211,7 +2213,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: `${itemId}_${index}`,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_use',
             toolName: change?.kind === 'add' ? 'Write' : 'Edit',
             toolInput: { file_path: change?.path, old_string: '', new_string: '' },
@@ -2225,7 +2227,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_use',
             toolName,
             toolInput: raw.arguments,
@@ -2239,7 +2241,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: `${itemId}_result`,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_result',
             toolId: itemId,
             content: raw.error
@@ -2253,7 +2255,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_use',
             toolName: 'WebSearch',
             toolInput: { query: raw.query },
@@ -2266,7 +2268,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_use',
             toolName: 'TodoWrite',
             toolInput: {
@@ -2282,7 +2284,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'error',
             content: raw.message?.content || 'Unknown error',
           })];
@@ -2291,7 +2293,7 @@ export class CodexSessionsProvider implements IProviderSessions {
             id: itemId,
             sessionId,
             timestamp: ts,
-            provider: PROVIDER,
+            provider: this.provider,
             kind: 'tool_use',
             toolName: raw.itemType || 'Unknown',
             toolInput: raw.item || raw,
@@ -2305,7 +2307,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'complete',
       })];
     }
@@ -2314,7 +2316,7 @@ export class CodexSessionsProvider implements IProviderSessions {
         id: baseId,
         sessionId,
         timestamp: ts,
-        provider: PROVIDER,
+        provider: this.provider,
         kind: 'error',
         content: raw.error?.message || 'Turn failed',
       })];
@@ -2335,7 +2337,7 @@ export class CodexSessionsProvider implements IProviderSessions {
 
     let result: CodexHistoryResult;
     try {
-      result = await getCodexSessionMessages(sessionId);
+      result = await getCodexSessionMessages(sessionId, this.provider);
     } catch (error) {
       // A broken inherited snapshot must not masquerade as an empty thread.
       if (error instanceof AppError && error.code.startsWith('CODEX_HISTORY_SOURCE_')) {

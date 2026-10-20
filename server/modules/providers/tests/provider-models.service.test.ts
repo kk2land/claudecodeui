@@ -391,6 +391,7 @@ test('allowed effort levels come from the provider, not from the built-in models
   const expectedLevels: Record<LLMProvider, string[]> = {
     claude: ['low', 'medium', 'high', 'xhigh', 'max', 'ultracode'],
     codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    gptweb: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     cursor: [],
     opencode: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
     dsh: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],

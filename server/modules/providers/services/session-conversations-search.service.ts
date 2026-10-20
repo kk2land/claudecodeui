@@ -5,11 +5,11 @@ import readline from 'node:readline';
 import { spawn } from 'cross-spawn';
 import { rgPath } from '@vscode/ripgrep';
 
-import { isClaudeNonTurnMessageRow, stripAnsiSequences } from '@/shared/utils.js';
+import { isClaudeNonTurnMessageRow, isCodexProvider, stripAnsiSequences } from '@/shared/utils.js';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 
 type AnyRecord = Record<string, any>;
-type SearchableProvider = 'claude' | 'codex';
+type SearchableProvider = 'claude' | 'codex' | 'gptweb';
 
 type SearchSnippetHighlight = {
   start: number;
@@ -93,7 +93,7 @@ type ProjectBucket = {
   sessions: SearchableSessionRow[];
 };
 
-const SUPPORTED_PROVIDERS = new Set<SearchableProvider>(['claude', 'codex']);
+const SUPPORTED_PROVIDERS = new Set<SearchableProvider>(['claude', 'codex', 'gptweb']);
 const MAX_MATCHES_PER_SESSION = 2;
 const RIPGREP_FILE_CHUNK_SIZE = 40;
 const RIPGREP_CHUNK_CONCURRENCY = 6;
@@ -1107,7 +1107,7 @@ async function parseCodexSessionMatches(
         snippet,
         highlights,
         timestamp: entry.timestamp ? String(entry.timestamp) : null,
-        provider: 'codex',
+        provider: session.provider,
       });
     }
   } catch {
@@ -1120,7 +1120,7 @@ async function parseCodexSessionMatches(
 
   return {
     sessionId: session.session_id,
-    provider: 'codex',
+    provider: session.provider,
     sessionSummary: toSummaryText(session.custom_name, latestUserMessageText, 'Codex Session'),
     matches,
   };
@@ -1133,7 +1133,7 @@ async function parseSessionMatches(
   if (session.provider === 'claude') {
     return parseClaudeSessionMatches(session, runtime);
   }
-  if (session.provider === 'codex') {
+  if (isCodexProvider(session.provider)) {
     return parseCodexSessionMatches(session, runtime);
   }
   return null;

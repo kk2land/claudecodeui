@@ -1,15 +1,16 @@
-import os from 'node:os';
 import path from 'node:path';
 import { readFile } from 'node:fs/promises';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import {
   buildLookupMap,
+  getCodexHome,
   extractFirstValidJsonlData,
   findFilesRecursivelyCreatedAfter,
   normalizeSessionName,
   readFileTimestamps,
 } from '@/shared/utils.js';
+import type { CodexProviderId } from '@/shared/index.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 
 type ParsedSession = {
@@ -22,8 +23,8 @@ type ParsedSession = {
  * Session indexer for Codex transcript artifacts.
  */
 export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
-  private readonly provider = 'codex' as const;
-  private readonly codexHome = path.join(os.homedir(), '.codex');
+  constructor(private readonly provider: CodexProviderId = 'codex') {}
+  private get codexHome() { return getCodexHome(this.provider); }
 
   /**
    * Scans ~/.codex/sessions and upserts discovered sessions into DB.
@@ -43,8 +44,8 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
         continue;
       }
 
-      const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
-        ?? sessionsDb.getSessionById(parsed.sessionId);
+      const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId, this.provider)
+        ?? (() => { const row = sessionsDb.getSessionById(parsed.sessionId); return row?.provider === this.provider ? row : null; })();
       if (existingSession) {
         // If session name is untitled and we now have a name, update it
         if (existingSession.custom_name === 'Untitled Codex Session' && parsed.sessionName && parsed.sessionName !== 'Untitled Codex Session') {
@@ -133,8 +134,8 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
 
     // App-created sessions are keyed by an app id, so disk-discovered provider
     // ids must be resolved through the provider-id mapping first.
-    const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId)
-      ?? sessionsDb.getSessionById(parsed.sessionId);
+    const existingSession = sessionsDb.getSessionByProviderSessionId(parsed.sessionId, this.provider)
+      ?? (() => { const row = sessionsDb.getSessionById(parsed.sessionId); return row?.provider === this.provider ? row : null; })();
     const existingSessionName = existingSession?.custom_name;
     if (existingSessionName && existingSessionName !== 'Untitled Codex Session') {
       return {

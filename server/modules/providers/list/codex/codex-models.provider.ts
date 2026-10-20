@@ -1,16 +1,17 @@
 import { readFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
 import TOML from '@iarna/toml';
 
 import type { IProviderModels } from '@/shared/interfaces.js';
 import type {
+  CodexProviderId,
   ProviderCurrentActiveModel,
   ProviderModelsDefinition,
 } from '@/shared/types.js';
 import {
   buildDefaultProviderCurrentActiveModel,
+  getCodexHome,
   readObjectRecord,
   readOptionalString,
 } from '@/shared/utils.js';
@@ -143,17 +144,20 @@ export const CODEX_PREDEFINED_MODELS: ProviderModelsDefinition = {
   DEFAULT: 'gpt-5.6-sol',
 };
 
-const CODEX_CONFIG_PATH = path.join(os.homedir(), '.codex', 'config.toml');
+
 
 /** Provider registry model adapter for Codex predefined models and active config. */
 export class CodexProviderModels implements IProviderModels {
+  constructor(private readonly provider: CodexProviderId = 'codex', private readonly configuredHome?: string) {}
+
+  protected get home(): string { return this.configuredHome ?? getCodexHome(this.provider); }
   async getSupportedModels(): Promise<ProviderModelsDefinition> {
     return CODEX_PREDEFINED_MODELS;
   }
 
   async getCurrentActiveModel(): Promise<ProviderCurrentActiveModel> {
     try {
-      const raw = await readFile(CODEX_CONFIG_PATH, 'utf8');
+      const raw = await readFile(path.join(this.home, 'config.toml'), 'utf8');
       const parsed = readObjectRecord(TOML.parse(raw));
       const model = readOptionalString(parsed?.model);
       if (!model) {

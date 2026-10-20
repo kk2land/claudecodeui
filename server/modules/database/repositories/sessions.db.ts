@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
@@ -133,6 +135,12 @@ export const sessionsDb = {
       return existing.session_id;
     }
 
+    // A copied native thread can exist in independent homes. Keep both rows
+    // instead of changing the provider of the first indexed conversation.
+    const conflictingId = db.prepare('SELECT 1 FROM sessions WHERE session_id = ? AND provider <> ?')
+      .get(providerSessionId, provider);
+    const appSessionId = conflictingId ? randomUUID() : providerSessionId;
+
     // Sessions created outside the app (directly via the provider CLI) are
     // keyed by the provider-native id for both columns. The ON CONFLICT path
     // covers legacy rows that predate the provider_session_id mapping.
@@ -152,7 +160,7 @@ export const sessionsDb = {
            ELSE COALESCE(excluded.custom_name, sessions.custom_name)
          END`
     ).run(
-      providerSessionId,
+      appSessionId,
       provider,
       providerSessionId,
       customName ?? null,
@@ -163,7 +171,7 @@ export const sessionsDb = {
       updatedAtValue
     );
 
-    return providerSessionId;
+    return appSessionId;
   },
 
   /**
@@ -222,8 +230,8 @@ export const sessionsDb = {
     // id is the provider-native one, which is what this row claims, so replace
     // it rather than leaving two sidebar entries for one conversation.
     db.transaction(() => {
-      db.prepare('DELETE FROM sessions WHERE session_id = ? AND session_id <> ?')
-        .run(input.providerSessionId, input.sessionId);
+      db.prepare('DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ? AND provider = ?')
+        .run(input.providerSessionId, input.providerSessionId, input.sessionId, input.provider);
       db.prepare(
         `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`
@@ -261,9 +269,10 @@ export const sessionsDb = {
           `SELECT ${SESSION_ROW_COLUMNS} FROM sessions
            WHERE (session_id = ? OR provider_session_id = ?)
              AND session_id <> ?
+             AND provider = (SELECT provider FROM sessions WHERE session_id = ?)
            LIMIT 1`
         )
-        .get(providerSessionId, providerSessionId, sessionId) as SessionRow | undefined;
+        .get(providerSessionId, providerSessionId, sessionId, sessionId) as SessionRow | undefined;
 
       if (duplicate) {
         db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
@@ -309,8 +318,9 @@ export const sessionsDb = {
     const db = getConnection();
 
     db.transaction(() => {
-      db.prepare('DELETE FROM sessions WHERE session_id = ? AND session_id <> ?')
-        .run(input.providerSessionId, sessionId);
+      db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ?
+        AND provider = (SELECT provider FROM sessions WHERE session_id = ?)`)
+        .run(input.providerSessionId, input.providerSessionId, sessionId, sessionId);
       db.prepare(
         `UPDATE sessions SET
            provider_session_id = ?,
@@ -470,17 +480,17 @@ export const sessionsDb = {
    * file names), so it uses this lookup to translate disk artifacts back to
    * the app-facing session row before broadcasting sidebar updates.
    */
-  getSessionByProviderSessionId(providerSessionId: string): SessionRow | null {
+  getSessionByProviderSessionId(providerSessionId: string, provider?: string): SessionRow | null {
     const db = getConnection();
     const row = db
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE provider_session_id = ?
+         WHERE provider_session_id = ? AND (? IS NULL OR provider = ?)
          ORDER BY updated_at DESC
          LIMIT 1`
       )
-      .get(providerSessionId) as SessionRow | undefined;
+      .get(providerSessionId, provider ?? null, provider ?? null) as SessionRow | undefined;
 
     return normalizeSessionRow(row) ?? null;
   },

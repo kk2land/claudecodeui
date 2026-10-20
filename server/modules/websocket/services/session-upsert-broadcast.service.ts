@@ -21,12 +21,10 @@ import type { SessionUpsertedEvent } from '@/shared/types.js';
 async function buildSessionUpsertedEvent(
   sessionIdOrProviderSessionId: string,
 ): Promise<SessionUpsertedEvent | null> {
-  // Resolving by provider id first covers the watcher, which only ever sees
-  // the id written in the transcript. For a row where the two ids are equal
-  // — legacy rows, and any session indexed from disk before its mapping
-  // existed — both lookups land on the same row anyway.
-  const row = sessionsDb.getSessionByProviderSessionId(sessionIdOrProviderSessionId)
-    ?? sessionsDb.getSessionById(sessionIdOrProviderSessionId);
+  // Synchronizers and live runs return app ids. A copied thread may share its
+  // native id across providers, so the exact app row must take precedence.
+  const row = sessionsDb.getSessionById(sessionIdOrProviderSessionId)
+    ?? sessionsDb.getSessionByProviderSessionId(sessionIdOrProviderSessionId);
   if (!row || row.isArchived) {
     return null;
   }

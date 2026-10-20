@@ -1,3 +1,4 @@
+import { GptwebProvider } from '@/modules/providers/list/gptweb/gptweb.provider.js';
 import { DshProvider } from '@/modules/providers/list/dsh/dsh.provider.js';
 import { ClaudeProvider } from '@/modules/providers/list/claude/claude.provider.js';
 import { CodexProvider } from '@/modules/providers/list/codex/codex.provider.js';
@@ -10,6 +11,7 @@ import { AppError } from '@/shared/utils.js';
 const providers: Record<LLMProvider, IProvider> = {
   claude: new ClaudeProvider(),
   codex: new CodexProvider(),
+  gptweb: new GptwebProvider(),
   cursor: new CursorProvider(),
   opencode: new OpenCodeProvider(),
   dsh: new DshProvider(),

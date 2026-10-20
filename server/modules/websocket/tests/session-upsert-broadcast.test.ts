@@ -136,3 +136,18 @@ test('a closed socket is skipped', async () => {
     assert.deepEqual(closing.frames, []);
   });
 });
+
+test('copied threads broadcast the requested app session independently of the other provider', async () => {
+  await withIsolatedDatabase(async () => {
+    const codexId = sessionsDb.createSession('shared-thread', 'codex', '/workspace/native');
+    const webId = sessionsDb.createSession('shared-thread', 'gptweb', '/workspace/web', 'Web', undefined, '2099-01-01T00:00:00Z');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    await broadcastSessionUpsertedBatch([codexId, webId]);
+
+    assert.deepEqual(connection.frames.map(frame => [frame.sessionId, frame.provider]), [
+      [codexId, 'codex'], [webId, 'gptweb'],
+    ]);
+  });
+});

@@ -524,7 +524,7 @@ function handleChatSubscribe(
     // keeps producing events through the same writer (task progress, the
     // turn the CLI pushes when a task reports), so a tab opened during that
     // work attaches too; the registry keeps the run while the work lasts.
-    if (isProcessing || dependencies.runtime.hasBackgroundWork(sessionId) || run?.provider === 'codex') {
+    if (isProcessing || dependencies.runtime.hasBackgroundWork(sessionId) || (run?.provider === 'codex' || run?.provider === 'gptweb')) {
       chatRunRegistry.attachConnection(sessionId, ws);
     }
 
@@ -539,7 +539,7 @@ function handleChatSubscribe(
       lastSeq: run?.lastSeq ?? 0,
       pendingPermissions,
       executionId: run?.executionId,
-      codexState: sessionsDb.getSessionById(sessionId)?.provider === 'codex' ? dependencies.runtime.getState?.('codex', sessionId) : undefined,
+      codexState: (() => { const provider = sessionsDb.getSessionById(sessionId)?.provider; return provider === 'codex' || provider === 'gptweb' ? dependencies.runtime.getState?.(provider, sessionId) : undefined; })(),
       timestamp: new Date().toISOString(),
     });
 

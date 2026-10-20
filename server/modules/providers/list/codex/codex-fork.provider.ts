@@ -16,6 +16,7 @@ import type { IProviderFork } from '@/shared/interfaces.js';
  * one thing — and the coarser one is the more useful of the two anyway.
  */
 export class CodexForkProvider implements IProviderFork {
+  constructor(private readonly client = codexAppServer) {}
   async forkSession(input: {
     providerSessionId: string;
     jsonlPath: string;
@@ -26,7 +27,7 @@ export class CodexForkProvider implements IProviderFork {
     // `title` is deliberately not forwarded. The sidebar name lives in this
     // app's own session row, and naming the thread inside Codex would mean a
     // second call that could fail after the fork already succeeded.
-    const fork = await codexAppServer.forkThread({
+    const fork = await this.client.forkThread({
       threadId: input.providerSessionId,
       lastTurnId: input.upToAnchorId,
       cwd: input.projectPath,

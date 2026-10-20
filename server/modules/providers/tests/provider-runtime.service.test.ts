@@ -73,6 +73,7 @@ test('providerRegistry owns one runtime for every registered provider', () => {
   assert.deepEqual(providers.map((provider) => provider.id), [
     'claude',
     'codex',
+    'gptweb',
     'cursor',
     'opencode',
     'dsh',

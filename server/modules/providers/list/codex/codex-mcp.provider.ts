@@ -1,13 +1,13 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import os from 'node:os';
 import path from 'node:path';
 
 import TOML from '@iarna/toml';
 
 import { McpProvider } from '@/modules/providers/shared/mcp/mcp.provider.js';
-import type { McpScope, ProviderMcpServer, UpsertProviderMcpServerInput } from '@/shared/types.js';
+import type { CodexProviderId, McpScope, ProviderMcpServer, UpsertProviderMcpServerInput } from '@/shared/types.js';
 import {
   AppError,
+  getCodexHome,
   readObjectRecord,
   readOptionalString,
   readStringArray,
@@ -34,14 +34,15 @@ const writeTomlConfig = async (filePath: string, data: Record<string, unknown>):
   await writeFile(filePath, toml, 'utf8');
 };
 
+/** Codex and GPT Web provider composition reuse this adapter with their own profile identity. */
 export class CodexMcpProvider extends McpProvider {
-  constructor() {
-    super('codex', ['user', 'project'], ['stdio', 'http']);
+  constructor(private readonly codexProvider: CodexProviderId = 'codex') {
+    super(codexProvider, ['user', 'project'], ['stdio', 'http']);
   }
 
   protected async readScopedServers(scope: McpScope, workspacePath: string): Promise<Record<string, unknown>> {
     const filePath = scope === 'user'
-      ? path.join(os.homedir(), '.codex', 'config.toml')
+      ? path.join(getCodexHome(this.codexProvider), 'config.toml')
       : path.join(workspacePath, '.codex', 'config.toml');
     const config = await readTomlConfig(filePath);
     return readObjectRecord(config.mcp_servers) ?? {};
@@ -53,7 +54,7 @@ export class CodexMcpProvider extends McpProvider {
     servers: Record<string, unknown>,
   ): Promise<void> {
     const filePath = scope === 'user'
-      ? path.join(os.homedir(), '.codex', 'config.toml')
+      ? path.join(getCodexHome(this.codexProvider), 'config.toml')
       : path.join(workspacePath, '.codex', 'config.toml');
     const config = await readTomlConfig(filePath);
     config.mcp_servers = servers;
@@ -105,7 +106,7 @@ export class CodexMcpProvider extends McpProvider {
     const config = rawConfig as Record<string, unknown>;
     if (typeof config.command === 'string') {
       return {
-        provider: 'codex',
+        provider: this.codexProvider,
         name,
         scope,
         transport: 'stdio',
@@ -119,7 +120,7 @@ export class CodexMcpProvider extends McpProvider {
 
     if (typeof config.url === 'string') {
       return {
-        provider: 'codex',
+        provider: this.codexProvider,
         name,
         scope,
         transport: 'http',

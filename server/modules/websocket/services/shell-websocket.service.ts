@@ -5,6 +5,7 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
+import { getCodexHome } from '@/shared/index.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -233,7 +234,7 @@ function buildShellCommand(
     return otherProgram('cursor-agent');
   }
 
-  if (provider === 'codex') {
+  if (provider === 'codex' || provider === 'gptweb') {
     if (resumeSessionId) {
       if (os.platform() === 'win32') {
         return otherProgram(`codex resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { codex }`);
@@ -654,6 +655,7 @@ export function handleShellConnection(
           cwd: resolvedProjectPath,
           env: {
             ...process.env,
+            ...(provider === 'gptweb' ? { CODEX_HOME: getCodexHome('gptweb') } : {}),
             [prioritizedPath.key]: prioritizedPath.value,
             TERM: 'xterm-256color',
             COLORTERM: 'truecolor',
@@ -785,7 +787,9 @@ export function handleShellConnection(
           const providerName =
             provider === 'cursor'
               ? 'Cursor'
-              : provider === 'codex'
+              : provider === 'gptweb'
+                ? 'GPT Web'
+                : provider === 'codex'
                 ? 'Codex'
                 : provider === 'opencode'
                     ? 'OpenCode'
