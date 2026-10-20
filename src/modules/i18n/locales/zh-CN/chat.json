@@ -95,6 +95,24 @@
   "usageLimit": {
     "resetAt": "Claude 使用限制已达到。您的限制将在 **{{time}} {{timezone}}** - {{date}} 重置"
   },
+  "runtime": {
+    "settings": "{{provider}} 运行设置",
+    "mode": "运行方式",
+    "modes": { "acp": "ACP", "headless": "headless" },
+    "loading": "加载中…",
+    "stop": "停止 {{runtime}}",
+    "processRunning": "进程运行中",
+    "processIdle": "进程未启动",
+    "startedAt": "启动时间",
+    "launcherPath": "启动程序路径",
+    "starting": "正在启动…",
+    "switching": "正在切换运行方式…",
+    "stopping": "正在停止进程…",
+    "sessionScope": "仅对当前会话生效，下次发送消息时启动进程。",
+    "noInteractivePermissions": "当前运行方式不支持交互审批，权限由 provider profile 决定。",
+    "queueHeld": "进程停止后，待发消息队列已暂停。",
+    "resumeQueue": "恢复队列"
+  },
   "codex": {
     "processRunning": "进程运行中",
     "processIdle": "进程未启动",

@@ -49,6 +49,8 @@ type UseChatComposerStateArgs = {
   currentProviderModel: string;
   currentProviderEffort: string;
   codexControls?: CodexControls;
+  /** Managed providers share allocation and finish pending runtime changes before sending. */
+  prepareSessionForSend?: (initialMessage: string) => Promise<string | null>;
   executionIdsRef?: MutableRefObject<Map<string, string>>;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
@@ -194,6 +196,7 @@ export function useChatComposerState({
   currentProviderEffort,
   isLoading,
   codexControls,
+  prepareSessionForSend,
   executionIdsRef,
   processingSessions,
   canAbortSession,
@@ -921,7 +924,19 @@ export function useChatComposerState({
       // via the session gateway. There is no client-visible session-id
       // handoff later — this id stays valid for the conversation's lifetime.
       let targetSessionId = selectedSession?.id || currentSessionId || null;
-      if (!targetSessionId) {
+      if (prepareSessionForSend) {
+        try {
+          targetSessionId = await prepareSessionForSend(messageContent);
+        } catch (error) {
+          addMessage({
+            type: 'error',
+            content: error instanceof Error ? error.message : String(error),
+            timestamp: new Date(),
+          });
+          return;
+        }
+        if (!targetSessionId) return;
+      } else if (!targetSessionId) {
         let createdSessionName = sessionSummary;
         try {
           const response = await api.providers.createSession({
@@ -1067,6 +1082,8 @@ export function useChatComposerState({
       if (draftScopeRef.current) {
         writeDraftText(draftScopeRef.current, '');
       }
+      // Runtime selection can migrate the draft before React adopts the new session scope.
+      if (prepareSessionForSend) writeDraftText(targetSessionId, '');
     },
     [
       selectedSession,
@@ -1078,6 +1095,7 @@ export function useChatComposerState({
       executeCommand,
       isLoading,
       codexControls,
+      prepareSessionForSend,
       onSessionProcessing,
       onSessionEstablished,
       provider,

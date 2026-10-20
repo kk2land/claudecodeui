@@ -10,7 +10,7 @@ type ActivityIndicatorProps = {
   activity: SessionActivity | null;
   onAbort?: () => void;
   isInputFocused?: boolean;
-  /** Codex keeps the status inside the composer below its separate control toolbar. */
+  /** Providers with a separate control toolbar keep the status inside the composer. */
   variant?: 'tabs' | 'inline';
 };
 

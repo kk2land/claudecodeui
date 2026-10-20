@@ -15,6 +15,8 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
+import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
+import type { ProviderRuntimeControls } from '@/shared/types';
 import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
@@ -75,6 +77,7 @@ type ChatComposerProps = {
   isDragActive: boolean;
   queuedDraft: QueuedDraft | null;
   codexControls?: CodexControls;
+  runtimeControls?: ProviderRuntimeControls;
   onExecutePlan?: () => void;
   backgroundSendPrompt: BackgroundSendPrompt | null;
   onResolveBackgroundSendPrompt: (choice: BackgroundSendChoice) => void;
@@ -154,6 +157,7 @@ export default function ChatComposer({
   isDragActive,
   queuedDraft,
   codexControls,
+  runtimeControls,
   onExecutePlan,
   backgroundSendPrompt,
   onResolveBackgroundSendPrompt,
@@ -259,7 +263,9 @@ export default function ChatComposer({
 
   // Hide the thinking/status bar while any permission request is pending
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
-  const hasFloatingActivityIndicator = Boolean(activity && !hasPendingPermissions && !codexControls);
+  // Provider toolbars sit above the input, so their activity belongs inside it.
+  const hasControlPanel = Boolean(codexControls || runtimeControls);
+  const hasFloatingActivityIndicator = Boolean(activity && !hasPendingPermissions && !hasControlPanel);
 
   const hasQueuedDraft = Boolean(queuedDraft);
   const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
@@ -280,7 +286,7 @@ export default function ChatComposer({
 
   return (
     <div className="chat-composer-shell relative flex-shrink-0 px-2 pb-2 pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6">
-      {!hasPendingPermissions && !codexControls && (
+      {!hasPendingPermissions && !hasControlPanel && (
         <div className="pointer-events-none absolute bottom-full left-1/2 z-10 w-[calc(100%-1rem)] max-w-[54.25rem] -translate-x-1/2 translate-y-px bg-transparent sm:w-[calc(100%-2rem)]">
           <ActivityIndicator activity={activity} onAbort={onAbortSession} isInputFocused={isInputFocused} />
         </div>
@@ -320,6 +326,7 @@ export default function ChatComposer({
       )}
 
       {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} onExecutePlan={onExecutePlan ?? (() => {})} />}
+      {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} providerLabel={providerLabel} />}
       <BackgroundSendDialog
         prompt={backgroundSendPrompt}
         onResolve={onResolveBackgroundSendPrompt}
@@ -389,7 +396,7 @@ export default function ChatComposer({
           ].filter(Boolean).join(' ')}
           {...getRootProps()}
         >
-          {codexControls && !hasPendingPermissions && (
+          {hasControlPanel && !hasPendingPermissions && (
             <ActivityIndicator activity={activity} onAbort={onAbortSession} variant="inline" />
           )}
           {isDragActive && (

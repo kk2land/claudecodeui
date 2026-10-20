@@ -5,6 +5,7 @@ import {
 } from '@/shared/authToken';
 import { IS_PLATFORM } from '@/shared/utils';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
+import type { ProviderRuntimeAction } from '@/shared/types';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -416,6 +417,10 @@ export const api = {
   // Provider (coding agent) endpoints — models, capabilities, sessions, MCP, skills.
   providers: {
     capabilities: () => get('/api/providers/capabilities'),
+    runtimeState: (provider: string, sessionId: string | null, options: ApiRequestOptions = {}) =>
+      get(`/api/providers/${encodeURIComponent(provider)}/runtime${query({ sessionId: sessionId ?? undefined })}`, options),
+    controlRuntime: (provider: string, sessionId: string, control: ProviderRuntimeAction) =>
+      post(`/api/providers/${encodeURIComponent(provider)}/runtime`, { sessionId, control }),
     authStatus: (provider: string) =>
       get(`/api/providers/${encodeURIComponent(provider)}/auth/status`),
     claudeSettingsPermissions: () => get('/api/providers/claude/settings-permissions'),

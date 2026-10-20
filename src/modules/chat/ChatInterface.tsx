@@ -21,6 +21,7 @@ import { useScheduledMessages } from '@/modules/chat/composer/useScheduledMessag
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useCodexControls } from '@/modules/chat/hooks/useCodexControls';
+import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
 import {
@@ -195,6 +196,10 @@ function ChatInterface({
     project: selectedProject, options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
     sendMessage, onSessionEstablished: handleSessionEstablished,
   });
+  const runtimeControls = useProviderRuntimeControls({
+    provider, sessionId: selectedSession?.id || currentSessionId,
+    project: selectedProject, newSessionTrigger, onSessionEstablished: handleSessionEstablished,
+  });
 
   const {
     input,
@@ -259,6 +264,7 @@ function ChatInterface({
     currentProviderEffort,
     isLoading: isProcessing,
     codexControls: provider === 'codex' ? codexControls : undefined,
+    prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
     executionIdsRef,
     processingSessions,
     canAbortSession,
@@ -579,6 +585,7 @@ function ChatInterface({
           onSubmit={handleSubmit}
           isDragActive={isDragActive}
           codexControls={provider === 'codex' ? codexControls : undefined}
+          runtimeControls={runtimeControls.available ? runtimeControls : undefined}
           onExecutePlan={() => handleVoiceTranscript(t('codex.implementPrompt'), false)}
           queuedDraft={queuedDraft}
           backgroundSendPrompt={backgroundSendPrompt}

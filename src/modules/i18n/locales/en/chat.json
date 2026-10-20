@@ -108,6 +108,24 @@
   "usageLimit": {
     "resetAt": "Claude usage limit reached. Your limit will reset at **{{time}} {{timezone}}** - {{date}}"
   },
+  "runtime": {
+    "settings": "{{provider}} runtime settings",
+    "mode": "Runtime",
+    "modes": { "acp": "ACP", "headless": "headless" },
+    "loading": "Loading…",
+    "stop": "Stop {{runtime}}",
+    "processRunning": "Process running",
+    "processIdle": "Process stopped",
+    "startedAt": "Started",
+    "launcherPath": "Launcher path",
+    "starting": "Starting…",
+    "switching": "Switching runtime…",
+    "stopping": "Stopping process…",
+    "sessionScope": "Applies to this session. A process starts when you send the next message.",
+    "noInteractivePermissions": "This runtime has no interactive approval channel; permissions follow the provider profile.",
+    "queueHeld": "Queued messages are paused after stopping the process.",
+    "resumeQueue": "Resume queue"
+  },
   "codex": {
     "processRunning": "Process running",
     "processIdle": "Process stopped",

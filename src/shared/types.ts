@@ -12,6 +12,7 @@ export type ProviderCapabilityRow = {
   provider: LLMProvider;
   supportsSessionForking?: boolean;
   nativeControls?: { goal?: boolean };
+  runtimeManagement?: { modes: string[]; stoppableModes: string[] };
 };
 
 /** One selectable model in a provider's model menu, including its optional reasoning-effort choices. */
@@ -1873,6 +1874,43 @@ type TaskStatus =
 
 /** A TaskMaster task's priority; high, medium and low are the known values and the string fallback tolerates anything else TaskMaster emits. */
 type TaskPriority = 'high' | 'medium' | 'low' | string;
+
+//----------------- PROVIDER PROCESS MANAGEMENT ------------
+/** Application controls for a provider's transports and managed process, independent of native agent features. */
+export type ProviderRuntimeAction =
+  | { action: 'runtime'; runtime: string }
+  | { action: 'stop' }
+  | { action: 'queue-resume' };
+
+/** Server-owned session runtime and process details, read without starting a process. */
+export type ProviderRuntimeState = {
+  runtime: string;
+  phase: 'idle' | 'starting' | 'running' | 'switching' | 'stopping';
+  queueHeld: boolean;
+  supportsPermissionRequests: boolean;
+  diagnostics: {
+    running: boolean;
+    pid: number | null;
+    startedAt: number | null;
+    launcherPath: string | null;
+    cliVersion: string | null;
+  };
+};
+
+/** Chat's runtime controller shared by its session hook, composer and process settings panel. */
+export type ProviderRuntimeControls = {
+  sessionId: string | null;
+  available: boolean;
+  modes: string[];
+  stoppableModes: string[];
+  state: ProviderRuntimeState | null;
+  pending: boolean;
+  error: string | null;
+  control(action: ProviderRuntimeAction): Promise<void>;
+  /** Waits for runtime changes and shares their session allocation; null means the user navigated away. */
+  prepareSend(initialMessage: string): Promise<string | null>;
+};
+// ---------------------------
 
 //----------------- CODEX NATIVE CONTROLS ------------
 /** Native goal progress used by chat controls; token budget is optional. */
