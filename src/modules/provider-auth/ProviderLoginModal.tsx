@@ -68,6 +68,7 @@ const getProviderTitle = (provider: LLMProvider) => {
   if (provider === 'codex') return 'Codex CLI Login';
   if (provider === 'opencode') return 'OpenCode CLI Login';
   if (provider === 'dsh') return 'DeepSeek Harness setup';
+  if (provider === 'gptweb') return 'GPT Web';
   return 'Claude CLI Login';
 };
 
@@ -85,6 +86,15 @@ export default function ProviderLoginModal({
     return null;
   }
 
+  if (provider === 'gptweb') return (
+    <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" data-escape-layer>
+      <div className="max-w-md rounded-lg border bg-background p-6 text-foreground">
+        <h2 className="text-lg font-semibold">GPT Web</h2>
+        <p className="my-4 text-sm">{t('gptwebSetup', { defaultValue: 'Start codex-chatgpt-web and finish its ChatGPT sign-in. Configure the directory selected by CODEX_GPTWEB_HOME, then reconnect.' })}</p>
+        <button type="button" onClick={onClose} className="rounded border px-4 py-2">{t('common.close', { defaultValue: 'Close' })}</button>
+      </div>
+    </div>
+  );
   const command = getProviderCommand({ provider, customCommand, isAuthenticated });
   const title = getProviderTitle(provider);
 

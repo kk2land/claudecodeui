@@ -119,11 +119,11 @@ export function useSlashCommands({
     }
 
     const parsedHistory = readCommandHistory(selectedProject.projectId);
-    const nativeCommands: SlashCommand[] = provider === 'codex' ? [
+    const nativeCommands: SlashCommand[] = (provider === 'codex' || provider === 'gptweb') ? [
       { name: '/plan', description: t('codex.planCommand'), type: 'built-in', metadata: { nativeControl: true } },
       ...(goalsEnabled ? [{ name: '/goal', description: t('codex.goalCommand'), type: 'built-in', metadata: { nativeControl: true } }] : []),
     ] : [];
-    return [...nativeCommands, ...projectCommands.filter((command) => !(provider === 'codex' && !goalsEnabled && command.name === '/goal') && !nativeCommands.some((native) => native.name === command.name))].sort((commandA, commandB) => {
+    return [...nativeCommands, ...projectCommands.filter((command) => !((provider === 'codex' || provider === 'gptweb') && !goalsEnabled && command.name === '/goal') && !nativeCommands.some((native) => native.name === command.name))].sort((commandA, commandB) => {
       const commandAUsage = parsedHistory[commandA.name] || 0;
       const commandBUsage = parsedHistory[commandB.name] || 0;
       return commandBUsage - commandAUsage;

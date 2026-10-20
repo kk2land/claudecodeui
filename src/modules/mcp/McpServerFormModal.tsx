@@ -103,7 +103,7 @@ export default function McpServerFormModal({
   const showProjectSelector = formData.scope !== 'user';
   const supportsHttpHeaders = formData.transport === 'http' || formData.transport === 'sse';
   const supportsWorkingDirectory = !isGlobalMode && MCP_SUPPORTS_WORKING_DIRECTORY[provider];
-  const showCodexOnlyFields = provider === 'codex' && !isGlobalMode;
+  const showCodexOnlyFields = (provider === 'codex' || provider === 'gptweb') && !isGlobalMode;
 
   return createPortal(
     <div data-escape-layer className="fixed inset-0 z-[10000] flex items-center justify-center bg-black/50 p-4">

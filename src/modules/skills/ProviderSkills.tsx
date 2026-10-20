@@ -52,6 +52,7 @@ const MAX_SKILL_FOLDER_BYTES = 30 * 1024 * 1024;
 const PROVIDER_NAMES: Record<SkillsProvider, string> = {
   claude: 'Claude',
   codex: 'Codex',
+  gptweb: 'GPT Web',
   cursor: 'Cursor',
   opencode: 'OpenCode',
   dsh: 'DeepSeek Harness',
@@ -60,6 +61,7 @@ const PROVIDER_NAMES: Record<SkillsProvider, string> = {
 const PROVIDER_SKILL_PATHS: Record<Exclude<SkillsProvider, 'opencode'>, string> = {
   claude: '~/.claude/skills/<skill-name>/SKILL.md',
   codex: '~/.agents/skills/<skill-name>/SKILL.md',
+  gptweb: '~/.agents/skills/<skill-name>/SKILL.md',
   cursor: '~/.cursor/skills/<skill-name>/SKILL.md',
   dsh: '$DSH_HOME/skills/<skill-name>/SKILL.md',
 };

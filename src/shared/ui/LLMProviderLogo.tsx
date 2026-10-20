@@ -19,6 +19,8 @@ export function LLMProviderLogo({
     return <CursorLogo className={className} />;
   }
 
+  if (provider === 'gptweb') return <CodexLogo className={className} label="GPT Web" />;
+
   if (provider === 'codex') {
     return <CodexLogo className={className} />;
   }

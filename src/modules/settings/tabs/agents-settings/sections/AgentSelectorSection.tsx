@@ -12,6 +12,7 @@ const AGENT_NAMES: Record<AgentProvider, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
   codex: 'Codex',
+  gptweb: 'GPT Web',
   opencode: 'OpenCode',
   dsh: 'DeepSeek Harness',
 };

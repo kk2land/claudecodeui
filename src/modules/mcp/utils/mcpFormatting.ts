@@ -133,13 +133,13 @@ export const parseJsonMcpPayload = (
       : undefined,
     url: readString(parsed.url),
     headers: readStringRecord(parsed.headers ?? parsed.http_headers) ?? {},
-    envVars: (options?.includeProviderSpecificFields ?? provider === 'codex')
+    envVars: (options?.includeProviderSpecificFields ?? (provider === 'codex' || provider === 'gptweb'))
       ? readStringArray(parsed.envVars ?? parsed.env_vars) ?? []
       : undefined,
-    bearerTokenEnvVar: (options?.includeProviderSpecificFields ?? provider === 'codex')
+    bearerTokenEnvVar: (options?.includeProviderSpecificFields ?? (provider === 'codex' || provider === 'gptweb'))
       ? readString(parsed.bearerTokenEnvVar ?? parsed.bearer_token_env_var)
       : undefined,
-    envHttpHeaders: (options?.includeProviderSpecificFields ?? provider === 'codex')
+    envHttpHeaders: (options?.includeProviderSpecificFields ?? (provider === 'codex' || provider === 'gptweb'))
       ? readStringRecord(parsed.envHttpHeaders ?? parsed.env_http_headers) ?? {}
       : undefined,
   };
@@ -157,7 +157,7 @@ export const createMcpPayloadFromForm = (
   assertSupportedTransport(provider, formData.transport, options);
 
   const supportsWorkingDirectory = options?.supportsWorkingDirectory ?? MCP_SUPPORTS_WORKING_DIRECTORY[provider];
-  const includeProviderSpecificFields = options?.includeProviderSpecificFields ?? provider === 'codex';
+  const includeProviderSpecificFields = options?.includeProviderSpecificFields ?? (provider === 'codex' || provider === 'gptweb');
 
   return {
     name: formData.name.trim(),

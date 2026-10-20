@@ -192,7 +192,7 @@ function ChatInterface({
   }, [setCurrentSessionId, onSessionEstablished, onNavigateToSession]);
 
   const codexControls = useCodexControls({
-    enabled: provider === 'codex', sessionId: selectedSession?.id || currentSessionId,
+    provider: provider === 'gptweb' ? 'gptweb' : 'codex', enabled: (provider === 'codex' || provider === 'gptweb'), sessionId: selectedSession?.id || currentSessionId,
     project: selectedProject, options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
     sendMessage, onSessionEstablished: handleSessionEstablished,
   });
@@ -263,7 +263,7 @@ function ChatInterface({
     currentProviderModel,
     currentProviderEffort,
     isLoading: isProcessing,
-    codexControls: provider === 'codex' ? codexControls : undefined,
+    codexControls: (provider === 'codex' || provider === 'gptweb') ? codexControls : undefined,
     prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
     executionIdsRef,
     processingSessions,
@@ -447,12 +447,14 @@ function ChatInterface({
   // Mirrors ChatComposer's own visibility check so the message pane can
   // reserve space for floating status tabs. Codex's status is inside the input
   // and already contributes to the composer's height.
-  const hasActivityIndicator = Boolean(provider !== 'codex' && sessionActivity && pendingPermissionRequests.length === 0);
+  const hasActivityIndicator = Boolean((provider !== 'codex' && provider !== 'gptweb') && sessionActivity && pendingPermissionRequests.length === 0);
 
   const selectedProviderLabel =
     provider === 'cursor'
       ? t('messageTypes.cursor')
-      : provider === 'codex'
+      : provider === 'gptweb'
+        ? 'GPT Web'
+        : provider === 'codex'
         ? t('messageTypes.codex')
         : provider === 'dsh' ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' }) : provider === 'opencode'
             ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
@@ -584,7 +586,7 @@ function ChatInterface({
           onClearInput={handleClearInput}
           onSubmit={handleSubmit}
           isDragActive={isDragActive}
-          codexControls={provider === 'codex' ? codexControls : undefined}
+          codexControls={(provider === 'codex' || provider === 'gptweb') ? codexControls : undefined}
           runtimeControls={runtimeControls.available ? runtimeControls : undefined}
           onExecutePlan={() => handleVoiceTranscript(t('codex.implementPrompt'), false)}
           queuedDraft={queuedDraft}

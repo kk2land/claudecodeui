@@ -73,7 +73,7 @@ export function CodexControlPanel({ controls, onExecutePlan }: { controls: Codex
         <button type="button" className={`${button} gap-1.5`} aria-expanded={runtimeOpen}
           aria-controls={runtimePanelId} onClick={() => setRuntimeOpen((open) => !open)}>
           <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
-          Codex
+          {controls.provider === 'gptweb' ? 'GPT Web' : 'Codex'}
           <ChevronDown className={`h-3.5 w-3.5 transition-transform ${runtimeOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
       </div>

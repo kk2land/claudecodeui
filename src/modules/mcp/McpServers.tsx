@@ -20,6 +20,7 @@ const MCP_PROVIDER_BUTTON_CLASSES: Record<McpProvider, string> = {
   claude: 'bg-primary text-primary-foreground hover:bg-primary/90',
   cursor: 'bg-primary text-primary-foreground hover:bg-primary/90',
   codex: 'bg-primary text-primary-foreground hover:bg-primary/90',
+  gptweb: 'bg-primary text-primary-foreground hover:bg-primary/90',
   opencode: 'bg-primary text-primary-foreground hover:bg-primary/90',
   dsh: 'bg-blue-600 text-white hover:bg-blue-700',
 };

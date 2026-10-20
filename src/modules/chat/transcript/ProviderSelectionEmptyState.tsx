@@ -29,6 +29,7 @@ import { writeSelectedProvider } from '@/shared/selectedProvider';
 const PROVIDER_META: { id: LLMProvider; name: string }[] = [
   { id: "claude", name: "Anthropic" },
   { id: "codex", name: "OpenAI" },
+  { id: "gptweb", name: "GPT Web" },
   { id: "cursor", name: "Cursor" },
   { id: "opencode", name: "OpenCode" },
   { id: "dsh", name: "DeepSeek Harness" },
@@ -77,6 +78,7 @@ function getModelConfig(
 function getProviderDisplayName(p: LLMProvider) {
   if (p === "claude") return "Claude";
   if (p === "cursor") return "Cursor";
+  if (p === "gptweb") return "GPT Web";
   if (p === "codex") return "Codex";
   if (p === "opencode") return "OpenCode";
   if (p === "dsh") return "DeepSeek Harness";
@@ -324,6 +326,7 @@ export default function ProviderSelectionEmptyState({
                 cursor: t("providerSelection.readyPrompt.cursor", {
                   model: providerModels.cursor,
                 }),
+                gptweb: `GPT Web · ${providerModels.gptweb}`,
                 codex: t("providerSelection.readyPrompt.codex", {
                   model: providerModels.codex,
                 }),

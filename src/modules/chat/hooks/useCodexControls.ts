@@ -8,6 +8,7 @@ import { hydrateChatDrafts, persistQueuedMessage, readQueuedDelivery, readQueued
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
 type Args = {
+  provider?: 'codex' | 'gptweb';
   enabled: boolean;
   sessionId: string | null;
   project: Project | null;
@@ -17,10 +18,10 @@ type Args = {
 };
 
 /** ChatInterface owns this controller; all native controls wait for a scoped server acknowledgement. */
-export function useCodexControls({ enabled, sessionId, project, options, sendMessage, onSessionEstablished }: Args): CodexControls {
+export function useCodexControls({ provider = 'codex', enabled, sessionId, project, options, sendMessage, onSessionEstablished }: Args): CodexControls {
   const { subscribe } = useWebSocket();
   const capabilities = useProviderCapabilities();
-  const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
+  const goalsEnabled = capabilities[provider]?.nativeControls?.goal === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
   // A control failure belongs to the action, independently of the model's running state.
@@ -33,8 +34,13 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   const [visibleGoals, setVisibleGoals] = useState<Set<string>>(new Set());
   // Session allocation is itself a pending action, before a transport request id exists.
   const [creatingSession, setCreatingSession] = useState(false);
-  const creation = useRef<{ projectId: string; promise: Promise<string> } | null>(null);
-  useEffect(() => { if (sessionId) creation.current = null; }, [sessionId]);
+  // Provider and project own an allocation; stale responses must not select a
+  // session or send controls after the user has switched to another provider.
+  const creation = useRef<{ provider: 'codex' | 'gptweb'; projectId: string; promise: Promise<string> | null } | null>(null);
+  useEffect(() => {
+    creation.current = null;
+    setCreatingSession(false);
+  }, [sessionId, provider, project?.projectId]);
   const pending = useRef(new Map<string, { sessionId: string; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>());
   const optionsRef = useRef(options);
   useEffect(() => { optionsRef.current = options; }, [options]);
@@ -43,7 +49,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     const sid = typeof event.sessionId === 'string' ? event.sessionId : null;
     if (!sid) return;
     if (event.codexState) setSnapshots((old) => ({ ...old, [sid]: event.codexState as CodexSessionState }));
-    if (event.provider === 'codex' && event.role === 'user' && event.clientMessageId) void hydrateChatDrafts();
+    if (event.provider === provider && event.role === 'user' && event.clientMessageId) void hydrateChatDrafts();
     if (event.kind !== 'control_result') return;
     setErrors((old) => ({ ...old, [sid]: event.ok ? null : String(event.error ?? 'Control failed') }));
     const entry = pending.current.get(String(event.requestId));
@@ -54,7 +60,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
       if (event.ok) entry.resolve(); else entry.reject(new Error(String(event.error ?? 'Control failed')));
     }
     void hydrateChatDrafts();
-  }), [subscribe]);
+  }), [subscribe, provider]);
 
   useEffect(() => () => {
     for (const entry of pending.current.values()) {
@@ -85,25 +91,33 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   const ensureSession = useCallback(async () => {
     if (sessionId) return sessionId;
     if (!project) throw new Error('Select a project first.');
-    if (creation.current?.projectId === project.projectId) return creation.current.promise;
+    if (creation.current?.provider === provider && creation.current.projectId === project.projectId && creation.current.promise) {
+      return creation.current.promise;
+    }
     setCreatingSession(true);
-    const promise = (async () => {
+    const entry: NonNullable<typeof creation.current> = { provider, projectId: project.projectId, promise: null };
+    creation.current = entry;
+    entry.promise = (async () => {
+      let succeeded = false;
       try {
-        const response = await api.providers.createSession({ provider: 'codex', projectPath: project.fullPath || project.path || '', initialMessage: '' });
+        const response = await api.providers.createSession({ provider, projectPath: project.fullPath || project.path || '', initialMessage: '' });
         if (!response.ok) throw new Error('Could not create a Codex session.');
         const body = await response.json();
         const id = body.data?.sessionId;
         if (!id) throw new Error('No session id returned.');
-        onSessionEstablished(id, { provider: 'codex', project, summary: body.data?.sessionName || 'Codex' });
+        if (creation.current !== entry) throw new Error('The provider or project changed while creating the session.');
+        onSessionEstablished(id, { provider, project, summary: body.data?.sessionName || (provider === 'gptweb' ? 'GPT Web' : 'Codex') });
+        succeeded = true;
         return id as string;
-      } catch (error) {
-        creation.current = null;
-        throw error;
-      } finally { setCreatingSession(false); }
+      } finally {
+        if (creation.current === entry) {
+          setCreatingSession(false);
+          if (!succeeded) creation.current = null;
+        }
+      }
     })();
-    creation.current = { projectId: project.projectId, promise };
-    return promise;
-  }, [sessionId, project, onSessionEstablished]);
+    return entry.promise;
+  }, [sessionId, project, onSessionEstablished, provider]);
 
   useEffect(() => subscribe((event) => {
     if (!enabled || !sessionId || event.kind !== 'websocket_reconnected') return;
@@ -159,6 +173,6 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     }
   }, [sessionId, snapshots, send]);
 
-  return { sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
+  return { provider, sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
     pending: creatingSession || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

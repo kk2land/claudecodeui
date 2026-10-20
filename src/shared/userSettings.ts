@@ -24,6 +24,7 @@ export type UserPreferences = {
   claudePermissions: unknown;
   cursorPermissions: unknown;
   codexPermissions: unknown;
+  gptwebPermissions: unknown;
   opencodePermissions: unknown;
   dshPermissions: unknown;
   codeEditorSettings: unknown;
@@ -62,6 +63,7 @@ const LEGACY_STORAGE_KEYS: Record<UserPreferenceKey, string> = {
   claudePermissions: 'claude-settings',
   cursorPermissions: 'cursor-tools-settings',
   codexPermissions: 'codex-settings',
+  gptwebPermissions: 'gptweb-settings',
   opencodePermissions: 'opencode-settings',
   dshPermissions: 'dsh-settings',
   // Unused: the four code-editor settings never shared one key, so they are

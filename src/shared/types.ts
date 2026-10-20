@@ -5,7 +5,7 @@ import type { NavigateFunction } from 'react-router-dom';
 //----------------- LLM PROVIDER MODEL CATALOG ------------
 
 /** Identifies which coding-agent CLI backs a session, project selection or model list. */
-export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode' | 'dsh';
+export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode' | 'dsh' | 'gptweb';
 
 /** Backend capability fields used by chat controls and sidebar session actions. */
 export type ProviderCapabilityRow = {
@@ -1975,6 +1975,8 @@ export type CodexControlAction =
 export type QueuedDelivery = { status: string; requestId: string | null; error: string | null };
 /** Chat controls shared between the session hook, composer and native control panel. */
 export type CodexControls = {
+  /** Selects the brand label when the same controls serve GPT Web. */
+  provider?: 'codex' | 'gptweb';
   sessionId?: string | null;
   /** Server-owned deployment opt-in; missing means Goals are disabled. */
   goalsEnabled?: boolean;

@@ -38,6 +38,13 @@ const providerCards = [
     loginButtonClassName: 'bg-gray-800 hover:bg-gray-900 dark:bg-gray-700 dark:hover:bg-gray-600',
   },
   {
+    provider: 'gptweb' as const,
+    title: 'GPT Web',
+    connectedClassName: 'bg-gray-100 dark:bg-gray-800/50 border-gray-300 dark:border-gray-600',
+    iconContainerClassName: 'bg-gray-100 dark:bg-gray-800',
+    loginButtonClassName: 'bg-gray-800 hover:bg-gray-900 dark:bg-gray-700 dark:hover:bg-gray-600',
+  },
+  {
     provider: 'opencode' as const,
     title: 'OpenCode',
     connectedClassName: 'bg-zinc-100 dark:bg-zinc-800/50 border-zinc-300 dark:border-zinc-600',

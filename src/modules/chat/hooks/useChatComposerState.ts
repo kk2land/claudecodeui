@@ -672,7 +672,7 @@ export function useChatComposerState({
     const toolsSettings = getToolsSettings();
 
     return {
-      ...(provider === 'codex' && codexMode ? { collaborationMode: codexMode } : {}),
+      ...((provider === 'codex' || provider === 'gptweb') && codexMode ? { collaborationMode: codexMode } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
@@ -796,7 +796,7 @@ export function useChatComposerState({
 
       // Native controls precede the busy queue branch; pause must never wait behind a turn.
       let planTask = false;
-      if (provider === 'codex' && codexControls && !queuedSubmission && !submitOptions?.skipCommandInterception) {
+      if ((provider === 'codex' || provider === 'gptweb') && codexControls && !queuedSubmission && !submitOptions?.skipCommandInterception) {
         const command = /^(\/plan|\/goal)(?:\s+([\s\S]*))?$/.exec(currentInput.trimEnd());
         if (command) {
           const argument = command[2]?.trim() ?? '';

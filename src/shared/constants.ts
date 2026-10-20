@@ -119,6 +119,7 @@ export const MCP_PROVIDER_NAMES: Record<McpProvider, string> = {
   claude: 'Claude',
   cursor: 'Cursor',
   codex: 'Codex',
+  gptweb: 'GPT Web',
   opencode: 'OpenCode',
   dsh: 'DeepSeek Harness',
 };
@@ -128,6 +129,7 @@ export const MCP_SUPPORTED_SCOPES: Record<McpProvider, McpScope[]> = {
   claude: ['user', 'project', 'local'],
   cursor: ['user', 'project'],
   codex: ['user', 'project'],
+  gptweb: ['user', 'project'],
   opencode: ['user', 'project'],
   dsh: ['user', 'project'],
 };
@@ -137,6 +139,7 @@ export const MCP_SUPPORTED_TRANSPORTS: Record<McpProvider, McpTransport[]> = {
   claude: ['stdio', 'http', 'sse'],
   cursor: ['stdio', 'http'],
   codex: ['stdio', 'http'],
+  gptweb: ['stdio', 'http'],
   opencode: ['stdio', 'http'],
   dsh: ['stdio', 'http'],
 };
@@ -149,6 +152,7 @@ export const MCP_SUPPORTS_WORKING_DIRECTORY: Record<McpProvider, boolean> = {
   claude: false,
   cursor: false,
   codex: true,
+  gptweb: true,
   opencode: false,
   dsh: false,
 };
@@ -220,6 +224,7 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
   claude: 'claudePermissions',
   cursor: 'cursorPermissions',
   codex: 'codexPermissions',
+  gptweb: 'gptwebPermissions',
   opencode: 'opencodePermissions',
   dsh: 'dshPermissions',
 };
