@@ -224,6 +224,8 @@ function ChatInterface({
     isDragActive,
     openAttachmentPicker,
     handleSubmit,
+    backgroundSendPrompt,
+    resolveBackgroundSendPrompt,
     queuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,
@@ -579,6 +581,8 @@ function ChatInterface({
           codexControls={provider === 'codex' ? codexControls : undefined}
           onExecutePlan={() => handleVoiceTranscript(t('codex.implementPrompt'), false)}
           queuedDraft={queuedDraft}
+          backgroundSendPrompt={backgroundSendPrompt}
+          onResolveBackgroundSendPrompt={resolveBackgroundSendPrompt}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
           attachedFiles={attachedFiles}

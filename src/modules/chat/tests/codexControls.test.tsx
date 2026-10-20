@@ -7,8 +7,8 @@ import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
-import { resetChatDrafts } from '@/shared/chatDrafts';
-import type { CodexControls, CodexSessionState, Project, ProjectSession, ServerEvent } from '@/shared/types';
+import { readQueuedMessage, resetChatDrafts } from '@/shared/chatDrafts';
+import type { CodexControls, CodexSessionState, Project, ProjectSession, ServerEvent, SessionActivityMap } from '@/shared/types';
 
 const project: Project = { projectId: 'codex-project', displayName: 'Test', fullPath: '/tmp/project' };
 function controls(patch: Partial<CodexSessionState> = {}): CodexControls {
@@ -85,12 +85,12 @@ test('the process stop button works during a turn and disables once the process 
   expect(screen.queryByText('PID 43210')).toBeNull();
 });
 
-function composer(codex: CodexControls, isLoading = true) {
+function composer(codex: CodexControls, isLoading = true, processingSessions?: SessionActivityMap) {
   const send = vi.fn(); const add = vi.fn();
   const view = renderHook(() => useChatComposerState({ selectedProject: project, selectedSession: { id: 'codex-session' } as ProjectSession,
     currentSessionId: 'codex-session', provider: 'codex', codexControls: codex, permissionMode: 'default', cyclePermissionMode: () => {},
     resolvePermissionModeForProvider: () => 'default', currentProviderModel: 'test-model', currentProviderEffort: 'high',
-    isLoading, canAbortSession: true, tokenBudget: null, sendMessage: send, scrollToBottom: () => {}, addMessage: add,
+    isLoading, processingSessions, canAbortSession: true, tokenBudget: null, sendMessage: send, scrollToBottom: () => {}, addMessage: add,
     setIsUserScrolledUp: () => {}, setPendingPermissionRequests: () => {} }));
   const submit = async (text: string) => {
     await act(async () => { view.result.current.setInput(text); });
@@ -144,6 +144,26 @@ test('ordinary busy input stays queued and retains its identity across store upd
   await act(async () => { h.result.current.setInput('another draft'); });
   expect(h.result.current.queuedDraft?.id).toBe(id);
   expect(codex.control).not.toHaveBeenCalled(); expect(codex.steer).not.toHaveBeenCalled();
+});
+
+test('a multiline Plan task queued behind background work keeps its mode and durable identity', async () => {
+  const h = composer(controls({ phase: 'idle', turnId: null }), false, new Map([
+    ['codex-session', { statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [] }],
+  ]));
+  await act(async () => { h.result.current.setInput('/plan\n/help design the API\ninclude tests'); });
+  let pending!: Promise<void>;
+  act(() => { pending = h.result.current.handleSubmit({ preventDefault() {} } as never); });
+  await waitFor(() => expect(h.result.current.backgroundSendPrompt).not.toBeNull());
+  await act(async () => {
+    h.result.current.resolveBackgroundSendPrompt('queue');
+    await pending;
+  });
+  const stored = readQueuedMessage('codex-session');
+  expect(stored?.id).toBeTruthy();
+  expect(stored?.id).toBe(h.result.current.queuedDraft?.id);
+  expect(stored?.content).toBe('/help design the API\ninclude tests');
+  expect(stored?.options?.collaborationMode).toBe('plan');
+  expect(h.send).not.toHaveBeenCalled();
 });
 
 test('sending and stopping work without native randomUUID', async () => {
