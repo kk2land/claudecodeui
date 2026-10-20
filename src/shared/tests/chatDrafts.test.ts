@@ -185,6 +185,34 @@ test('a queued message with neither text nor attachments reads as absent', async
   assert.equal(store.readQueuedMessage('session-a'), null);
 });
 
+for (const source of ['mirror', 'server'] as const) {
+  test(`incomplete queued messages from the ${source} cannot crash the composer`, async () => {
+    const records = [
+      { scope: 'missing', text: 'keep draft', queuedMessage: {} },
+      { scope: 'null', text: '', queuedMessage: { content: null } },
+      { scope: 'number', text: '', queuedMessage: { content: 42 } },
+      { scope: 'attachment', text: '', queuedMessage: { id: 'queued-file', attachments: [{ name: 'notes.txt' }] } },
+      { scope: 'legacy-image', text: '', queuedMessage: { images: [{ name: 'shot.png' }] } },
+    ];
+    if (source === 'mirror') {
+      localStorage.setItem('chat-drafts', JSON.stringify(Object.fromEntries(records.map(({ scope, ...draft }) => [scope, draft]))));
+    } else {
+      serverDrafts = records;
+    }
+    const store = await loadStore();
+    if (source === 'server') await store.hydrateChatDrafts();
+
+    assert.equal(store.readDraftText('missing'), 'keep draft');
+    for (const scope of ['missing', 'null', 'number']) assert.equal(store.readQueuedMessage(scope), null);
+    assert.deepEqual(store.readQueuedMessage('attachment'), {
+      id: 'queued-file', content: '', attachments: [{ name: 'notes.txt' }],
+    });
+    assert.equal(store.readQueuedMessage('legacy-image')?.content, '');
+    assert.deepEqual(store.readQueuedMessage('legacy-image')?.attachments, [{ name: 'shot.png' }]);
+    assert.deepEqual(savedDrafts, [], 'reading old data must not overwrite the stored queue');
+  });
+}
+
 test('legacy image-only descriptors are still readable as attachments', async () => {
   const store = await loadStore();
 

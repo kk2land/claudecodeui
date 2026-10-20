@@ -19,7 +19,9 @@ type WorkspaceErrorBoundaryProps = {
 
 function formatError(error: unknown): string {
   if (error instanceof Error) {
-    return `${error.name}: ${error.message}`;
+    // The component stack names the owning React view, not the throwing hook
+    // or utility. Preserve the actual call stack in the optional error details.
+    return error.stack || `${error.name}: ${error.message}`;
   }
 
   return String(error);
@@ -73,12 +75,13 @@ function ErrorFallback({
 }
 
 /** Wraps the chat view in WorkspaceMain so a render error there cannot take down the whole workspace. */
-function WorkspaceErrorBoundary({
+export default function WorkspaceErrorBoundary({
   children,
   showDetails = false,
   onRetry = undefined,
   resetKeys = undefined,
 }: WorkspaceErrorBoundaryProps) {
+  // Retain React's component context alongside the exception's call stack.
   const [componentStack, setComponentStack] = useState<string | null>(null);
 
   const handleError = useCallback((error: Error, errorInfo: ErrorInfo) => {
@@ -115,5 +118,3 @@ function WorkspaceErrorBoundary({
     </ReactErrorBoundary>
   );
 }
-
-export default WorkspaceErrorBoundary;

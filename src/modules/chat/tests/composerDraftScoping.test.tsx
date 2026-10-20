@@ -4,8 +4,8 @@ import { act, renderHook } from '@testing-library/react';
 import { beforeEach, test, vi } from 'vitest';
 
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
-import { readDraftText, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
-import type { PermissionMode, Project, ProjectSession } from '@/shared/types';
+import { hydrateChatDrafts, readDraftText, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
+import type { LLMProvider, PermissionMode, Project, ProjectSession } from '@/shared/types';
 
 /**
  * Drafts used to be keyed by project, so every session in a project shared one
@@ -24,6 +24,8 @@ const PROJECT: Project = {
   fullPath: '/tmp/project-one',
 };
 
+let serverDrafts: unknown[] = [];
+
 // The composer only ever reaches the network through these; stubbing them keeps
 // the test about draft scoping rather than about fetch behaviour in jsdom.
 vi.mock('@/shared/api', () => {
@@ -31,7 +33,7 @@ vi.mock('@/shared/api', () => {
   return {
     api: {
       user: {
-        drafts: () => okJson({ success: true, drafts: [] }),
+        drafts: () => okJson({ success: true, drafts: serverDrafts }),
         saveDraft: () => okJson({ success: true }),
         deleteDraft: () => okJson({ success: true }),
         preferences: () => okJson({ success: true, preferences: {} }),
@@ -43,12 +45,12 @@ vi.mock('@/shared/api', () => {
   };
 });
 
-const renderComposer = (selectedSession: ProjectSession | null) => renderHook(
+const renderComposer = (selectedSession: ProjectSession | null, provider: LLMProvider = 'claude') => renderHook(
   ({ session }: { session: ProjectSession | null }) => useChatComposerState({
     selectedProject: PROJECT,
     selectedSession: session,
     currentSessionId: session?.id ?? null,
-    provider: 'claude',
+    provider,
     permissionMode: 'default',
     cyclePermissionMode: () => undefined,
     resolvePermissionModeForProvider: () => 'default' as PermissionMode,
@@ -71,6 +73,25 @@ beforeEach(() => {
   // The drafts store is a module-level singleton, so its in-memory copy
   // outlives localStorage.clear() and would leak one test's drafts into the next.
   resetChatDrafts();
+  serverDrafts = [];
+});
+
+test('opening DSH and editing an attachment-only queue keeps composer input a string', async () => {
+  const attachment = { name: 'notes.txt', path: '/uploads/notes.txt', mimeType: 'text/plain', size: 5 };
+  serverDrafts = [{
+    scope: 'session-dsh',
+    text: 'unsent draft',
+    queuedMessage: { id: 'queued-file', attachments: [attachment] },
+  }];
+  await hydrateChatDrafts();
+  const view = renderComposer({ id: 'session-dsh' }, 'dsh');
+  assert.equal(view.result.current.input.trim(), 'unsent draft');
+  assert.equal(view.result.current.queuedDraft?.content, '');
+  assert.deepEqual(view.result.current.queuedDraft?.uploadedAttachments, [attachment]);
+
+  await act(async () => { view.result.current.editQueuedDraft(); });
+  assert.equal(view.result.current.input.trim(), '');
+  assert.equal(view.result.current.queuedDraft, null);
 });
 
 test('a draft is stored under the open session, not the project', async () => {

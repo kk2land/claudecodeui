@@ -219,10 +219,13 @@ export function readQueuedMessage(scope: string): StoredQueuedMessage | null {
     : Array.isArray(queued.images)
       ? queued.images
       : [];
+  // Mirror and server payloads are untyped at runtime. Older attachment-only
+  // queues can omit content; never pass undefined into the composer or trim.
+  const content = typeof queued.content === 'string' ? queued.content : '';
 
   // A queued message with neither text nor attachments has nothing to send.
-  return queued.content.trim() || attachments.length > 0
-    ? { ...queued, attachments }
+  return content.trim() || attachments.length > 0
+    ? { ...queued, content, attachments }
     : null;
 }
 
