@@ -48,3 +48,28 @@ test('MCP settings preserve other entries and do not rewrite native DSH profile 
     assert((await provider.listServers()).user.some((server) => server.command === 'node'));
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+for (const scope of ['user', 'project'] as const) test(`concurrent DSH MCP ${scope} updates preserve every addition and removal across instances`, async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-mcp-concurrent-'));
+  try {
+    const config = new DshConfigurationProvider({ DSH_HOME: root });
+    const first = new DshMcpProvider(config), second = new DshMcpProvider(config);
+    const options = { scope, workspacePath: path.join(root, 'workspace'), transport: 'stdio' as const, command: process.execPath };
+    await Promise.all([
+      first.upsertServer({ ...options, name: 'one' }),
+      second.upsertServer({ ...options, name: 'two' }),
+    ]);
+    assert.deepEqual((await first.listServers(options))[scope].map((server) => server.name).sort(), ['one', 'two']);
+    await Promise.all([
+      second.removeServer({ ...options, name: 'one' }),
+      first.upsertServer({ ...options, name: 'three' }),
+      second.upsertServer({ ...options, name: 'four' }),
+    ]);
+    assert.deepEqual((await first.listServers(options))[scope].map((server) => server.name).sort(), ['four', 'three', 'two']);
+    const rejected = first.upsertServer({ ...options, name: 'invalid name' });
+    const accepted = second.upsertServer({ ...options, name: 'after-error' });
+    await assert.rejects(rejected, /MCP names/);
+    await accepted;
+    assert.equal((await second.listServers(options))[scope].length, 4, 'a rejected update must not block later writes');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

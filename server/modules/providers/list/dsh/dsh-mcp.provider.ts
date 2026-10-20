@@ -9,10 +9,36 @@ import { readObjectRecord, readStringArray, readStringRecord, AppError } from '@
 
 /** Manages CloudCLI-owned DSH MCP declarations, leaving native profile files untouched. */
 export class DshMcpProvider extends McpProvider {
+  // Instances targeting the same file share a read-modify-write queue. Atomic
+  // rename protects readers, but alone cannot prevent writers losing entries.
+  private static readonly pendingUpdates = new Map<string, Promise<void>>();
+
   constructor(private readonly configuration: DshConfigurationProvider) { super('dsh', ['user', 'project'], ['stdio', 'http']); }
 
   private file(scope: McpScope, workspace: string): string {
     return path.join(scope === 'user' ? this.configuration.read().home : path.join(workspace, '.dsh'), 'cloudcli-mcp.json');
+  }
+
+  private update<T>(scope: McpScope, workspace: string | undefined, action: () => Promise<T>): Promise<T> {
+    this.assertScope(scope);
+    const file = this.file(scope, path.resolve(workspace ?? process.cwd()));
+    const previous = DshMcpProvider.pendingUpdates.get(file) ?? Promise.resolve();
+    const result = previous.then(action);
+    // A failed save must reject its own caller while allowing the next save.
+    const settled = result.then(() => {}, () => {});
+    DshMcpProvider.pendingUpdates.set(file, settled);
+    void settled.then(() => {
+      if (DshMcpProvider.pendingUpdates.get(file) === settled) DshMcpProvider.pendingUpdates.delete(file);
+    });
+    return result;
+  }
+
+  override async upsertServer(input: UpsertProviderMcpServerInput): Promise<ProviderMcpServer> {
+    return this.update(input.scope ?? 'project', input.workspacePath, () => super.upsertServer(input));
+  }
+
+  override async removeServer(input: Parameters<McpProvider['removeServer']>[0]) {
+    return this.update(input.scope ?? 'project', input.workspacePath, () => super.removeServer(input));
   }
 
   protected async readScopedServers(scope: McpScope, workspace: string): Promise<Record<string, unknown>> {
