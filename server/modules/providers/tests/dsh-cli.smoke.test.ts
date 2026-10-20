@@ -113,9 +113,9 @@ for (const mode of ['acp', 'headless'] as const) {
       assert(nativeId);
       const originalId = nativeId;
       assert(messages.some((message) => message.kind === 'tool_use' && message.toolName === 'read'));
-      assert(messages.some((message) => message.kind === 'tool_result' && message.toolResult?.content.includes('DSH_LOCAL_TOOL_CONTENT')));
+      assert(messages.some((message) => message.kind === 'tool_result' && message.content?.includes('DSH_LOCAL_TOOL_CONTENT') && message.isError === false));
       assert(messages.some((message) => message.kind === 'tool_use' && message.toolName === 'mcp__local__ping'));
-      assert(messages.some((message) => message.kind === 'tool_result' && message.toolResult?.content.includes('DSH_LOCAL_MCP_CONTENT')));
+      assert(messages.some((message) => message.kind === 'tool_result' && message.content?.includes('DSH_LOCAL_MCP_CONTENT') && message.isError === false));
       assert(messages.some((message) => message.kind === 'text' && message.content === answer));
       await run('Continue the same conversation.');
       await runtime.close();
@@ -133,7 +133,7 @@ for (const mode of ['acp', 'headless'] as const) {
         'Read fixture.txt and report its contents.', 'Continue the same conversation.', 'Resume after a process restart.',
       ]);
       assert.equal(history.messages.filter((message) => message.kind === 'tool_use').length, 2);
-      assert(history.messages.some((message) => message.kind === 'tool_result' && message.toolResult?.content?.includes('DSH_LOCAL_TOOL_CONTENT')));
+      assert(history.messages.some((message) => message.kind === 'tool_result' && message.content?.includes('DSH_LOCAL_TOOL_CONTENT') && message.isError === false));
     } finally {
       await runtime.close();
       http.closeAllConnections();

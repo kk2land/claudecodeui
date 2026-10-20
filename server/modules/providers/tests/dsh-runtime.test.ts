@@ -224,7 +224,9 @@ test('headless keeps multiline prompts in stdin and replaces the bounded text wi
     const text = f.messages.filter((message) => message.kind === 'text');
     assert.equal(text[0].id, text[1].id);
     assert.equal(text.at(-1)?.content, '中文完成✅');
-    assert(f.messages.some((message) => message.kind === 'tool_result'));
+    const result = f.messages.find((message) => message.kind === 'tool_result');
+    assert.equal(result?.content, 'ok');
+    assert.equal(result?.isError, false);
     assert.equal(f.messages.at(-1)?.success, true);
   } finally { await f.close(); }
 });

@@ -81,6 +81,20 @@ test('the echoed task prompt does not appear in the timeline', () => {
   assert.equal(converted[0].subagentActivity, undefined);
 });
 
+test('legacy nested tool results retain content and errors inside a subagent', () => {
+  const rows = normalizedToChatMessages([
+    taskRow(),
+    subagentBash('step-1', 'bash-1'),
+    message('result-1', {
+      kind: 'tool_result', toolId: 'bash-1', parentToolUseId: 'task-1', content: undefined,
+      toolResult: { content: '<tool_use_error>Command failed</tool_use_error>', isError: true },
+    }),
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].subagentActivity?.[0].toolResult?.content, 'Command failed');
+  assert.equal(rows[0].subagentActivity?.[0].toolResult?.isError, true);
+});
+
 test('a growing live timeline invalidates the cached container projection', () => {
   const task = taskRow();
   const first = subagentBash('step-1', 'bash-1');

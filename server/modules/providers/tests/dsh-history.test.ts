@@ -81,7 +81,8 @@ test('native history retains human messages and tools after full context compact
     assert.equal(history.messages[2].toolName, 'read');
     assert.deepEqual(history.messages[2].toolInput, { path: 'file.txt' });
     assert.equal(history.messages[2].toolId, history.messages[3].toolId);
-    assert.equal(history.messages[3].toolResult?.content, 'file contents');
+    assert.equal(history.messages[3].content, 'file contents');
+    assert.equal(history.messages[3].isError, false);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 

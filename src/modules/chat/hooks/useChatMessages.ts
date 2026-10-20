@@ -7,7 +7,8 @@ import type { ChatMessage, LiveTaskStatus, NormalizedMessage, SubagentActivity }
 import { formatUsageLimitText } from '@/modules/chat/utils/chatFormatting';
 
 function formatToolResultContent(content: unknown): string {
-  const text = typeof content === 'string' ? content : JSON.stringify(content);
+  if (content == null) return '';
+  const text = typeof content === 'string' ? content : JSON.stringify(content) ?? '';
   const toolUseErrorMatch = /^<tool_use_error>([\s\S]*)<\/tool_use_error>$/.exec(text.trim());
   return toolUseErrorMatch ? toolUseErrorMatch[1] : text;
 }
@@ -19,6 +20,16 @@ type ParsedTaskNotification = {
 };
 
 type ToolResultSource = NormalizedMessage['toolResult'] | NormalizedMessage | null;
+
+function formatToolResult(source: NonNullable<ToolResultSource>): NonNullable<NormalizedMessage['toolResult']> {
+  // Older DSH servers nested standalone results. Keep those replayed/history rows readable.
+  const nested = 'toolResult' in source ? source.toolResult : null;
+  return {
+    content: formatToolResultContent(source.content ?? nested?.content),
+    isError: Boolean(source.isError ?? nested?.isError),
+    toolUseResult: source.toolUseResult ?? nested?.toolUseResult,
+  };
+}
 
 type CachedMessageProjection = {
   /** A tool-use row also depends on a separately received tool-result row. */
@@ -286,10 +297,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
         case 'tool_result': {
           const tool = msg.toolId ? liveSubagentToolsById.get(msg.toolId) : undefined;
           if (tool) {
-            tool.toolResult = {
-              content: formatToolResultContent(msg.content ?? ''),
-              isError: Boolean(msg.isError),
-            };
+            tool.toolResult = formatToolResult(msg);
             lastSubagentSourceByParent.set(parentId, msg);
           }
           break;
@@ -458,13 +466,7 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
           || msg.toolName === 'Task'
           || msg.toolName === 'Agent';
 
-        const toolResult = tr
-          ? {
-              content: formatToolResultContent(tr.content),
-              isError: Boolean(tr.isError),
-              toolUseResult: tr.toolUseResult,
-            }
-          : null;
+        const toolResult = tr ? formatToolResult(tr) : null;
 
         // The server-indexed timeline arrives on a history load; the live fold
         // covers the run in progress. A mid-run refresh can attach a partial
@@ -572,13 +574,13 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
           break;
         }
 
-        const content = formatToolResultContent(msg.content || '');
+        const { content, isError } = formatToolResult(msg);
         if (!content.trim()) {
           break;
         }
 
         converted.push({
-          type: msg.isError ? 'error' : 'assistant',
+          type: isError ? 'error' : 'assistant',
           content,
           timestamp: msg.timestamp,
           toolId: msg.toolId,

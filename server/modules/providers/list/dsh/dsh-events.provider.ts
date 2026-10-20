@@ -52,7 +52,8 @@ export class DshEventsProvider {
       const resultText = typeof result === 'string' ? result : result === undefined ? '' : JSON.stringify(result, null, 2);
       return [make({ id: `dsh:${sessionId}:tool:${toolId}:${resultOnly ? 'result' : 'call'}`, kind: resultOnly ? 'tool_result' : 'tool_use',
         toolId, toolName, toolInput: event.rawInput ?? event.input ?? data.arguments ?? {},
-        ...(resultOnly ? { toolResult: { content: resultText, isError: event.status === 'failed' || event.status === 'error' || data.message?.isError === true } } : {}),
+        // Standalone tool_result rows use flat fields; nested toolResult is for tool_use snapshots.
+        ...(resultOnly ? { content: resultText, isError: event.status === 'failed' || event.status === 'error' || data.message?.isError === true } : {}),
       })];
     }
     if (type === 'error') return [make({ kind: 'error', content: event.message ?? event.error ?? 'DSH failed.' })];

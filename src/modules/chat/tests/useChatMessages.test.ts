@@ -107,6 +107,78 @@ test('preserves existing UI objects when an older message is prepended', () => {
   assert.strictEqual(withOlderHistory[2], initial[1]);
 });
 
+test('attaches legacy nested DSH results and refreshes the cached tool row', () => {
+  const call = message('call', { provider: 'dsh', kind: 'tool_use', toolId: 'read-1', toolName: 'read' });
+  const result = message('result', {
+    provider: 'dsh', kind: 'tool_result', toolId: 'read-1', content: undefined,
+    toolResult: { content: 'file contents', isError: false },
+  });
+  const pending = normalizedToChatMessages([call]);
+  const completed = normalizedToChatMessages([call, result]);
+  assert.equal(completed.length, 1);
+  assert.notStrictEqual(completed[0], pending[0]);
+  assert.equal(completed[0].toolResult?.content, 'file contents');
+  assert.equal(completed[0].toolResult?.isError, false);
+  assert.strictEqual(normalizedToChatMessages([call, result])[0], completed[0]);
+
+  const failed = normalizedToChatMessages([call, {
+    ...result,
+    toolResult: { content: '<tool_use_error>Access denied</tool_use_error>', isError: true },
+  }]);
+  assert.notStrictEqual(failed[0], completed[0]);
+  assert.equal(failed[0].toolResult?.content, 'Access denied');
+  assert.equal(failed[0].toolResult?.isError, true);
+});
+
+test.each([undefined, null])('renders a tool result with %s content as empty output', (content) => {
+  const call = message('call', { kind: 'tool_use', toolId: 'tool-1' });
+  // JSON responses can contain null even though the client contract uses optional strings.
+  const result = JSON.parse(JSON.stringify(message('result', { kind: 'tool_result', toolId: 'tool-1', content: undefined })));
+  result.content = content;
+  const rows = normalizedToChatMessages([call, result]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].toolResult?.content, '');
+  assert.equal(rows[0].toolResult?.isError, false);
+});
+
+test('flat tool results take precedence over legacy nested fields, including empty output and false errors', () => {
+  const call = message('call', { kind: 'tool_use', toolId: 'tool-1' });
+  const result = message('result', {
+    kind: 'tool_result', toolId: 'tool-1', content: '', isError: false,
+    toolResult: { content: 'stale failure', isError: true },
+    toolUseResult: { status: 'done' },
+  });
+  assert.deepEqual(normalizedToChatMessages([call, result])[0].toolResult, {
+    content: '', isError: false, toolUseResult: { status: 'done' },
+  });
+});
+
+test('retains inline tool results and structured output formatting', () => {
+  const call = message('call', {
+    kind: 'tool_use', toolId: 'tool-1',
+    toolResult: { content: '<tool_use_error>Failed</tool_use_error>', isError: true, toolUseResult: { exitCode: 1 } },
+  });
+  assert.deepEqual(normalizedToChatMessages([call])[0].toolResult, {
+    content: 'Failed', isError: true, toolUseResult: { exitCode: 1 },
+  });
+
+  const structured = JSON.parse(JSON.stringify(call));
+  structured.toolResult = { content: { files: ['README.md'] }, isError: false };
+  const rows = normalizedToChatMessages([structured]);
+  assert.equal(rows[0].toolResult?.content, '{"files":["README.md"]}');
+});
+
+test('renders a legacy nested result without a tool id with its error status', () => {
+  const result = message('result', {
+    provider: 'dsh', kind: 'tool_result', content: undefined,
+    toolResult: { content: 'Read failed', isError: true },
+  });
+  const rows = normalizedToChatMessages([result]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].type, 'error');
+  assert.equal(rows[0].content, 'Read failed');
+});
+
 test('preserves both UI objects produced by an unchanged task notification', () => {
   const notification = message('task-notification', {
     role: 'user',
