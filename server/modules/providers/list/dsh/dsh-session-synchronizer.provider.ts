@@ -25,8 +25,9 @@ export class DshSessionSynchronizer implements IProviderSessionSynchronizer {
     const title = [...log.events].reverse().find((event) => event.type === 'session/title')?.data?.title;
     const firstUser = log.events.find((event) => event.type === 'user/message');
     const firstText = firstUser?.data?.content?.find((block: { type: string }) => block.type === 'text')?.text;
-    const pending = sessionsDb.getSessionByProviderSessionId(id) ?? sessionsDb.findLatestPendingAppSession('dsh', log.header.cwd);
-    if (pending && !pending.provider_session_id) sessionsDb.assignProviderSessionId(pending.session_id, id);
+    // A directory can hold several pending app runs and unrelated old logs.
+    // Only the runtime's exact native-id announcement may claim an app row;
+    // assignProviderSessionId merges any watcher-created native row later.
     const existing = sessionsDb.getSessionByProviderSessionId(id);
     const updated = log.events.at(-1)?.time ?? log.header.createdAt;
     return sessionsDb.createSession(id, 'dsh', log.header.cwd,
