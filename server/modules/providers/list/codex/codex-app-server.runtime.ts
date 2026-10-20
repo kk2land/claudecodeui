@@ -581,11 +581,15 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     try {
       ({ thread } = await this.client.request('thread/read', { threadId: session.threadId, includeTurns: true }));
     } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED') throw error;
+      // session_created can trigger a refresh before the first turn/start is
+      // accepted. History is empty for now; do not confirm local receipts or
+      // alter the pending turn. Later refreshes must still read native history.
+      if (error.message.includes('is not materialized yet; includeTurns is unavailable before first user message')) return;
       // Opening/reconnecting restores receipts, not active-turn state. Only this
       // known history limitation can use the same persisted rows as the UI;
       // Stop still requires native confirmation and other RPC errors propagate.
-      if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED'
-        || !error.message.includes('list_turns is not supported yet')) throw error;
+      if (!error.message.includes('list_turns is not supported yet')) throw error;
       for (const message of await this.readStoredMessages(session.id)) {
         if (message.role === 'user' && typeof message.clientMessageId === 'string' && message.clientMessageId) {
           this.confirmSteer(session.id, message.clientMessageId);

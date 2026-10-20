@@ -171,6 +171,71 @@ test('unsupported history restoration preserves the running turn and never confi
   await running;
 });
 
+for (const goalsEnabled of [false, true]) {
+  test(`history refresh before the first user message preserves its pending turn with Goals ${goalsEnabled ? 'enabled' : 'disabled'}`, async () => {
+    process.env.CLOUDCLI_CODEX_GOAL_ENABLED = String(goalsEnabled);
+    const h = harness();
+    let acknowledge!: (value: AnyRecord) => void;
+    h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+    h.handlers.set('thread/read', async () => {
+      throw new AppError('thread native-thread is not materialized yet; includeTurns is unavailable before first user message', {
+        code: 'CODEX_APP_SERVER_REJECTED',
+      });
+    });
+    h.storedMessages.push({
+      id: 'first-message', clientMessageId: 'first-message', kind: 'text', role: 'user',
+      provider: 'codex', sessionId: 'app-session', timestamp: '2026-10-20T00:00:00.000Z', content: 'hello',
+    });
+    const running = h.run('hello', { clientMessageId: 'first-message' });
+    await eventually(() => h.calls.some(({ method }) => method === 'turn/start'));
+    try {
+      const restored = await h.control({ action: 'goal', operation: 'get' });
+      assert.equal(restored.phase, 'starting');
+      assert.equal(restored.turnId, null);
+      assert.deepEqual(h.historyReads, []);
+      assert.deepEqual(h.accepted, []);
+      assert.equal(h.events.some((event) => event.kind === 'error' || event.kind === 'complete'), false);
+
+      acknowledge({ turn: { id: 'turn-1' } });
+      await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+      h.handlers.set('thread/read', async () => ({ thread: { turns: [
+        { items: [{ type: 'userMessage', clientId: 'first-message' }] },
+      ] } }));
+      const materialized = await h.control({ action: 'goal', operation: 'get' });
+      assert.equal(materialized.phase, 'running');
+      assert.equal(materialized.turnId, 'turn-1');
+      assert.deepEqual(h.accepted, ['first-message']);
+      assert.equal(h.calls.filter(({ method }) => method === 'thread/start').length, 1);
+      assert.equal(h.calls.filter(({ method }) => method === 'turn/start').length, 1);
+    } finally {
+      acknowledge({ turn: { id: 'turn-1' } });
+      await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+      h.finish();
+      await running;
+    }
+  });
+}
+
+test('an unmaterialized history refresh preserves a paused Plan goal before any user message', async () => {
+  const h = harness();
+  await h.control({ action: 'mode', mode: 'plan' });
+  const planned = await h.control({ action: 'goal', operation: 'set', objective: 'plan the change' });
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('thread native-thread is not materialized yet; includeTurns is unavailable before first user message', {
+      code: 'CODEX_APP_SERVER_REJECTED',
+    });
+  });
+
+  const restored = await h.control({ action: 'goal', operation: 'get' });
+  assert.equal(restored.phase, 'idle');
+  assert.equal(restored.mode, 'plan');
+  assert.equal(restored.goal?.status, 'paused');
+  assert.deepEqual(restored.goal, planned.goal);
+  assert.equal(h.calls.some(({ method }) => method === 'turn/start'), false);
+  assert.deepEqual(h.historyReads, []);
+  assert.deepEqual(h.accepted, []);
+});
+
 test('history restoration still reports unrelated RPC failures', async () => {
   const h = harness();
   h.writer.setSessionId!('native-thread');
@@ -183,24 +248,29 @@ test('history restoration still reports unrelated RPC failures', async () => {
   assert.deepEqual(h.accepted, []);
 });
 
-test('stored history never substitutes for native confirmation of an uncertain stop', async () => {
-  const h = harness();
-  h.handlers.set('turn/start', async () => {
-    throw new AppError('Start acknowledgement timed out', { code: 'CODEX_APP_SERVER_TIMEOUT' });
-  });
-  h.handlers.set('thread/read', async () => {
-    throw new AppError('list_turns is not supported yet', { code: 'CODEX_APP_SERVER_REJECTED' });
-  });
-  const running = h.run();
-  await eventually(() => h.runtime.getState('app-session').phase === 'stopFailed');
+for (const [limitation, message] of [
+  ['unsupported', 'list_turns is not supported yet'],
+  ['unmaterialized', 'thread native-thread is not materialized yet; includeTurns is unavailable before first user message'],
+]) {
+  test(`${limitation} history never substitutes for native confirmation of an uncertain stop`, async () => {
+    const h = harness();
+    h.handlers.set('turn/start', async () => {
+      throw new AppError('Start acknowledgement timed out', { code: 'CODEX_APP_SERVER_TIMEOUT' });
+    });
+    h.handlers.set('thread/read', async () => {
+      throw new AppError(message, { code: 'CODEX_APP_SERVER_REJECTED' });
+    });
+    const running = h.run();
+    await eventually(() => h.runtime.getState('app-session').phase === 'stopFailed');
 
-  assert.equal(await h.runtime.abort('app-session'), false);
-  assert.equal(h.runtime.getState('app-session').phase, 'stopFailed');
-  assert.deepEqual(h.historyReads, []);
-  assert.equal(h.events.some((event) => event.kind === 'complete'), false);
-  h.finish('turn-1', 'interrupted');
-  await running;
-});
+    assert.equal(await h.runtime.abort('app-session'), false);
+    assert.equal(h.runtime.getState('app-session').phase, 'stopFailed');
+    assert.deepEqual(h.historyReads, []);
+    assert.equal(h.events.some((event) => event.kind === 'complete'), false);
+    h.finish('turn-1', 'interrupted');
+    await running;
+  });
+}
 
 test('native turn uses independent Plan/permission settings and stable message identity', async () => {
   const h = harness();
