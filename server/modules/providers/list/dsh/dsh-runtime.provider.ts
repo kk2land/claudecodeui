@@ -10,9 +10,10 @@ import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 import { DshSessionSynchronizer } from '@/modules/providers/list/dsh/dsh-session-synchronizer.provider.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
+import { sessionRuntimeDb } from '@/modules/database/index.js';
 import type { IProviderRuntime } from '@/shared/interfaces.js';
-import type { AnyRecord, DshConfiguration, ProviderPermissionDecision, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/types.js';
-import { createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
+import type { AnyRecord, DshConfiguration, ProviderPermissionDecision, ProviderRuntimeAction, ProviderRuntimeState, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/types.js';
+import { AppError, createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
 import { appendFilesInputTag, normalizeAttachmentDescriptors } from '@/shared/image-attachments.js';
 
 type DshOwner = {
@@ -34,6 +35,8 @@ type DshOwner = {
   defaultModel?: string;
   approvalBypass?: boolean;
   mcpSignature?: string;
+  cliVersion?: string;
+  processStopped?: boolean;
 };
 type DshApproval = { owner: DshOwner; message: AnyRecord; options: AnyRecord[]; resolve(value: unknown): void };
 
@@ -41,18 +44,23 @@ type DshApproval = { owner: DshOwner; message: AnyRecord; options: AnyRecord[]; 
 export class DshRuntimeProvider implements IProviderRuntime {
   private readonly owners = new Map<string, DshOwner>();
   private readonly approvals = new Map<string, DshApproval>();
+  // A handoff/stop excludes new sends and queue dispatch until teardown has actually finished.
+  private readonly transitions = new Map<string, { phase: 'switching' | 'stopping'; done: Promise<void> }>();
 
   constructor(
     private readonly configuration: DshConfigurationProvider,
     private readonly events: DshEventsProvider,
     private readonly mcp: DshMcpProvider,
     private readonly synchronizer: Pick<DshSessionSynchronizer, 'synchronize'>,
+    private readonly settings: Pick<typeof sessionRuntimeDb, 'getDsh' | 'saveDsh'> = sessionRuntimeDb,
   ) {}
 
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<void> {
     const id = String(options.sessionId || randomUUID());
+    if (this.transitions.has(id)) throw new AppError('Wait for the DSH runtime change or stop to finish.', { code: 'DSH_RUNTIME_BUSY', statusCode: 409 });
     if (this.owners.get(id)?.busy) throw new Error('DSH session is already running; queue the next message.');
     const config = this.configuration.read();
+    config.mode = this.settings.getDsh(id)?.runtime ?? config.mode;
     const cwd = path.resolve(options.cwd || options.projectPath || process.cwd());
     const signature = createHash('sha256').update(JSON.stringify({ config, cwd })).digest('hex');
     let owner = this.owners.get(id);
@@ -116,7 +124,9 @@ export class DshRuntimeProvider implements IProviderRuntime {
         // next turn. Publish it only after teardown and this busy guard end.
         // No owner mutation or asynchronous cleanup may follow the terminal.
         owner.busy = false;
-        if (!owner.aborted) {
+        if (owner.processStopped) {
+          owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: 0, aborted: true }));
+        } else if (!owner.aborted) {
           if (exitCode === 0) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode }));
         }
@@ -187,6 +197,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
       };
       const initialized = await child.request('initialize', { protocolVersion: 1, clientCapabilities: {}, clientInfo: { name: 'cloudcli', version: '1' } }, timeout);
       if (initialized.protocolVersion !== 1) throw new Error('Unsupported DSH ACP protocol version.');
+      owner.cliVersion = typeof initialized.agentInfo?.version === 'string' ? initialized.agentInfo.version : undefined;
       if (owner.aborted) return;
       const servers = await this.servers(owner);
       const created = owner.nativeId
@@ -281,6 +292,83 @@ export class DshRuntimeProvider implements IProviderRuntime {
     },
     listPending: (sessionId: string): unknown[] => [...this.approvals.values()].filter((request) => request.owner.id === sessionId).map((request) => request.message),
   };
+
+  /** Providers' runtime panel uses these application controls without issuing Codex-native commands. */
+  readonly management = {
+    getState: (sessionId: string | null): ProviderRuntimeState => {
+      const owner = sessionId ? this.owners.get(sessionId) : undefined;
+      const saved = sessionId ? this.settings.getDsh(sessionId) : null;
+      const runtime = saved?.runtime ?? this.configuration.read().mode;
+      const child = owner?.child;
+      const running = Boolean(child?.isRunning);
+      return {
+        runtime,
+        phase: (sessionId && this.transitions.get(sessionId)?.phase) || (owner?.busy ? running ? 'running' : 'starting' : 'idle'),
+        queueHeld: saved?.queueHeld ?? false,
+        supportsPermissionRequests: runtime === 'acp',
+        diagnostics: {
+          running, pid: running ? child!.child.pid! : null,
+          startedAt: running ? child!.startedAt : null,
+          launcherPath: running ? child!.child.spawnfile : null,
+          cliVersion: running ? owner?.cliVersion ?? null : null,
+        },
+      };
+    },
+    control: async (sessionId: string, action: ProviderRuntimeAction): Promise<ProviderRuntimeState> => {
+      const transition = this.transitions.get(sessionId);
+      if (transition) {
+        if (action.action !== 'stop' || transition.phase !== 'stopping') {
+          throw new AppError('Wait for the DSH runtime change or stop to finish.', { code: 'DSH_RUNTIME_BUSY', statusCode: 409 });
+        }
+        await transition.done;
+        return this.management.getState(sessionId);
+      }
+      const state = this.management.getState(sessionId);
+      const owner = this.owners.get(sessionId);
+      if (action.action === 'queue-resume') {
+        this.settings.saveDsh(sessionId, { runtime: state.runtime as DshConfiguration['mode'], queueHeld: false });
+        return this.management.getState(sessionId);
+      }
+      if (action.action === 'runtime') {
+        if (action.runtime !== 'acp' && action.runtime !== 'headless') {
+          throw new AppError('DSH supports only acp and headless.', { code: 'INVALID_RUNTIME', statusCode: 400 });
+        }
+        if (owner?.busy) throw new AppError('Stop this session before changing its runtime.', { code: 'DSH_RUNTIME_BUSY', statusCode: 409 });
+        if (state.runtime === action.runtime) return state;
+      } else if (state.runtime !== 'acp') {
+        throw new AppError('Only the DSH ACP process can be stopped from this panel.', { code: 'UNSUPPORTED_RUNTIME_CONTROL', statusCode: 409 });
+      }
+
+      // Defer cleanup until the gate is installed, including a stop during asynchronous startup.
+      const done = Promise.resolve().then(async () => {
+        if (action.action === 'stop') {
+          this.settings.saveDsh(sessionId, { runtime: 'acp', queueHeld: true });
+          if (owner) {
+            owner.processStopped = owner.busy;
+            owner.aborted = true;
+            this.cancelApprovals(owner);
+            // Closing stdio and bounded signals also stops a stuck initialize/prompt RPC.
+            if (owner.busy) {
+              await owner.child?.close();
+              // execute owns cleanup until startup/indexing finish, including patches created after stop.
+              await owner.done;
+            }
+            await this.release(owner);
+          }
+        } else {
+          if (owner) await this.release(owner);
+          this.settings.saveDsh(sessionId, { runtime: action.runtime as DshConfiguration['mode'], queueHeld: state.queueHeld });
+        }
+      });
+      this.transitions.set(sessionId, { phase: action.action === 'stop' ? 'stopping' : 'switching', done });
+      try { await done; } finally { this.transitions.delete(sessionId); }
+      return this.management.getState(sessionId);
+    },
+  };
+
+  isQueueBlocked(sessionId: string): boolean {
+    return this.transitions.has(sessionId) || Boolean(this.settings.getDsh(sessionId)?.queueHeld);
+  }
 
   async abort(sessionId: string): Promise<boolean> {
     const owner = this.owners.get(sessionId);

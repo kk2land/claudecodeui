@@ -9,7 +9,7 @@ import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-confi
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js';
 import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
-import type { AnyRecord, DshRuntimeMode, ProviderRuntimeContext } from '@/shared/types.js';
+import type { AnyRecord, DshRuntimeMode, DshRuntimeSettings, ProviderRuntimeContext } from '@/shared/types.js';
 
 const actor = `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
@@ -22,7 +22,8 @@ if (process.argv.includes('headless')) {
   process.stdin.on('data',d=>input+=d);
   process.stdin.on('end',()=>{
     log({prompt:input});
-    output({type:'session',sessionId:'native-headless'});
+    const sessionIndex=process.argv.indexOf('--session-id');
+    output({type:'session',sessionId:sessionIndex<0?'native-headless':process.argv[sessionIndex+1]});
     if(input==='wait') {setInterval(()=>{},1000);return;}
     output({type:'status',phase:'step_start'});
     output({type:'tool_call',callId:'tool-1',tool:'bash',input:{command:'pwd'}});
@@ -48,7 +49,7 @@ if (process.argv.includes('headless')) {
   };
   rl.on('line',line=>{
     const f=JSON.parse(line);log(f);
-    if(f.method==='initialize') output({id:f.id,result:{protocolVersion:1}});
+    if(f.method==='initialize') output({id:f.id,result:{protocolVersion:1,agentInfo:{version:'0.2.1-test'}}});
     else if(f.method==='session/new') output({id:f.id,result:{sessionId:'native-acp',configOptions:choices}});
     else if(f.method==='session/resume') {
       if(f.params.sessionId==='missing') output({id:f.id,error:{code:-32602,message:'unknown session'}});
@@ -78,12 +79,14 @@ async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = n
   const messages: AnyRecord[] = [];
   let captured = nativeId;
   let syncs = 0;
-  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), new DshMcpProvider(config), { synchronize: async () => { syncs++; return synchronize ? synchronize() : 0; } });
+  const saved = new Map<string, DshRuntimeSettings>();
+  const settings = { getDsh: (id: string) => saved.get(id) ?? null, saveDsh: (id: string, value: DshRuntimeSettings) => { saved.set(id, value); } };
+  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), new DshMcpProvider(config), { synchronize: async () => { syncs++; return synchronize ? synchronize() : 0; } }, settings);
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => captured, resolveResumeModel: async (_id, model) => model || 'default',
     getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default' }), normalizeMessage: () => [], isProviderInstalled: async () => true };
   const run = (prompt: string, options: AnyRecord = {}) => runtime.run(prompt, { sessionId: 'app', cwd: root, ...options },
     { send: (value) => messages.push(value as AnyRecord), setSessionId: (id) => { captured = id; } }, context);
-  return { runtime, messages, run, root, get syncs() { return syncs; }, get captured() { return captured; },
+  return { runtime, messages, run, root, settings, get syncs() { return syncs; }, get captured() { return captured; },
     calls: async () => (await readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as AnyRecord),
     close: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
 }
@@ -280,4 +283,120 @@ test('cancelling during startup prevents a process from being launched later', {
 test('configuration rejects unsupported transports and non-array patch arguments', () => {
   assert.throws(() => new DshConfigurationProvider({ CLOUDCLI_DSH_RUNTIME: 'sdk' }).read(), /acp or headless/);
   assert.throws(() => new DshConfigurationProvider({ CLOUDCLI_DSH_PATCHES: 'shell --flags' }).read(), /JSON array/);
+});
+
+test('runtime state is passive and selection persists before the first run', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture('headless');
+  try {
+    assert.equal(f.runtime.management.getState(null).runtime, 'headless');
+    assert.equal(f.runtime.management.getState('app').diagnostics.running, false);
+    await assert.rejects(f.calls(), { code: 'ENOENT' });
+    const state = await f.runtime.management.control('app', { action: 'runtime', runtime: 'acp' });
+    assert.equal(state.runtime, 'acp');
+    assert.equal(state.supportsPermissionRequests, true);
+    assert.equal(state.diagnostics.pid, null);
+    assert.deepEqual(f.settings.getDsh('app'), { runtime: 'acp', queueHeld: false });
+    await assert.rejects(f.calls(), { code: 'ENOENT' });
+    await f.run('hello');
+    assert((await f.calls())[0].args.includes('acp'));
+    await assert.rejects(f.runtime.management.control('app', { action: 'runtime', runtime: 'sdk' }), /acp and headless/);
+  } finally { await f.close(); }
+});
+
+test('ACP diagnostics track the process lifetime and switching waits for release', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await f.run('hello');
+    const first = f.runtime.management.getState('app');
+    assert.equal(first.phase, 'idle');
+    assert.equal(first.diagnostics.running, true);
+    assert(first.diagnostics.pid);
+    assert(first.diagnostics.startedAt);
+    assert.equal(first.diagnostics.launcherPath, path.join(f.root, 'fake-dsh.mjs'));
+    assert.equal(first.diagnostics.cliVersion, '0.2.1-test');
+    await f.run('again');
+    assert.deepEqual(f.runtime.management.getState('app').diagnostics, first.diagnostics);
+    const switching = f.runtime.management.control('app', { action: 'runtime', runtime: 'headless' });
+    assert.equal(f.runtime.management.getState('app').phase, 'switching');
+    assert.equal(f.runtime.isQueueBlocked('app'), true);
+    await assert.rejects(f.run('racing send'), /Wait for/);
+    const next = await switching;
+    assert.equal(next.runtime, 'headless');
+    assert.equal(next.diagnostics.running, false);
+    assert.equal(next.supportsPermissionRequests, false);
+    await f.run('headless');
+    assert((await f.calls()).some((call) => call.args?.includes('headless')));
+    await assert.rejects(f.runtime.management.control('app', { action: 'stop' }), /Only.*ACP/);
+  } finally { await f.close(); }
+});
+
+test('stopping idle ACP holds its queue and does not restart on polling', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await f.run('hello');
+    const stopping = f.runtime.management.control('app', { action: 'stop' });
+    const duplicate = f.runtime.management.control('app', { action: 'stop' });
+    assert.equal(f.runtime.management.getState('app').phase, 'stopping');
+    await assert.rejects(f.runtime.management.control('app', { action: 'runtime', runtime: 'headless' }), /Wait for/);
+    await assert.rejects(f.runtime.management.control('app', { action: 'queue-resume' }), /Wait for/);
+    const [state] = await Promise.all([stopping, duplicate]);
+    assert.equal(state.queueHeld, true);
+    assert.equal(state.diagnostics.running, false);
+    assert.equal(f.runtime.isQueueBlocked('app'), true);
+    assert.equal(f.runtime.isQueueBlocked('other'), false);
+    assert.equal(f.runtime.management.getState('app').diagnostics.pid, null);
+    assert.equal((await f.calls()).filter((call) => call.args).length, 1);
+    await f.runtime.management.control('app', { action: 'runtime', runtime: 'headless' });
+    assert.equal(f.runtime.isQueueBlocked('app'), true, 'switching must not clear an explicit stop');
+    await f.runtime.management.control('app', { action: 'queue-resume' });
+    assert.equal(f.runtime.isQueueBlocked('app'), false);
+  } finally { await f.close(); }
+});
+
+for (const prompt of ['wait', 'permission']) test(`ACP process stop settles an active ${prompt} turn exactly once`, { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    const running = f.run(prompt);
+    await until(() => f.captured !== null);
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/prompt'));
+    await assert.rejects(f.runtime.management.control('app', { action: 'runtime', runtime: 'headless' }), /Stop this session/);
+    await f.runtime.management.control('app', { action: 'stop' });
+    await running;
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+    assert.equal(f.runtime.permissions.listPending('app').length, 0);
+    const complete = f.messages.filter((message) => message.kind === 'complete');
+    assert.equal(complete.length, 1);
+    assert.equal(complete[0].aborted, true);
+    assert.equal(f.runtime.management.getState('app').diagnostics.running, false);
+  } finally { await f.close(); }
+});
+
+test('a process stop during startup prevents a late launch and leaves the queue held', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    const running = f.run('hello');
+    await f.runtime.management.control('app', { action: 'stop' });
+    await running;
+    assert.equal(f.runtime.isQueueBlocked('app'), true);
+    assert.equal(f.runtime.management.getState('app').diagnostics.running, false);
+    assert.equal(f.messages.filter((message) => message.kind === 'complete' && message.aborted).length, 1);
+    await assert.rejects(f.calls(), { code: 'ENOENT' });
+  } finally { await f.close(); }
+});
+
+test('stopping one ACP session leaves another session process and queue available', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await f.run('hello');
+    await f.run('hello from another session', { sessionId: 'other' });
+    const other = f.runtime.management.getState('other');
+    assert(other.diagnostics.running);
+    assert.notEqual(other.diagnostics.pid, f.runtime.management.getState('app').diagnostics.pid);
+    await f.runtime.management.control('app', { action: 'stop' });
+    assert.equal(f.runtime.management.getState('app').diagnostics.running, false);
+    assert.deepEqual(f.runtime.management.getState('other').diagnostics, other.diagnostics);
+    assert.equal(f.runtime.isQueueBlocked('other'), false);
+    await f.run('continue other session', { sessionId: 'other' });
+    assert.equal(f.messages.at(-1)?.success, true);
+  } finally { await f.close(); }
 });

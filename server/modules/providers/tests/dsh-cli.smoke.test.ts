@@ -12,7 +12,7 @@ import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js
 import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
 import { DshSessionStore } from '@/modules/providers/list/dsh/dsh-session-store.provider.js';
 import { DshSessionsProvider } from '@/modules/providers/list/dsh/dsh-sessions.provider.js';
-import type { AnyRecord, ProviderRuntimeContext } from '@/shared/types.js';
+import type { AnyRecord, DshRuntimeSettings, ProviderRuntimeContext } from '@/shared/types.js';
 
 // Opt in with an independently installed @deepseek-ai/dsh@0.2.1-rc.2 binary.
 // Only the real CLI is external: model requests stay on this local HTTP server,
@@ -96,7 +96,9 @@ for (const mode of ['acp', 'headless'] as const) {
     const mcp = new DshMcpProvider(configuration);
     await mcp.upsertServer({ name: 'local', scope: 'project', workspacePath: cwd, transport: 'stdio', command: process.execPath,
       args: [mcpFile], env: { CLOUDCLI_MCP_TEXT: 'DSH_LOCAL_MCP_CONTENT' } });
-    const createRuntime = () => new DshRuntimeProvider(configuration, events, mcp, { synchronize: async () => 0 });
+    const saved = new Map<string, DshRuntimeSettings>();
+    const settings = { getDsh: (id: string) => saved.get(id) ?? null, saveDsh: (id: string, value: DshRuntimeSettings) => { saved.set(id, value); } };
+    const createRuntime = () => new DshRuntimeProvider(configuration, events, mcp, { synchronize: async () => 0 }, settings);
     let runtime = createRuntime();
     let nativeId: string | null = null;
     const messages: AnyRecord[] = [];
@@ -122,8 +124,8 @@ for (const mode of ['acp', 'headless'] as const) {
       runtime = createRuntime();
       await run('Resume after a process restart.');
       assert.equal(nativeId, originalId);
-      await runtime.close();
       assert.equal(runtime.listActiveSessions().length, 0);
+      assert.equal(runtime.management.getState('local-app').diagnostics.running, mode === 'acp');
       assert.equal(messages.filter((message) => message.kind === 'complete' && message.success).length, 3);
       assert(JSON.stringify(requests.at(-1)?.messages).includes('DSH_LOCAL_TOOL_CONTENT'));
       assert(JSON.stringify(requests.at(-1)?.messages).includes('DSH_LOCAL_MCP_CONTENT'));
@@ -134,6 +136,19 @@ for (const mode of ['acp', 'headless'] as const) {
       ]);
       assert.equal(history.messages.filter((message) => message.kind === 'tool_use').length, 2);
       assert(history.messages.some((message) => message.kind === 'tool_result' && message.content?.includes('DSH_LOCAL_TOOL_CONTENT') && message.isError === false));
+      // Select the other actual transport, preserving the native conversation across process handoff.
+      const otherMode = mode === 'acp' ? 'headless' : 'acp';
+      await runtime.management.control('local-app', { action: 'runtime', runtime: otherMode });
+      assert.equal(runtime.management.getState('local-app').diagnostics.running, false, 'handoff closes the old process without starting a new one');
+      await run('Continue after changing transport.');
+      assert.equal(nativeId, originalId);
+      assert.equal(messages.filter((message) => message.kind === 'complete' && message.success).length, 4);
+      if (otherMode === 'acp') {
+        assert.equal(runtime.management.getState('local-app').diagnostics.running, true);
+        await runtime.management.control('local-app', { action: 'stop' });
+        assert.equal(runtime.management.getState('local-app').diagnostics.running, false);
+        assert.equal(runtime.isQueueBlocked('local-app'), true);
+      }
     } finally {
       await runtime.close();
       http.closeAllConnections();

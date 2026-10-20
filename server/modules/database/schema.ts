@@ -236,7 +236,7 @@ CREATE TABLE IF NOT EXISTS session_drafts (
 );
 `;
 
-/** Database initialization and migrations persist each Codex session's runtime, mode and queue hold. */
+/** Database initialization and migrations persist session runtimes and queue holds, plus Codex's native mode. */
 export const SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS session_runtime_settings (
     session_id TEXT PRIMARY KEY,

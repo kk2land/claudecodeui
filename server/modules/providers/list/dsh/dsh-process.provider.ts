@@ -10,6 +10,7 @@ type PendingRequest = { resolve(value: AnyRecord): void; reject(error: Error): v
 /** DSH-owned stdio transport shared by its ACP and headless runtime paths. */
 export class DshProcess {
   readonly child: ChildProcess;
+  readonly startedAt = Date.now();
   readonly exited: Promise<number | null>;
   onFrame: (frame: AnyRecord) => void = () => {};
   onRequest: (method: string, params: AnyRecord) => Promise<unknown> = async () => { throw new Error('Unsupported ACP client request.'); };
@@ -115,6 +116,8 @@ export class DshProcess {
   get errorTail(): string { return this.stderr; }
   get transportError(): Error | undefined { return this.failure; }
   get isClosed(): boolean { return this.ended || Boolean(this.failure); }
+  // A protocol failure starts cleanup but is not proof that the operating-system process exited.
+  get isRunning(): boolean { return !this.ended && this.child.pid !== undefined; }
 
   close(): Promise<void> {
     this.closing ??= (async () => {

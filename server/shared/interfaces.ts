@@ -17,6 +17,8 @@ import type {
   ProviderRuntimeContext,
   ProviderRuntimePermissionGateway,
   ProviderRuntimeWriter,
+  ProviderRuntimeAction,
+  ProviderRuntimeState,
   UpsertProviderMcpServerInput,
   WorkflowAgentActivity,
   CodexControlAction,
@@ -39,6 +41,11 @@ export interface IProviderRuntime {
     context: ProviderRuntimeContext,
   ): Promise<unknown>;
   abort(sessionId: string): boolean | Promise<boolean>;
+  /** Optional application-owned transport selection and process lifecycle, separate from Codex native controls. */
+  management?: {
+    getState(sessionId: string | null): ProviderRuntimeState;
+    control(sessionId: string, action: ProviderRuntimeAction): Promise<ProviderRuntimeState>;
+  };
   /** Optional rich controls implemented by Codex's app-server adapter. */
   control?(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<CodexSessionState>;
   /** Read without starting a process; used by reconnect and scheduling. */

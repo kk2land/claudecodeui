@@ -22,6 +22,8 @@ type ProviderCapabilities = {
   supportsAbort: boolean;
   /** Native controls require the app-server runtime; SDK compatibility does not provide them. */
   nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean };
+  /** Application transport/process controls, independent of provider-native plan or steer support. */
+  runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /** Whether interactive tool permission prompts can reach the UI. */
   supportsPermissionRequests: boolean;
   /** Whether the token-usage endpoint has data for this provider. */
@@ -110,7 +112,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsImages: false,
     supportsFiles: true,
     supportsAbort: true,
-    supportsPermissionRequests: process.env.CLOUDCLI_DSH_RUNTIME !== 'headless',
+    // ACP supports prompts; the per-session runtime snapshot reports whether they are currently available.
+    supportsPermissionRequests: true,
+    runtimeManagement: { modes: ['acp', 'headless'], stoppableModes: ['acp'] },
     supportsTokenUsage: false,
     supportsEffort: true,
     effortLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],

@@ -9,6 +9,7 @@ import { providerTokenUsageService } from '@/modules/providers/services/provider
 import { providerSkillsService } from '@/modules/providers/services/skills.service.js';
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { providerRuntimeManagementService } from '@/modules/providers/services/provider-runtime-management.service.js';
 import type {
   CustomProviderModelEffort,
   CustomProviderModelInput,
@@ -17,6 +18,7 @@ import type {
   McpTransport,
   ProviderSkillCreateFile,
   ProviderSkillCreateInput,
+  ProviderRuntimeAction,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
@@ -858,6 +860,27 @@ router.get(
 );
 
 // ----------------- Session routes -----------------
+router.get('/:provider/runtime', asyncHandler(async (req: Request, res: Response) => {
+  const provider = parseProvider(req.params.provider);
+  const sessionId = req.query.sessionId === undefined ? null : parseSessionId(req.query.sessionId);
+  res.json(createApiSuccessResponse(providerRuntimeManagementService.getState(provider, sessionId)));
+}));
+
+router.post('/:provider/runtime', asyncHandler(async (req: Request, res: Response) => {
+  const provider = parseProvider(req.params.provider);
+  const sessionId = parseSessionId(req.body?.sessionId);
+  const raw = req.body?.control;
+  let action: ProviderRuntimeAction;
+  if (raw?.action === 'runtime' && typeof raw.runtime === 'string' && raw.runtime.length > 0 && raw.runtime.length <= 80) {
+    action = { action: 'runtime', runtime: raw.runtime };
+  } else if (raw?.action === 'stop' || raw?.action === 'queue-resume') {
+    action = { action: raw.action };
+  } else {
+    throw new AppError('Invalid runtime control.', { code: 'INVALID_CONTROL', statusCode: 400 });
+  }
+  res.json(createApiSuccessResponse(await providerRuntimeManagementService.control(provider, sessionId, action)));
+}));
+
 /**
  * Session gateway entry point: allocates the stable app-facing session id for
  * a brand-new chat. The frontend must call this before the first `chat.send`

@@ -38,3 +38,33 @@ test('process stop persists holds for every native Codex queue while preserving 
     else process.env.CLOUDCLI_CODEX_RUNTIME_MODE = previousRuntime;
   }
 });
+
+test('DSH transport and queue holds survive reconnecting to the database without changing Codex settings', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'dsh-runtime-settings-'));
+  const previous = process.env.DATABASE_PATH;
+  closeConnection();
+  process.env.DATABASE_PATH = join(directory, 'auth.db');
+  try {
+    await initializeDatabase();
+    sessionsDb.createAppSession('dsh-settings', 'dsh', directory);
+    sessionsDb.createAppSession('codex-settings', 'codex', directory);
+    sessionRuntimeDb.update('codex-settings', { runtime: 'sdk', mode: 'plan', queueHeld: true });
+    assert.equal(sessionRuntimeDb.getDsh('dsh-settings'), null);
+    sessionRuntimeDb.saveDsh('dsh-settings', { runtime: 'headless', queueHeld: false });
+    sessionRuntimeDb.saveDsh('dsh-settings', { runtime: 'acp', queueHeld: true });
+    closeConnection();
+    await initializeDatabase();
+    assert.deepEqual(sessionRuntimeDb.getDsh('dsh-settings'), { runtime: 'acp', queueHeld: true });
+    assert.deepEqual(sessionRuntimeDb.get('codex-settings'), { runtime: 'sdk', mode: 'plan', queueHeld: true });
+    assert.equal(sessionRuntimeDb.getDsh('codex-settings'), null);
+    sessionRuntimeDb.holdCodexAppServerQueues();
+    assert.deepEqual(sessionRuntimeDb.getDsh('dsh-settings'), { runtime: 'acp', queueHeld: true });
+  } finally {
+    closeConnection();
+    if (previous === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});

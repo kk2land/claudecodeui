@@ -21,6 +21,10 @@
 
 ACP 按应用会话持有进程，连续任务复用同一连接；空闲后回收。实现 initialize、session/new、session/resume、session/prompt、session/cancel、session/close 和会话配置选项。历史索引与进程清理完成前仍保持运行中状态；清理完成并解除运行占用后再发送 complete，使持久化队列能安全派发下一条消息。遇到正在进行的空闲回收时，等待旧进程退出后再恢复，取消期间不启动替代 prompt。传输断开或恢复失败不自动新建会话，也不自动重发可能已经执行的 prompt。
 
+聊天输入框上方的运行设置可为当前会话选择 `ACP` 或 `headless`，选择保存在现有 `session_runtime_settings` 表中，重启后保留；未选择时沿用 `CLOUDCLI_DSH_RUNTIME` 默认值。切换仅允许在当前任务结束后执行，等待旧进程退出才保存新模式，下次发送消息时使用同一原生会话恢复。状态查询不启动进程。
+
+ACP 面板显示进程运行状态、PID、启动时间、启动程序及协议返回的版本（如有）。「停止 ACP」只清理当前会话的进程，覆盖空闲、初始化、执行中和待审批阶段，等实际退出后确认；执行中的任务收到一次 aborted complete。停止会持久化暂停应用待发队列，保留待发消息，切换运行方式不会解除暂停；「恢复队列」才允许自动派发。headless 不显示 ACP 停止按钮，执行中的任务继续使用现有取消入口。
+
 headless 将完整多行 prompt 写入 stdin，避免 shell 转义和命令行参数误解析；使用 `--session-id` 继续已知会话，非零退出码或协议损坏始终作为失败，即使已经收到 final。stdout JSON 的 text 投影可能有截断，终态 final 的完整文本按同一消息身份更新。
 
 应用关闭、用户取消、启动失败和协议错误都经过有界的 stdin EOF、SIGTERM、SIGKILL 清理。不同应用会话、home、工作目录与配置不共享进程。

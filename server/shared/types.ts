@@ -72,6 +72,12 @@ export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
 /** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
 export type DshRuntimeMode = 'acp' | 'headless';
 
+/** DSH session preferences persisted independently of Codex's native collaboration mode. */
+export type DshRuntimeSettings = {
+  runtime: DshRuntimeMode;
+  queueHeld: boolean;
+};
+
 /** Launch snapshot shared by DSH configuration, process ownership, and native history readers. */
 export type DshConfiguration = {
   mode: DshRuntimeMode;
@@ -89,6 +95,29 @@ export type DshSessionLog = {
   filePath: string;
   header: { id: string; cwd?: string; createdAt: number; origin?: string; parentSession?: string };
   events: AnyRecord[];
+};
+
+// ---------------------------
+//----------------- PROVIDER PROCESS MANAGEMENT ------------
+/** Application-level process controls, validated by the owning adapter against its supported transports. */
+export type ProviderRuntimeAction =
+  | { action: 'runtime'; runtime: string }
+  | { action: 'stop' }
+  | { action: 'queue-resume' };
+
+/** Read-only process snapshot for the runtime panel; querying it must never launch or resume a process. */
+export type ProviderRuntimeState = {
+  runtime: string;
+  phase: 'idle' | 'starting' | 'running' | 'switching' | 'stopping';
+  queueHeld: boolean;
+  supportsPermissionRequests: boolean;
+  diagnostics: {
+    running: boolean;
+    pid: number | null;
+    startedAt: number | null;
+    launcherPath: string | null;
+    cliVersion: string | null;
+  };
 };
 
 // ---------------------------
