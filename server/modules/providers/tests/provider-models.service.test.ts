@@ -8,8 +8,8 @@ import type {
   LLMProvider,
   ProviderCurrentActiveModel,
   ProviderModelsDefinition,
-} from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+} from '@/shared/index.js';
+import { AppError } from '@/shared/index.js';
 
 const createModels = (value: string): ProviderModelsDefinition => ({
   OPTIONS: [{ value, label: value }],
@@ -128,6 +128,7 @@ const createTestService = (options: {
   settings?: ReturnType<typeof createSettingsStore>;
   activeModel?: (provider: LLMProvider, sessionId?: string) => string;
   onCatalogRead?: (provider: LLMProvider) => void;
+  models?: (provider: LLMProvider) => ProviderModelsDefinition;
 } = {}) => {
   const catalog = options.catalog ?? createCatalogStore();
   const sessions = options.sessions ?? createSessionStore();
@@ -140,7 +141,7 @@ const createTestService = (options: {
       models: {
         getSupportedModels: async () => {
           options.onCatalogRead?.(provider);
-          return createModels(`${provider}-default`);
+          return options.models?.(provider) ?? createModels(`${provider}-default`);
         },
         getCurrentActiveModel: async (sessionId) => createCurrentActiveModel(
           options.activeModel?.(provider, sessionId) ?? `${provider}-default`,
@@ -392,7 +393,7 @@ test('allowed effort levels come from the provider, not from the built-in models
     codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     cursor: [],
     opencode: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
-    dsh: ['off', 'low', 'high', 'max'],
+    dsh: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   };
   for (const [provider, levels] of Object.entries(expectedLevels) as Array<[LLMProvider, string[]]>) {
     assert.deepEqual((await service.getProviderModels(provider)).EFFORT_LEVELS, levels, provider);
@@ -420,6 +421,84 @@ test('duplicate model ids are rejected within one provider', async () => {
       && error.code === 'MODEL_ID_ALREADY_EXISTS'
       && error.statusCode === 409,
   );
+});
+
+for (const onlyCustom of [false, true]) {
+  test(`discovery of an existing custom model preserves one editable row (custom-only: ${onlyCustom})`, async () => {
+    const predefined = createModels('default');
+    const { service } = createTestService({ models: () => predefined });
+    const existing = await service.createCustomModel('dsh', {
+      id: 'gateway/model',
+      model: 'My model',
+      effort: { values: ['high'], default: 'high' },
+    });
+    const recordId = existing.model.recordId as number;
+    const other = await service.createCustomModel('dsh', { id: 'gateway/other', model: 'Other' });
+    predefined.OPTIONS.push({
+      value: 'gateway/model',
+      label: 'Discovered name',
+      effort: { values: [{ value: 'xhigh' }] },
+    });
+    predefined.OPTIONS.push({ value: 'gateway/new', label: 'New discovery' });
+
+    const merged = await service.setCustomModelsOnly('dsh', onlyCustom);
+    assert.equal(new Set(merged.OPTIONS.map(({ value }) => value)).size, merged.OPTIONS.length);
+    assert.deepEqual(merged.OPTIONS.find(({ value }) => value === 'gateway/model'), existing.model);
+    assert.equal(merged.DEFAULT, onlyCustom ? 'gateway/model' : 'default');
+
+    const renamed = await service.updateCustomModel('dsh', recordId, { id: 'gateway/model', model: 'Renamed' });
+    assert.equal(renamed.model.label, 'Renamed');
+    assert.equal(renamed.model.recordId, recordId);
+    assert.equal(renamed.model.isCustom, true);
+    assert.deepEqual(renamed.model.effort, existing.model.effort);
+    const edited = await service.updateCustomModel('dsh', recordId, {
+      id: 'gateway/model',
+      model: 'Renamed',
+      effort: { values: ['high', 'xhigh'], default: 'xhigh' },
+    });
+    assert.deepEqual(edited.models.OPTIONS.find(({ value }) => value === 'gateway/model')?.effort, {
+      default: 'xhigh', values: [{ value: 'high' }, { value: 'xhigh' }],
+    });
+
+    for (const id of ['gateway/model', 'gateway/new']) {
+      for (const mutate of [
+        () => service.createCustomModel('dsh', { id, model: 'Duplicate' }),
+        () => service.updateCustomModel('dsh', other.model.recordId as number, { id, model: 'Duplicate' }),
+      ]) {
+        await assert.rejects(mutate, (error) => error instanceof AppError
+          && error.code === 'MODEL_ID_ALREADY_EXISTS' && error.statusCode === 409);
+      }
+    }
+
+    const moved = await service.updateCustomModel('dsh', recordId, { id: 'gateway/renamed', model: 'Moved' });
+    assert.equal(moved.models.OPTIONS.some(({ value, isCustom }) => value === 'gateway/model' && !isCustom), !onlyCustom);
+    assert.equal(moved.models.OPTIONS.find(({ value }) => value === 'gateway/renamed')?.recordId, recordId);
+  });
+}
+
+test('deleting a custom override retains the session model only if discovery remains visible', async () => {
+  for (const onlyCustom of [false, true]) {
+    for (const hasOtherCustom of [false, true]) {
+      const predefined = createModels('default');
+      const { service, catalog } = createTestService({ models: () => predefined });
+      const existing = await service.createCustomModel('dsh', { id: 'gateway/model', model: 'Custom' });
+      if (hasOtherCustom) {
+        await service.createCustomModel('dsh', { id: 'gateway/other', model: 'Other' });
+      }
+      predefined.OPTIONS.push({ value: 'gateway/model', label: 'Discovered' });
+      await service.setCustomModelsOnly('dsh', onlyCustom);
+
+      const removed = await service.deleteCustomModel('dsh', existing.model.recordId as number);
+      const discovered = removed.models.OPTIONS.find(({ value }) => value === 'gateway/model');
+      if (onlyCustom && hasOtherCustom) {
+        assert.equal(discovered, undefined);
+        assert.deepEqual(catalog.deleteFallbacks, ['gateway/other']);
+      } else {
+        assert.deepEqual(discovered, { value: 'gateway/model', label: 'Discovered', isCustom: false });
+        assert.deepEqual(catalog.deleteFallbacks, ['gateway/model']);
+      }
+    }
+  }
 });
 
 test('predefined models have no database record or mutation target', async () => {

@@ -16,7 +16,7 @@ export class DshProvider extends AbstractProvider {
   private readonly store = new DshSessionStore(this.configuration);
   private readonly events = new DshEventsProvider();
   readonly auth = new DshAuthProvider(this.configuration);
-  readonly models = new DshModelsProvider(this.store);
+  readonly models = new DshModelsProvider(this.store, this.configuration);
   readonly mcp = new DshMcpProvider(this.configuration);
   readonly skills = new DshSkillsProvider(this.configuration);
   readonly sessions = new DshSessionsProvider(this.store, this.events);

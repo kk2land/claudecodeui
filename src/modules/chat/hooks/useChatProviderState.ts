@@ -22,7 +22,9 @@ const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly stri
   // valid Max/Ultra selection from being reset during catalog hydration.
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   opencode: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-  dsh: ['off', 'low', 'high', 'max'],
+  // Configured pi-ai models can advertise xhigh and the intermediate levels.
+  // Preserve a saved choice while the profile-backed catalog is loading.
+  dsh: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const toProviderEffortOptions = (

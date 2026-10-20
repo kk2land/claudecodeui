@@ -113,7 +113,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsPermissionRequests: process.env.CLOUDCLI_DSH_RUNTIME !== 'headless',
     supportsTokenUsage: false,
     supportsEffort: true,
-    effortLevels: ['off', 'low', 'high', 'max'],
+    effortLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },

@@ -1,17 +1,17 @@
 import { appConfigDb, providerModelsDb, sessionsDb } from '@/modules/database/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
-import type { IProvider } from '@/shared/interfaces.js';
 import type {
   CustomProviderModelInput,
   CustomProviderModelRecord,
+  IProvider,
   LLMProvider,
   ProviderCurrentActiveModel,
   ProviderModelOption,
   ProviderModelsDefinition,
   ProviderSessionModel,
-} from '@/shared/types.js';
-import { AppError } from '@/shared/utils.js';
+} from '@/shared/index.js';
+import { AppError } from '@/shared/index.js';
 
 /** Session-row access the service needs, narrowed so tests can stub it. */
 type ProviderModelsSessionStore = {
@@ -92,7 +92,9 @@ const readCustomModelEffortLevels = (provider: LLMProvider): string[] => (
 /**
  * Builds the catalog every picker, command, and runtime reads.
  *
- * Built-in models come first, then custom ones. With `customModelsOnly` set the
+ * Built-in models come first, then custom ones. Existing custom rows take
+ * precedence when a provider later discovers the same ID, preserving their
+ * labels, effort metadata, and mutation identity. With `customModelsOnly` set the
  * built-ins are left out and the first custom model becomes the default, so a
  * provider pointed at a gateway lists only what that gateway serves. The flag
  * only applies while at least one custom model exists: an empty catalog would
@@ -105,12 +107,15 @@ const mergeProviderModels = (
   customModelsOnly: boolean,
 ): ProviderModelsDefinition => {
   const customOptions = custom.map(toCustomProviderModelOption);
+  const customIds = new Set(customOptions.map((option) => option.value));
   const listOnlyCustomModels = customModelsOnly && customOptions.length > 0;
   return {
     OPTIONS: listOnlyCustomModels
       ? customOptions
       : [
-        ...predefined.OPTIONS.map((option) => ({ ...option, isCustom: false })),
+        ...predefined.OPTIONS
+          .filter((option) => !customIds.has(option.value))
+          .map((option) => ({ ...option, isCustom: false })),
         ...customOptions,
       ],
     DEFAULT: listOnlyCustomModels ? customOptions[0].value : predefined.DEFAULT,
@@ -167,10 +172,9 @@ const isUniqueConstraintError = (error: unknown): boolean => (
  * Creates the provider model application service used by Providers routes,
  * Commands, and provider runtimes.
  *
- * Curated adapter definitions stay source-controlled and are merged at read
- * time with custom SQLite rows. This deliberately has no predefined-model
- * persistence, memory cache, disk cache, TTL, or provider-native discovery.
- * Tests inject a small custom-model store through the same boundary.
+ * Adapter catalogs (curated or discovered by the provider) are merged at read
+ * time with custom SQLite rows. This service neither persists nor caches the
+ * adapter's rows. Tests inject a small custom-model store through the same boundary.
  */
 export const createProviderModelsService = (dependencies: ProviderModelsServiceDependencies = {}) => {
   const resolveProvider = dependencies.resolveProvider ?? providerRegistry.resolveProvider;
@@ -236,9 +240,11 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     provider: LLMProvider,
     predefined: ProviderModelsDefinition,
     modelId: string,
-    currentRecordId?: number,
+    currentModel?: CustomProviderModelRecord,
   ): void => {
-    if (predefined.OPTIONS.some((option) => option.value === modelId)) {
+    // Discovery can add an ID after the user created it. Allow edits that keep
+    // that row's ID, while still rejecting new duplicates or renames onto it.
+    if (currentModel?.modelId !== modelId && predefined.OPTIONS.some((option) => option.value === modelId)) {
       throw new AppError(`A ${provider} model with this ID already exists.`, {
         code: 'MODEL_ID_ALREADY_EXISTS',
         statusCode: 409,
@@ -246,7 +252,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     }
 
     const duplicate = catalog.findCustomProviderModelByModelId(provider, modelId);
-    if (duplicate && duplicate.recordId !== currentRecordId) {
+    if (duplicate && duplicate.recordId !== currentModel?.recordId) {
       throw new AppError(`A ${provider} model with this ID already exists.`, {
         code: 'MODEL_ID_ALREADY_EXISTS',
         statusCode: 409,
@@ -286,9 +292,9 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     input: CustomProviderModelInput,
   ): Promise<{ model: ProviderModelOption; models: ProviderModelsDefinition }> => {
     const predefined = await resolveProvider(provider).models.getSupportedModels();
-    readCustomModel(provider, recordId);
+    const existing = readCustomModel(provider, recordId);
     const normalized = normalizeCustomModelInput(input);
-    assertModelIdAvailable(provider, predefined, normalized.id, recordId);
+    assertModelIdAvailable(provider, predefined, normalized.id, existing);
     assertEffortLevelsSupported(provider, normalized);
 
     try {
@@ -320,16 +326,20 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     recordId: number,
   ): Promise<{ model: ProviderModelOption; models: ProviderModelsDefinition }> => {
     const predefined = await resolveProvider(provider).models.getSupportedModels();
-    readCustomModel(provider, recordId);
-    // Sessions on the deleted model move to the default of the catalog left
-    // behind: the first remaining custom model (the new DEFAULT) while only
-    // custom models are listed, or the built-in default once none remain.
-    const fallbackModelId = mergeProviderModels(
+    const existing = readCustomModel(provider, recordId);
+    // Compute visibility after deletion before deciding whether sessions can
+    // keep their model or need the remaining catalog's default.
+    const remainingCatalog = mergeProviderModels(
       provider,
       predefined,
       catalog.listCustomProviderModels(provider).filter((record) => record.recordId !== recordId),
       isCustomModelsOnly(provider),
-    ).DEFAULT;
+    );
+    // Removing a custom override can reveal a discovered row with the same ID.
+    // Keep sessions on that model if it remains selectable in the resulting catalog.
+    const fallbackModelId = remainingCatalog.OPTIONS.some((option) => option.value === existing.modelId)
+      ? existing.modelId
+      : remainingCatalog.DEFAULT;
     const removed = catalog.deleteCustomProviderModel(provider, recordId, fallbackModelId);
     if (!removed) {
       throw new AppError('Model not found.', {

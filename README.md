@@ -293,4 +293,10 @@ Restart CloudCLI after changing launch settings. `acp` is the default persistent
 
 ACP exposes one-time tool approvals in the chat. Headless uses environment/`.env` credentials by default and has no interactive approval channel. Connection status checks credential presence; the model runtime validates it when a task starts. Use `default` for DSH's configured selection, or add a custom `provider/model` entry in the model library.
 
+The model picker also reads static `config.providers.<provider>.models` declarations from `$DSH_HOME/profiles/headless/cordis.patch.yml` (default home: `~/.dsh`). It applies that file's patches in order by entry ID: later configs replace earlier configs, disabled entries and groups are hidden, and inserted or nested group declarations are included. It uses each model's `id`, `name`, and declared `reasoningEfforts`, preserving the full `provider/model` route. Existing manually added models take precedence when discovery returns the same route, remaining editable without duplicate picker rows. The file is reread on each model-list request; missing or invalid files leave `Profile default` and manually added models available.
+
+This discovery does not copy headless configuration into ACP: ACP must advertise the selected model in its own profile. Bundle defaults, executable YAML expressions, and `CLOUDCLI_DSH_PATCHES` overlays are not resolved by this static reader. References to bundle-owned entries are projected from the overrides in this file; their inherited configuration and group ancestry are unavailable.
+
+If selecting a model from the headless file reports `DSH does not advertise model`, set `CLOUDCLI_DSH_RUNTIME=headless` in CloudCLI's environment (or its root `.env`) and restart the backend. To keep using ACP, configure the same provider/model in `$DSH_HOME/profiles/acp/cordis.patch.yml`; a full `provider/model` route alone does not register it with ACP.
+
 See [DSH configuration, supported features and checks](docs/deepseek-harness-provider-plan.md) for patch overlays, native compressed history, MCP/skills, and deployment details.

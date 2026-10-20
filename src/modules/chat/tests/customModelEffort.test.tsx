@@ -68,6 +68,19 @@ const CATALOG: Partial<Record<LLMProvider, ProviderModelsDefinition>> = {
     DEFAULT: 'opencode/gpt-5.5',
     EFFORT_LEVELS: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
   },
+  dsh: {
+    OPTIONS: [
+      { value: 'default', label: 'Profile default', isCustom: false },
+      {
+        value: 'magpie/workbuddy/deepseek-v4-pro',
+        label: 'Deepseek-V4-Pro · WorkBuddy',
+        isCustom: false,
+        effort: { values: [{ value: 'off' }, { value: 'high' }, { value: 'xhigh' }] },
+      },
+    ],
+    DEFAULT: 'default',
+    EFFORT_LEVELS: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
+  },
 };
 
 const okJson = (data: unknown) => Promise.resolve({
@@ -113,6 +126,21 @@ const createActions = () => {
 beforeEach(() => {
   localStorage.clear();
   resetUserPreferences();
+});
+
+test('DSH configured models keep a saved xhigh effort while the catalog loads', async () => {
+  localStorage.setItem('dsh-model', 'magpie/workbuddy/deepseek-v4-pro');
+  localStorage.setItem('dsh-effort', 'xhigh');
+  const { useChatProviderState } = await import('@/modules/chat/hooks/useChatProviderState');
+  const { result } = renderHook(() => useChatProviderState({ selectedSession: null, selectedProject: null }));
+
+  await waitFor(() => assert.equal(result.current.providerModelCatalog.dsh?.OPTIONS.length, 2));
+  assert.equal(result.current.providerModels.dsh, 'magpie/workbuddy/deepseek-v4-pro');
+  assert.equal(localStorage.getItem('dsh-effort'), 'xhigh');
+  assert.deepEqual(
+    result.current.providerModelCatalog.dsh?.OPTIONS[1].effort?.values,
+    [{ value: 'off' }, { value: 'high' }, { value: 'xhigh' }],
+  );
 });
 
 test('the model library declares effort levels for a new custom model', async () => {

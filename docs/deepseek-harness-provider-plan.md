@@ -50,6 +50,7 @@ headless 将完整多行 prompt 写入 stdin，避免 shell 转义和命令行�
 ## 模型、审批、MCP 与 skills
 
 - 默认模型使用 DSH 会话/profile 的选择；自定义模型优先写为 `provider/model` 或 ACP 公布的完整 selector value，实际执行时验证该选择。ACP 中同名模型分属多个 provider 时，拒绝含糊的裸模型名。
+- 模型列表每次请求读取 `$DSH_HOME/profiles/headless/cordis.patch.yml` 的静态 `config.providers.<provider>.models` 声明。先按条目 ID 顺序应用 patch：`config` 整体替换，后续禁用或重新启用生效，支持 `insert`、向分组插入及嵌套 `group.config`，禁用分组隐藏所有子项。映射 `id`、`name` 和 `reasoningEfforts`，保留 `provider/model` 完整路由与 `Profile default`。缺失、不可读或无效文件退回默认选项；与手工模型同 ID 时保留手工记录的名称、推理强度和可编辑性，只展示一项，删除覆盖项后可恢复配置中的模型。读取只返回模型元数据，不返回凭据，不执行 YAML 表达式，也不解析 bundle 默认值或 `CLOUDCLI_DSH_PATCHES`；bundle 条目仅根据本文件覆盖字段投影，无法读取继承配置或分组归属。读取 headless 列表不会改变 ACP 配置，ACP 仍须自行公布对应模型。
 - ACP 按运行时公布的选项设置 model/effort。headless 对显式模型生成仅本次运行使用的临时 patch，不改写用户 profile。
 - ACP 工具审批复用应用 UI，支持 allow-once、reject-once 和取消。不会把允许一次扩大为永久允许；任务结束后旧审批失效。
 - CloudCLI 管理的 MCP 声明保存到 `$DSH_HOME/cloudcli-mcp.json` 和 `<workspace>/.dsh/cloudcli-mcp.json`。同一服务进程按配置文件串行执行完整的读取、增删和写入，并以原子重命名发布结果；失败的更新不阻塞后续保存。ACP 将声明转换为标准配置；headless 通过临时 patch 挂载 MCP client。原生 profile 文件保持独立，已有原生 MCP 配置仍由 DSH 加载。
