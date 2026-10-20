@@ -290,6 +290,11 @@
       "startingNow": "Starting now"
     },
     "stop": "停止",
+    "backgroundTask": {
+      "prompt": {
+        "editDescription": "替换消息会开始新一轮执行，并停止当前后台任务；这些任务尚未返回的结果将会丢失。"
+      }
+    },
     "controls": {
       "stopGeneration": "Stop Generation",
       "pressEscToStop": "Press Esc anytime to stop"

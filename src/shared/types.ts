@@ -803,6 +803,8 @@ export type BackgroundSendChoice = 'send' | 'queue' | 'cancel';
 /** An open background-work send prompt, listing the session's own background tasks as display strings. */
 export type BackgroundSendPrompt = {
   work: string[];
+  /** False for message replacements, which the append-only queue cannot dispatch; omitted means queueing is allowed. */
+  canQueue?: boolean;
 };
 
 /** Viewport-relative placement box (right/bottom offsets plus max height and width) computed for a composer popover so the model and permission menus stay inside the window. */

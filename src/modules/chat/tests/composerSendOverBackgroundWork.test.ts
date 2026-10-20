@@ -5,7 +5,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
-import { clearQueuedMessage, readQueuedMessage } from '@/shared/chatDrafts';
+import { readDraftText, readQueuedMessage, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
 import type * as ChatDrafts from '@/shared/chatDrafts';
 import type { BackgroundSendChoice, PermissionMode, Project, ProjectSession, SessionActivityMap } from '@/shared/types';
 
@@ -53,12 +53,12 @@ const backgroundOnly: SessionActivityMap = new Map([[
 const uploads = () => vi.mocked(fetch).mock.calls.filter(([url]) => String(url).includes('/api/assets/files'));
 
 const render = (processingSessions: SessionActivityMap) => {
-  const sent: Array<{ type: string }> = [];
-  const view = renderHook(() =>
+  const sent: Array<{ type: string; anchorId?: string }> = [];
+  const view = renderHook(({ session }) =>
     useChatComposerState({
       selectedProject: PROJECT,
-      selectedSession: SESSION,
-      currentSessionId: SESSION.id,
+      selectedSession: session,
+      currentSessionId: session.id,
       provider: 'claude',
       permissionMode: 'default',
       cyclePermissionMode: () => undefined,
@@ -75,9 +75,10 @@ const render = (processingSessions: SessionActivityMap) => {
       setIsUserScrolledUp: () => undefined,
       setPendingPermissionRequests: () => undefined,
     }),
+    { initialProps: { session: SESSION } },
   );
   const sends = () => sent.filter((message) => message.type === 'chat.send');
-  return { view, sends };
+  return { view, sends, frames: () => sent };
 };
 
 type View = ReturnType<typeof render>['view'];
@@ -109,7 +110,7 @@ beforeEach(() => {
   }));
   // The drafts store is module state; a message queued by one test must not
   // be restored into the next one's composer.
-  clearQueuedMessage(SESSION.id);
+  resetChatDrafts();
   writeQueuedMessage.mockReset();
   localStorage.clear();
 });
@@ -186,6 +187,38 @@ test('send anyway sends the message', async () => {
   assert.equal(writeQueuedMessage.mock.calls.length, 0);
 });
 
+test('an edit cannot be queued as an ordinary new message behind background work', async () => {
+  const { view, frames } = render(backgroundOnly);
+  await act(async () => {
+    view.result.current.beginEditMessage({ type: 'user', content: 'replacement', transcriptAnchorId: 'turn-to-replace', timestamp: 1 });
+  });
+  await submitAndAnswer(view, 'queue');
+
+  assert.equal(writeQueuedMessage.mock.calls.length, 0, 'a queued append must not silently replace the requested edit');
+  assert.equal(frames().length, 0);
+  assert.equal(view.result.current.input, 'replacement');
+  assert.equal(view.result.current.editingAnchorId, 'turn-to-replace');
+});
+
+test('sending an edit over background work preserves its replacement anchor', async () => {
+  const { view, frames } = render(backgroundOnly);
+  await act(async () => {
+    view.result.current.beginEditMessage({ type: 'user', content: 'replacement', transcriptAnchorId: 'turn-to-replace', timestamp: 1 });
+  });
+  const pending = startSubmit(view);
+  await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+  assert.equal(view.result.current.backgroundSendPrompt?.canQueue, false);
+  await act(async () => {
+    view.result.current.resolveBackgroundSendPrompt('send');
+    await pending;
+  });
+
+  const edits = frames().filter((frame) => frame.type === 'chat.edit-send');
+  assert.equal(edits.length, 1);
+  assert.equal(edits[0].anchorId, 'turn-to-replace');
+  assert.equal(view.result.current.editingAnchorId, null);
+});
+
 test('a second submit while the prompt is open neither opens another prompt nor sends', async () => {
   const { view, sends } = render(backgroundOnly);
   await act(async () => { view.result.current.setInput('hello'); });
@@ -206,6 +239,29 @@ test('a second submit while the prompt is open neither opens another prompt nor 
   });
   assert.equal(sends().length, 0, 'exactly zero sends');
 });
+
+for (const staleChoice of ['send', 'queue'] as const) {
+  test(`switching sessions cancels the background prompt and ignores a stale ${staleChoice} choice`, async () => {
+    const { view, sends } = render(backgroundOnly);
+    writeDraftText('session-2', 'keep the other conversation draft');
+    await act(async () => { view.result.current.setInput('message for the first conversation'); });
+    const pending = startSubmit(view);
+    await waitFor(() => assert.notEqual(view.result.current.backgroundSendPrompt, null));
+
+    await act(async () => { view.rerender({ session: { id: 'session-2' } }); });
+    assert.equal(view.result.current.backgroundSendPrompt, null, 'the old session prompt closes');
+    await act(async () => {
+      view.result.current.resolveBackgroundSendPrompt(staleChoice);
+      await pending;
+    });
+
+    assert.equal(sends().length, 0, 'the abandoned submission does not send');
+    assert.equal(writeQueuedMessage.mock.calls.length, 0, 'the abandoned submission does not queue');
+    assert.equal(view.result.current.input, 'keep the other conversation draft');
+    assert.equal(readDraftText('session-2'), 'keep the other conversation draft');
+    assert.equal(readDraftText(SESSION.id), 'message for the first conversation');
+  });
+}
 
 test('a session with nothing in the background sends without asking', async () => {
   const { view, sends } = render(new Map());

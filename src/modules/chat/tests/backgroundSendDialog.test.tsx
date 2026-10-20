@@ -28,6 +28,16 @@ describe('the background-work send dialog', () => {
     expect(onResolve.mock.calls).toEqual([['cancel'], ['queue'], ['send']]);
   });
 
+  it('offers send and cancel for an edit without promising to queue it', () => {
+    const onResolve = vi.fn();
+    render(<BackgroundSendDialog prompt={{ ...PROMPT, canQueue: false }} onResolve={onResolve} />);
+
+    expect(screen.queryByRole('button', { name: 'Queue' })).toBeNull();
+    expect(screen.getByText(/Replacing a message starts a new turn/)).toBeTruthy();
+    fireEvent.click(screen.getByRole('button', { name: 'Send anyway' }));
+    expect(onResolve).toHaveBeenCalledWith('send');
+  });
+
   it('cancels on Escape and on a click outside', () => {
     const onResolve = vi.fn();
     render(<BackgroundSendDialog prompt={PROMPT} onResolve={onResolve} />);

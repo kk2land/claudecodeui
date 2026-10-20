@@ -12,7 +12,8 @@ type BackgroundSendDialogProps = {
  * Rendered by chat's ChatComposer when a message is sent to a session whose
  * turn has ended but whose background work is still running. Sending now
  * stops that work, so the choices are to send anyway, queue the message until
- * the work finishes, or cancel.
+ * the work finishes, or cancel. Replacements only offer send and cancel,
+ * because the durable queue appends new turns rather than editing history.
  *
  * Cancel comes first in the DOM so Dialog's open-focus lands on it: an Enter
  * pressed right after the send that opened the prompt (a double Enter, a key
@@ -21,6 +22,7 @@ type BackgroundSendDialogProps = {
  */
 export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSendDialogProps) {
   const { t } = useTranslation('chat');
+  const canQueue = prompt?.canQueue !== false;
 
   return (
     <Dialog
@@ -47,8 +49,10 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
         )}
 
         <p id="background-send-dialog-description" className="mt-3 text-sm text-muted-foreground">
-          {t('claudeStatus.backgroundTask.prompt.description', {
-            defaultValue: 'A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.',
+          {t(canQueue ? 'claudeStatus.backgroundTask.prompt.description' : 'claudeStatus.backgroundTask.prompt.editDescription', {
+            defaultValue: canQueue
+              ? 'A new message starts a new turn, which stops that work; anything it has not reported yet is lost. Queue the message to send it when the work finishes.'
+              : 'Replacing a message starts a new turn, which stops that work; anything it has not reported yet is lost.',
           })}
         </p>
 
@@ -56,9 +60,11 @@ export default function BackgroundSendDialog({ prompt, onResolve }: BackgroundSe
           <Button type="button" variant="outline" onClick={() => onResolve('cancel')}>
             {t('claudeStatus.backgroundTask.prompt.cancel', { defaultValue: 'Cancel' })}
           </Button>
-          <Button type="button" variant="default" onClick={() => onResolve('queue')}>
-            {t('claudeStatus.backgroundTask.prompt.queue', { defaultValue: 'Queue' })}
-          </Button>
+          {canQueue && (
+            <Button type="button" variant="default" onClick={() => onResolve('queue')}>
+              {t('claudeStatus.backgroundTask.prompt.queue', { defaultValue: 'Queue' })}
+            </Button>
+          )}
           <Button type="button" variant="destructive" onClick={() => onResolve('send')}>
             {t('claudeStatus.backgroundTask.prompt.sendAnyway', { defaultValue: 'Send anyway' })}
           </Button>

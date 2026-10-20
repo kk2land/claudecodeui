@@ -700,11 +700,11 @@ export function useChatComposerState({
   const backgroundSendResolverRef = useRef<((choice: BackgroundSendChoice) => void) | null>(null);
 
   const askBeforeSendingOverBackgroundWork = useCallback(
-    (work: string[]) => new Promise<BackgroundSendChoice>((resolve) => {
+    (work: string[], canQueue = true) => new Promise<BackgroundSendChoice>((resolve) => {
       // Only one prompt at a time: a stale one is answered "cancel".
       backgroundSendResolverRef.current?.('cancel');
       backgroundSendResolverRef.current = resolve;
-      setBackgroundSendPrompt({ work });
+      setBackgroundSendPrompt({ work, ...(canQueue ? {} : { canQueue: false }) });
     }),
     [],
   );
@@ -716,11 +716,11 @@ export function useChatComposerState({
     resolve?.(choice);
   }, []);
 
-  // An unmounted composer cannot answer; let the pending submit finish.
+  // A choice belongs to the conversation that opened it. Leaving that draft
+  // scope (or unmounting) cancels the pending send without touching another draft.
   useEffect(() => () => {
-    backgroundSendResolverRef.current?.('cancel');
-    backgroundSendResolverRef.current = null;
-  }, []);
+    resolveBackgroundSendPrompt('cancel');
+  }, [draftScope, resolveBackgroundSendPrompt]);
 
   // Persist a message to send "when this finishes" and show it as the queued
   // card. Used while a turn is in flight and when the user chooses to queue
@@ -978,11 +978,13 @@ export function useChatComposerState({
       if (backgroundActivity?.background) {
         const work = ownBackgroundTasks(backgroundActivity.tasks ?? [])
           .map((task) => describeBackgroundTask(task, t));
-        const choice = await askBeforeSendingOverBackgroundWork(work);
-        if (choice === 'cancel') {
+        const choice = await askBeforeSendingOverBackgroundWork(work, !editingAnchorId);
+        if (choice === 'cancel' || sessionKeyRef.current !== targetSessionId) {
           return;
         }
         if (choice === 'queue') {
+          // Durable queues append new turns; a replacement must keep its edit frame and anchor.
+          if (editingAnchorId) return;
           if (queuedSubmission) {
             queuedDraftSessionRef.current = sessionKey;
             setQueuedDraft(queuedSubmission);
