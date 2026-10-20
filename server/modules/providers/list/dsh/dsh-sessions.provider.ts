@@ -1,4 +1,4 @@
-import { foldSurface } from '@deepseek-ai/dsh-session/surface';
+import { isAppendSurfaceEvent } from '@deepseek-ai/dsh-session/surface';
 
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 import { DshSessionStore } from '@/modules/providers/list/dsh/dsh-session-store.provider.js';
@@ -17,11 +17,11 @@ export class DshSessionsProvider implements IProviderSessions {
     const offset = Math.max(0, options.offset ?? 0);
     const limit = options.limit == null ? null : Math.max(0, options.limit);
     if (!log) return { messages: [], total: 0, hasMore: false, limit, offset };
-    // The official fold removes compacted/replaced nodes rather than showing
-    // both their old contents and their replacement as duplicate history.
-    const surface = foldSurface(log.events as unknown as Parameters<typeof foldSurface>[0]);
-    const visible = new Set<number>(surface.nodes);
-    const messages = log.events.filter((event) => visible.has(event.seq)).flatMap((event) => this.events.normalize(event, sessionId));
+    // The human transcript retains append-origin messages in log order.
+    // Surface replacements are model-only summaries/copies: applying them
+    // here would erase conversation the user already saw before compaction.
+    const messages = log.events.filter((event) => isAppendSurfaceEvent(event as Parameters<typeof isAppendSurfaceEvent>[0]))
+      .flatMap((event) => this.events.normalize(event, sessionId));
     const { page, hasMore } = sliceTailPage(messages, limit, offset);
     return { messages: page, total: messages.length, hasMore, limit, offset };
   }

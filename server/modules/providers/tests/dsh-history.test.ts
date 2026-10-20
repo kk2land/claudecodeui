@@ -10,14 +10,14 @@ import { DshSessionStore } from '@/modules/providers/list/dsh/dsh-session-store.
 import { DshSessionsProvider } from '@/modules/providers/list/dsh/dsh-sessions.provider.js';
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 
-test('native history selects the newest generation, applies replacements, and paginates from the tail', async () => {
+test('native history selects the newest generation and preserves original order across a model-only replacement', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-history-'));
   try {
     const directory = path.join(root, 'sessions', 'workspace', 'native-1');
     await mkdir(directory, { recursive: true });
     const header = { type: 'session', version: 4, id: 'native-1', createdAt: 1, cwd: root, isSeeded: false, delegationDepth: 0 };
     const user = (seq: number, text: string) => ({ type: 'user/message', seq, time: seq + 1, surfaceOp: 'append', data: { id: `user-${seq}`, role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] } });
-    const events = [user(0, 'old'), { ...user(1, 'replacement'), surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }, sourceEventSeqs: [0] }, user(2, 'latest')];
+    const events = [user(0, 'old'), user(1, 'latest'), { ...user(2, 'model-only replacement'), surfaceOp: { op: 'replace', startSeq: 0, endSeq: 0 }, sourceEventSeqs: [0] }];
     const file = path.join(directory, 'session.v4.jsonl');
     const original = [header, ...events].map((row) => JSON.stringify(row)).join('\n') + '\n{"partial":';
     await writeFile(file, original);
@@ -31,7 +31,7 @@ test('native history selects the newest generation, applies replacements, and pa
     assert.equal(latest.hasMore, true);
     assert.equal(latest.messages[0].sessionId, 'app-1');
     const older = await sessions.fetchHistory('app-1', { providerSessionId: 'native-1', limit: 1, offset: 1 });
-    assert.deepEqual(older.messages.map((message) => message.content), ['replacement']);
+    assert.deepEqual(older.messages.map((message) => message.content), ['old']);
     assert.equal((await sessions.fetchHistory('app-1', { providerSessionId: 'native-1', limit: 0 })).messages.length, 0);
     assert.equal(await readFile(file, 'utf8'), original, 'reader must not repair or migrate the native file');
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -54,7 +54,7 @@ test('compressed native history accepts complete checksummed frames before an un
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('native surface retains assistant tool calls and results without exposing runtime context as user input', async () => {
+test('native history retains human messages and tools after full context compaction', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-tools-history-'));
   try {
     const directory = path.join(root, 'sessions', 'workspace', 'native-tools');
@@ -69,6 +69,8 @@ test('native surface retains assistant tool calls and results without exposing r
       ] } } },
       { type: 'tool/call', seq: 3, time: 5, data: { turn: 1, step: 1, callId: 'read-1', name: 'read', arguments: '{"path":"file.txt"}' } },
       { type: 'tool/result', seq: 4, time: 6, surfaceOp: 'append', sourceEventSeqs: [3], data: { turn: 1, step: 1, message: { id: 'result', role: 'tool', source: { kind: 'tool', callId: 'read-1' }, toolCallId: 'read-1', content: [{ type: 'text', text: 'file contents' }], isError: false } } },
+      { type: 'user/message', seq: 5, time: 7, surfaceOp: { op: 'replace', startSeq: 0, endSeq: 4 }, sourceEventSeqs: [0, 1, 2, 4],
+        data: { id: 'summary', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Model-only compacted summary.' }] } },
     ];
     await writeFile(path.join(directory, 'session.v4.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
     const store = new DshSessionStore(new DshConfigurationProvider({ DSH_HOME: root }));
