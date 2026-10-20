@@ -313,7 +313,7 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
       workspacePath,
     });
 
-    assert.equal(globalResult.length, 5);
+    assert.deepEqual(globalResult.map(entry => entry.provider).sort(), ['claude', 'codex', 'cursor', 'dsh', 'gptweb', 'opencode']);
     const dshProject = await readJson(path.join(workspacePath, '.dsh', 'cloudcli-mcp.json'));
     assert.ok(dshProject['global-http']);
     assert.ok(globalResult.every((entry) => entry.created === true));
@@ -345,6 +345,28 @@ test('providerMcpService global adder writes to all providers and rejects unsupp
     );
   } finally {
     restoreHomeDir();
+    await fs.rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('GPT Web user MCP configuration belongs to its selected home', { concurrency: false }, async t => {
+  const tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), 'llm-mcp-gptweb-'));
+  const previous = process.env.CODEX_GPTWEB_HOME;
+  process.env.CODEX_GPTWEB_HOME = path.join(tempRoot, 'web-profile');
+  t.mock.method(os, 'homedir', () => tempRoot);
+  try {
+    const codexConfig = path.join(tempRoot, '.codex', 'config.toml');
+    await fs.mkdir(path.dirname(codexConfig), { recursive: true });
+    await fs.writeFile(codexConfig, 'model = "native"\n');
+    const result = await providerMcpService.upsertProviderMcpServer('gptweb', {
+      name: 'web-tool', scope: 'user', transport: 'http', url: 'https://example.com/mcp',
+    });
+    assert.equal(result.provider, 'gptweb');
+    assert.equal(await fs.readFile(codexConfig, 'utf8'), 'model = "native"\n');
+    const webConfig = TOML.parse(await fs.readFile(path.join(process.env.CODEX_GPTWEB_HOME, 'config.toml'), 'utf8'));
+    assert.ok((webConfig.mcp_servers as Record<string, unknown>)['web-tool']);
+  } finally {
+    if (previous === undefined) delete process.env.CODEX_GPTWEB_HOME; else process.env.CODEX_GPTWEB_HOME = previous;
     await fs.rm(tempRoot, { recursive: true, force: true });
   }
 });

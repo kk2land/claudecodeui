@@ -32,14 +32,14 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
   const delivery = useSyncExternalStore(subscribeToChatDrafts, useCallback(() => sessionId ? readQueuedDelivery(sessionId) : null, [sessionId]), () => null);
   // Opening /goal exposes the editor even when the native thread has no goal yet.
   const [visibleGoals, setVisibleGoals] = useState<Set<string>>(new Set());
-  // Session allocation is itself a pending action, before a transport request id exists.
-  const [creatingSession, setCreatingSession] = useState(false);
+  // Allocation remains pending only for its owning provider and project,
+  // before a transport request id exists.
+  const [creatingSession, setCreatingSession] = useState<{ provider: 'codex' | 'gptweb'; projectId: string } | null>(null);
   // Provider and project own an allocation; stale responses must not select a
   // session or send controls after the user has switched to another provider.
   const creation = useRef<{ provider: 'codex' | 'gptweb'; projectId: string; promise: Promise<string> | null } | null>(null);
   useEffect(() => {
     creation.current = null;
-    setCreatingSession(false);
   }, [sessionId, provider, project?.projectId]);
   const pending = useRef(new Map<string, { sessionId: string; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>());
   const optionsRef = useRef(options);
@@ -94,9 +94,9 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
     if (creation.current?.provider === provider && creation.current.projectId === project.projectId && creation.current.promise) {
       return creation.current.promise;
     }
-    setCreatingSession(true);
     const entry: NonNullable<typeof creation.current> = { provider, projectId: project.projectId, promise: null };
     creation.current = entry;
+    setCreatingSession(entry);
     entry.promise = (async () => {
       let succeeded = false;
       try {
@@ -110,10 +110,8 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
         succeeded = true;
         return id as string;
       } finally {
-        if (creation.current === entry) {
-          setCreatingSession(false);
-          if (!succeeded) creation.current = null;
-        }
+        setCreatingSession(current => current === entry ? null : current);
+        if (creation.current === entry && !succeeded) creation.current = null;
       }
     })();
     return entry.promise;
@@ -173,6 +171,7 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
     }
   }, [sessionId, snapshots, send]);
 
+  const allocating = !sessionId && creatingSession?.provider === provider && creatingSession.projectId === project?.projectId;
   return { provider, sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
-    pending: creatingSession || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
+    pending: Boolean(allocating) || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }
