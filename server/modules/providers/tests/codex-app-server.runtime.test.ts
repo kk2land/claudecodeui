@@ -237,12 +237,18 @@ for (const goalsEnabled of [false, true]) {
       const restored = await h.control({ action: 'goal', operation: 'get' });
       assert.equal(restored.phase, 'starting');
       assert.equal(restored.turnId, null);
+      assert.equal(h.calls.filter(({ method }) => method === 'thread/read').length, 0);
       assert.deepEqual(h.historyReads, []);
       assert.deepEqual(h.accepted, []);
       assert.equal(h.events.some((event) => event.kind === 'error' || event.kind === 'complete'), false);
 
       acknowledge({ turn: { id: 'turn-1' } });
       await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+      const pendingHistory = await h.control({ action: 'goal', operation: 'get' });
+      assert.equal(pendingHistory.phase, 'running');
+      assert.equal(pendingHistory.turnId, 'turn-1');
+      assert.equal(h.calls.filter(({ method }) => method === 'thread/read').length, 1);
+      assert.deepEqual(h.accepted, []);
       h.handlers.set('thread/read', async () => ({ thread: { turns: [
         { items: [{ type: 'userMessage', clientId: 'first-message' }] },
       ] } }));
@@ -277,8 +283,27 @@ test('an unmaterialized history refresh preserves a paused Plan goal before any 
   assert.equal(restored.goal?.status, 'paused');
   assert.deepEqual(restored.goal, planned.goal);
   assert.equal(h.calls.some(({ method }) => method === 'turn/start'), false);
+  assert.equal(h.calls.some(({ method }) => method === 'thread/read'), false);
   assert.deepEqual(h.historyReads, []);
   assert.deepEqual(h.accepted, []);
+});
+
+test('a new thread starts reading history after its first native goal turn begins', async () => {
+  const h = harness();
+  await h.control({ action: 'goal', operation: 'set', objective: 'run the change' });
+  await h.control({ action: 'goal', operation: 'get' });
+  assert.equal(h.calls.some(({ method }) => method === 'thread/read'), false);
+
+  h.event('turn/started', { turn: { id: 'goal-turn' } });
+  h.handlers.set('thread/read', async () => ({ thread: { turns: [
+    { items: [{ type: 'userMessage', clientId: 'native-receipt' }] },
+  ] } }));
+  const restored = await h.control({ action: 'goal', operation: 'get' });
+  assert.equal(restored.phase, 'running');
+  assert.equal(restored.turnId, 'goal-turn');
+  assert.equal(h.calls.filter(({ method }) => method === 'thread/read').length, 1);
+  assert.deepEqual(h.accepted, ['native-receipt']);
+  h.finish('goal-turn');
 });
 
 test('history restoration still reports unrelated RPC failures', async () => {

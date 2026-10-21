@@ -46,6 +46,8 @@ type NativeSession = {
   setup: Promise<void> | null;
   goalMutation: Promise<void> | null;
   turn: NativeTurn | null;
+  // Fresh threads have no readable turns until native execution accepts input.
+  historyReady: boolean;
   completedTurns: Set<string>;
   children: Set<string>;
   stop: Promise<boolean> | null;
@@ -161,7 +163,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session = {
       id: sessionId, threadId: providerId, writer, context, options, startedAt: Date.now(),
       state: { ...this.getState(sessionId), runtime: 'app-server', phase: 'starting', error: undefined }, model: '',
-      setup: null, goalMutation: null, turn: null, completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
+      setup: null, goalMutation: null, turn: null, historyReady: Boolean(providerId), completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
     };
     this.failures.delete(sessionId);
     this.sessions.set(sessionId, session);
@@ -300,6 +302,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         ...this.turnPermissions(options),
       });
       if (!result.turn?.id) throw new Error('Codex did not return a turn id.');
+      session.historyReady = true;
       turn.id = result.turn.id;
       if (!turn.terminal) {
         session.state.turnId = turn.id;
@@ -394,6 +397,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (!turnId || session.completedTurns.has(turnId)) return;
       if (!session.turn || session.turn.terminal) this.newTurn(session, session.writer.nextTurn?.() ?? session.writer, turnId);
       if (session.turn!.id && session.turn!.id !== turnId) return;
+      session.historyReady = true;
       session.turn!.id = turnId;
       session.state.turnId = turnId;
       session.state.phase = session.stopRequested ? 'stopping' : 'running';
@@ -578,14 +582,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   }
 
   private async restoreHistory(session: NativeSession): Promise<void> {
+    // session_created refreshes can race the first turn/start. Defer the RPC
+    // itself until its acknowledgement or a native auto-turn proves readiness.
+    if (!session.historyReady) return;
     let thread: AnyRecord | undefined;
     try {
       ({ thread } = await this.client.request('thread/read', { threadId: session.threadId, includeTurns: true }));
     } catch (error) {
       if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED') throw error;
-      // session_created can trigger a refresh before the first turn/start is
-      // accepted. History is empty for now; do not confirm local receipts or
-      // alter the pending turn. Later refreshes must still read native history.
+      // Resumed threads may still be empty, and persistence can lag the first
+      // turn acknowledgement. Do not confirm receipts or alter the pending
+      // turn; later refreshes must still retry native history.
       if (error.message.includes('is not materialized yet; includeTurns is unavailable before first user message')) return;
       // Opening/reconnecting restores receipts, not active-turn state. Only this
       // known history limitation can use the same persisted rows as the UI;
