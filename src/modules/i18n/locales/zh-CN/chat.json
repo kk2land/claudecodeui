@@ -357,7 +357,10 @@
     "unavailableFailed": "Codex 未能生成建议",
     "unavailableRejected": "Codex 拒绝了建议请求",
     "unavailableRequestFailed": "建议请求失败",
-    "unavailableTimeout": "等待建议超时"
+    "unavailableTimeout": "等待建议超时",
+    "unavailableUnsupported": "当前安装的 Codex 版本不支持建议功能",
+    "unavailableIneligible": "当前账号或模型不支持 Codex 建议",
+    "unavailableConfig": "暂时无法使用 Codex 建议"
   },
   "export": {
     "trigger": "导出对话",

@@ -1,6 +1,6 @@
 Codex app-server 接入实施记录与计划
 
-已按确认的交互完成实现：Codex 默认通过仓库固定版本 0.156.1 的 app-server 执行；运行中发送仍默认排队，通过排队卡片上的“↳ 引导”追加到当前 turn。原生 Plan、结构化提问、持久化 Goal、经原生终态确认的停止已接入。停止后保留会话和排队内容。
+已按确认的交互完成实现：Codex 默认通过仓库固定版本 0.163.0 的 app-server 执行；运行中发送仍默认排队，通过排队卡片上的“↳ 引导”追加到当前 turn。原生 Plan、结构化提问、持久化 Goal、经原生终态确认的停止已接入。停止后保留会话和排队内容。下文保留此前设计阶段的版本记录，Composer Predictions 的当前实现见文末。
 
 实施日期：2026-10-13；调研及改动基线：`7c3049fe`。以下先记录交付行为与验证范围，再保留此前确认的设计及验收目标。
 
@@ -284,3 +284,14 @@ Goal 在原生执行器内续轮，thread 控制器持续接收。更换目标�
 测试分为 transport 单测、provider 状态机与事件映射测试、websocket/调度集成测试、frontend 交互测试，以及少量真实 app-server smoke。重点覆盖失败与竞态，而不只验证“调用了某个方法”。
 
 开发阶段先运行相关模块测试，再执行 `npm test`、`npm run test:client`、`npm run build`、`npm run typecheck`、`npm run lint`；`npm run build` 已包含 `build:client`。补充平台相关子进程启动/关闭验证，并记录环境导致的跳过项。计划文档本身只做链接、内容与 diff 检查。
+
+## Composer Predictions 实现记录（CLI 0.163.0）
+
+- CLI 升级到 `@openai/codex` 0.163.0（仅该包与平台二进制）。官方 `thread/prediction/request` 仍返回未实现，**不使用**该方法或 `thread/prediction/updated` 通知。
+- 远端配置：认证后 GET `https://chatgpt.com/backend-api/wham/predictions/config`，字段校验 `is_enabled`、`unsupported_models`、采样率、`prompt`、`prompt_version`、`prediction_reasoning_effort`；凭据读 `CODEX_HOME/auth.json`（显式 `apikey` 模式不当作 OAuth），成功结果按账号/token 身份缓存约 5 分钟，过期/401 经 app-server `account/read {refreshToken:true}` 后重读，不自行写 token；仅官方 origin，`redirect:'error'`。无可用凭据或配置时明确不可用，不伪造原生支持。
+- 生成：父 turn 成功后，`thread/fork {experimentalPredictionMode, ephemeral, excludeTurns, threadSource:'composer_predictions'}` 建临时线程，再以普通 `turn/start` 运行远端 prompt + JSON schema 指令的 turn；仅解析合法 JSON（`suggestion: string|null`），空/null 视为无建议。fork 失败直接不可用，**无 fresh-thread fallback**。
+- 隔离与生命周期：预测线程的消息/用量/完成不进入父会话 transcript、队列、预算或 run completion，也不注册为子 agent；反向审批/提问自动取消且不弹 UI。
+- 资格边界：切到 Plan、原生 Goal 变为 active 时会立即清除进行中或已就绪的预测（配置加载期间同样在返回后复核），不再 fork，也不展示旧建议；切回普通模式不会复活已清除的预测。总 30s deadline 覆盖配置、fork 与 turn；newTurn/stop/release/close/进程退出/父 turn 重建均取消；晚到 fork/turn ACK 在后台按连接代际清理（interrupt + unsubscribe），旧代际不会向新进程发送旧 ID。
+- 能力门控：会话级 `predictionSupported` 依据真实 CLI 版本（公开稳定 0.163.0 起；预发布/未知视为不支持），前端据此展示或明确提示不支持，SDK 运行时隐藏原生入口。
+- 测试：配置加载器、执行器与运行时各有单元/协议测试；新增真实 0.163.0 binary smoke（临时 CODEX_HOME + 127.0.0.1 Responses stub）验证父上下文继承、ephemeral fork、JSON 解析、父 rollout/thread 无污染、无持久 fork 会话与 fork unload。
+- 未验证：真实账户的远端灰度配置、线上 prompt 与用量/计费语义；本仓库不主张已获得原生计费待遇。

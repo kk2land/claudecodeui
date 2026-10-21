@@ -1947,29 +1947,37 @@ export type CodexUserInputRequest = {
 /**
  * Stable, non-sensitive reason a native composer prediction produced no text.
  *
- * The native service never guarantees a suggestion: the account or model may
- * not be eligible, the result may be empty, the request may be rejected by a
- * build without the experimental API, the RPC may fail, or the asynchronous
- * result may never arrive. The UI maps each value to a localized sentence; raw
- * provider text is never rendered.
+ * The service never guarantees a suggestion: this app may lack usable ChatGPT
+ * credentials (`ineligible`), the account may not receive the remote
+ * configuration (`config_unavailable`), the installed Codex build may not
+ * support the fork protocol (`unsupported`), the account or model may be
+ * excluded (`ineligible`), the answer may be empty (`empty`) or malformed
+ * (`failed`), the protocol may reject the request (`rejected`), a transport
+ * error may occur (`request_failed`), or nothing may arrive in time
+ * (`timeout`). The UI maps each value to a localized sentence; raw provider
+ * text is never rendered.
  */
 export type CodexComposerPredictionReason =
   | 'empty'
   | 'failed'
   | 'rejected'
   | 'request_failed'
-  | 'timeout';
+  | 'timeout'
+  | 'unsupported'
+  | 'ineligible'
+  | 'config_unavailable';
 
 /**
  * Next-message suggestion produced by Codex's native composer prediction.
  *
  * `ready` is the only status that may display text, and that text is exactly
- * what the native result supplied — this app never synthesizes a suggestion or
- * makes a model call of its own. `pending` means a request is outstanding and
- * its asynchronous result has not arrived yet (it is published before the RPC
- * acknowledgement); `unavailable` covers no suggestion,
- * a rejection, a failure and a timeout, with `reason` naming which. `error` is
- * diagnostic only and must never be shown as a chat error.
+ * what the service supplied — this app never synthesizes a suggestion. The
+ * prediction itself runs in an ephemeral fork of the conversation, never in the
+ * user's own thread. `pending` means a prediction is outstanding (published
+ * before any fork or turn acknowledgement); `unavailable` covers no suggestion,
+ * an unsupported build, an ineligible account/model, an unavailable remote
+ * configuration, a rejection, a failure and a timeout, with `reason` naming
+ * which. `error` is diagnostic only and must never be shown as a chat error.
  */
 export type CodexComposerPrediction = {
   /** Native turn whose successful completion produced this request. */
@@ -2005,6 +2013,8 @@ export type CodexSessionState = {
   questions: CodexUserInputRequest[];
   /** Native next-message suggestion; absent when none was requested for the turn. */
   prediction?: CodexComposerPrediction;
+  /** Whether this session's installed Codex build supports the prediction protocol. */
+  predictionSupported?: boolean;
   error?: string;
 };
 
@@ -2031,8 +2041,10 @@ export type QueuedDelivery = { status: string; requestId: string | null; error: 
  * without sending.
  */
 export type ComposerPredictionControls = {
-  /** True only for the native Codex app-server integration that advertises support. */
+  /** True only for the native Codex app-server integration known to support this session. */
   available: boolean;
+  /** The selected Codex build lacks the prediction protocol; explain instead of offering a toggle. */
+  unsupported?: boolean;
   /** Ghost text to display; null when nothing may be shown right now. */
   suggestion: string | null;
   /** Persisted user switch for showing suggestions. */
@@ -2057,6 +2069,8 @@ export type CodexControls = {
   goalVisible?: boolean;
   /** The integration can request native suggestions; not an account/region/model eligibility claim. */
   predictionsSupported?: boolean;
+  /** The selected session's Codex build lacks the prediction protocol. */
+  predictionsUnsupported?: boolean;
   state: CodexSessionState | null;
   error: string | null;
   pending: boolean;

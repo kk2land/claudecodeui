@@ -12,6 +12,8 @@ export type {
   CodexComposerPrediction,
   CodexComposerPredictionReason,
   CodexControlAction,
+  CodexPredictionConfigResult,
+  CodexPredictionConfiguration,
   CodexGoal,
   CodexRpcClient,
   CodexRpcFrame,

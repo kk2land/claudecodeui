@@ -61,6 +61,8 @@ export function ComposerPredictionOverlay({ suggestion, onAccept, onDismiss }: C
 type ComposerPredictionStatusProps = {
   /** The persisted switch, shown only where the integration actually supports predictions. */
   enabled: boolean;
+  /** The selected Codex build lacks the protocol; show a short explanation instead of a toggle. */
+  unsupported?: boolean;
   onChange(enabled: boolean): void;
   /** A finished turn's native request is still outstanding; a low-key note. */
   pending?: boolean;
@@ -83,6 +85,9 @@ function predictionReasonKey(reason: CodexComposerPredictionReason | undefined):
     case 'rejected': return 'prediction.unavailableRejected';
     case 'request_failed': return 'prediction.unavailableRequestFailed';
     case 'timeout': return 'prediction.unavailableTimeout';
+    case 'unsupported': return 'prediction.unavailableUnsupported';
+    case 'ineligible': return 'prediction.unavailableIneligible';
+    case 'config_unavailable': return 'prediction.unavailableConfig';
     default: return 'prediction.unavailable';
   }
 }
@@ -94,9 +99,17 @@ function predictionReasonKey(reason: CodexComposerPredictionReason | undefined):
  * says nothing about the conversation itself.
  */
 export function ComposerPredictionStatus({
-  enabled, onChange, pending = false, unavailable, unavailableReason, className,
+  enabled, onChange, unsupported = false, pending = false, unavailable, unavailableReason, className,
 }: ComposerPredictionStatusProps) {
   const { t } = useTranslation('chat');
+  if (unsupported) {
+    return (
+      <span className={cn('inline-flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground/60', className)} data-testid="composer-prediction-unsupported">
+        <SparklesIcon className="h-3 w-3" aria-hidden="true" />
+        <span className="truncate">{t('prediction.unavailableUnsupported')}</span>
+      </span>
+    );
+  }
   return (
     <span className={cn('inline-flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground/60', className)}>
       <button

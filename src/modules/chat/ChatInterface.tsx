@@ -276,6 +276,8 @@ function ChatInterface({
     composerPredictionsEligible: provider === 'codex' && codexControls.predictionsSupported === true
       && codexControls.state?.runtime !== 'sdk',
     composerPredictionsBlocked: pendingPermissionRequests.length > 0,
+    composerPredictionsUnsupported: codexControls.predictionsUnsupported === true
+      && codexControls.state?.runtime !== 'sdk',
     prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
     executionIdsRef,
     processingSessions,
@@ -644,7 +646,8 @@ function ChatInterface({
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
-          composerPrediction={provider === 'codex' && codexControls.predictionsSupported ? composerPrediction : undefined}
+          composerPrediction={provider === 'codex' && (codexControls.predictionsSupported || codexControls.predictionsUnsupported)
+            ? composerPrediction : undefined}
         />}
         </div>
       </div>

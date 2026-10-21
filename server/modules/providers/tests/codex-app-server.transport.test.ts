@@ -58,6 +58,36 @@ test('production spawn explicitly disables Goals unless the env opt-in is true',
   }
 });
 
+test('transport reads the CLI version from the initialize echo, keeping a prerelease suffix', async () => {
+  // The initialize echo is `<clientName>/<cliVersion> ...`; the adapter must not
+  // assume the client name is `codex` and must keep the prerelease intact so the
+  // runtime's protocol gate can tell stable from alpha.
+  for (const [userAgent, expected] of [
+    ['cloudcli/0.163.0 (Mac OS; arm64) dumb (cloudcli; 1.0.0)', '0.163.0'],
+    ['cloudcli/0.163.0-alpha.11 (Mac OS; arm64) dumb (cloudcli; 1.0.0)', '0.163.0-alpha.11'],
+  ]) {
+    const h = fakeProcess();
+    // Re-wire stdin so every frame is acknowledged, and initialize echoes the
+    // realistic clientName/version userAgent.
+    h.child.stdin = new Writable({ write(chunk, _encoding, done) {
+      const frame = JSON.parse(String(chunk)) as CodexRpcFrame;
+      if (frame.method === 'initialize') {
+        queueMicrotask(() => h.child.stdout.emit('data', `${JSON.stringify({ id: frame.id, result: { userAgent } })}\n`));
+      } else if (frame.id !== undefined) {
+        queueMicrotask(() => h.child.stdout.emit('data', `${JSON.stringify({ id: frame.id, result: {} })}\n`));
+      }
+      done();
+    } }) as typeof h.child.stdin;
+    const transport = new CodexAppServerTransport({ spawn: () => h.child, timeoutMs: 100 });
+    try {
+      await transport.request('ping');
+      assert.equal(transport.status.cliVersion, expected, `cliVersion for ${userAgent}`);
+    } finally {
+      await transport.close();
+    }
+  }
+});
+
 test('transport lazily initializes once, correlates out-of-order responses and handles partial lines', async () => {
   const h = fakeProcess();
   assert.equal(h.frames.length, 0);
@@ -287,5 +317,43 @@ test('EPIPE clears pending requests and emits one process failure', async () => 
   assert.equal(h.transport.status.startedAt, null);
   h.child.emit('exit', 1, null);
   assert.equal(exits, 1);
+  await h.transport.close();
+});
+
+test('default production transport reports the bundled CLI without spawning or sending RPC', async (t) => {
+  // A lazy `status` read must expose the bundled 0.163.0 identity so a mounted
+  // session can opt into predictions before the first send, while spawning
+  // nothing and sending no RPC.
+  const spawned = t.mock.method(childProcess, 'spawn', () => { throw new Error('must not spawn'); });
+  syncBuiltinESMExports();
+  try {
+    const transport = new CodexAppServerTransport();
+    const status = transport.status;
+    assert.equal(status.running, false);
+    assert.equal(status.pid, null);
+    assert.equal(status.startedAt, null);
+    assert.equal(status.pendingRequests, 0);
+    assert.ok(status.launcherPath && status.launcherPath.endsWith('codex.js'), 'bundled launcher path is known');
+    assert.equal(status.cliVersion, '0.163.0');
+    assert.equal(spawned.mock.callCount(), 0, 'reading status must never spawn the process');
+
+    // The runtime surfaces the same installed-build capability from that status.
+    let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
+    const runtime = new CodexAppServerRuntime(transport, { get: () => settings, update: (_, patch) => (settings = { ...settings, ...patch }) }, 100, () => {});
+    assert.equal(runtime.getState('cold-session').predictionSupported, true);
+    assert.equal(runtime.getState('cold-session').diagnostics?.cliVersion, '0.163.0');
+    assert.equal(spawned.mock.callCount(), 0);
+    await runtime.close();
+  } finally {
+    spawned.mock.restore();
+    syncBuiltinESMExports();
+  }
+});
+
+test('a custom spawn never borrows the bundled CLI version', async () => {
+  const h = fakeProcess();
+  const status = h.transport.status;
+  assert.equal(status.launcherPath, null);
+  assert.equal(status.cliVersion, null, 'a custom spawn must wait for its real handshake');
   await h.transport.close();
 });

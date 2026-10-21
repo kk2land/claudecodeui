@@ -709,13 +709,14 @@ export type CodexUserInputRequest = {
 /**
  * Stable, non-sensitive reason a native composer prediction produced no text.
  *
- * The app-server never guarantees a suggestion: the account/model may not be
- * eligible, the result may be empty, the request may be rejected by a build
- * without the experimental API, the RPC may fail, or the asynchronous result
- * may never arrive. `empty` is a successful result with no text; `failed` is a
- * native `failed`/malformed result; `rejected` is an app-server RPC rejection;
- * `request_failed` is any other transport failure; `timeout` is the local
- * deadline. It exists only so the composer can explain the absence in the
+ * The adapter never guarantees a suggestion: the signed-in credential may be
+ * unusable (`ineligible`), the signed-in account may not receive the remote
+ * configuration (`config_unavailable`), the installed CLI may lack the fork
+ * semantics the adapter needs (`unsupported`), the account/model may be excluded
+ * by the remote configuration (`ineligible`), the result may be empty
+ * (`empty`), malformed or failed (`failed`), rejected by app-server
+ * (`rejected`), lost to a transport error (`request_failed`), or late
+ * (`timeout`). It exists only so the composer can explain the absence in the
  * user's language — it is never rendered as raw provider text.
  */
 export type CodexComposerPredictionReason =
@@ -723,24 +724,53 @@ export type CodexComposerPredictionReason =
   | 'failed'
   | 'rejected'
   | 'request_failed'
-  | 'timeout';
+  | 'timeout'
+  | 'unsupported'
+  | 'ineligible'
+  | 'config_unavailable';
 
 /**
- * Next-message suggestion produced by Codex's native composer prediction.
+ * Validated remote composer-prediction configuration.
  *
- * The runtime asks the app-server for it with the experimental
- * `thread/prediction/request` RPC after a normal turn completes; this app never
- * synthesizes the text itself and never starts an extra model turn. Only
- * `ready` carries displayable text. `pending` means a request is outstanding
- * and its asynchronous result has not arrived yet — it is published before the
- * RPC acknowledgement. `unavailable` covers an empty result, a rejection, a
- * failure and a timeout, and names the class of failure in `reason`. A
- * prediction problem is diagnostic only: it
- * never becomes `CodexSessionState.error`, never changes the chat phase, and
- * never surfaces a run-failure notification.
+ * Mirrors the fields the desktop client requires before it will fork a thread:
+ * an enable switch, an optional model exclusion list, sampling rates, the prompt
+ * and its version, and an optional reasoning effort. The prompt is remote data
+ * owned by the service; this app neither authors nor substitutes one.
+ */
+export type CodexPredictionConfiguration = {
+  isEnabled: boolean;
+  unsupportedModels: string[];
+  sampleRate: number;
+  liveSampleRate?: number;
+  prompt: string;
+  promptVersion: string;
+  predictionReasoningEffort: string | null;
+};
+
+/**
+ * Result of loading that configuration for the current credential.
+ *
+ * `ready` never implies the account is eligible beyond the remote switch; every
+ * other status is a stable, non-sensitive classification the runtime publishes.
+ */
+export type CodexPredictionConfigResult =
+  | { status: 'ready'; config: CodexPredictionConfiguration }
+  | { status: 'unavailable'; reason: Extract<CodexComposerPredictionReason, 'ineligible' | 'config_unavailable'> };
+
+/**
+ * Next-message suggestion produced by Codex's composer prediction.
+ *
+ * The adapter forks the parent thread into an ephemeral prediction thread and
+ * runs one ordinary model turn there with the remotely configured prompt; the
+ * parent conversation never receives that turn. Only `ready` carries
+ * displayable text. `pending` means the prediction is outstanding and is
+ * published before any fork or turn acknowledgement. `unavailable` covers every
+ * refusal or failure and names the class in `reason`. A prediction problem is
+ * diagnostic only: it never becomes `CodexSessionState.error`, never changes the
+ * chat phase, and never surfaces a run-failure notification.
  */
 export type CodexComposerPrediction = {
-  /** Native turn whose successful completion produced this request. */
+  /** Parent turn whose successful completion produced this prediction. */
   sourceTurnId: string;
   status: 'pending' | 'ready' | 'unavailable';
   /** Suggested next user message; present only when `status` is `ready`. */
@@ -773,6 +803,11 @@ export type CodexSessionState = {
   questions: CodexUserInputRequest[];
   /** Native next-message suggestion; absent when none was requested for this turn. */
   prediction?: CodexComposerPrediction;
+  /**
+   * Whether this session's installed CLI can run the prediction fork protocol.
+   * False for older/unknown builds, whose UI must not offer suggestions at all.
+   */
+  predictionSupported?: boolean;
   error?: string;
 };
 

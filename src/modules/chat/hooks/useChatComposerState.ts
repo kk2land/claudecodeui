@@ -58,6 +58,8 @@ type UseChatComposerStateArgs = {
    * no native prediction.
    */
   composerPredictionsEligible?: boolean;
+  /** The selected Codex build lacks the prediction protocol; explain instead of offering a toggle. */
+  composerPredictionsUnsupported?: boolean;
   /** Open permission prompts in this chat hide any suggestion and its request. */
   composerPredictionsBlocked?: boolean;
   /** Managed providers share allocation and finish pending runtime changes before sending. */
@@ -209,6 +211,7 @@ export function useChatComposerState({
   codexControls,
   composerPredictionsEligible = false,
   composerPredictionsBlocked = false,
+  composerPredictionsUnsupported = false,
   prepareSessionForSend,
   executionIdsRef,
   processingSessions,
@@ -1595,7 +1598,10 @@ export function useChatComposerState({
     openAttachmentPicker: open,
     handleSubmit,
     composerPrediction: {
-      available: composerPredictionsEligible,
+      // The row is shown for the native integration even when this build is
+      // known to be incompatible, so the composer can explain that state.
+      available: composerPredictionsEligible || composerPredictionsUnsupported,
+      unsupported: composerPredictionsUnsupported,
       suggestion: composerPrediction.suggestion,
       enabled: composerPredictionsPreference.enabled,
       setEnabled: composerPredictionsPreference.setEnabled,

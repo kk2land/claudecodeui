@@ -58,6 +58,11 @@ export class CodexAppServerTransport implements CodexRpcClient {
   }
 
   get status() {
+    // Before the first spawn, the bundled launcher identity is read lazily from
+    // package metadata (never by spawning), so a mounted session can decide
+    // whether predictions are supported without a handshake. A custom spawn has
+    // no bundled identity and reports null until its real init echo arrives.
+    if (!this.options.spawn && (!this.launcherPath || !this.cliVersion)) this.readBundledIdentity();
     return {
       running: this.child !== null,
       pid: this.child?.pid ?? null,
@@ -66,6 +71,23 @@ export class CodexAppServerTransport implements CodexRpcClient {
       launcherPath: this.launcherPath,
       cliVersion: this.cliVersion,
     };
+  }
+
+  /**
+   * Resolves the packaged launcher path and its package version without
+   * starting a process. Missing metadata leaves both null; `start()` still
+   * throws the AppError that the runtime relies on.
+   */
+  private readBundledIdentity(): void {
+    try {
+      const require = createRequire(import.meta.url);
+      const launcher = require.resolve('@openai/codex/bin/codex.js');
+      const version = (require('@openai/codex/package.json') as { version: string }).version;
+      if (!this.launcherPath) this.launcherPath = launcher;
+      if (!this.cliVersion) this.cliVersion = version;
+    } catch {
+      // Absent bundle stays unknown; only an actual send fails with the AppError.
+    }
   }
 
   /** The router excludes native queues and sends until a SIGTERM target has actually exited. */
@@ -89,14 +111,11 @@ export class CodexAppServerTransport implements CodexRpcClient {
     if (this.options.spawn) {
       child = this.options.spawn();
     } else {
-      let launcher: string;
-      try {
-        launcher = require.resolve('@openai/codex/bin/codex.js');
-        this.launcherPath = launcher;
-        this.cliVersion = (require('@openai/codex/package.json') as { version: string }).version;
-      } catch {
+      this.readBundledIdentity();
+      if (!this.launcherPath || !this.cliVersion) {
         throw new AppError('The bundled Codex CLI is not installed.', { code: 'CODEX_APP_SERVER_UNAVAILABLE', statusCode: 503 });
       }
+      const launcher = this.launcherPath;
       // This private connection owns every subscription. Release unsubscribed
       // threads promptly so SDK compatibility can resume their latest rollout.
       child = spawn(process.execPath, [launcher, 'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0',
@@ -152,7 +171,11 @@ export class CodexAppServerTransport implements CodexRpcClient {
         capabilities: { experimentalApi: true },
       }) as { userAgent?: string };
       // Prefer the running executable's identity over its npm package metadata.
-      this.cliVersion = initialized?.userAgent?.match(/codex[^/]*\/v?(\d+\.\d+\.\d+)/)?.[1] ?? this.cliVersion;
+      // The initialize echo is `<clientName>/<cliVersion> ...`, so the CLI
+      // version is the first segment after that name; the prerelease suffix is
+      // preserved so the runtime's protocol gate can tell a public stable build
+      // apart from an internal/alpha identity.
+      this.cliVersion = initialized?.userAgent?.match(/^[^/\s]+\/([0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?)/)?.[1] ?? this.cliVersion;
       await this.write({ method: 'initialized', params: {} }, child);
     } catch (error) {
       if (this.child === child && this.stopTarget !== child && !child.killed) child.kill('SIGTERM');

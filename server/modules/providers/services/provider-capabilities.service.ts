@@ -24,9 +24,10 @@ type ProviderCapabilities = {
   supportsAbort: boolean;
   /**
    * Native controls require the app-server runtime; SDK compatibility does not
-   * provide them. `predictions` reports only that this integration can request
-   * Codex's native next-message suggestion, never that the signed-in account,
-   * region or model is eligible for the upstream composer-predictions beta.
+   * provide them. `predictions` reports only that this adapter implements the
+   * fork-based suggestion protocol, never that the signed-in account, region,
+   * model or installed CLI is eligible. The per-session snapshot's
+   * `predictionSupported` is the real gate the composer consumes.
    */
   nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean; predictions: boolean };
   /** Application transport/process controls, independent of provider-native plan or steer support. */

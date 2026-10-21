@@ -21,9 +21,10 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   const { subscribe } = useWebSocket();
   const capabilities = useProviderCapabilities();
   const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
-  // Integration support only; whether the account/model is actually eligible is
-  // reported by the per-turn prediction snapshot, never assumed here.
-  const predictionsSupported = capabilities.codex?.nativeControls?.predictions === true;
+  // Integration support needs both the adapter's static capability and the real
+  // per-session CLI gate; account/model eligibility is still reported by the
+  // per-turn prediction snapshot and never assumed here.
+  const predictionsImplemented = capabilities.codex?.nativeControls?.predictions === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
   // A control failure belongs to the action, independently of the model's running state.
@@ -173,6 +174,17 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   }, [sessionId, snapshots, send]);
 
   const allocating = Boolean(enabled && !sessionId && creatingSession?.scope === allocationScope);
-  return { sessionId, goalsEnabled, predictionsSupported, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
+  // Before a session exists the backend cannot have reported its CLI build, so a
+  // first send opts in optimistically; the runtime gates the real protocol after
+  // the handshake and never falls back to an ordinary turn on an unknown build.
+  const sessionSnapshot = sessionId ? snapshots[sessionId] : undefined;
+  const nativeRuntime = sessionSnapshot?.runtime !== 'sdk';
+  const predictionsSupported = predictionsImplemented && nativeRuntime
+    && (sessionSnapshot ? sessionSnapshot.predictionSupported === true : true);
+  // A known-incompatible build is reported explicitly instead of silently
+  // offering a toggle that could never produce a suggestion.
+  const predictionsUnsupported = predictionsImplemented && nativeRuntime
+    && Boolean(sessionId) && sessionSnapshot?.predictionSupported === false;
+  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
     pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

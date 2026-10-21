@@ -96,8 +96,8 @@ test('pinned app-server steers, stops a real background process, forks and persi
     assert.ok(events.some((event) => event.kind === 'complete' && event.aborted));
     await until(() => { try { process.kill(processId!, 0); return false; } catch { return true; } }, 'native background terminal cleanup');
     const snapshot = await transport.request('thread/read', { threadId, includeTurns: true });
-    assert.equal(snapshot.thread.cliVersion, '0.162.1');
-    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.162.1');
+    assert.equal(snapshot.thread.cliVersion, '0.163.0');
+    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.163.0');
     assert.equal(snapshot.thread.turns.at(-1)?.status, 'interrupted');
     const fork = await transport.request('thread/fork', { threadId, cwd: root });
     assert.notEqual(fork.thread.id, threadId); await stat(fork.thread.path);
@@ -118,8 +118,13 @@ test('pinned app-server steers, stops a real background process, forks and persi
     assert.equal(persisted.goal.objective, 'Local smoke goal');
     const rollout = await readFile(snapshot.thread.path, 'utf8');
     assert.ok(rollout.includes('first-input'));
-    const input = rollout.split('\n').filter(Boolean).map((line) => JSON.parse(line)).find((row) => row.payload?.item?.client_id === 'first-input');
-    assert.equal(input.payload.item.type, 'UserMessage');
+    // Codex 0.163 records the submitted user message as an `event_msg` whose
+    // payload carries the client id directly; confirm that exact identity.
+    const rows = rollout.split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    const input = rows.find((row) => row.payload?.client_id === 'first-input');
+    assert.ok(input, 'the submitted client id is persisted in the rollout');
+    assert.equal(input.type, 'event_msg');
+    assert.equal(input.payload.type, 'user_message');
   } finally {
     await runtime.abort('app-smoke');
     await transport.close(); await runtime.close();
