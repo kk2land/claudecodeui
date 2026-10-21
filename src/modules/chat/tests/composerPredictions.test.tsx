@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { act, fireEvent, render, renderHook, screen } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-import '@/modules/i18n';
+import { i18n } from '@/modules/i18n';
 import { ComposerPredictionOverlay, ComposerPredictionStatus } from '@/modules/chat/composer/ComposerPrediction';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useComposerPrediction } from '@/modules/chat/hooks/useComposerPrediction';
 import { readStoredUiPreferences } from '@/shared/uiPreferences';
 import { readDraftText, resetChatDrafts } from '@/shared/chatDrafts';
 import { resetUserPreferences, writeUserPreference } from '@/shared/userSettings';
-import type { CodexComposerPrediction, CodexControls, Project, ProjectSession } from '@/shared/types';
+import type { CodexComposerPrediction, CodexComposerPredictionReason, CodexControls, Project, ProjectSession } from '@/shared/types';
 
 /**
  * Native Codex composer predictions are shown as ghost text that is *not* the
@@ -331,4 +331,96 @@ test('the overlay renders ghost text and its buttons accept or dismiss without s
   assert.equal(screen.getByRole('button', { name: /Suggestions on/ }).getAttribute('aria-pressed'), 'true');
   assert.ok(screen.getByTestId('composer-prediction-unavailable').textContent);
   status.unmount();
+});
+
+test('pending, empty, failed, rejected and timed-out predictions report visible localized state', async () => {
+  // The native request is outstanding: the composer says so instead of looking
+  // like suggestions are simply broken.
+  const pending = render(<ComposerPredictionStatus enabled onChange={() => {}} pending unavailable={false} />);
+  assert.equal(screen.getByTestId('composer-prediction-pending').textContent, 'Waiting for a suggestion…');
+  assert.equal(screen.queryByTestId('composer-prediction-unavailable'), null);
+  pending.unmount();
+
+  // Every classified reason has its own sentence; raw provider text is never used.
+  const cases: Array<[CodexComposerPredictionReason, string]> = [
+    ['empty', 'Codex returned no suggestion this time'],
+    ['failed', 'Codex could not produce a suggestion'],
+    ['rejected', 'Codex rejected the suggestion request'],
+    ['request_failed', 'The suggestion request failed'],
+    ['timeout', 'No suggestion arrived in time'],
+  ];
+  for (const [reason, expected] of cases) {
+    const view = render(
+      <ComposerPredictionStatus enabled onChange={() => {}} unavailable unavailableReason={reason} />,
+    );
+    assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, expected);
+    view.unmount();
+  }
+
+  // A snapshot without a reason (an older publisher) keeps the generic copy.
+  const generic = render(<ComposerPredictionStatus enabled onChange={() => {}} unavailable />);
+  assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, 'No suggestion this time');
+  generic.unmount();
+
+  // Chinese gets localized text rather than an English fallback.
+  await act(async () => { await i18n.changeLanguage('zh-CN'); });
+  try {
+    const zh = render(
+      <ComposerPredictionStatus enabled onChange={() => {}} unavailable unavailableReason="timeout" />,
+    );
+    assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, '等待建议超时');
+    zh.unmount();
+  } finally {
+    await act(async () => { await i18n.changeLanguage('en'); });
+  }
+});
+
+test('a pending then empty prediction moves through visible states for the same turn', () => {
+  const hook = renderHook(({ prediction }: { prediction?: CodexComposerPrediction }) => useComposerPrediction({
+    enabled: true, sessionId: SESSION.id, prediction, busy: false, suppressed: false, input: '',
+  }), { initialProps: {
+    prediction: { sourceTurnId: 'turn-1', status: 'pending' } as CodexComposerPrediction,
+  } });
+
+  assert.equal(hook.result.current.pending, true);
+  assert.equal(hook.result.current.unavailable, false);
+  assert.equal(hook.result.current.suggestion, null);
+
+  // The real `completed` result with null text arrives for the same turn.
+  hook.rerender({ prediction: { sourceTurnId: 'turn-1', status: 'unavailable', reason: 'empty' } });
+  assert.equal(hook.result.current.pending, false);
+  assert.equal(hook.result.current.unavailable, true);
+  assert.equal(hook.result.current.unavailableReason, 'empty');
+  assert.equal(hook.result.current.suggestion, null);
+
+  // Ready text continues to be the only thing that becomes ghost text.
+  hook.rerender({ prediction: { sourceTurnId: 'turn-2', status: 'ready', text: 'Next step.' } });
+  assert.equal(hook.result.current.suggestion, 'Next step.');
+  assert.equal(hook.result.current.pending, false);
+  assert.equal(hook.result.current.unavailable, false);
+  assert.equal(hook.result.current.unavailableReason, undefined);
+});
+
+test('typing permanently retires a result, while a live turn only hides it', async () => {
+  const typed = renderHook(({ input }: { input: string }) => useComposerPrediction({
+    enabled: true, sessionId: SESSION.id, busy: false, suppressed: false, input,
+    prediction: { sourceTurnId: 'turn-1', status: 'unavailable', reason: 'timeout' },
+  }), { initialProps: { input: '' } });
+  assert.equal(typed.result.current.unavailable, true);
+  typed.rerender({ input: 'still editing' });
+  assert.equal(typed.result.current.unavailable, false);
+  assert.equal(typed.result.current.unavailableReason, undefined);
+  // Clearing the input does not resurrect it: typing refused this turn for good.
+  typed.rerender({ input: '' });
+  assert.equal(typed.result.current.unavailable, false);
+
+  // A live turn hides the note only; the same pending request shows again once
+  // the turn ends, because the request itself was never refused.
+  const busy = renderHook(({ isBusy }: { isBusy: boolean }) => useComposerPrediction({
+    enabled: true, sessionId: SESSION.id, busy: isBusy, suppressed: false, input: '',
+    prediction: { sourceTurnId: 'turn-2', status: 'pending' },
+  }), { initialProps: { isBusy: true } });
+  assert.equal(busy.result.current.pending, false);
+  busy.rerender({ isBusy: false });
+  assert.equal(busy.result.current.pending, true);
 });

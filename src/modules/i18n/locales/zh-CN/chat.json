@@ -351,7 +351,13 @@
     "toggleOn": "建议已开启",
     "toggleOff": "建议已关闭",
     "toggleHint": "回复结束后显示 Codex 建议的下一条消息；采用只会填入输入框，不会发送。",
-    "unavailable": "这次没有建议"
+    "pending": "正在等待建议…",
+    "unavailable": "这次没有建议",
+    "unavailableEmpty": "这次 Codex 没有返回建议",
+    "unavailableFailed": "Codex 未能生成建议",
+    "unavailableRejected": "Codex 拒绝了建议请求",
+    "unavailableRequestFailed": "建议请求失败",
+    "unavailableTimeout": "等待建议超时"
   },
   "export": {
     "trigger": "导出对话",

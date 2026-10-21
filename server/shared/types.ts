@@ -707,16 +707,37 @@ export type CodexUserInputRequest = {
 };
 
 /**
+ * Stable, non-sensitive reason a native composer prediction produced no text.
+ *
+ * The app-server never guarantees a suggestion: the account/model may not be
+ * eligible, the result may be empty, the request may be rejected by a build
+ * without the experimental API, the RPC may fail, or the asynchronous result
+ * may never arrive. `empty` is a successful result with no text; `failed` is a
+ * native `failed`/malformed result; `rejected` is an app-server RPC rejection;
+ * `request_failed` is any other transport failure; `timeout` is the local
+ * deadline. It exists only so the composer can explain the absence in the
+ * user's language — it is never rendered as raw provider text.
+ */
+export type CodexComposerPredictionReason =
+  | 'empty'
+  | 'failed'
+  | 'rejected'
+  | 'request_failed'
+  | 'timeout';
+
+/**
  * Next-message suggestion produced by Codex's native composer prediction.
  *
  * The runtime asks the app-server for it with the experimental
  * `thread/prediction/request` RPC after a normal turn completes; this app never
  * synthesizes the text itself and never starts an extra model turn. Only
- * `ready` carries displayable text. `pending` means the request was
- * acknowledged while the asynchronous result is outstanding; `unavailable`
- * covers an empty result, a rejection, a failure and a timeout. A prediction
- * problem is diagnostic only: it never becomes `CodexSessionState.error`, never
- * changes the chat phase, and never surfaces a run-failure notification.
+ * `ready` carries displayable text. `pending` means a request is outstanding
+ * and its asynchronous result has not arrived yet — it is published before the
+ * RPC acknowledgement. `unavailable` covers an empty result, a rejection, a
+ * failure and a timeout, and names the class of failure in `reason`. A
+ * prediction problem is diagnostic only: it
+ * never becomes `CodexSessionState.error`, never changes the chat phase, and
+ * never surfaces a run-failure notification.
  */
 export type CodexComposerPrediction = {
   /** Native turn whose successful completion produced this request. */
@@ -724,7 +745,9 @@ export type CodexComposerPrediction = {
   status: 'pending' | 'ready' | 'unavailable';
   /** Suggested next user message; present only when `status` is `ready`. */
   text?: string;
-  /** Low-priority reason the suggestion is unavailable; never a chat error. */
+  /** Why no suggestion is available; present only when `status` is `unavailable`. */
+  reason?: CodexComposerPredictionReason;
+  /** Low-priority diagnostic detail; never a chat error and never shown raw. */
   error?: string;
 };
 

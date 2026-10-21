@@ -9,6 +9,7 @@ import { appendFilesInputTag, normalizeAttachmentDescriptors, isImageAttachmentD
 import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEnabled } from '@/shared/index.js';
 import type {
   AnyRecord,
+  CodexComposerPredictionReason,
   CodexControlAction,
   CodexGoal,
   CodexRpcClient,
@@ -435,7 +436,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (session.state.prediction) session.state.prediction = undefined;
   }
 
-  private settlePrediction(session: NativeSession, sourceTurnId: string, value: { status: 'ready'; text: string } | { status: 'unavailable'; error?: string }): void {
+  private settlePrediction(
+    session: NativeSession,
+    sourceTurnId: string,
+    value:
+      | { status: 'ready'; text: string }
+      | { status: 'unavailable'; reason: CodexComposerPredictionReason; error?: string },
+  ): void {
     // Identity is re-checked at the point of use: a stale reply for a previous
     // turn, or one that raced a newer request, must not be published.
     if (session.prediction?.sourceTurnId !== sourceTurnId || session.state.prediction?.sourceTurnId !== sourceTurnId) return;
@@ -461,17 +468,26 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.clearPrediction(session);
     const timer = setTimeout(() => {
       if (session.prediction?.sourceTurnId !== sourceTurnId) return;
-      this.settlePrediction(session, sourceTurnId, { status: 'unavailable', error: 'Prediction timed out.' });
+      this.settlePrediction(session, sourceTurnId, {
+        status: 'unavailable', reason: 'timeout', error: 'Prediction timed out.',
+      });
     }, Math.max(1, this.predictionTimeoutMs));
     timer.unref?.();
     session.prediction = { threadId, sourceTurnId, timer };
     session.state.prediction = { sourceTurnId, status: 'pending' };
     this.publish(session);
     void this.client.request('thread/prediction/request', { threadId, sourceTurnId }).catch((error: Error) => {
-      // The acknowledgement only confirms receipt; an error message means no
-      // result is coming, but it is never a chat-level failure.
+      // The acknowledgement only confirms receipt; an error means no result is
+      // coming, but it is never a chat-level failure. The diagnostic error
+      // stays in the snapshot; the composer uses the classified reason rather
+      // than provider text.
       if (session.prediction?.sourceTurnId !== sourceTurnId || session.threadId !== threadId) return;
-      this.settlePrediction(session, sourceTurnId, { status: 'unavailable', error: error.message || 'Prediction unavailable.' });
+      const rejected = error instanceof AppError && error.code === 'CODEX_APP_SERVER_REJECTED';
+      this.settlePrediction(session, sourceTurnId, {
+        status: 'unavailable',
+        reason: rejected ? 'rejected' : 'request_failed',
+        error: error.message || 'Prediction unavailable.',
+      });
     });
   }
 
@@ -481,6 +497,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
    * prediction arrives after its turn has already completed, and it matches
    * identity explicitly so child threads and replaced requests cannot write
    * into this session.
+   *
+   * The result schema admits exactly two shapes: `completed` (whose `text` is
+   * nullable) and `failed`. A completed result without text is a successful
+   * "no suggestion", not an error, and it is reported as such.
    */
   private onPredictionUpdated(p: AnyRecord): void {
     const session = [...this.sessions.values()].find((candidate) => candidate.threadId === p.threadId);
@@ -493,7 +513,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.settlePrediction(session, p.sourceTurnId, { status: 'ready', text });
       return;
     }
-    this.settlePrediction(session, p.sourceTurnId, { status: 'unavailable' });
+    this.settlePrediction(session, p.sourceTurnId, {
+      status: 'unavailable',
+      reason: result?.type === 'completed' ? 'empty' : 'failed',
+    });
   }
 
   private onNotification(frame: CodexRpcFrame): void {

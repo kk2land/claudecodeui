@@ -1945,14 +1945,31 @@ export type CodexUserInputRequest = {
 };
 
 /**
+ * Stable, non-sensitive reason a native composer prediction produced no text.
+ *
+ * The native service never guarantees a suggestion: the account or model may
+ * not be eligible, the result may be empty, the request may be rejected by a
+ * build without the experimental API, the RPC may fail, or the asynchronous
+ * result may never arrive. The UI maps each value to a localized sentence; raw
+ * provider text is never rendered.
+ */
+export type CodexComposerPredictionReason =
+  | 'empty'
+  | 'failed'
+  | 'rejected'
+  | 'request_failed'
+  | 'timeout';
+
+/**
  * Next-message suggestion produced by Codex's native composer prediction.
  *
  * `ready` is the only status that may display text, and that text is exactly
  * what the native result supplied — this app never synthesizes a suggestion or
- * makes a model call of its own. `pending` means a request was acknowledged and
- * its asynchronous result is outstanding; `unavailable` covers no suggestion,
- * a rejection, a failure and a timeout. `error` is diagnostic only and must
- * never be shown as a chat error.
+ * makes a model call of its own. `pending` means a request is outstanding and
+ * its asynchronous result has not arrived yet (it is published before the RPC
+ * acknowledgement); `unavailable` covers no suggestion,
+ * a rejection, a failure and a timeout, with `reason` naming which. `error` is
+ * diagnostic only and must never be shown as a chat error.
  */
 export type CodexComposerPrediction = {
   /** Native turn whose successful completion produced this request. */
@@ -1960,7 +1977,9 @@ export type CodexComposerPrediction = {
   status: 'pending' | 'ready' | 'unavailable';
   /** Suggested next user message; present only when `status` is `ready`. */
   text?: string;
-  /** Low-priority reason the suggestion is unavailable. */
+  /** Why no suggestion is available; present only when `status` is `unavailable`. */
+  reason?: CodexComposerPredictionReason;
+  /** Low-priority diagnostic detail; never rendered as raw provider text. */
   error?: string;
 };
 
@@ -2019,8 +2038,12 @@ export type ComposerPredictionControls = {
   /** Persisted user switch for showing suggestions. */
   enabled: boolean;
   setEnabled(enabled: boolean): void;
+  /** The current turn's native request is still outstanding; render a muted waiting note. */
+  pending: boolean;
   /** The current turn produced no usable suggestion; render a muted note. */
   unavailable: boolean;
+  /** Classified reason for `unavailable`, localized by the UI; never raw provider text. */
+  unavailableReason: CodexComposerPredictionReason | undefined;
   /** Writes the suggestion into the composer; returns false when nothing was shown. */
   accept(): boolean;
   /** Hides this turn's suggestion for good. */

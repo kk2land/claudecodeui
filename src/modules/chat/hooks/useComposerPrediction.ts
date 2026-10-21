@@ -1,6 +1,6 @@
 import { useCallback, useState } from 'react';
 
-import type { CodexComposerPrediction } from '@/shared/types';
+import type { CodexComposerPrediction, CodexComposerPredictionReason } from '@/shared/types';
 
 type Args = {
   /** Preference, capability, provider and runtime all allowed the suggestion. */
@@ -23,8 +23,16 @@ type Args = {
 type Result = {
   /** Ghost text to display; null when there is nothing showable right now. */
   suggestion: string | null;
+  /** The current turn is still waiting for its native answer, composer idle and empty. */
+  pending: boolean;
   /** The current turn reported no usable suggestion while the composer stays empty and idle. */
   unavailable: boolean;
+  /**
+   * Why that turn produced nothing, when the native result said so. `undefined`
+   * for a pending request and for a snapshot published before reasons existed;
+   * the UI then falls back to a generic sentence.
+   */
+  unavailableReason: CodexComposerPredictionReason | undefined;
   /** Retires the current suggestion (and its pending result) for this turn. */
   dismiss(): void;
   /** Returns the accepted text and retires it; the caller owns the draft write. */
@@ -81,7 +89,9 @@ export function useComposerPrediction({ enabled, sessionId, prediction, busy, su
 
   const key = prediction ? `${sessionId ?? ''}:${prediction.sourceTurnId}` : null;
   const text = prediction?.status === 'ready' && prediction.text ? prediction.text : null;
+  const pending = prediction?.status === 'pending';
   const unavailable = prediction?.status === 'unavailable';
+  const unavailableReason = unavailable ? prediction.reason : undefined;
 
   let next = memory;
   if (memory.sessionId !== sessionId) {
@@ -122,7 +132,12 @@ export function useComposerPrediction({ enabled, sessionId, prediction, busy, su
 
   return {
     suggestion: showable ? text : null,
+    // Waiting is reportable only in the same conditions that keep a result
+    // showable: an idle, empty composer that has not refused this turn. A
+    // pending request while a turn runs (or after the user typed) stays silent.
+    pending: Boolean(showable && pending && !text),
     unavailable: Boolean(showable && !text && unavailable),
+    unavailableReason: showable && !text && unavailable ? unavailableReason : undefined,
     dismiss,
     accept,
   };

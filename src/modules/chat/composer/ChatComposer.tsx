@@ -491,7 +491,9 @@ export default function ChatComposer({
               <ComposerPredictionStatus
                 enabled={composerPrediction.enabled}
                 onChange={composerPrediction.setEnabled}
+                pending={composerPrediction.pending}
                 unavailable={composerPrediction.unavailable}
+                unavailableReason={composerPrediction.unavailableReason}
               />
             )}
 

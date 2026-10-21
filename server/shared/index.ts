@@ -10,6 +10,7 @@ export type {
   AuthenticatedWebSocketRequest,
   BackgroundTaskSummary,
   CodexComposerPrediction,
+  CodexComposerPredictionReason,
   CodexControlAction,
   CodexGoal,
   CodexRpcClient,

@@ -162,20 +162,30 @@ test('prediction requests require per-turn opt-in and an ordinary successful tur
 });
 
 test('empty, failed, rejected and timed-out results are unavailable without touching chat state', async () => {
+  // The generated `ThreadPredictionUpdatedNotification` schema admits exactly
+  // `{result:{type:'completed',text?:string|null}}` and `{result:{type:'failed'}}`.
+  // An empty successful result is a legitimate "no suggestion", not a failure.
   for (const result of [
     { type: 'completed', text: null },
     { type: 'completed', text: '   ' },
     { type: 'completed' },
-    { type: 'failed' },
   ]) {
     const h = harness();
     await runCompletedTurn(h);
     h.predictionUpdated({ sourceTurnId: 'turn-1', result });
-    assert.deepEqual(h.state().prediction, { sourceTurnId: 'turn-1', status: 'unavailable' });
+    assert.deepEqual(h.state().prediction, { sourceTurnId: 'turn-1', status: 'unavailable', reason: 'empty' });
     assert.equal(h.state().phase, 'idle');
     assert.equal(h.state().error, undefined);
     assert.equal(h.events.filter((event) => event.kind === 'error').length, 0);
     assert.equal(h.events.some((event) => event.kind === 'complete' && event.success === false), false);
+  }
+  for (const result of [{ type: 'failed' }, { type: 'unexpected' }, undefined]) {
+    const h = harness();
+    await runCompletedTurn(h);
+    h.predictionUpdated({ sourceTurnId: 'turn-1', result });
+    assert.deepEqual(h.state().prediction, { sourceTurnId: 'turn-1', status: 'unavailable', reason: 'failed' });
+    assert.equal(h.state().error, undefined);
+    assert.equal(h.events.filter((event) => event.kind === 'error').length, 0);
   }
 
   const rejected = harness();
@@ -184,15 +194,29 @@ test('empty, failed, rejected and timed-out results are unavailable without touc
   });
   await runCompletedTurn(rejected);
   await eventually(() => rejected.state().prediction?.status === 'unavailable', 'the rejected prediction');
+  assert.equal(rejected.state().prediction?.reason, 'rejected');
   assert.equal(rejected.state().phase, 'idle');
   assert.equal(rejected.state().error, undefined);
+
+  // A transport/timeout-class failure is not a rejection; the reason stays
+  // classified so the UI can localize it without provider text.
+  const requestFailed = harness();
+  requestFailed.handlers.set('thread/prediction/request', async () => {
+    throw new AppError('Codex app-server did not confirm thread/prediction/request.', { code: 'CODEX_APP_SERVER_TIMEOUT' });
+  });
+  await runCompletedTurn(requestFailed);
+  await eventually(() => requestFailed.state().prediction?.status === 'unavailable', 'the failed prediction request');
+  assert.equal(requestFailed.state().prediction?.reason, 'request_failed');
+  assert.equal(requestFailed.state().error, undefined);
 
   const timedOut = harness(20);
   await runCompletedTurn(timedOut);
   await eventually(() => timedOut.state().prediction?.status === 'unavailable', 'the timed-out prediction');
   // A result that arrives after the deadline must not resurrect the suggestion.
   timedOut.predictionUpdated({ sourceTurnId: 'turn-1', result: { type: 'completed', text: 'Too late.' } });
-  assert.deepEqual(timedOut.state().prediction, { sourceTurnId: 'turn-1', status: 'unavailable', error: 'Prediction timed out.' });
+  assert.deepEqual(timedOut.state().prediction, {
+    sourceTurnId: 'turn-1', status: 'unavailable', reason: 'timeout', error: 'Prediction timed out.',
+  });
   assert.equal(timedOut.state().phase, 'idle');
   assert.equal(timedOut.state().error, undefined);
 });

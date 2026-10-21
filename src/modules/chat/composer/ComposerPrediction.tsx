@@ -1,6 +1,7 @@
 import { useTranslation } from 'react-i18next';
 import { SparklesIcon } from 'lucide-react';
 
+import type { CodexComposerPredictionReason } from '@/shared/types';
 import { cn } from '@/shared/utils';
 
 type ComposerPredictionOverlayProps = {
@@ -61,18 +62,40 @@ type ComposerPredictionStatusProps = {
   /** The persisted switch, shown only where the integration actually supports predictions. */
   enabled: boolean;
   onChange(enabled: boolean): void;
+  /** A finished turn's native request is still outstanding; a low-key note. */
+  pending?: boolean;
   /** A finished turn reported no suggestion; a low-key note, never a chat error. */
   unavailable: boolean;
+  /**
+   * Classified reason the native service returned nothing. Raw provider text is
+   * deliberately not accepted here: the copy is fully localized, and a missing
+   * reason falls back to the generic sentence.
+   */
+  unavailableReason?: CodexComposerPredictionReason;
   className?: string;
 };
 
+/** Locale key for one classified prediction failure; unknown values stay generic. */
+function predictionReasonKey(reason: CodexComposerPredictionReason | undefined): string {
+  switch (reason) {
+    case 'empty': return 'prediction.unavailableEmpty';
+    case 'failed': return 'prediction.unavailableFailed';
+    case 'rejected': return 'prediction.unavailableRejected';
+    case 'request_failed': return 'prediction.unavailableRequestFailed';
+    case 'timeout': return 'prediction.unavailableTimeout';
+    default: return 'prediction.unavailable';
+  }
+}
+
 /**
  * Rendered by ChatComposer's footer as the small persisted toggle for native
- * suggestions plus, when the current turn produced none, a muted note. It is
- * never an error surface: an unavailable prediction says nothing about the
- * conversation itself.
+ * suggestions plus, while the native request is outstanding or when it produced
+ * none, a muted note. It is never an error surface: an unavailable prediction
+ * says nothing about the conversation itself.
  */
-export function ComposerPredictionStatus({ enabled, onChange, unavailable, className }: ComposerPredictionStatusProps) {
+export function ComposerPredictionStatus({
+  enabled, onChange, pending = false, unavailable, unavailableReason, className,
+}: ComposerPredictionStatusProps) {
   const { t } = useTranslation('chat');
   return (
     <span className={cn('inline-flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground/60', className)}>
@@ -89,9 +112,14 @@ export function ComposerPredictionStatus({ enabled, onChange, unavailable, class
         <SparklesIcon className="h-3 w-3" aria-hidden="true" />
         {t(enabled ? 'prediction.toggleOn' : 'prediction.toggleOff')}
       </button>
-      {enabled && unavailable && (
+      {enabled && pending && !unavailable && (
+        <span data-testid="composer-prediction-pending" aria-live="polite" className="truncate">
+          {t('prediction.pending')}
+        </span>
+      )}
+      {enabled && unavailable && !pending && (
         <span data-testid="composer-prediction-unavailable" className="truncate">
-          {t('prediction.unavailable')}
+          {t(predictionReasonKey(unavailableReason))}
         </span>
       )}
     </span>

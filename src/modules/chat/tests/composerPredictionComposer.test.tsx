@@ -187,3 +187,30 @@ test('the composer footer toggle persists the preference and hides the preview',
   const stored = JSON.parse(localStorage.getItem('user-preferences') ?? '{}');
   assert.equal(stored.uiPreferences.showComposerPredictions, false);
 });
+
+test('the real composer moves a pending request through ready, empty and rejected states', async () => {
+  const { rerender } = render(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'pending' })} />);
+  const textarea = await screen.findByPlaceholderText('Ask Codex anything') as HTMLTextAreaElement;
+
+  // Waiting is visible while the composer is idle and empty; it is not an error.
+  assert.equal(screen.getByTestId('composer-prediction-pending').textContent, 'Waiting for a suggestion…');
+  assert.equal(screen.queryByTestId('composer-prediction'), null);
+
+  // The same turn's result then arrives with native text: it becomes ghost
+  // text, and the textarea value stays untouched until the user accepts.
+  rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'ready', text: 'Show day one.' })} />);
+  assert.equal(screen.getByTestId('composer-prediction').textContent, 'Show day one.');
+  assert.equal(screen.queryByTestId('composer-prediction-pending'), null);
+  assert.equal(textarea.value, '');
+
+  // A later turn can still come back without text; that is reported, not left
+  // looking like a broken toggle.
+  rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-2', status: 'pending' })} />);
+  rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-2', status: 'unavailable', reason: 'empty' })} />);
+  assert.equal(screen.queryByTestId('composer-prediction-pending'), null);
+  assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, 'Codex returned no suggestion this time');
+
+  // A rejected request names the rejection without claiming a specific build.
+  rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-3', status: 'unavailable', reason: 'rejected' })} />);
+  assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, 'Codex rejected the suggestion request');
+});

@@ -252,7 +252,13 @@
     "toggleOn": "Suggestions on",
     "toggleOff": "Suggestions off",
     "toggleHint": "Show Codex's suggested next message when a reply finishes. Accepting it only fills the input; it never sends.",
-    "unavailable": "No suggestion this time"
+    "pending": "Waiting for a suggestion…",
+    "unavailable": "No suggestion this time",
+    "unavailableEmpty": "Codex returned no suggestion this time",
+    "unavailableFailed": "Codex could not produce a suggestion",
+    "unavailableRejected": "Codex rejected the suggestion request",
+    "unavailableRequestFailed": "The suggestion request failed",
+    "unavailableTimeout": "No suggestion arrived in time"
   },
   "providerSelection": {
     "title": "Choose Your AI Assistant",
