@@ -15,6 +15,8 @@ export type UiPreferences = {
   sendByCtrlEnter: boolean;
   sidebarVisible: boolean;
   voiceEnabled: boolean;
+  /** Whether a finished Codex reply may ask for a native next-message suggestion. */
+  showComposerPredictions: boolean;
 };
 
 export type UiPreferenceKey = keyof UiPreferences;
@@ -29,6 +31,7 @@ const DEFAULTS: UiPreferences = {
   sendByCtrlEnter: false,
   sidebarVisible: true,
   voiceEnabled: false,
+  showComposerPredictions: true,
 };
 
 const PREFERENCE_KEYS = Object.keys(DEFAULTS) as UiPreferenceKey[];

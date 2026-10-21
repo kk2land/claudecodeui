@@ -11,7 +11,8 @@ export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode' | 'dsh';
 export type ProviderCapabilityRow = {
   provider: LLMProvider;
   supportsSessionForking?: boolean;
-  nativeControls?: { goal?: boolean };
+  /** `predictions` only says the integration can ask for a native suggestion; it is never an eligibility claim. */
+  nativeControls?: { goal?: boolean; predictions?: boolean };
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
 };
 
@@ -1938,6 +1939,26 @@ export type CodexUserInputRequest = {
   }>;
 };
 
+/**
+ * Next-message suggestion produced by Codex's native composer prediction.
+ *
+ * `ready` is the only status that may display text, and that text is exactly
+ * what the native result supplied — this app never synthesizes a suggestion or
+ * makes a model call of its own. `pending` means a request was acknowledged and
+ * its asynchronous result is outstanding; `unavailable` covers no suggestion,
+ * a rejection, a failure and a timeout. `error` is diagnostic only and must
+ * never be shown as a chat error.
+ */
+export type CodexComposerPrediction = {
+  /** Native turn whose successful completion produced this request. */
+  sourceTurnId: string;
+  status: 'pending' | 'ready' | 'unavailable';
+  /** Suggested next user message; present only when `status` is `ready`. */
+  text?: string;
+  /** Low-priority reason the suggestion is unavailable. */
+  error?: string;
+};
+
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Process details are exposed only in the advanced Codex controls. */
@@ -1958,6 +1979,8 @@ export type CodexSessionState = {
   phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
   goal: CodexGoal | null;
   questions: CodexUserInputRequest[];
+  /** Native next-message suggestion; absent when none was requested for the turn. */
+  prediction?: CodexComposerPrediction;
   error?: string;
 };
 
@@ -1973,12 +1996,39 @@ export type CodexControlAction =
 
 /** Durable queue delivery metadata; unknown outcomes must never auto-send. */
 export type QueuedDelivery = { status: string; requestId: string | null; error: string | null };
+
+/**
+ * The chat composer's view of Codex's native next-message suggestion.
+ *
+ * `available` only says the integration can ask for one in this turn (native
+ * app-server, advertised capability, enabled preference); it is never a claim
+ * that the account is eligible. `suggestion` is ghost text that is not yet in
+ * the textarea value, and `accept()` moves it into an ordinary editable draft
+ * without sending.
+ */
+export type ComposerPredictionControls = {
+  /** True only for the native Codex app-server integration that advertises support. */
+  available: boolean;
+  /** Ghost text to display; null when nothing may be shown right now. */
+  suggestion: string | null;
+  /** Persisted user switch for showing suggestions. */
+  enabled: boolean;
+  setEnabled(enabled: boolean): void;
+  /** The current turn produced no usable suggestion; render a muted note. */
+  unavailable: boolean;
+  /** Writes the suggestion into the composer; returns false when nothing was shown. */
+  accept(): boolean;
+  /** Hides this turn's suggestion for good. */
+  dismiss(): void;
+};
 /** Chat controls shared between the session hook, composer and native control panel. */
 export type CodexControls = {
   sessionId?: string | null;
   /** Server-owned deployment opt-in; missing means Goals are disabled. */
   goalsEnabled?: boolean;
   goalVisible?: boolean;
+  /** The integration can request native suggestions; not an account/region/model eligibility claim. */
+  predictionsSupported?: boolean;
   state: CodexSessionState | null;
   error: string | null;
   pending: boolean;

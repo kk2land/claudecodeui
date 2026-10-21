@@ -257,6 +257,7 @@ function ChatInterface({
     editingAnchorId,
     beginEditMessage,
     cancelEditMessage,
+    composerPrediction,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -268,6 +269,13 @@ function ChatInterface({
     currentProviderEffort,
     isLoading: isProcessing,
     codexControls: provider === 'codex' ? codexControls : undefined,
+    // Native predictions exist only for the app-server runtime that advertises
+    // the integration; SDK compatibility has no such native method. Before the
+    // first snapshot arrives, retain the user's opt-in for that first message;
+    // the backend requests predictions only when it selects the native runtime.
+    composerPredictionsEligible: provider === 'codex' && codexControls.predictionsSupported === true
+      && codexControls.state?.runtime !== 'sdk',
+    composerPredictionsBlocked: pendingPermissionRequests.length > 0,
     prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
     executionIdsRef,
     processingSessions,
@@ -636,6 +644,7 @@ function ChatInterface({
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
+          composerPrediction={provider === 'codex' && codexControls.predictionsSupported ? composerPrediction : undefined}
         />}
         </div>
       </div>

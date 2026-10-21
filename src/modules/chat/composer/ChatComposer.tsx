@@ -17,7 +17,7 @@ import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
 import type { ProviderRuntimeControls } from '@/shared/types';
-import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -40,6 +40,7 @@ import { ScheduleMessagePopover } from '@/modules/chat/composer/ScheduleMessageP
 import { ScheduledMessageList } from '@/modules/chat/composer/ScheduledMessageList';
 import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMenu';
+import { ComposerPredictionOverlay, ComposerPredictionStatus } from '@/modules/chat/composer/ComposerPrediction';
 
 type MentionableFile = {
   name: string;
@@ -122,6 +123,11 @@ type ChatComposerProps = {
   placeholder: string;
   isTextareaExpanded: boolean;
   sendByCtrlEnter?: boolean;
+  /**
+   * Codex's native next-message suggestion plus its persisted switch. Optional
+   * so existing fixtures and non-Codex composers need no changes.
+   */
+  composerPrediction?: ComposerPredictionControls;
 };
 
 /**
@@ -200,6 +206,7 @@ export default function ChatComposer({
   placeholder,
   isTextareaExpanded,
   sendByCtrlEnter,
+  composerPrediction,
 }: ChatComposerProps) {
   const { t } = useTranslation('chat');
   const fileDropdownRef = useRef<HTMLDivElement | null>(null);
@@ -455,6 +462,13 @@ export default function ChatComposer({
               onInput={onTextareaInput}
               placeholder={placeholder}
             />
+            {composerPrediction?.suggestion && (
+              <ComposerPredictionOverlay
+                suggestion={composerPrediction.suggestion}
+                onAccept={() => { composerPrediction.accept(); }}
+                onDismiss={composerPrediction.dismiss}
+              />
+            )}
         </PromptInputBody>
 
         <PromptInputFooter className="flex-wrap gap-y-1">
@@ -472,6 +486,14 @@ export default function ChatComposer({
             )}
 
             <TokenUsageSummary usage={tokenBudget} onClick={onShowTokenUsage} />
+
+            {composerPrediction?.available && (
+              <ComposerPredictionStatus
+                enabled={composerPrediction.enabled}
+                onChange={composerPrediction.setEnabled}
+                unavailable={composerPrediction.unavailable}
+              />
+            )}
 
             <PromptInputButton
               tooltip={{ content: t('input.showAllCommands') }}

@@ -21,6 +21,9 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   const { subscribe } = useWebSocket();
   const capabilities = useProviderCapabilities();
   const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
+  // Integration support only; whether the account/model is actually eligible is
+  // reported by the per-turn prediction snapshot, never assumed here.
+  const predictionsSupported = capabilities.codex?.nativeControls?.predictions === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
   // A control failure belongs to the action, independently of the model's running state.
@@ -170,6 +173,6 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   }, [sessionId, snapshots, send]);
 
   const allocating = Boolean(enabled && !sessionId && creatingSession?.scope === allocationScope);
-  return { sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
+  return { sessionId, goalsEnabled, predictionsSupported, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
     pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

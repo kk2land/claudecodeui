@@ -244,6 +244,16 @@
       "cancel": "Cancel"
     }
   },
+  "prediction": {
+    "accept": "Use",
+    "acceptHint": "Insert this suggestion as a draft without sending",
+    "dismiss": "Hide suggestion",
+    "hint": "Tab to use · Esc to hide",
+    "toggleOn": "Suggestions on",
+    "toggleOff": "Suggestions off",
+    "toggleHint": "Show Codex's suggested next message when a reply finishes. Accepting it only fills the input; it never sends.",
+    "unavailable": "No suggestion this time"
+  },
   "providerSelection": {
     "title": "Choose Your AI Assistant",
     "description": "Select a provider to start a new conversation",

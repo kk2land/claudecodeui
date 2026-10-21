@@ -343,6 +343,16 @@
       "cancel": "取消"
     }
   },
+  "prediction": {
+    "accept": "采用",
+    "acceptHint": "将这条建议填入输入框，不会直接发送",
+    "dismiss": "隐藏建议",
+    "hint": "Tab 采用 · Esc 隐藏",
+    "toggleOn": "建议已开启",
+    "toggleOff": "建议已关闭",
+    "toggleHint": "回复结束后显示 Codex 建议的下一条消息；采用只会填入输入框，不会发送。",
+    "unavailable": "这次没有建议"
+  },
   "export": {
     "trigger": "导出对话",
     "heading": "导出为",

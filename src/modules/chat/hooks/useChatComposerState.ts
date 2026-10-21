@@ -17,7 +17,7 @@ import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
 import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
-import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   clearQueuedMessage,
@@ -33,6 +33,8 @@ import { describeBackgroundTask, ownBackgroundTasks } from '@/modules/chat/utils
 import { useFileMentions } from '@/modules/chat/hooks/useFileMentions';
 import { useInputHistory } from '@/modules/chat/hooks/useInputHistory';
 import { useSlashCommands } from '@/modules/chat/hooks/useSlashCommands';
+import { useComposerPrediction } from '@/modules/chat/hooks/useComposerPrediction';
+import { useComposerPredictionsPreference } from '@/modules/chat/hooks/useComposerPredictionsPreference';
 
 type UseChatComposerStateArgs = {
   selectedProject: Project | null;
@@ -49,6 +51,15 @@ type UseChatComposerStateArgs = {
   currentProviderModel: string;
   currentProviderEffort: string;
   codexControls?: CodexControls;
+  /**
+   * Whether the active provider is Codex on the native app-server runtime and
+   * the deployment advertises prediction support. `undefined`/false keeps the
+   * feature off for every other provider and for SDK compatibility, which has
+   * no native prediction.
+   */
+  composerPredictionsEligible?: boolean;
+  /** Open permission prompts in this chat hide any suggestion and its request. */
+  composerPredictionsBlocked?: boolean;
   /** Managed providers share allocation and finish pending runtime changes before sending. */
   prepareSessionForSend?: (initialMessage: string) => Promise<string | null>;
   executionIdsRef?: MutableRefObject<Map<string, string>>;
@@ -196,6 +207,8 @@ export function useChatComposerState({
   currentProviderEffort,
   isLoading,
   codexControls,
+  composerPredictionsEligible = false,
+  composerPredictionsBlocked = false,
   prepareSessionForSend,
   executionIdsRef,
   processingSessions,
@@ -333,6 +346,26 @@ export function useChatComposerState({
   // while `queuedDraft` still holds the old session's draft; the persistence
   // effect must not write across that gap.
   const queuedDraftSessionRef = useRef<string | null>(sessionKey);
+
+  // Persisted user switch for native suggestions, read through the shared
+  // preference store so these hooks stay mountable without app providers.
+  const composerPredictionsPreference = useComposerPredictionsPreference();
+  // Every condition that makes a suggestion inapplicable is combined here so
+  // the overlay cannot render a suggestion the composer would not send from.
+  const predictionSuppressed = attachedFiles.length > 0 || Boolean(queuedDraft) || Boolean(editingAnchorId)
+    || composerPredictionsBlocked || Boolean(codexControls?.state?.questions.length);
+  const composerPrediction = useComposerPrediction({
+    enabled: composerPredictionsEligible && composerPredictionsPreference.enabled,
+    sessionId: sessionKey,
+    prediction: codexControls?.state?.prediction,
+    // Native state can arrive before the shared chat activity catches up,
+    // including the idle gap between turns of an active Goal.
+    busy: isLoading || Boolean(codexControls?.pending)
+      || Boolean(codexControls?.state && codexControls.state.phase !== 'idle')
+      || codexControls?.state?.goal?.status === 'active',
+    suppressed: predictionSuppressed,
+    input,
+  });
 
   const handleBuiltInCommand = useCallback(
     (result: CommandExecutionResult) => {
@@ -659,6 +692,10 @@ export function useChatComposerState({
   // queued message keeps the provider settings it was composed under even if
   // it is later dispatched outside this composer (app-level auto-send).
   const codexMode = codexControls?.state?.mode;
+  // A suggestion is requested only for a turn this composer explicitly opts in
+  // on: Codex native app-server, advertised support, and the persisted switch.
+  // Captured per send so a queued message keeps the choice it was composed with.
+  const composerPredictions = composerPredictionsEligible && composerPredictionsPreference.enabled;
   const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
     const getToolsSettings = () => readUserPreference(
       PROVIDER_PERMISSION_PREFERENCE_KEYS[provider],
@@ -673,6 +710,9 @@ export function useChatComposerState({
 
     return {
       ...(provider === 'codex' && codexMode ? { collaborationMode: codexMode } : {}),
+      // Explicit per-turn opt-in; the backend never requests a prediction for a
+      // turn that did not carry it, and other providers ignore it entirely.
+      ...(provider === 'codex' ? { composerPredictions } : {}),
       model: currentProviderModel,
       effort: currentProviderEffort,
       permissionMode: resolvePermissionModeForProvider(provider, permissionMode),
@@ -682,6 +722,7 @@ export function useChatComposerState({
     };
   }, [
     codexMode,
+    composerPredictions,
     currentProviderEffort,
     currentProviderModel,
     permissionMode,
@@ -1313,6 +1354,30 @@ export function useChatComposerState({
     [handleCommandInputChange, resetCommandMenuState, setCursorPosition],
   );
 
+  /**
+   * Places the accepted suggestion in the composer as ordinary editable text.
+   *
+   * It deliberately does not submit, record history or touch the permission
+   * mode: accepting a suggestion is exactly equivalent to the user typing it.
+   * The same `setInput`/`inputValueRef` pair a send reads is written, so an
+   * immediate Enter sends the accepted text rather than a stale empty value.
+   */
+  const acceptComposerPrediction = useCallback(() => {
+    const accepted = composerPrediction.accept();
+    if (!accepted) return false;
+    setInput(accepted);
+    inputValueRef.current = accepted;
+    window.requestAnimationFrame(() => {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      textarea.focus();
+      resizeTextarea(textarea);
+      const caret = accepted.length;
+      textarea.setSelectionRange(caret, caret);
+    });
+    return true;
+  }, [composerPrediction, resizeTextarea, setInput]);
+
   const handleKeyDown = useCallback(
     (event: KeyboardEvent<HTMLTextAreaElement>) => {
       if (handleCommandMenuKeyDown(event)) {
@@ -1324,6 +1389,28 @@ export function useChatComposerState({
       }
 
       if (handleHistoryKeyDown(event)) {
+        return;
+      }
+
+      // A confirming IME key must never be read as Tab or Esc. `isComposing`
+      // misses Safari, which fires compositionend before the confirming key.
+      const compositionActive = event.nativeEvent.isComposing || isComposingRef.current
+        || performance.now() - lastCompositionEndAtRef.current < SAFARI_IME_RACE_WINDOW_MS;
+
+      // Plain Tab accepts a visible suggestion before it rotates permissions.
+      // Modified Tab keeps its own meaning, and open menus were already handled.
+      // With no suggestion, the pre-existing permission-mode Tab is untouched.
+      if (event.key === 'Tab' && !compositionActive
+        && !event.shiftKey && !event.ctrlKey && !event.metaKey && !event.altKey
+        && !showFileDropdown && !showCommandMenu
+        && acceptComposerPrediction()) {
+        event.preventDefault();
+        return;
+      }
+
+      if (event.key === 'Escape' && !compositionActive && composerPrediction.suggestion) {
+        event.preventDefault();
+        composerPrediction.dismiss();
         return;
       }
 
@@ -1350,6 +1437,8 @@ export function useChatComposerState({
       }
     },
     [
+      acceptComposerPrediction,
+      composerPrediction,
       cyclePermissionMode,
       handleCommandMenuKeyDown,
       handleFileMentionsKeyDown,
@@ -1505,6 +1594,15 @@ export function useChatComposerState({
     isDragActive,
     openAttachmentPicker: open,
     handleSubmit,
+    composerPrediction: {
+      available: composerPredictionsEligible,
+      suggestion: composerPrediction.suggestion,
+      enabled: composerPredictionsPreference.enabled,
+      setEnabled: composerPredictionsPreference.setEnabled,
+      unavailable: composerPrediction.unavailable,
+      accept: acceptComposerPrediction,
+      dismiss: composerPrediction.dismiss,
+    } satisfies ComposerPredictionControls,
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
     queuedDraft,
