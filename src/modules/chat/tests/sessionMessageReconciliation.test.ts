@@ -231,3 +231,38 @@ test('the persisted-row fallback rejects different explicit clientMessageIds', (
   });
   assert.deepEqual(removeOptimisticUserEchoes([h2], [second], retired), []);
 });
+
+test('a legacy history row retires the optimistic echo by send ID even when presentation differs', () => {
+  const retired = new Map<string, NormalizedMessage>();
+  const sendId = 'legacy-client-send';
+  // This fixture differs only in line breaks and carries no files, so identity
+  // alone decides the retirement; the persisted row's presentation is not
+  // assumed to have been normalized in any particular way.
+  const optimistic = createUserMessage(sendId, '2026-10-21T10:45:19.000Z', {
+    provider: 'codex',
+    sessionId: 's1',
+    content: '请当我的 Python 入门教练。\n\n请先给出 7 天学习计划。',
+    isOptimistic: true,
+  });
+  const persisted = createUserMessage(sendId, '2026-10-21T10:45:21.000Z', {
+    provider: 'codex',
+    sessionId: 's1',
+    // `uuid` from a legacy `user_message` row becomes the send identity.
+    clientMessageId: sendId,
+    content: '请当我的 Python 入门教练。\n请先给出 7 天学习计划。',
+  });
+
+  assert.deepEqual(removeOptimisticUserEchoes([persisted], [optimistic], retired), []);
+  assert.equal(retired.get(sendId)?.id, sendId);
+});
+
+test('a legacy row with a different send ID does not retire an identical-looking echo', () => {
+  const optimistic = createUserMessage('second-send', '2026-10-21T10:48:00.000Z', {
+    provider: 'codex', sessionId: 's1', content: 'ping', isOptimistic: true,
+  });
+  const persisted = createUserMessage('first-send', '2026-10-21T10:47:58.000Z', {
+    provider: 'codex', sessionId: 's1', clientMessageId: 'first-send', content: 'ping',
+  });
+
+  assert.deepEqual(removeOptimisticUserEchoes([persisted], [optimistic]), [optimistic]);
+});

@@ -376,6 +376,12 @@ function mergeUserSnapshotProvenance(
   // A native item may repeat the send under a different row id. The bubble the
   // user is already looking at keeps its identity.
   merged.id = existing.id;
+  // The native row may have been the first to learn the provider-confirmed
+  // send ID; a later optimistic/replayed copy without it must not drop the one
+  // piece of identity that ties the bubble to its persisted turn.
+  if (!merged.clientMessageId && existing.clientMessageId) {
+    merged.clientMessageId = existing.clientMessageId;
+  }
   if (existing.isOptimistic) {
     merged.isOptimistic = true;
   }
@@ -393,6 +399,38 @@ function mergeUserSnapshotProvenance(
   }
 
   return merged;
+}
+
+/**
+ * Whether two realtime rows are the same user submission under any known
+ * identity pairing.
+ *
+ * A native `userMessage` may arrive first under its own row id while carrying
+ * the composer's send ID (`clientMessageId`); the optimistic echo arrives later
+ * under that send ID and no `clientMessageId` of its own. Identity therefore has
+ * to be compared symmetrically, across both fields on both sides. Two rows that
+ * each name a *different* provider-confirmed send ID are different submissions
+ * even when their text is identical, so that case never matches.
+ */
+function isSameRealtimeUserSubmission(
+  existing: NormalizedMessage,
+  incoming: NormalizedMessage,
+): boolean {
+  if (
+    incoming.kind !== 'text' || incoming.role !== 'user'
+    || existing.kind !== 'text' || existing.role !== 'user'
+  ) {
+    return false;
+  }
+  if (existing.clientMessageId && incoming.clientMessageId
+    && existing.clientMessageId !== incoming.clientMessageId) {
+    return false;
+  }
+  return (
+    (Boolean(incoming.clientMessageId) && incoming.clientMessageId === existing.clientMessageId)
+    || (Boolean(incoming.clientMessageId) && incoming.clientMessageId === existing.id)
+    || (Boolean(existing.clientMessageId) && incoming.id === existing.clientMessageId)
+  );
 }
 
 function computeMerged(
@@ -830,16 +868,10 @@ export function useSessionStore() {
 
     const index = slot.realtimeMessages.findIndex((entry) => (
       entry.id === normalizedMessage.id
-      // A native item can carry the composer's send ID under a different row
-      // id; it updates that same submission instead of stacking beside it.
-      || Boolean(
-        normalizedMessage.clientMessageId
-        && normalizedMessage.kind === 'text'
-        && normalizedMessage.role === 'user'
-        && (entry.id === normalizedMessage.clientMessageId
-          || (entry.kind === 'text' && entry.role === 'user'
-            && entry.clientMessageId === normalizedMessage.clientMessageId)),
-      )
+      // The native row and the optimistic echo may arrive in either order, and
+      // the native row may carry the send ID under its own row id. Identity is
+      // compared on both sides so neither ordering stacks a second bubble.
+      || isSameRealtimeUserSubmission(entry, normalizedMessage)
     ));
     // Native items are full snapshots. Replace by identity, preserving first appearance order.
     let updated = [...slot.realtimeMessages];

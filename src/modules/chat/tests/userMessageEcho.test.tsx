@@ -300,3 +300,80 @@ test('refreshing the first send does not hide a pending identical second send', 
   act(() => result.current.store.appendRealtime(SESSION.id, echo('second-send')));
   assert.equal(result.current.chat.chatMessages.length, 2);
 });
+
+test('a native echo that arrives before the optimistic row keeps one bubble and its send identity', () => {
+  const { result } = renderChat();
+
+  // The provider's item names this send under its own row id and carries the
+  // composer's client id; the optimistic row is appended afterwards under that
+  // send id and has no client id of its own. Matching only in one direction
+  // stacked two identical bubbles here.
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-id'), clientMessageId: 'client-message-1',
+  }));
+  act(() => result.current.chat.addMessage(prompt('client-message-1')));
+
+  const rows = result.current.store.getMessages(SESSION.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, 'provider-item-id');
+  // The established native identity survives the late optimistic copy.
+  assert.equal(rows[0].clientMessageId, 'client-message-1');
+  // First appearance wins the timestamp, whichever side arrived first.
+  assert.equal(rows[0].timestamp, ACK_AT);
+});
+
+test('a native echo under its own row id associates with an earlier optimistic send id', () => {
+  const { result } = renderChat();
+
+  // The ordinary composer order: the optimistic row uses the send id as its row
+  // id, then the provider repeats the turn under its own item id.
+  act(() => result.current.chat.addMessage(prompt('client-message-1')));
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-id'), clientMessageId: 'client-message-1',
+  }));
+
+  const rows = result.current.store.getMessages(SESSION.id);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].id, 'client-message-1');
+  // The native snapshot's identity is recorded on the row the user sees.
+  assert.equal(rows[0].clientMessageId, 'client-message-1');
+});
+
+test('distinct explicit send IDs stay distinct when a native echo arrives first', () => {
+  const { result } = renderChat();
+
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-a'), clientMessageId: 'first-send',
+  }));
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-b'), clientMessageId: 'second-send',
+  }));
+  // The exact same text was sent twice on purpose; both must remain.
+  act(() => result.current.chat.addMessage(prompt('first-send')));
+  act(() => result.current.chat.addMessage(prompt('second-send')));
+
+  assert.equal(result.current.chat.chatMessages.length, 2);
+  assert.deepEqual(
+    result.current.store.getMessages(SESSION.id).map((message) => message.id),
+    ['provider-item-a', 'provider-item-b'],
+  );
+});
+
+test('a replay of a native echo updates the surviving row instead of adding a second one', () => {
+  const { result } = renderChat();
+
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-id'), clientMessageId: 'client-message-1',
+  }));
+  act(() => result.current.chat.addMessage(prompt('client-message-1')));
+  // Reconnect replay repeats the native item, then a `completed` snapshot does.
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-id'), clientMessageId: 'client-message-1', seq: 2,
+  }));
+  act(() => result.current.store.appendRealtime(SESSION.id, {
+    ...echo('provider-item-id'), clientMessageId: 'client-message-1', seq: 3, isStreaming: false,
+  }));
+
+  assert.equal(result.current.chat.chatMessages.length, 1);
+  assert.equal(result.current.store.getMessages(SESSION.id)[0].id, 'provider-item-id');
+});

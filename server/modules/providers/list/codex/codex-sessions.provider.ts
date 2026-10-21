@@ -1436,6 +1436,11 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
         }
         messages.push({
           type: 'user',
+          // Legacy rollouts record the send identity on the event itself; it is
+          // the only durable link between this prompt and its live echo, so
+          // history can retire that echo by ID rather than by matching text.
+          // Older files carry no `client_id`; the ID-less fallback stays valid.
+          uuid: readNonEmptyString(payload.client_id),
           timestamp,
           message: { role: 'user', content: payload.message },
           images: extractCodexUserImages(payload),

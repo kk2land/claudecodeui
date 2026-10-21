@@ -646,3 +646,76 @@ test('Codex history restores user prompts from typed item_completed rows', { con
     await rm(tempRoot, { recursive: true, force: true });
   }
 });
+
+test('Codex legacy user_message rows keep their send identity, turn and long multiline text', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-legacy-user-history-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    const providerSessionId = 'codex-legacy-1';
+    const transcriptPath = path.join(tempRoot, '.codex', 'sessions', '2026', '07', '07', `rollout-${providerSessionId}.jsonl`);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+
+    // The shape the installed CLI writes for an ordinary send: a turn bracket
+    // plus one `event_msg`/`user_message` carrying the composer's client id.
+    // The second prompt repeats the first one verbatim but was a different
+    // send, so it must keep its own identity rather than be deduplicated.
+    const firstPrompt = [
+      '请当我的 Python 入门教练。我没有编程基础，每天能学习 30 分钟。',
+      '',
+      '请先给出 7 天学习计划，并展开第一天的任务。',
+    ].join('\n');
+    const lines = [
+      { type: 'session_meta', payload: { id: providerSessionId, cwd: workspacePath } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-1' } },
+      { type: 'event_msg', payload: {
+        type: 'user_message', client_id: 'client-first-send', message: firstPrompt,
+        images: [], local_images: [],
+      } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-1' } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-2' } },
+      { type: 'event_msg', payload: {
+        type: 'user_message', client_id: 'client-second-send', message: firstPrompt,
+        images: [], local_images: ['/tmp/legacy-picture.png'],
+      } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-2' } },
+      // An older file may omit the identity entirely; that row must still load.
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'turn-3' } },
+      { type: 'event_msg', payload: { type: 'user_message', message: 'ID-less legacy prompt' } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'turn-3' } },
+    ].map((entry) => JSON.stringify(entry));
+    await writeFile(transcriptPath, `${lines.join('\n')}\n`, 'utf8');
+
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createAppSession('app-legacy-1', 'codex', workspacePath);
+      sessionsDb.assignProviderSessionId('app-legacy-1', providerSessionId);
+      await new CodexSessionSynchronizer().synchronize();
+
+      const history = await new CodexSessionsProvider().fetchHistory('app-legacy-1');
+      const users = history.messages.filter((message) => message.role === 'user');
+
+      assert.equal(users.length, 3, 'each legacy send is its own row');
+      // Identity comes from the rollout, so a refresh can retire the optimistic
+      // echo by ID instead of guessing from text and timestamps.
+      assert.equal(users[0]?.id, 'client-first-send');
+      assert.equal(users[0]?.clientMessageId, 'client-first-send');
+      assert.equal(users[0]?.content, firstPrompt);
+      assert.equal(users[0]?.transcriptAnchorId, 'turn-1');
+      // Identical text with a different send ID stays a distinct submission.
+      assert.equal(users[1]?.id, 'client-second-send');
+      assert.equal(users[1]?.clientMessageId, 'client-second-send');
+      assert.equal(users[1]?.content, firstPrompt);
+      assert.equal(users[1]?.transcriptAnchorId, 'turn-2');
+      assert.equal((users[1]?.images as Array<{ path?: string }> | undefined)?.[0]?.path, '/tmp/legacy-picture.png');
+      // The ID-less fallback keeps the prompt readable with a synthesized id.
+      assert.equal(users[2]?.content, 'ID-less legacy prompt');
+      assert.equal(users[2]?.clientMessageId, undefined);
+      assert.ok(users[2]?.id);
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
