@@ -507,7 +507,12 @@ type QuestionOption = {
 export type NormalizedMessage = {
   /** Native item snapshots update in place until completion. */
   isStreaming?: boolean;
-  /** Client-only user echo awaiting confirmation; enables history reconciliation when the provider does not preserve its send ID. */
+  /**
+   * A user turn whose persisted history has not taken it over yet. Native
+   * snapshots acknowledge the send but do not retire the echo, because a
+   * provider may persist the same turn under a different identity; the
+   * reconciliation that runs on history refresh is what clears it.
+   */
   isOptimistic?: boolean;
   id: string;
   /** Original send ID returned by the provider; distinct IDs identify distinct submissions even when their text matches. */

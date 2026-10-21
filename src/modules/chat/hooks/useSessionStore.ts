@@ -11,7 +11,10 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 
 import { api } from '@/shared/api';
 import type { LLMProvider, NormalizedMessage } from '@/shared/types';
-import { removeOptimisticUserEchoes } from '@/modules/chat/utils/sessionMessageReconciliation';
+import {
+  isRetiredUserEchoMessage,
+  removeOptimisticUserEchoes,
+} from '@/modules/chat/utils/sessionMessageReconciliation';
 import {
   hasReachedCachedTailTimeBoundary,
   mergeLatestServerPage,
@@ -33,6 +36,13 @@ export type SessionSlot = {
   serverMessages: NormalizedMessage[];
   realtimeMessages: NormalizedMessage[];
   merged: NormalizedMessage[];
+  /**
+   * @internal Local user echo identities already handed over to a persisted
+   * row. The realtime row is pruned once history owns it, but its identity is
+   * still needed to ignore a late native ack/replay and to stop a later
+   * identical send from claiming the same persisted turn.
+   */
+  _retiredUserEchoes: Map<string, NormalizedMessage>;
   /** @internal Cache-invalidation refs for computeMerged */
   _lastServerRef: NormalizedMessage[];
   _lastRealtimeRef: NormalizedMessage[];
@@ -57,6 +67,7 @@ function createEmptySlot(): SessionSlot {
     serverMessages: EMPTY,
     realtimeMessages: EMPTY,
     merged: EMPTY,
+    _retiredUserEchoes: new Map(),
     _lastServerRef: EMPTY,
     _lastRealtimeRef: EMPTY,
     status: 'idle',
@@ -296,13 +307,18 @@ function dedupeAdjacentAssistantEchoes(merged: NormalizedMessage[]): NormalizedM
 function pruneRealtimeSupersededByServer(
   serverMessages: NormalizedMessage[],
   realtimeMessages: NormalizedMessage[],
+  retiredUserEchoes: Map<string, NormalizedMessage>,
 ): NormalizedMessage[] {
   if (realtimeMessages.length === 0) {
     return realtimeMessages;
   }
 
   const serverIds = new Set(serverMessages.map((message) => message.id));
-  const reconciledRealtimeMessages = removeOptimisticUserEchoes(serverMessages, realtimeMessages);
+  const reconciledRealtimeMessages = removeOptimisticUserEchoes(
+    serverMessages,
+    realtimeMessages,
+    retiredUserEchoes,
+  );
 
   return reconciledRealtimeMessages.filter((message) => {
     if (serverIds.has(message.id)) {
@@ -337,7 +353,53 @@ function pruneRealtimeSupersededByServer(
   });
 }
 
-function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[]): NormalizedMessage[] {
+/**
+ * Folds a native user snapshot onto the row it updates in place.
+ *
+ * The snapshot owns content and attachments when it carries them, but the
+ * first timestamp and local-only edit provenance stay with the row the user
+ * already sees. `isOptimistic` survives because a native ack does not mean
+ * persisted history has taken the turn over — the provider may store it under
+ * a different identity. Missing attachments mean "none reported", not
+ * "removed".
+ */
+function mergeUserSnapshotProvenance(
+  existing: NormalizedMessage,
+  snapshot: NormalizedMessage,
+): NormalizedMessage {
+  const merged: NormalizedMessage = { ...snapshot, timestamp: existing.timestamp };
+
+  if (snapshot.kind !== 'text' || snapshot.role !== 'user') {
+    return merged;
+  }
+
+  // A native item may repeat the send under a different row id. The bubble the
+  // user is already looking at keeps its identity.
+  merged.id = existing.id;
+  if (existing.isOptimistic) {
+    merged.isOptimistic = true;
+  }
+  if (existing.replacesAnchorId) {
+    merged.replacesAnchorId = existing.replacesAnchorId;
+  }
+  if (existing.replacesAfterRowCount !== undefined) {
+    merged.replacesAfterRowCount = existing.replacesAfterRowCount;
+  }
+  if (merged.images === undefined || merged.images.length === 0) {
+    if (existing.images?.length) merged.images = existing.images;
+  }
+  if (merged.files === undefined || merged.files.length === 0) {
+    if (existing.files?.length) merged.files = existing.files;
+  }
+
+  return merged;
+}
+
+function computeMerged(
+  server: NormalizedMessage[],
+  realtime: NormalizedMessage[],
+  retiredUserEchoes: Map<string, NormalizedMessage>,
+): NormalizedMessage[] {
   if (realtime.length === 0) {
     return dedupeAdjacentAssistantEchoes(server);
   }
@@ -346,7 +408,7 @@ function computeMerged(server: NormalizedMessage[], realtime: NormalizedMessage[
   }
 
   const serverIds = new Set(server.map((message) => message.id));
-  const reconciledRealtime = removeOptimisticUserEchoes(server, realtime);
+  const reconciledRealtime = removeOptimisticUserEchoes(server, realtime, retiredUserEchoes);
   const extra = reconciledRealtime.filter((message) => {
     if (serverIds.has(message.id)) {
       return false;
@@ -383,7 +445,11 @@ function recomputeMergedIfNeeded(slot: SessionSlot): boolean {
   }
   slot._lastServerRef = slot.serverMessages;
   slot._lastRealtimeRef = slot.realtimeMessages;
-  slot.merged = computeMerged(slot.serverMessages, slot.realtimeMessages);
+  slot.merged = computeMerged(
+    slot.serverMessages,
+    slot.realtimeMessages,
+    slot._retiredUserEchoes,
+  );
   return true;
 }
 
@@ -534,6 +600,7 @@ async function refreshLatestSlotFromServer(
   slot.realtimeMessages = pruneRealtimeSupersededByServer(
     slot.serverMessages,
     slot.realtimeMessages,
+    slot._retiredUserEchoes,
   );
   recomputeMergedIfNeeded(slot);
 
@@ -611,6 +678,7 @@ export function useSessionStore() {
         slot.realtimeMessages = pruneRealtimeSupersededByServer(
           slot.serverMessages,
           slot.realtimeMessages,
+          slot._retiredUserEchoes,
         );
         recomputeMergedIfNeeded(slot);
         if (data.tokenUsage !== undefined) {
@@ -754,10 +822,28 @@ export function useSessionStore() {
       msg.sessionId === sessionId
         ? msg
         : { ...msg, sessionId };
-    const index = slot.realtimeMessages.findIndex((entry) => entry.id === normalizedMessage.id);
+    // History already owns this submission. A late ack, completion, or replay
+    // must not add a second row beside the persisted one.
+    if (isRetiredUserEchoMessage(normalizedMessage, slot._retiredUserEchoes)) {
+      return;
+    }
+
+    const index = slot.realtimeMessages.findIndex((entry) => (
+      entry.id === normalizedMessage.id
+      // A native item can carry the composer's send ID under a different row
+      // id; it updates that same submission instead of stacking beside it.
+      || Boolean(
+        normalizedMessage.clientMessageId
+        && normalizedMessage.kind === 'text'
+        && normalizedMessage.role === 'user'
+        && (entry.id === normalizedMessage.clientMessageId
+          || (entry.kind === 'text' && entry.role === 'user'
+            && entry.clientMessageId === normalizedMessage.clientMessageId)),
+      )
+    ));
     // Native items are full snapshots. Replace by identity, preserving first appearance order.
     let updated = [...slot.realtimeMessages];
-    if (index >= 0) updated[index] = { ...normalizedMessage, timestamp: updated[index].timestamp };
+    if (index >= 0) updated[index] = mergeUserSnapshotProvenance(updated[index], normalizedMessage);
     else updated.push(normalizedMessage);
     if (updated.length > MAX_REALTIME_MESSAGES) {
       updated = updated.slice(-MAX_REALTIME_MESSAGES);
