@@ -1,5 +1,11 @@
 # Repository guidance
 
+## Codex and dsh responsibilities
+
+- Codex owns requirement analysis, solution design, task breakdown, review, and final acceptance.
+- dsh performs concrete execution, including implementation, file changes, and necessary validation, according to Codex's plan and constraints.
+- Codex must use the `$codex-dsh` workflow to delegate execution to dsh, review the actual changes and validation results, and return issues to dsh for rework before accepting the task.
+
 ## Backend code
 
 For every task that creates, modifies, refactors, or reviews backend code under `server/`, load and follow `$backend-module-standards` from `.agents/skills/backend-module-standards/SKILL.md`. Apply it only to backend code; do not impose those architecture rules on the frontend.
