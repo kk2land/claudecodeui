@@ -33,7 +33,6 @@ export class CodexAppServerTransport implements CodexRpcClient {
 
   constructor(private readonly options: {
     spawn?: () => ChildProcessWithoutNullStreams;
-    env?: NodeJS.ProcessEnv | (() => NodeJS.ProcessEnv);
     timeoutMs?: number;
     stopTimeoutMs?: number;
   } = {}) {}
@@ -102,7 +101,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
       // threads promptly so SDK compatibility can resume their latest rollout.
       child = spawn(process.execPath, [launcher, 'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0',
         '-c', `features.goals=${isCodexGoalEnabled()}`], {
-        env: typeof this.options.env === 'function' ? this.options.env() : this.options.env ?? process.env,
+        env: process.env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });
     }

@@ -285,7 +285,7 @@ Set `CLOUDCLI_HIDDEN_PROVIDERS` in the backend environment or `.env`, then resta
 export CLOUDCLI_HIDDEN_PROVIDERS="cursor,opencode"
 ```
 
-Supported IDs are `claude`, `codex`, `gptweb`, `cursor`, `opencode`, and `dsh`. Commas or whitespace separate entries; IDs are case-insensitive and unknown entries are ignored. An unset or empty value shows every provider.
+Supported IDs are `claude`, `codex`, `cursor`, `opencode`, and `dsh`. Commas or whitespace separate entries; IDs are case-insensitive and unknown entries are ignored. An unset or empty value shows every provider.
 
 Hidden providers disappear from the new-chat model picker, its search results, and its model-library tabs, including all built-in and custom models. A previously selected hidden provider falls back to the first visible provider for new chats. If every provider is hidden, the picker is empty and the new-chat composer is unavailable. Existing sessions, stored model settings, provider runtimes, and API access remain available; this setting controls UI visibility only.
 
@@ -314,20 +314,3 @@ This discovery does not copy headless configuration into ACP: ACP must advertise
 If selecting a model from the headless file reports `DSH does not advertise model`, set `CLOUDCLI_DSH_RUNTIME=headless` in CloudCLI's environment (or its root `.env`) and restart the backend. To keep using ACP, configure the same provider/model in `$DSH_HOME/profiles/acp/cordis.patch.yml`; a full `provider/model` route alone does not register it with ACP.
 
 See [DSH configuration, supported features and checks](docs/deepseek-harness-provider-plan.md) for patch overlays, native compressed history, MCP/skills, and deployment details.
-
-
-### GPT Web provider
-
-Select **GPT Web** to use a separately configured [codex-chatgpt-web](https://github.com/miuuyy/codex-chatgpt-web) connection through the existing Codex runtime.
-
-Set the backend environment before starting CloudCLI:
-
-```bash
-export CODEX_GPTWEB_HOME="$HOME/.codex-gptweb"
-```
-
-`CODEX_GPTWEB_HOME` is required for this provider. Both Codex SDK (`codex exec`) and app-server child processes receive it as `CODEX_HOME`; the backend's global `CODEX_HOME` stays unchanged. Restart the backend after changing this directory. Config, credentials, transcript indexing, MCP and Codex-owned skill paths use the selected profile. GPT Web has its own app-server, model catalog and queue-stop scope.
-
-Prepare that directory and run the external launcher yourself; CloudCLI does not initialize the route, sign into ChatGPT or install its harness. Models and reasoning levels are read from the configured bridge's authenticated `/v1/models` endpoint, filtered to visible `chatgpt-web/` entries. The directory must contain valid `config.toml` routing and the credentials required by the bridge's model endpoint. A service or authentication error is reported without falling back to ordinary Codex models.
-
-For filesystem and terminal tools, enable Full harness in the launcher. If the launcher uses a different Codex home, register this directory in the launcher's `CODEX_CHATGPT_WEB_TRUSTED_CODEX_HOMES`. Current upstream setup requires the built-in `openai` provider with `openai_base_url`; custom `model_provider` configurations need separate compatibility verification. See [the integration plan](docs/gptweb-provider-plan.md).

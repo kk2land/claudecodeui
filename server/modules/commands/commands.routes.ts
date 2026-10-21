@@ -45,13 +45,12 @@ const providerModelsService = dependencies.models;
 const process = dependencies.runtime;
 const router = express.Router();
 
-const MODEL_PROVIDERS = ["claude", "cursor", "codex", "opencode", "dsh", "gptweb"];
+const MODEL_PROVIDERS = ["claude", "cursor", "codex", "opencode", "dsh"];
 
 const MODEL_PROVIDER_LABELS = {
   claude: "Claude",
   cursor: "Cursor",
   codex: "Codex",
-  gptweb: "GPT Web",
   opencode: "OpenCode",
   dsh: "DeepSeek Harness",
 };

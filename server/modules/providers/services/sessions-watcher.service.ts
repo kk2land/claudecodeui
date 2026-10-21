@@ -7,13 +7,11 @@ import chokidar, { type FSWatcher } from 'chokidar';
 import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-configuration.provider.js';
 import { sessionSynchronizerService } from '@/modules/providers/services/session-synchronizer.service.js';
 import { broadcastSessionUpsertedBatch } from '@/modules/websocket/index.js';
-import { getCodexHome } from '@/shared/index.js';
 import type { LLMProvider } from '@/shared/types.js';
 
 type WatcherEventType = 'add' | 'change';
 
-const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string | (() => string) }> = [
-  ...(process.env.CODEX_GPTWEB_HOME?.trim() ? [{ provider: 'gptweb' as const, rootPath: () => path.join(getCodexHome('gptweb'), 'sessions') }] : []),
+const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string }> = [
   { provider: 'dsh', rootPath: new DshConfigurationProvider().sessionsRoot },
   {
     provider: 'claude',
@@ -25,7 +23,7 @@ const PROVIDER_WATCH_PATHS: Array<{ provider: LLMProvider; rootPath: string | ((
   },
   {
     provider: 'codex',
-    rootPath: path.join(getCodexHome(), 'sessions'),
+    rootPath: path.join(os.homedir(), '.codex', 'sessions'),
   },
   {
     provider: 'opencode',
@@ -209,10 +207,8 @@ export async function initializeSessionsWatcher(): Promise<void> {
     failures: initialSync.failures,
   });
 
-  for (const { provider, rootPath: configuredRoot } of PROVIDER_WATCH_PATHS) {
-    let rootPath: string | null = null;
+  for (const { provider, rootPath } of PROVIDER_WATCH_PATHS) {
     try {
-      rootPath = typeof configuredRoot === 'function' ? configuredRoot() : configuredRoot;
       await fsPromises.mkdir(rootPath, { recursive: true });
 
       const watcher = chokidar.watch(rootPath, {

@@ -17,7 +17,7 @@ const apiState = vi.hoisted(() => ({
   hidden: [] as string[], failedCatalogs: [] as string[], capabilitiesWait: null as Promise<void> | null,
   capabilitiesMode: 'success' as 'success' | 'network-error' | 'http-error' | 'invalid' | 'legacy',
 }));
-const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh', 'gptweb'];
+const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
 const catalog = (provider: LLMProvider): ProviderModelsDefinition => ({
   DEFAULT: `${provider}-builtin`,
   OPTIONS: [
@@ -120,6 +120,19 @@ test('an unset visibility setting preserves the selected provider and every mode
   for (const provider of PROVIDERS) assert.equal(Boolean(picker.queryByText(`${provider} built in`)), true);
 });
 
+test('a saved GPT Web selection falls back without loading or exposing the removed provider', async () => {
+  writeUserPreference('selectedProvider', 'gptweb');
+  const loadModels = vi.spyOn(api.providers, 'models');
+  const { result } = renderHook(() => useChatProviderState({ selectedSession: null, selectedProject: null }));
+  await waitFor(() => assert.equal(result.current.providerModelsLoading, false));
+  assert.equal(result.current.provider, 'claude');
+  assert.equal(loadModels.mock.calls.some(([provider]) => String(provider) === 'gptweb'), false);
+
+  renderPicker();
+  fireEvent.click(screen.getByRole('button', { name: /Click to change model/ }));
+  assert.equal(Boolean(screen.queryByText(/GPT Web/)), false);
+});
+
 test('new chats skip a stored hidden provider while preserving its model preference and catalog', async () => {
   apiState.hidden = ['claude', 'cursor'];
   writeUserPreference('selectedProvider', 'cursor');
@@ -147,24 +160,24 @@ test('existing hidden-provider sessions keep their model and fall back only afte
 });
 
 test('hidden providers have no headings, built-in models, custom models or search matches', () => {
-  renderPicker(['cursor', 'gptweb']);
+  renderPicker(['cursor', 'opencode']);
   fireEvent.click(screen.getByRole('button', { name: /Click to change model/ }));
   assert.equal(Boolean(screen.queryByRole('button', { name: /Cursor/ })), false);
-  assert.equal(Boolean(screen.queryByRole('button', { name: /GPT Web/ })), false);
+  assert.equal(Boolean(screen.queryByRole('button', { name: /OpenCode/ })), false);
   assert.equal(Boolean(screen.queryByText('cursor built in')), false);
   assert.equal(Boolean(screen.queryByText('cursor custom')), false);
-  assert.equal(Boolean(screen.queryByText('gptweb custom')), false);
+  assert.equal(Boolean(screen.queryByText('opencode custom')), false);
   fireEvent.change(screen.getByPlaceholderText('Search models...'), { target: { value: 'cursor' } });
   assert.equal(Boolean(screen.queryByText('No models found.')), true);
 });
 
 test('the new-chat model library excludes hidden provider tabs and models', () => {
-  renderPicker(['cursor', 'gptweb']);
+  renderPicker(['cursor', 'opencode']);
   fireEvent.click(screen.getByRole('button', { name: /Click to change model/ }));
   fireEvent.click(screen.getByRole('button', { name: /Add model/ }));
   const library = within(screen.getByRole('dialog'));
   assert.equal(Boolean(library.queryByRole('button', { name: /Cursor/ })), false);
-  assert.equal(Boolean(library.queryByRole('button', { name: /GPT Web/ })), false);
+  assert.equal(Boolean(library.queryByRole('button', { name: /OpenCode/ })), false);
   assert.equal(Boolean(library.queryByText('cursor custom')), false);
   assert.equal(Boolean(library.queryByRole('button', { name: /Codex/ })), true);
 });
@@ -177,12 +190,12 @@ test('the model library chooses a visible initial tab when the stored provider i
 });
 
 test('provider visibility survives a failed model catalog response', async () => {
-  apiState.hidden = ['gptweb'];
-  apiState.failedCatalogs = ['gptweb'];
+  apiState.hidden = ['opencode'];
+  apiState.failedCatalogs = ['opencode'];
   const { result } = renderHook(() => useChatProviderState({ selectedSession: null, selectedProject: null }));
   await waitFor(() => assert.equal(result.current.providerModelsLoading, false));
-  assert.deepEqual(result.current.hiddenModelProviders, ['gptweb']);
-  assert.equal(result.current.providerModelCatalog.gptweb, undefined);
+  assert.deepEqual(result.current.hiddenModelProviders, ['opencode']);
+  assert.equal(result.current.providerModelCatalog.opencode, undefined);
 });
 
 test('model options wait for visibility even when catalogs load first', async () => {
@@ -280,10 +293,10 @@ test('a capability failure leaves an existing hidden-provider session usable', a
 });
 
 test('the new-chat /models library hides deployment-hidden providers', () => {
-  renderModelsCommand('claude', ['cursor', 'gptweb']);
+  renderModelsCommand('claude', ['cursor', 'opencode']);
   fireEvent.click(screen.getByRole('button', { name: 'Manage models' }));
   assert.equal(Boolean(screen.queryByRole('button', { name: /Cursor/ })), false);
-  assert.equal(Boolean(screen.queryByRole('button', { name: /GPT Web/ })), false);
+  assert.equal(Boolean(screen.queryByRole('button', { name: /OpenCode/ })), false);
   assert.equal(Boolean(screen.queryByRole('button', { name: /Codex/ })), true);
   assert.equal(Boolean(screen.queryByText('cursor custom')), false);
 });

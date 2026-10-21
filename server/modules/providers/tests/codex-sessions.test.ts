@@ -89,6 +89,39 @@ test('Codex synchronizer preserves the title assigned when CloudCLI creates a se
   }
 });
 
+for (const scan of ['full', 'file'] as const) {
+  test(`Codex ${scan} synchronization ignores retained provider rows sharing the native thread id`, { concurrency: false }, async () => {
+    const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-retired-session-'));
+    const workspacePath = path.join(tempRoot, 'workspace');
+    await mkdir(workspacePath);
+    const restoreHomeDir = patchHomeDir(tempRoot);
+    try {
+      const filePath = await writeCodexTranscript(tempRoot, 'shared-native-thread', workspacePath, 'native prompt');
+      await writeFile(path.join(tempRoot, '.codex', 'session_index.jsonl'),
+        `${JSON.stringify({ id: 'shared-native-thread', thread_name: 'Native Codex title' })}\n`);
+      await withIsolatedDatabase(async () => {
+        if (scan === 'full') {
+          sessionsDb.createSession('shared-native-thread', 'codex', workspacePath, 'Native Codex title');
+        }
+        const retiredId = sessionsDb.createSession('shared-native-thread', 'gptweb', workspacePath,
+          'Retained Web title', undefined, '2099-01-01T00:00:00Z');
+        const synchronizer = new CodexSessionSynchronizer();
+        if (scan === 'full') await synchronizer.synchronize();
+        else await synchronizer.synchronizeFile(filePath);
+
+        const native = sessionsDb.getSessionByProviderSessionId('shared-native-thread', 'codex');
+        assert.equal(native?.custom_name, 'Native Codex title');
+        assert.equal(native?.jsonl_path, filePath);
+        assert.equal(sessionsDb.getSessionById(retiredId)?.custom_name, 'Retained Web title');
+        assert.equal(sessionsDb.getSessionById(retiredId)?.provider, 'gptweb');
+      });
+    } finally {
+      restoreHomeDir();
+      await rm(tempRoot, { recursive: true, force: true });
+    }
+  });
+}
+
 test('Codex synchronizer skips sub-agent rollout files', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-session-sync-subagent-'));
   const workspacePath = path.join(tempRoot, 'workspace');

@@ -1,5 +1,5 @@
 import { getConnection } from '@/modules/database/connection.js';
-import type { CodexProviderId, SessionRuntimeSettings } from '@/shared/index.js';
+import type { SessionRuntimeSettings } from '@/shared/index.js';
 import type { DshRuntimeSettings } from '@/shared/types.js';
 
 /** Used by Providers and WebSocket/Scheduled Messages to persist mode and queue stop intent. */
@@ -37,12 +37,12 @@ export const sessionRuntimeDb = {
     return settings;
   },
   /** Providers holds all native Codex queues before stopping their shared process, including unloaded sessions. */
-  holdCodexAppServerQueues(provider: CodexProviderId = 'codex'): void {
+  holdCodexAppServerQueues(): void {
     getConnection().prepare(`INSERT INTO session_runtime_settings(session_id, runtime, mode, queue_held)
       SELECT sessions.session_id, 'app-server', COALESCE(settings.mode, 'default'), 1
       FROM sessions LEFT JOIN session_runtime_settings AS settings ON settings.session_id = sessions.session_id
-      WHERE sessions.provider = ? AND COALESCE(settings.runtime, ?) = 'app-server'
+      WHERE sessions.provider = 'codex' AND COALESCE(settings.runtime, ?) = 'app-server'
       ON CONFLICT(session_id) DO UPDATE SET queue_held = 1`)
-      .run(provider, process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk' ? 'sdk' : 'app-server');
+      .run(process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk' ? 'sdk' : 'app-server');
   },
 };

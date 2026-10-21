@@ -57,25 +57,6 @@ type ProviderCapabilities = {
  * - only the Claude SDK integration surfaces interactive permission requests.
  * - Cursor has no token usage endpoint support (its store.db has no usage rows).
  */
-const codexCapabilities: Omit<ProviderCapabilities, 'provider'> = {
-  permissionModes: ['default', 'acceptEdits', 'bypassPermissions'],
-  defaultPermissionMode: 'default',
-  supportsImages: true,
-  supportsFiles: true,
-  supportsAbort: true,
-  supportsPermissionRequests: true,
-  nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true },
-  supportsTokenUsage: true,
-  supportsEffort: true,
-  effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  // Not from the Codex SDK, which only starts and resumes threads: both ride
-  // the same CLI's `app-server` protocol, whose `thread/fork` copies a
-  // thread up to a chosen turn. Editing is that fork plus a new prompt,
-  // which is how Codex's own IDE clients do it.
-  supportsMessageEditing: true,
-  supportsSessionForking: true,
-};
-
 const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
   claude: {
     provider: 'claude',
@@ -107,8 +88,25 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsMessageEditing: false,
     supportsSessionForking: false,
   },
-  codex: { provider: 'codex', ...codexCapabilities },
-  gptweb: { provider: 'gptweb', ...codexCapabilities },
+  codex: {
+    provider: 'codex',
+    permissionModes: ['default', 'acceptEdits', 'bypassPermissions'],
+    defaultPermissionMode: 'default',
+    supportsImages: true,
+    supportsFiles: true,
+    supportsAbort: true,
+    supportsPermissionRequests: true,
+    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true },
+    supportsTokenUsage: true,
+    supportsEffort: true,
+    effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+    // Not from the Codex SDK, which only starts and resumes threads: both ride
+    // the same CLI's `app-server` protocol, whose `thread/fork` copies a
+    // thread up to a chosen turn. Editing is that fork plus a new prompt,
+    // which is how Codex's own IDE clients do it.
+    supportsMessageEditing: true,
+    supportsSessionForking: true,
+  },
   dsh: {
     provider: 'dsh',
     permissionModes: ['default'],

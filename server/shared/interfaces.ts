@@ -135,13 +135,6 @@ export interface IProviderModels {
   getSupportedModels(): Promise<ProviderModelsDefinition>;
 
   /**
-   * Providers' model service uses this optional routing constraint for saved,
-   * custom and requested model ids. It must be synchronous and independent of
-   * catalog visibility so existing sessions can resume hidden legacy models.
-   */
-  isModelIdSupported?(model: string): boolean;
-
-  /**
    * Reads the model the provider itself believes one session is running with.
    *
    * Only consulted for sessions the app has never recorded a model for — a

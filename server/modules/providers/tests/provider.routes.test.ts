@@ -84,6 +84,31 @@ test('hidden providers remain usable through session and model APIs', async () =
   }
 });
 
+test('removed GPT Web provider is absent from capabilities and rejected by provider APIs', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    const response = await fetch(`${baseUrl}/api/providers/capabilities`);
+    const body = await response.json() as { data: { providers: Array<{ provider: string }> } };
+    assert.equal(body.data.providers.some((row) => row.provider === 'gptweb'), false);
+    assert.throws(() => providerRegistry.resolveProvider('gptweb'), { code: 'UNSUPPORTED_PROVIDER' });
+    for (const endpoint of ['capabilities', 'models', 'runtime', 'auth/status', 'mcp/servers', 'skills']) {
+      const removed = await fetch(`${baseUrl}/api/providers/gptweb/${endpoint}`);
+      assert.equal(removed.status, 400, endpoint);
+      assert.equal((await removed.json() as { error: { code: string } }).error.code, 'UNSUPPORTED_PROVIDER');
+    }
+    const created = await fetch(`${baseUrl}/api/providers/sessions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'gptweb', projectPath: workspacePath }),
+    });
+    assert.equal(created.status, 400);
+    assert.equal((await created.json() as { error: { code: string } }).error.code, 'UNSUPPORTED_PROVIDER');
+
+    sessionsDb.createAppSession('legacy-web-session', 'gptweb', workspacePath);
+    const details = await fetch(`${baseUrl}/api/providers/sessions/legacy-web-session`);
+    assert.equal(details.status, 400);
+    assert.ok(sessionsDb.getSessionById('legacy-web-session'));
+  });
+});
+
 test('session creation route names a CloudCLI session from the initial message', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     const response = await fetch(`${baseUrl}/api/providers/sessions`, {

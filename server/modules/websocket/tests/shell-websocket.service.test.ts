@@ -86,6 +86,34 @@ test('a stale socket close cannot detach the socket that replaced it', () => {
   pty.emitExit();
 });
 
+test('removed GPT Web requests cannot spawn, restart, or reuse an existing Codex PTY', () => {
+  const pty = createFakePty();
+  let spawnCount = 0;
+  const dependencies = {
+    resolveProviderSessionId: () => null,
+    spawnPty: () => { spawnCount += 1; return pty as never; },
+  };
+  const init = { type: 'init', projectPath: process.cwd(), sessionId: `retired-${Date.now()}`, provider: 'codex' };
+  const codex = createFakeSocket();
+  handleShellConnection(codex as never, dependencies);
+  codex.emit('message', JSON.stringify(init));
+  try {
+    for (const isPlainShell of [false, true]) {
+      const removed = createFakeSocket();
+      handleShellConnection(removed as never, dependencies);
+      removed.emit('message', JSON.stringify({ ...init, provider: 'gptweb', forceRestart: true, isPlainShell }));
+      assert.equal(spawnCount, 1);
+      assert.equal(pty.killed, false);
+      assert.equal(removed.frames.length, 1);
+      assert.match(removed.frames[0], /GPT Web provider has been removed/);
+    }
+    pty.emitData('still-codex');
+    assert.ok(codex.frames.some((frame) => frame.includes('still-codex')));
+  } finally {
+    pty.emitExit();
+  }
+});
+
 test('shell output detects and normalizes a wrapped authentication URL', () => {
   const pty = createFakePty();
   const socket = createFakeSocket();

@@ -13,7 +13,7 @@ afterEach(() => {
   else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = originalGoalSetting;
 });
 
-function harness(timeout = 100, provider: 'codex' | 'gptweb' = 'codex') {
+function harness(timeout = 100) {
   const calls: Array<{ method: string; params: AnyRecord }> = [];
   let notify: (frame: CodexRpcFrame) => void = () => {};
   let request: (frame: CodexRpcFrame) => Promise<unknown> = async () => ({});
@@ -59,7 +59,7 @@ function harness(timeout = 100, provider: 'codex' | 'gptweb' = 'codex') {
   const runtime = new CodexAppServerRuntime(rpc, settingsDb, timeout, (_, id) => accepted.push(id), async (sessionId) => {
     historyReads.push(sessionId);
     return storedMessages;
-  }, provider);
+  });
   const events: AnyRecord[] = [];
   let writerNumber = 1;
   const writer: ProviderRuntimeWriter = { send: (data) => events.push({ ...data as AnyRecord, writer: 1 }), setSessionId: (id) => { nativeId = id; }, nextTurn: () => {
@@ -79,51 +79,6 @@ function harness(timeout = 100, provider: 'codex' | 'gptweb' = 'codex') {
 async function eventually(predicate: () => boolean) {
   for (let i = 0; i < 100; i++) { if (predicate()) return; await new Promise((resolve) => setTimeout(resolve, 1)); }
   assert.ok(predicate(), 'expected state was never reached');
-}
-
-test('Codex native turns and steer validate images against the actual turn model before sending', async () => {
-  const h = harness(100, 'gptweb');
-  h.context.validateModelInput = async (model, attachments) => {
-    assert.equal(model, 'test-model');
-    if (Array.isArray(attachments) && attachments.length) {
-      throw new AppError('Text-only model', { code: 'MODEL_IMAGES_NOT_SUPPORTED', statusCode: 400 });
-    }
-  };
-  await assert.rejects(h.run('image', { images: [{ path: '/tmp/image.png' }] }), /Text-only/);
-  assert.equal(h.calls.some(call => call.method === 'turn/start'), false);
-  const running = h.run();
-  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
-  try {
-    await assert.rejects(h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'image-steer',
-      content: 'look', attachments: [{ path: '/tmp/image.png' }] }), /Text-only/);
-    assert.equal(h.calls.some(call => call.method === 'turn/steer'), false);
-  } finally { h.finish(); await running; }
-});
-
-for (const ending of ['completed', 'process-stopped'] as const) {
-  test(`steer does not dispatch after ${ending} while image validation is pending`, async () => {
-    const h = harness(100, 'gptweb');
-    const running = h.run();
-    await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
-    let release!: () => void;
-    let validating = false;
-    h.context.validateModelInput = async () => {
-      validating = true;
-      await new Promise<void>(resolve => { release = resolve; });
-    };
-    const steering = h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'late-image',
-      content: 'look', attachments: [{ path: '/tmp/image.png' }] });
-    // Attach the rejection handler before releasing the validation barrier.
-    const outcome = steering.then(() => null, error => error);
-    await eventually(() => validating);
-    if (ending === 'completed') h.finish();
-    else h.exit(new AppError('Stopped', { code: 'CODEX_APP_SERVER_STOPPED' }));
-    await running;
-    release();
-    assert.equal((await outcome)?.code, 'STALE_TURN');
-    assert.equal(h.calls.some(call => call.method === 'turn/steer'), false);
-    assert.equal(h.events.some(event => event.clientMessageId === 'late-image'), false);
-  });
 }
 
 test('disabled Goals reject activation before any native call, while Plan and normal turns still work', async () => {
@@ -912,18 +867,4 @@ test('an unconfirmed thread unload never commits the runtime switch', async () =
   h.handlers.set('thread/unsubscribe', async () => ({ status: 'notLoaded' }));
   await router.control!('app-session', { action: 'runtime', runtime: 'sdk' }, h.options, h.writer, h.context);
   assert.equal(h.settings().runtime, 'sdk');
-});
-
-
-test('GPT Web reuses native plan and steer while publishing only its own provider identity', async () => {
-  const h = harness(100, 'gptweb');
-  const running = h.run('design', { collaborationMode: 'plan' });
-  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
-  assert.equal(h.calls.find(call => call.method === 'turn/start')?.params.collaborationMode.mode, 'plan');
-  await h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'web-steer', content: 'also verify', attachments: [] });
-  h.event('item/completed', { turnId: 'turn-1', item: { type: 'agentMessage', id: 'web-answer', text: 'done' } });
-  h.finish(); await running;
-  assert.ok(h.events.some(event => event.kind === 'text' && event.content === 'done'));
-  assert.ok(h.events.every(event => event.provider === 'gptweb'));
-  assert.equal(h.calls.filter(call => call.method === 'turn/steer').length, 1);
 });

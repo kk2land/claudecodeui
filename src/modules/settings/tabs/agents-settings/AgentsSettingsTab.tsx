@@ -34,13 +34,13 @@ export default function AgentsSettingsTab({
   const [selectedAgent, setSelectedAgent] = useState<AgentProvider>('claude');
   const [selectedCategory, setSelectedCategory] = useState<AgentCategory>('account');
   const visibleCategories = useMemo<AgentCategory[]>(() => (
-    selectedAgent === 'dsh' || selectedAgent === 'gptweb' ? ['account', 'mcp', 'skills'] : selectedAgent === 'opencode'
+    selectedAgent === 'dsh' ? ['account', 'mcp', 'skills'] : selectedAgent === 'opencode'
       ? ['account', 'permissions', 'mcp']
       : ['account', 'permissions', 'mcp', 'skills']
   ), [selectedAgent]);
 
   const visibleAgents = useMemo<AgentProvider[]>(() => {
-    return ['claude', 'cursor', 'codex', 'opencode', 'dsh', 'gptweb'];
+    return ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
   }, []);
 
   const agentContextById = useMemo<AgentContextByProvider>(() => ({
@@ -56,7 +56,6 @@ export default function AgentsSettingsTab({
       authStatus: providerAuthStatus.codex,
       onLogin: () => onProviderLogin('codex'),
     },
-    gptweb: { authStatus: providerAuthStatus.gptweb, onLogin: () => onProviderLogin('gptweb') },
     dsh: { authStatus: providerAuthStatus.dsh, onLogin: () => onProviderLogin('dsh') },
     opencode: {
       authStatus: providerAuthStatus.opencode,
@@ -69,7 +68,6 @@ export default function AgentsSettingsTab({
     providerAuthStatus.cursor,
     providerAuthStatus.opencode,
     providerAuthStatus.dsh,
-    providerAuthStatus.gptweb,
   ]);
 
   useEffect(() => {

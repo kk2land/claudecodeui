@@ -30,6 +30,10 @@ type RecentSessionsPage = {
 const SESSION_ROW_COLUMNS =
   'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
 
+// Keep retired GPT Web rows available by id and for explicit project deletion,
+// while excluding them from UI pages, search, and transcript pruning.
+const VISIBLE_SESSION_PROVIDER_SQL = "provider <> 'gptweb'";
+
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
 function normalizeTimestamp(value?: string): string | null {
@@ -538,7 +542,7 @@ export const sessionsDb = {
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE isArchived = 0`
+         WHERE isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}`
       )
       .all() as SessionRow[];
 
@@ -557,6 +561,7 @@ export const sessionsDb = {
     const db = getConnection();
     const visibilityClause = `
       sessions.isArchived = 0
+      AND sessions.${VISIBLE_SESSION_PROVIDER_SQL}
       AND (projects.isArchived IS NULL OR projects.isArchived = 0)
     `;
     const rows = db
@@ -595,7 +600,7 @@ export const sessionsDb = {
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE isArchived = 1
+         WHERE isArchived = 1 AND ${VISIBLE_SESSION_PROVIDER_SQL}
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
       )
       .all() as SessionRow[];
@@ -611,7 +616,7 @@ export const sessionsDb = {
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0`
+           AND isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}`
       )
       .all(normalizedProjectPath) as SessionRow[];
 
@@ -644,7 +649,7 @@ export const sessionsDb = {
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0
+           AND isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
          LIMIT ? OFFSET ?`
       )
@@ -661,7 +666,7 @@ export const sessionsDb = {
         `SELECT COUNT(*) AS count
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0`
+           AND isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}`
       )
       .get(normalizedProjectPath) as { count: number } | undefined;
 
@@ -714,7 +719,7 @@ export const sessionsDb = {
   },
 
   /**
-   * Lists every indexed session that claims a transcript file on disk.
+   * Lists indexed sessions of active providers that claim a transcript file on disk.
    *
    * Only rows with a `jsonl_path` are returned, which deliberately excludes
    * app-created sessions still waiting for their first provider write and
@@ -728,7 +733,8 @@ export const sessionsDb = {
       .prepare(
         `SELECT session_id, jsonl_path
          FROM sessions
-         WHERE jsonl_path IS NOT NULL AND jsonl_path <> ''`
+         WHERE jsonl_path IS NOT NULL AND jsonl_path <> ''
+           AND ${VISIBLE_SESSION_PROVIDER_SQL}`
       )
       .all() as Array<{ session_id: string; jsonl_path: string }>;
   },

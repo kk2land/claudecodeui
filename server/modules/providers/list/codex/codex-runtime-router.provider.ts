@@ -2,7 +2,7 @@ import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { codexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
-import type { CodexProviderId, IProviderRuntime } from '@/shared/index.js';
+import type { IProviderRuntime } from '@/shared/index.js';
 import { AppError, createNormalizedMessage } from '@/shared/index.js';
 
 type RouterDependencies = {
@@ -15,12 +15,12 @@ type RouterDependencies = {
 };
 
 /** CodexProvider and provider tests use this dispatcher with isolated lifecycle dependencies. */
-export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> = {}, provider: CodexProviderId = 'codex'): IProviderRuntime {
+export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> = {}): IProviderRuntime {
   const { native, sdk, settings, stop, isStopping, isCodexSession } = {
     native: codexAppServerRuntime, sdk: codexRuntime, settings: sessionRuntimeDb,
     stop: () => codexAppServerTransport.stop(),
     isStopping: () => codexAppServerTransport.isStopping,
-    isCodexSession: (sessionId: string) => sessionsDb.getSessionById(sessionId)?.provider === provider,
+    isCodexSession: (sessionId: string) => sessionsDb.getSessionById(sessionId)?.provider === 'codex',
     ...overrides,
   };
   // A live SDK run stays addressable even if the user's default selection changes.
@@ -68,7 +68,7 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
       if (action.action === 'state') return { ...current, ...settings.get(sessionId) };
       if (action.action === 'stop-app-server') {
         processStopped = true;
-        settings.holdCodexAppServerQueues(provider);
+        settings.holdCodexAppServerQueues();
         if (settings.get(sessionId).runtime === 'app-server') settings.update(sessionId, { queueHeld: true });
         if (!stopping) {
           stopVersion++;
@@ -101,7 +101,7 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
           return { ...native.getState(sessionId), ...settings.get(sessionId) };
         } finally {
           switchingSessions.delete(sessionId);
-          writer.send(createNormalizedMessage({ provider, sessionId, kind: 'status', text: 'codex_control',
+          writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'status', text: 'codex_control',
             codexState: { ...native.getState(sessionId), ...settings.get(sessionId) } }));
         }
       }

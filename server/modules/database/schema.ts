@@ -174,6 +174,8 @@ CREATE TABLE IF NOT EXISTS app_config (
  * controlled in each provider's `-models.provider.ts` adapter so they can be
  * updated without migrating application data. `model_id` is unique only within
  * a provider because different CLIs can accept the same identifier.
+ * The retired `gptweb` id remains valid here to preserve existing library rows;
+ * active provider APIs reject it through the provider registry.
  *
  * `effort_values` (JSON array of level ids) and `effort_default` hold the
  * reasoning-effort levels the user declared for the model; both stay NULL when

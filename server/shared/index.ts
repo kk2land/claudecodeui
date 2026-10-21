@@ -1,8 +1,6 @@
 export {
   appendFilesInputTag,
   buildCodexInputItems,
-  isImageAttachmentDescriptor,
-  normalizeAttachmentDescriptors,
   normalizeImageDescriptors,
   parseFilesInputTag,
 } from './image-attachments.js';
@@ -12,7 +10,6 @@ export type {
   AuthenticatedWebSocketRequest,
   BackgroundTaskSummary,
   CodexControlAction,
-  CodexProviderId,
   CodexGoal,
   CodexRpcClient,
   CodexRpcFrame,
@@ -62,10 +59,6 @@ export {
   generateMessageId,
   getModuleDirectory,
   isCodexGoalEnabled,
-  isCodexProvider,
-  normalizeProjectPath,
-  getCodexHome,
-  getCodexProcessEnv,
   parseIncomingJsonObject,
   readObjectRecord,
   readOptionalString,

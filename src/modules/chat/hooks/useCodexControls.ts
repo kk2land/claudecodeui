@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
 import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
@@ -8,7 +8,6 @@ import { hydrateChatDrafts, persistQueuedMessage, readQueuedDelivery, readQueued
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
 type Args = {
-  provider?: 'codex' | 'gptweb';
   enabled: boolean;
   sessionId: string | null;
   project: Project | null;
@@ -18,10 +17,10 @@ type Args = {
 };
 
 /** ChatInterface owns this controller; all native controls wait for a scoped server acknowledgement. */
-export function useCodexControls({ provider = 'codex', enabled, sessionId, project, options, sendMessage, onSessionEstablished }: Args): CodexControls {
+export function useCodexControls({ enabled, sessionId, project, options, sendMessage, onSessionEstablished }: Args): CodexControls {
   const { subscribe } = useWebSocket();
   const capabilities = useProviderCapabilities();
-  const goalsEnabled = capabilities[provider]?.nativeControls?.goal === true;
+  const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
   // A control failure belongs to the action, independently of the model's running state.
@@ -32,15 +31,16 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
   const delivery = useSyncExternalStore(subscribeToChatDrafts, useCallback(() => sessionId ? readQueuedDelivery(sessionId) : null, [sessionId]), () => null);
   // Opening /goal exposes the editor even when the native thread has no goal yet.
   const [visibleGoals, setVisibleGoals] = useState<Set<string>>(new Set());
-  // Allocation remains pending only for its owning provider and project,
-  // before a transport request id exists.
-  const [creatingSession, setCreatingSession] = useState<{ provider: 'codex' | 'gptweb'; projectId: string } | null>(null);
-  // Provider and project own an allocation; stale responses must not select a
-  // session or send controls after the user has switched to another provider.
-  const creation = useRef<{ provider: 'codex' | 'gptweb'; projectId: string; promise: Promise<string> | null } | null>(null);
+  // Returning to the same project after navigation still owns a fresh allocation scope.
+  const allocationScope = useMemo(() => ({ enabled, sessionId, projectId: project?.projectId }),
+    [enabled, sessionId, project?.projectId]);
+  // Only the allocation owned by the current Codex selection can block its controls.
+  const [creatingSession, setCreatingSession] = useState<{ scope: typeof allocationScope } | null>(null);
+  const creation = useRef<{ scope: typeof allocationScope; promise: Promise<string> | null } | null>(null);
   useEffect(() => {
     creation.current = null;
-  }, [sessionId, provider, project?.projectId]);
+    return () => { creation.current = null; };
+  }, [allocationScope]);
   const pending = useRef(new Map<string, { sessionId: string; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>());
   const optionsRef = useRef(options);
   useEffect(() => { optionsRef.current = options; }, [options]);
@@ -49,7 +49,7 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
     const sid = typeof event.sessionId === 'string' ? event.sessionId : null;
     if (!sid) return;
     if (event.codexState) setSnapshots((old) => ({ ...old, [sid]: event.codexState as CodexSessionState }));
-    if (event.provider === provider && event.role === 'user' && event.clientMessageId) void hydrateChatDrafts();
+    if (event.provider === 'codex' && event.role === 'user' && event.clientMessageId) void hydrateChatDrafts();
     if (event.kind !== 'control_result') return;
     setErrors((old) => ({ ...old, [sid]: event.ok ? null : String(event.error ?? 'Control failed') }));
     const entry = pending.current.get(String(event.requestId));
@@ -60,7 +60,7 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
       if (event.ok) entry.resolve(); else entry.reject(new Error(String(event.error ?? 'Control failed')));
     }
     void hydrateChatDrafts();
-  }), [subscribe, provider]);
+  }), [subscribe]);
 
   useEffect(() => () => {
     for (const entry of pending.current.values()) {
@@ -91,31 +91,29 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
   const ensureSession = useCallback(async () => {
     if (sessionId) return sessionId;
     if (!project) throw new Error('Select a project first.');
-    if (creation.current?.provider === provider && creation.current.projectId === project.projectId && creation.current.promise) {
-      return creation.current.promise;
-    }
-    const entry: NonNullable<typeof creation.current> = { provider, projectId: project.projectId, promise: null };
+    if (creation.current?.scope === allocationScope && creation.current.promise) return creation.current.promise;
+    const entry: NonNullable<typeof creation.current> = { scope: allocationScope, promise: null };
     creation.current = entry;
     setCreatingSession(entry);
     entry.promise = (async () => {
       let succeeded = false;
       try {
-        const response = await api.providers.createSession({ provider, projectPath: project.fullPath || project.path || '', initialMessage: '' });
+        const response = await api.providers.createSession({ provider: 'codex', projectPath: project.fullPath || project.path || '', initialMessage: '' });
         if (!response.ok) throw new Error('Could not create a Codex session.');
         const body = await response.json();
         const id = body.data?.sessionId;
         if (!id) throw new Error('No session id returned.');
-        if (creation.current !== entry) throw new Error('The provider or project changed while creating the session.');
-        onSessionEstablished(id, { provider, project, summary: body.data?.sessionName || (provider === 'gptweb' ? 'GPT Web' : 'Codex') });
+        if (creation.current !== entry) throw new Error('The Codex selection or project changed while creating the session.');
+        onSessionEstablished(id, { provider: 'codex', project, summary: body.data?.sessionName || 'Codex' });
         succeeded = true;
         return id as string;
       } finally {
-        setCreatingSession(current => current === entry ? null : current);
+        setCreatingSession((current) => current === entry ? null : current);
         if (creation.current === entry && !succeeded) creation.current = null;
       }
     })();
     return entry.promise;
-  }, [sessionId, project, onSessionEstablished, provider]);
+  }, [sessionId, project, onSessionEstablished, allocationScope]);
 
   useEffect(() => subscribe((event) => {
     if (!enabled || !sessionId || event.kind !== 'websocket_reconnected') return;
@@ -171,7 +169,7 @@ export function useCodexControls({ provider = 'codex', enabled, sessionId, proje
     }
   }, [sessionId, snapshots, send]);
 
-  const allocating = !sessionId && creatingSession?.provider === provider && creatingSession.projectId === project?.projectId;
-  return { provider, sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
-    pending: Boolean(allocating) || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
+  const allocating = Boolean(enabled && !sessionId && creatingSession?.scope === allocationScope);
+  return { sessionId, goalsEnabled, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
+    pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

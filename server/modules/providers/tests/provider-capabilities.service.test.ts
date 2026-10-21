@@ -15,7 +15,6 @@ import type { LLMProvider, ProviderModelsDefinition } from '@/shared/types.js';
 const CURATED_CATALOGS: Record<LLMProvider, ProviderModelsDefinition> = {
   claude: CLAUDE_PREDEFINED_MODELS,
   codex: CODEX_PREDEFINED_MODELS,
-  gptweb: { OPTIONS: [], DEFAULT: '' },
   cursor: CURSOR_PREDEFINED_MODELS,
   opencode: OPENCODE_PREDEFINED_MODELS,
   dsh: { DEFAULT: 'default', OPTIONS: [{ value: 'default', label: 'Profile default' }] },
@@ -31,13 +30,13 @@ test('DSH advertises image attachments for both supported transports', () => {
 test('provider visibility normalizes environment entries without removing capabilities', () => {
   const original = process.env.CLOUDCLI_HIDDEN_PROVIDERS;
   try {
-    process.env.CLOUDCLI_HIDDEN_PROVIDERS = ' Cursor, GPTWEB, cursor \n opencode,unknown, ';
+    process.env.CLOUDCLI_HIDDEN_PROVIDERS = ' Cursor, CODEX, cursor \n opencode,unknown, ';
     const rows = providerCapabilitiesService.listAllProviderCapabilities();
     assert.equal(rows.length, Object.keys(CURATED_CATALOGS).length);
     assert.deepEqual(rows.filter((row) => row.hiddenFromModelPicker).map((row) => row.provider).sort(),
-      ['cursor', 'gptweb', 'opencode']);
-    assert.equal(providerCapabilitiesService.getProviderCapabilities('gptweb').hiddenFromModelPicker, true);
-    assert.equal(providerCapabilitiesService.getProviderCapabilities('gptweb').nativeControls?.plan, true);
+      ['codex', 'cursor', 'opencode']);
+    assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').hiddenFromModelPicker, true);
+    assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.plan, true);
     assert.equal(providerCapabilitiesService.getProviderCapabilities('claude').hiddenFromModelPicker, false);
 
     for (const value of [undefined, '', ' , \n ', 'unknown']) {

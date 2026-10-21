@@ -88,7 +88,6 @@ const queryCursor = providerRuntimeService.getRunner('cursor');
 const queryCodex = providerRuntimeService.getRunner('codex');
 const queryOpenCode = providerRuntimeService.getRunner('opencode');
 const queryDsh = providerRuntimeService.getRunner('dsh');
-const queryGptweb = providerRuntimeService.getRunner('gptweb');
 const gitRoutes = createGitModule({
     queryClaude,
     queryCursor,
@@ -99,7 +98,6 @@ const agentRoutes = createAgentModule({
     queryCodex,
     queryOpenCode,
     queryDsh,
-    queryGptweb,
 });
 
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.

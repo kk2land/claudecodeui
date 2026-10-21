@@ -1,14 +1,13 @@
 type CodexLogoProps = {
   className?: string;
-  label?: string;
 };
 
 /** Rendered by the shared LLMProviderLogo when the provider is Codex. */
-const CodexLogo = ({ className = 'w-5 h-5', label = 'Codex' }: CodexLogoProps) => (
+const CodexLogo = ({ className = 'w-5 h-5' }: CodexLogoProps) => (
   <svg
     viewBox="100 100 520 520"
     role="img"
-    aria-label={label}
+    aria-label="Codex"
     className={className}
     fill="none"
     xmlns="http://www.w3.org/2000/svg"

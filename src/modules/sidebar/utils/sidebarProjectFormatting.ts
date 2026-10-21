@@ -212,7 +212,6 @@ export const normalizeProjectForSettings = (project: Project): SettingsProject =
 export const PROVIDER_LABELS: Record<LLMProvider, string> = {
   claude: 'Claude',
   codex: 'Codex',
-  gptweb: 'GPT Web',
   cursor: 'Cursor',
   opencode: 'OpenCode',
   dsh: 'DeepSeek Harness',

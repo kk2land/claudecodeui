@@ -45,14 +45,6 @@ const agentConfig: Record<AgentProvider, AgentVisualConfig> = {
     subtextClass: 'text-gray-700 dark:text-gray-300',
     buttonClass: 'bg-gray-800 hover:bg-gray-900 active:bg-gray-950 dark:bg-gray-700 dark:hover:bg-gray-600 dark:active:bg-gray-500',
   },
-  gptweb: {
-    name: 'GPT Web',
-    bgClass: 'bg-muted/50',
-    borderClass: 'border-gray-300 dark:border-gray-600',
-    textClass: 'text-gray-900 dark:text-gray-100',
-    subtextClass: 'text-gray-700 dark:text-gray-300',
-    buttonClass: 'bg-gray-800 hover:bg-gray-900 active:bg-gray-950 dark:bg-gray-700 dark:hover:bg-gray-600 dark:active:bg-gray-500',
-  },
   dsh: {
     name: 'DeepSeek Harness',
     description: 'DSH coding agent',
@@ -115,7 +107,6 @@ function SubscriptionOverrideNotice({ override }: SubscriptionOverrideNoticeProp
 export default function AccountContent({ agent, authStatus, onLogin }: AccountContentProps) {
   const { t } = useTranslation('settings');
   const config = agentConfig[agent];
-  const isGptweb = agent === 'gptweb';
 
   return (
     <div className="space-y-6">
@@ -142,7 +133,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                 {authStatus.loading ? (
                   t('agents.authStatus.checkingAuth')
                 ) : authStatus.authenticated ? (
-                  isGptweb ? t('auth:gptweb.catalogConnected') : t('agents.authStatus.loggedInAs', {
+                  t('agents.authStatus.loggedInAs', {
                     email: authStatus.email || t('agents.authStatus.authenticatedUser'),
                   })
                 ) : (
@@ -167,10 +158,6 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
             </div>
           </div>
 
-          {isGptweb && authStatus.authenticated && !authStatus.loading && (
-            <p className="text-sm text-muted-foreground">{t('auth:gptweb.verificationRequired')}</p>
-          )}
-
           {!authStatus.loading && authStatus.subscriptionOverride && (
             <SubscriptionOverrideNotice override={authStatus.subscriptionOverride} />
           )}
@@ -180,10 +167,10 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
               <div className="flex items-center justify-between">
                 <div>
                   <div className={`font-medium ${config.textClass}`}>
-                    {isGptweb ? t('auth:gptweb.setupButton') : authStatus.authenticated ? t('agents.login.reAuthenticate') : t('agents.login.title')}
+                    {authStatus.authenticated ? t('agents.login.reAuthenticate') : t('agents.login.title')}
                   </div>
                   <div className={`text-sm ${config.subtextClass}`}>
-                    {isGptweb ? t('auth:gptweb.setupDescription') : authStatus.authenticated
+                    {authStatus.authenticated
                       ? t('agents.login.reAuthDescription')
                       : t('agents.login.description', { agent: config.name })}
                   </div>
@@ -194,7 +181,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                   size="sm"
                 >
                   <LogIn className="mr-2 h-4 w-4" />
-                  {isGptweb ? t('auth:gptweb.setupButton') : authStatus.authenticated ? t('agents.login.reLoginButton') : t('agents.login.button')}
+                  {authStatus.authenticated ? t('agents.login.reLoginButton') : t('agents.login.button')}
                 </Button>
               </div>
             </div>

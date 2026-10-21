@@ -41,8 +41,6 @@ const pruneOrphanedSessions = async (): Promise<number> => {
     if (await pathExists(jsonlPath)) {
       continue;
     }
-    // An optional, currently disabled profile must not lose its indexed history.
-    if (!process.env.CODEX_GPTWEB_HOME?.trim() && sessionsDb.getSessionById(sessionId)?.provider === 'gptweb') continue;
 
     const directory = path.dirname(jsonlPath);
     let directoryExists = knownDirectoryExists.get(directory);
@@ -84,7 +82,6 @@ async function runSessionSynchronization(): Promise<SessionSynchronizeResult> {
   const processedByProvider: Record<LLMProvider, number> = {
     claude: 0,
     codex: 0,
-    gptweb: 0,
     cursor: 0,
     opencode: 0,
     dsh: 0,
@@ -92,7 +89,7 @@ async function runSessionSynchronization(): Promise<SessionSynchronizeResult> {
   const failures: string[] = [];
 
   const results = await Promise.allSettled(
-    providerRegistry.listProviders().filter(provider => provider.id !== 'gptweb' || process.env.CODEX_GPTWEB_HOME?.trim()).map(async (provider) => ({
+    providerRegistry.listProviders().map(async (provider) => ({
       provider: provider.id,
       processed: await provider.sessionSynchronizer.synchronize(lastScanAt ?? undefined),
     }))

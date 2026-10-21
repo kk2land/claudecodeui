@@ -105,3 +105,18 @@ test('synchronizeSessions keeps sessions that have no transcript path yet', asyn
     assert.ok(sessionsDb.getSessionById('opencode-session'));
   });
 });
+
+test('synchronizeSessions preserves retired provider history when its transcript was removed', async () => {
+  await withIsolatedDatabase(async (workspace) => {
+    const transcriptDirectory = path.join(workspace, 'retired-transcripts');
+    await mkdir(transcriptDirectory);
+    sessionsDb.createSession('legacy-web', 'gptweb', PROJECT_PATH, 'Legacy', undefined, undefined,
+      path.join(transcriptDirectory, 'missing.jsonl'));
+
+    const result = await sessionSynchronizerService.synchronizeSessions();
+
+    assert.deepEqual(result.failures, []);
+    assert.equal(result.prunedOrphans, 0);
+    assert.ok(sessionsDb.getSessionById('legacy-web'));
+  });
+});

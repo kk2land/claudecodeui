@@ -21,7 +21,6 @@ const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly stri
   // narrows this once available; including the GPT-5.6 tiers here prevents a
   // valid Max/Ultra selection from being reset during catalog hydration.
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  gptweb: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   opencode: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
   // Configured pi-ai models can advertise xhigh and the intermediate levels.
   // Preserve a saved choice while the profile-backed catalog is loading.
@@ -36,12 +35,11 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   claude: 'default',
   cursor: 'gpt-5.3-codex',
   codex: 'gpt-5.4',
-  gptweb: '',
   opencode: 'anthropic/claude-sonnet-4-5',
   dsh: 'default',
 };
 
-const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh', 'gptweb'];
+const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
 
 /** localStorage key holding the user's default model for one provider. */
 const providerModelStorageKey = (provider: LLMProvider): string => `${provider}-model`;
@@ -56,7 +54,6 @@ const FALLBACK_PERMISSION_MODES: Record<LLMProvider, PermissionMode[]> = {
   claude: ['default', 'auto', 'acceptEdits', 'bypassPermissions', 'plan'],
   cursor: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
   codex: ['default', 'acceptEdits', 'bypassPermissions'],
-  gptweb: ['default', 'acceptEdits', 'bypassPermissions'],
   opencode: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
   dsh: ['default'],
 };
@@ -745,9 +742,6 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
       : providerModelCatalog[provider]?.OPTIONS ?? [],
     [hiddenModelProviders, provider, providerModelCatalog, selectedSession],
   );
-  const selectedModelOption = getModelOption(provider, currentProviderModel);
-  const supportsImages = providerCapabilities?.[provider]?.supportsImages !== false
-    && selectedModelOption?.inputModalities?.includes('image') !== false;
 
   const applyProviderCatalog = useCallback((
     targetProvider: LLMProvider,
@@ -895,6 +889,5 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
-    supportsImages,
   };
 }

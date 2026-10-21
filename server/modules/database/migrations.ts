@@ -528,7 +528,7 @@ const migrateDshProviderModels = (db: Database): void => {
   })();
 };
 
-/** Retains model-library data when adding GPT Web to an existing database. */
+/** Historical migration retained for compatibility with existing GPT Web model rows. */
 const migrateGptwebProviderModels = (db: Database): void => {
   const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_models'").get() as { sql: string };
   const constraint = table.sql.match(/\bprovider\s+IN\s*\(([^)]*)\)/i);

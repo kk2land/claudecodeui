@@ -102,6 +102,26 @@ test('a queued message is sent by the server without a browser connection', asyn
   });
 });
 
+test('retired GPT Web queues remain stored and due schedules fail without starting a runtime', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const projectPath = sessionsDb.getSessionById(SESSION_ID)!.project_path!;
+    sessionsDb.createAppSession('legacy-web', 'gptweb', projectPath);
+    const queuedMessage = { content: 'keep this pending message' };
+    sessionDraftsDb.saveDraft(userId, 'legacy-web', { text: '', queuedMessage });
+    scheduledMessagesDb.create({ userId, sessionId: 'legacy-web', content: 'scheduled legacy message',
+      options: {}, scheduledFor: new Date(Date.now() - 60_000) });
+
+    assert.equal(await dispatchQueuedMessages(providerRuntimeService), 0);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessage, queuedMessage);
+    assert.equal(await dispatchDueScheduledMessages(providerRuntimeService), 1);
+    const scheduled = scheduledMessagesDb.listForSession(userId, 'legacy-web')[0];
+    assert.equal(scheduled.status, 'failed');
+    assert.match(scheduled.failure_reason!, /Provider "gptweb" is not available/);
+    assert.equal(chatRunRegistry.getRun('legacy-web'), undefined);
+    assert.ok(sessionsDb.getSessionById('legacy-web'));
+  });
+});
+
 test('a queued message stays pending while its session is busy', async () => {
   await withIsolatedDatabase(async (userId) => {
     sessionDraftsDb.saveDraft(userId, SESSION_ID, {

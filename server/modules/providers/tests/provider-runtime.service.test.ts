@@ -3,7 +3,6 @@ import test from 'node:test';
 
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { createProviderRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
-import { AppError } from '@/shared/index.js';
 import type { IProvider, IProviderRuntime, LLMProvider } from '@/shared/index.js';
 
 function createRuntime(overrides: Partial<IProviderRuntime> = {}): IProviderRuntime {
@@ -22,10 +21,6 @@ function createProvider(id: LLMProvider, runtime: IProviderRuntime): IProvider {
   return {
     id,
     runtime,
-    models: {
-      async getSupportedModels() { return { OPTIONS: [], DEFAULT: 'default-model' }; },
-      async getCurrentActiveModel() { return { model: 'default-model' }; },
-    },
     auth: {
       async getStatus() {
         return {
@@ -78,68 +73,12 @@ test('providerRegistry owns one runtime for every registered provider', () => {
   assert.deepEqual(providers.map((provider) => provider.id), [
     'claude',
     'codex',
-    'gptweb',
     'cursor',
     'opencode',
     'dsh',
   ]);
   assert.equal(providers.every((provider) => typeof provider.runtime.run === 'function'), true);
   assert.equal(providers.every((provider) => typeof provider.runtime.abort === 'function'), true);
-});
-
-test('runtime context rejects images for text-only models and preserves providers without modality metadata', async () => {
-  const provider = createProvider('gptweb', createRuntime({
-    async run(_command, options, _writer, context) {
-      await context.validateModelInput?.(options.model, options.attachments);
-      return 'sent';
-    },
-  }));
-  provider.models.getSupportedModels = async () => ({ DEFAULT: 'chatgpt-web/manual', OPTIONS: [
-    { value: 'chatgpt-web/manual', label: 'Manual', inputModalities: ['text'] },
-    { value: 'chatgpt-web/automatic', label: 'Automatic', inputModalities: ['text', 'image'] },
-    { value: 'legacy', label: 'Unknown metadata' },
-  ] });
-  const service = createProviderRuntimeService({ resolveProvider: () => provider });
-  const run = (model: string, file: string) => service.run('gptweb', 'look', { model, attachments: [{ path: file }] }, { send() {} });
-  await assert.rejects(run('chatgpt-web/manual', '/tmp/image.png'), error =>
-    error instanceof AppError && error.code === 'MODEL_IMAGES_NOT_SUPPORTED');
-  assert.equal(await run('chatgpt-web/manual', '/tmp/notes.txt'), 'sent');
-  assert.equal(await run('chatgpt-web/automatic', '/tmp/image.png'), 'sent');
-  assert.equal(await run('legacy', '/tmp/image.png'), 'sent');
-});
-
-test('an unavailable catalog fails image validation before dispatch and reports definite non-delivery', async () => {
-  const provider = createProvider('gptweb', createRuntime({
-    async run(_command, options, _writer, context) {
-      await context.validateModelInput?.(options.model, options.attachments);
-      assert.fail('Input must not be dispatched');
-    },
-  }));
-  provider.models.getSupportedModels = async () => { throw new AppError('Catalog offline', { code: 'GPTWEB_MODELS_UNAVAILABLE', statusCode: 503 }); };
-  const service = createProviderRuntimeService({ resolveProvider: () => provider });
-  await assert.rejects(service.run('gptweb', 'look', { model: 'chatgpt-web/test', attachments: [{ path: '/tmp/image.png' }] }, { send() {} }),
-    error => error instanceof AppError && error.code === 'MODEL_INPUT_VALIDATION_FAILED' && error.statusCode === 503);
-});
-
-test('custom-only model lists do not hide input limits from an existing session', async () => {
-  const provider = createProvider('gptweb', createRuntime({
-    async run(_command, options, _writer, context) {
-      await context.validateModelInput?.(options.model, options.attachments);
-      return 'sent';
-    },
-  }));
-  provider.models.getSupportedModels = async () => ({ DEFAULT: 'chatgpt-web/text', OPTIONS: [
-    { value: 'chatgpt-web/text', label: 'Text', inputModalities: ['text'] },
-    { value: 'chatgpt-web/vision', label: 'Vision', inputModalities: ['text', 'image'] },
-  ] });
-  const service = createProviderRuntimeService({ resolveProvider: () => provider,
-    getProviderModels: async () => ({ DEFAULT: 'chatgpt-web/vision', CUSTOM_MODELS_ONLY: true,
-      OPTIONS: [{ value: 'chatgpt-web/vision', label: 'Custom vision', inputModalities: ['text', 'image'] }],
-    }),
-  });
-  await assert.rejects(service.run('gptweb', 'look', {
-    model: 'chatgpt-web/text', attachments: [{ path: '/tmp/image.png' }],
-  }, { send() {} }), error => error instanceof AppError && error.code === 'MODEL_IMAGES_NOT_SUPPORTED');
 });
 
 test('dispatches runs and aborts through the runtime owned by providerRegistry', async () => {

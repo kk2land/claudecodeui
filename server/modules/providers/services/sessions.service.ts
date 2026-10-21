@@ -545,7 +545,7 @@ export const sessionsService = {
     // re-parsing the whole file per request. Cursor and OpenCode read their
     // messages from elsewhere (store.db / shared SQLite), so that file's stat
     // says nothing about their history — they stay on the direct path.
-    const transcriptPath = provider === 'claude' || provider === 'codex' || provider === 'gptweb'
+    const transcriptPath = provider === 'claude' || provider === 'codex'
       ? session.jsonl_path
       : null;
     const fullHistory = await sessionHistoryCache.getFullHistory({
@@ -636,6 +636,8 @@ export const sessionsService = {
       });
     }
 
+    // Deep links to retained data must not open a removed provider in chat.
+    providerRegistry.resolveProvider(session.provider);
     const projectPath = session.project_path?.trim() ? session.project_path : null;
     const project = projectPath ? projectsDb.getProjectPath(projectPath) : null;
 

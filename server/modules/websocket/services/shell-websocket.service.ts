@@ -5,7 +5,6 @@ import path from 'node:path';
 import pty, { type IPty } from 'node-pty';
 import { WebSocket, type RawData } from 'ws';
 
-import { getCodexHome } from '@/shared/index.js';
 import { parseIncomingJsonObject, stripAnsiSequences } from '@/shared/utils.js';
 
 type ShellIncomingMessage = {
@@ -234,7 +233,7 @@ function buildShellCommand(
     return otherProgram('cursor-agent');
   }
 
-  if (provider === 'codex' || provider === 'gptweb') {
+  if (provider === 'codex') {
     if (resumeSessionId) {
       if (os.platform() === 'win32') {
         return otherProgram(`codex resume "${resumeSessionId}"; if ($LASTEXITCODE -ne 0) { codex }`);
@@ -551,6 +550,10 @@ export function handleShellConnection(
         const sessionId = readString(data.sessionId) || null;
         const hasSession = readBoolean(data.hasSession);
         const provider = readString(data.provider, 'claude');
+        // Reject stale clients before reusing a PTY or falling back to Claude.
+        if (provider === 'gptweb') {
+          throw new Error('GPT Web provider has been removed.');
+        }
         const initialCommand = readString(data.initialCommand);
         const forceRestart = readBoolean(data.forceRestart);
         const colorScheme = readColorScheme(data.colorScheme);
@@ -655,7 +658,6 @@ export function handleShellConnection(
           cwd: resolvedProjectPath,
           env: {
             ...process.env,
-            ...(provider === 'gptweb' ? { CODEX_HOME: getCodexHome('gptweb') } : {}),
             [prioritizedPath.key]: prioritizedPath.value,
             TERM: 'xterm-256color',
             COLORTERM: 'truecolor',
@@ -787,9 +789,7 @@ export function handleShellConnection(
           const providerName =
             provider === 'cursor'
               ? 'Cursor'
-              : provider === 'gptweb'
-                ? 'GPT Web'
-                : provider === 'codex'
+              : provider === 'codex'
                 ? 'Codex'
                 : provider === 'opencode'
                     ? 'OpenCode'

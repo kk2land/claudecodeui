@@ -66,14 +66,15 @@ export const sessionDraftsDb = {
     return rows.map(toRecord);
   },
 
-  /** Lists persisted queued turns whose scopes are real chat sessions. */
+  /** Lists dispatchable queued turns; retired provider drafts remain stored and unclaimed. */
   listQueuedMessages(): QueuedSessionMessageRecord[] {
     const rows = getConnection()
       .prepare(
         `SELECT drafts.user_id, drafts.draft_scope, drafts.queued_message
          FROM session_drafts AS drafts
          INNER JOIN sessions ON sessions.session_id = drafts.draft_scope
-         WHERE drafts.queued_message IS NOT NULL AND drafts.queue_status = 'queued'`
+         WHERE drafts.queued_message IS NOT NULL AND drafts.queue_status = 'queued'
+           AND sessions.provider <> 'gptweb'`
       )
       .all() as QueuedMessageRow[];
 

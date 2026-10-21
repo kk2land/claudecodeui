@@ -25,7 +25,7 @@ async function buildSessionUpsertedEvent(
   // native id across providers, so the exact app row must take precedence.
   const row = sessionsDb.getSessionById(sessionIdOrProviderSessionId)
     ?? sessionsDb.getSessionByProviderSessionId(sessionIdOrProviderSessionId);
-  if (!row || row.isArchived) {
+  if (!row || row.isArchived || row.provider === 'gptweb') {
     return null;
   }
 

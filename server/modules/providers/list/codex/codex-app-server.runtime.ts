@@ -10,7 +10,6 @@ import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEn
 import type {
   AnyRecord,
   CodexControlAction,
-  CodexProviderId,
   CodexGoal,
   CodexRpcClient,
   CodexRpcFrame,
@@ -93,8 +92,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     private readonly stopTimeoutMs = 10_000,
     private readonly confirmSteer = (sessionId: string, requestId: string) => sessionDraftsDb.confirmSteer(sessionId, requestId),
     private readonly readStoredMessages = async (sessionId: string): Promise<NormalizedMessage[]> =>
-      (await new CodexSessionsProvider(this.provider).fetchHistory(sessionId)).messages,
-    private readonly provider: CodexProviderId = 'codex',
+      (await new CodexSessionsProvider().fetchHistory(sessionId)).messages,
   ) {
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
@@ -134,7 +132,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   private publish(session: NativeSession): void {
     session.writer.send(createNormalizedMessage({
-      provider: this.provider, sessionId: session.id, kind: 'status', text: 'codex_control', codexState: this.getState(session.id),
+      provider: 'codex', sessionId: session.id, kind: 'status', text: 'codex_control', codexState: this.getState(session.id),
     }));
   }
 
@@ -186,7 +184,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       target.threadId = result.thread.id;
       target.model = result.model || result.thread.model || target.model;
       writer.setSessionId?.(target.threadId!);
-      if (!providerId) writer.send(createNormalizedMessage({ provider: this.provider, sessionId, kind: 'session_created', newSessionId: target.threadId! }));
+      if (!providerId) writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'session_created', newSessionId: target.threadId! }));
       const { goal } = isCodexGoalEnabled()
         ? await this.client.request('thread/goal/get', { threadId: target.threadId })
         : { goal: null };
@@ -265,7 +263,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     } catch (error) {
       if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0) && error instanceof AppError
         && ['CODEX_APP_SERVER_STOPPED', 'CODEX_APP_SERVER_SESSION_CLOSED'].includes(error.code)) {
-        writer.send(createCompleteMessage({ provider: this.provider, sessionId, exitCode: 0, aborted: true }));
+        writer.send(createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }));
         return;
       }
       throw error;
@@ -273,7 +271,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     // Stop may have finished while thread initialization was still pending. Only
     // a new user submission, captured after that Stop, may clear its intent.
     if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
-      writer.send({ ...createCompleteMessage({ provider: this.provider, sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
+      writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
     }
     if (session.stopRequested) {
@@ -286,9 +284,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.settings.update(sessionId, { mode: options.collaborationMode });
     }
     session.model = await context.resolveResumeModel(sessionId, options.model) ?? session.model;
-    await context.validateModelInput?.(session.model, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
     if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
-      writer.send({ ...createCompleteMessage({ provider: this.provider, sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
+      writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
     }
     const turn = this.newTurn(session, writer, null);
@@ -337,14 +334,14 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session.state.phase = session.stopRequested ? 'stopping' : status === 'failed' ? 'failed' : 'idle';
     if (error) {
       session.state.error = error;
-      turn.writer.send(createNormalizedMessage({ provider: this.provider, sessionId: session.id, kind: 'error', content: error }));
+      turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'error', content: error }));
     }
     this.publish(session);
-    turn.writer.send({ ...createCompleteMessage({ provider: this.provider, sessionId: session.id, exitCode: status === 'failed' ? 1 : 0, aborted: status === 'interrupted' }),
+    turn.writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId: session.id, exitCode: status === 'failed' ? 1 : 0, aborted: status === 'interrupted' }),
       goalActive: session.state.goal?.status === 'active', stopping: session.stopRequested, turnId: turn.id,
       success: status === 'completed' && !['blocked', 'usageLimited', 'budgetLimited'].includes(session.state.goal?.status ?? '') });
     if (!session.stopRequested && session.state.goal?.status !== 'active') {
-      const notice = { userId: turn.writer.userId ?? null, provider: this.provider, sessionId: session.options.sessionId ?? session.id, sessionName: session.options.sessionSummary ?? null };
+      const notice = { userId: turn.writer.userId ?? null, provider: 'codex', sessionId: session.options.sessionId ?? session.id, sessionName: session.options.sessionSummary ?? null };
       if (status === 'failed') notifyRunFailed({ ...notice, error: error ?? 'Codex turn failed.' });
       else if (status === 'completed') notifyRunStopped({ ...notice, stopReason: session.state.goal?.status ?? 'completed' });
     }
@@ -412,17 +409,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (!turn || turn.terminal || (turnId && turn.id && turnId !== turn.id)) return;
     if (frame.method === 'turn/completed') { if (!turn.id && turnId) turn.id = turnId; this.complete(session, p.turn.status, p.turn.error?.message); return; }
     if (frame.method === 'error') {
-      if (!p.willRetry) turn.writer.send(createNormalizedMessage({ provider: this.provider, sessionId: session.id, kind: 'error', content: p.error?.message ?? 'Codex error' }));
+      if (!p.willRetry) turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'error', content: p.error?.message ?? 'Codex error' }));
       return;
     }
     if (frame.method === 'thread/tokenUsage/updated') {
       const usage = p.tokenUsage ?? p.usage;
-      if (usage?.total) turn.writer.send(createNormalizedMessage({ provider: this.provider, sessionId: session.id, kind: 'status', text: 'token_budget',
+      if (usage?.total) turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'status', text: 'token_budget',
         tokenBudget: { used: usage.total.totalTokens, total: usage.modelContextWindow, inputTokens: usage.total.inputTokens, outputTokens: usage.total.outputTokens } }));
       return;
     }
     if (frame.method === 'turn/plan/updated') {
-      turn.writer.send(createNormalizedMessage({ provider: this.provider, sessionId: session.id, id: `${this.provider}:${turn.id}:steps`, kind: 'tool_use', toolName: 'TodoWrite', toolId: `${this.provider}:${turn.id}:steps`,
+      turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, id: `codex:${turn.id}:steps`, kind: 'tool_use', toolName: 'TodoWrite', toolId: `codex:${turn.id}:steps`,
         toolInput: { todos: (p.plan ?? []).map((step: AnyRecord) => ({ content: step.step, status: step.status === 'inProgress' ? 'in_progress' : step.status })) } }));
       return;
     }
@@ -449,7 +446,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') for (const child of item.receiverThreadIds ?? []) if (child !== session.threadId) session.children.add(child);
       if (item.type === 'userMessage' && item.clientId) this.confirmSteer(session.id, item.clientId);
       turn.items.set(item.id, item);
-      for (const message of normalizeAppServerItem(item, session.id, turn.id ?? turnId ?? 'starting', this.provider)) turn.writer.send(message);
+      for (const message of normalizeAppServerItem(item, session.id, turn.id ?? turnId ?? 'starting')) turn.writer.send(message);
     }
   }
 
@@ -628,18 +625,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (!session || session.stopRequested || !session.turn || session.turn.terminal || session.turn.id !== action.expectedTurnId) {
         throw new AppError('The target turn ended or is stopping. Your message is still queued.', { code: 'STALE_TURN', statusCode: 409 });
       }
-      const targetTurn = session.turn;
-      await session.context.validateModelInput?.(session.model, action.attachments);
-      // Catalog lookup can outlive the turn or an explicit process stop. Check
-      // again before request(), which may otherwise lazily restart app-server.
-      if (this.sessions.get(sessionId) !== session || session.stopRequested || session.turn !== targetTurn
-        || targetTurn.terminal || targetTurn.id !== action.expectedTurnId) {
-        throw new AppError('The target turn ended or is stopping. Your message is still queued.', { code: 'STALE_TURN', statusCode: 409 });
-      }
       await this.client.request('turn/steer', { threadId: session.threadId, expectedTurnId: action.expectedTurnId,
         clientUserMessageId: action.requestId, input: buildInput(action.content, action.attachments) });
       // Steer acceptance can precede its native userMessage item by an entire model call.
-      for (const message of normalizeAppServerItem({ type: 'userMessage', id: action.requestId, clientId: action.requestId, content: buildInput(action.content, action.attachments) }, sessionId, action.expectedTurnId, this.provider)) session.writer.send(message);
+      for (const message of normalizeAppServerItem({ type: 'userMessage', id: action.requestId, clientId: action.requestId, content: buildInput(action.content, action.attachments) }, sessionId, action.expectedTurnId)) session.writer.send(message);
       return this.getState(sessionId);
     }
     if (action.action === 'answer') {
@@ -736,9 +725,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         session.state.questions.push({ requestId: id, turnId: p.turnId, isBlocking: p.isBlocking !== false, questions: p.questions });
         this.publish(session);
       } else {
-        session.writer.send(createNormalizedMessage({ provider: this.provider, sessionId: session.id, kind: 'permission_request', requestId: id,
+        session.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'permission_request', requestId: id,
           toolName: kind === 'command' ? 'Bash' : kind === 'file' ? 'FileChange' : 'Permissions', input: p,
-          context: { provider: this.provider, availableDecisions: p.availableDecisions ?? ['accept', 'decline', 'cancel'] } }));
+          context: { provider: 'codex', availableDecisions: p.availableDecisions ?? ['accept', 'decline', 'cancel'] } }));
       }
     });
   }
@@ -748,7 +737,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     request.session.state.questions = request.session.state.questions.filter((q) => q.requestId !== request.id);
     request.resolve(response);
     if (request.kind === 'question') this.publish(request.session);
-    else request.session.writer.send(createNormalizedMessage({ provider: this.provider, sessionId: request.session.id, kind: 'permission_resolved', requestId: request.id }));
+    else request.session.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: request.session.id, kind: 'permission_resolved', requestId: request.id }));
   }
 
   private cancelRequest(request: NativeRequest): void {
@@ -776,7 +765,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.resolveRequest(request, { decision: nativeDecision });
     },
     listPending: (sessionId: string) => [...this.requests.values()].filter((r) => r.session.id === sessionId && r.kind !== 'question')
-      .map((r) => ({ requestId: r.id, provider: this.provider, toolName: r.kind === 'command' ? 'Bash' : r.kind === 'file' ? 'FileChange' : 'Permissions', input: r.params, context: { provider: this.provider, availableDecisions: r.params.availableDecisions ?? ['accept', 'acceptForSession', 'decline', 'cancel'] } })),
+      .map((r) => ({ requestId: r.id, provider: 'codex', toolName: r.kind === 'command' ? 'Bash' : r.kind === 'file' ? 'FileChange' : 'Permissions', input: r.params, context: { provider: 'codex', availableDecisions: r.params.availableDecisions ?? ['accept', 'acceptForSession', 'decline', 'cancel'] } })),
   };
 
   /** Session status polling must include native goal gaps and uncertain stopping states. */
@@ -828,9 +817,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   }
 
   async close(): Promise<void> {
-    if (this.client.close) {
+    if (this.client === codexAppServerTransport) {
       await Promise.all(this.listActiveSessions().map(({ sessionId }) => this.abort(sessionId)));
-      await this.client.close();
+      await codexAppServerTransport.close();
     }
     for (const unsubscribe of this.unsubscribe) unsubscribe();
     this.unsubscribe = [];

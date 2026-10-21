@@ -21,10 +21,9 @@ import {
   createCompleteMessage,
   createNormalizedMessage,
   isCodexGoalEnabled,
-  getCodexProcessEnv,
 } from '@/shared/index.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
-import type { CodexProviderId, AnyRecord, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/index.js';
+import type { AnyRecord, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/index.js';
 
 type ActiveCodexSession = {
   thread: Thread;
@@ -34,6 +33,7 @@ type ActiveCodexSession = {
   startedAt: string;
 };
 
+const activeCodexSessions = new Map<string, ActiveCodexSession>();
 
 // Codex CLI requires non-whitespace stdin even when --image arguments are
 // present, so attachment-only turns need a small text instruction.
@@ -262,8 +262,6 @@ async function queryCodex(
   options: AnyRecord = {},
   ws: ProviderRuntimeWriter,
   context: ProviderRuntimeContext,
-  provider: CodexProviderId,
-  activeCodexSessions: Map<string, ActiveCodexSession>,
 ) {
   const {
     sessionId,
@@ -282,7 +280,6 @@ async function queryCodex(
   const providerSessionId = context.resolveProviderSessionId(sessionId);
 
   const resolvedModel = await context.resolveResumeModel(sessionId, model);
-  await context.validateModelInput?.(resolvedModel, options.attachments ?? [...(images ?? []), ...(files ?? [])]);
 
   const workingDirectory = cwd || projectPath || process.cwd();
   const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);
@@ -312,7 +309,7 @@ async function queryCodex(
   const sessionKey = () => sessionId || capturedSessionId || null;
 
   try {
-    codex = new Codex({ env: getCodexProcessEnv(provider), config: { features: { goals: isCodexGoalEnabled() } } });
+    codex = new Codex({ config: { features: { goals: isCodexGoalEnabled() } } });
 
     const threadOptions: ThreadOptions = {
       workingDirectory,
@@ -374,7 +371,7 @@ async function queryCodex(
 
           if (!providerSessionId && !sessionCreatedSent) {
             sessionCreatedSent = true;
-            sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider }));
+            sendMessage(ws, createNormalizedMessage({ kind: 'session_created', newSessionId: capturedSessionId, sessionId: capturedSessionId, provider: 'codex' }));
           }
         }
       }
@@ -420,7 +417,7 @@ async function queryCodex(
         // Notifications are app-facing, so they carry the app session id.
         notifyRunFailed({
           userId: ws?.userId || null,
-          provider,
+          provider: 'codex',
           sessionId: sessionId || capturedSessionId || null,
           sessionName: sessionSummary,
           error: terminalFailure
@@ -431,7 +428,7 @@ async function queryCodex(
       if (event.type === 'turn.completed') {
         const tokenBudget = extractCodexTokenBudget(event);
         if (tokenBudget) {
-          sendMessage(ws, createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget, sessionId: capturedSessionId || sessionId || null, provider }));
+          sendMessage(ws, createNormalizedMessage({ kind: 'status', text: 'token_budget', tokenBudget, sessionId: capturedSessionId || sessionId || null, provider: 'codex' }));
         }
       }
     }
@@ -442,7 +439,7 @@ async function queryCodex(
     const runAborted = runSession?.status === 'aborted' || abortController.signal.aborted;
     if (!runAborted) {
       sendMessage(ws, createCompleteMessage({
-        provider,
+        provider: 'codex',
         sessionId: capturedSessionId || sessionId || null,
         actualSessionId: capturedSessionId || thread.id || sessionId || null,
         exitCode: terminalFailure ? 1 : 0,
@@ -450,7 +447,7 @@ async function queryCodex(
       if (!terminalFailure) {
         notifyRunStopped({
           userId: ws?.userId || null,
-          provider,
+          provider: 'codex',
           sessionId: sessionId || capturedSessionId || null,
           sessionName: sessionSummary,
           stopReason: 'completed'
@@ -476,17 +473,17 @@ async function queryCodex(
           ? 'Codex CLI is not configured. Please set up authentication first.'
           : runError.message;
 
-        sendMessage(ws, createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider }));
+        sendMessage(ws, createNormalizedMessage({ kind: 'error', content: errorContent, sessionId: capturedSessionId || sessionId || null, provider: 'codex' }));
       }
       sendMessage(ws, createCompleteMessage({
-        provider,
+        provider: 'codex',
         sessionId: capturedSessionId || sessionId || null,
         exitCode: 1,
       }));
       if (!terminalFailure) {
         notifyRunFailed({
           userId: ws?.userId || null,
-          provider,
+          provider: 'codex',
           sessionId: sessionId || capturedSessionId || null,
           sessionName: sessionSummary,
           error
@@ -510,7 +507,7 @@ async function queryCodex(
  * @param {string} sessionId - Session ID to abort
  * @returns {boolean} - Whether abort was successful
  */
-function abortCodexSession(sessionId: string, activeCodexSessions: Map<string, ActiveCodexSession>) {
+function abortCodexSession(sessionId: string) {
   const session = activeCodexSessions.get(sessionId);
 
   if (!session) {
@@ -526,6 +523,12 @@ function abortCodexSession(sessionId: string, activeCodexSessions: Map<string, A
 
   return true;
 }
+
+/** Used by the providers module's CodexProvider to run and abort SDK turns. */
+export const codexRuntime = {
+  run: queryCodex,
+  abort: abortCodexSession,
+};
 
 /**
  * Helper to send message via WebSocket or writer
@@ -546,33 +549,21 @@ function sendMessage(ws: ProviderRuntimeWriter, data: unknown) {
   }
 }
 
-/** Codex and GPT Web reuse SDK execution while owning independent active-session maps. */
-export function createCodexSdkRuntime(provider: CodexProviderId = 'codex') {
-  const activeCodexSessions = new Map<string, ActiveCodexSession>();
-  // Clean up old completed sessions periodically
-  const completedSessionCleanupTimer = setInterval(() => {
-    const now = Date.now();
-    const maxAge = 30 * 60 * 1000; // 30 minutes
+// Clean up old completed sessions periodically
+const completedSessionCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  const maxAge = 30 * 60 * 1000; // 30 minutes
 
-    for (const [id, session] of activeCodexSessions.entries()) {
-      if (session.status !== 'running') {
-        const startedAt = new Date(session.startedAt).getTime();
-        if (now - startedAt > maxAge) {
-          activeCodexSessions.delete(id);
-        }
+  for (const [id, session] of activeCodexSessions.entries()) {
+    if (session.status !== 'running') {
+      const startedAt = new Date(session.startedAt).getTime();
+      if (now - startedAt > maxAge) {
+        activeCodexSessions.delete(id);
       }
     }
-  }, 5 * 60 * 1000); // Every 5 minutes
+  }
+}, 5 * 60 * 1000); // Every 5 minutes
 
-  // Runtime cleanup should not keep focused tests or one-off scripts alive after
-  // their provider work has completed.
-  completedSessionCleanupTimer.unref?.();
-  return {
-    run: (command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext) =>
-      queryCodex(command, options, writer, context, provider, activeCodexSessions),
-    abort: (sessionId: string) => abortCodexSession(sessionId, activeCodexSessions),
-  };
-}
-
-/** Default Codex profile keeps its existing SDK execution entrypoint. */
-export const codexRuntime = createCodexSdkRuntime();
+// Runtime cleanup should not keep focused tests or one-off scripts alive after
+// their provider work has completed.
+completedSessionCleanupTimer.unref?.();

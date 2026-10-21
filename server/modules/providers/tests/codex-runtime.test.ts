@@ -6,22 +6,7 @@ import { Codex } from '@openai/codex-sdk';
 import type { Thread, ThreadOptions } from '@openai/codex-sdk';
 
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
-import { AppError } from '@/shared/index.js';
 import type { ProviderRuntimeContext } from '@/shared/index.js';
-
-test('Codex SDK rejects unsupported image input before launching a thread', async t => {
-  const start = t.mock.method(Codex.prototype, 'startThread', () => { throw new Error('Must not start'); });
-  const context: ProviderRuntimeContext = {
-    resolveProviderSessionId: () => null, resolveResumeModel: async () => 'text-only',
-    getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'text-only' }), normalizeMessage: () => [], isProviderInstalled: async () => true,
-    validateModelInput: async (_model, attachments) => {
-      assert.deepEqual(attachments, [{ path: '/tmp/image.png' }]);
-      throw new AppError('Images are unsupported', { code: 'MODEL_IMAGES_NOT_SUPPORTED', statusCode: 400 });
-    },
-  };
-  await assert.rejects(codexRuntime.run('look', { images: [{ path: '/tmp/image.png' }] }, { send() {} }, context), /Images are unsupported/);
-  assert.equal(start.mock.callCount(), 0);
-});
 
 for (const resumed of [false, true]) {
   for (const permissionMode of [undefined, 'default', 'unknown', 'acceptEdits', 'bypassPermissions']) {

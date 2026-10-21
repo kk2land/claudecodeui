@@ -2,7 +2,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
-import { sessionSynchronizerService } from '@/modules/providers/index.js';
+import { sessionSynchronizerService, sessionsService } from '@/modules/providers/index.js';
 import { WS_OPEN_STATE, connectedClients } from '@/modules/websocket/index.js';
 import type { RealtimeClientConnection } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
@@ -128,7 +128,9 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
 }
 
 function readProjectSessionsIncludingArchived(projectPath: string): ProjectSessionsPageResult {
-  const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath) as SessionRepositoryRow[];
+  const providers = new Set<string>(sessionsService.listProviderIds());
+  const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath)
+    .filter((row) => providers.has(row.provider));
 
   return {
     sessions: rows.map(mapSessionRowToSummary),

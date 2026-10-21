@@ -1,10 +1,10 @@
-import type { CodexProviderId, AnyRecord, NormalizedMessage } from '@/shared/index.js';
+import type { AnyRecord, NormalizedMessage } from '@/shared/index.js';
 import { createNormalizedMessage, unifiedDiffToTexts, parseFilesInputTag } from '@/shared/index.js';
 
 /** Codex runtime uses this adapter for both progressive items and final item snapshots. */
-export function normalizeAppServerItem(item: AnyRecord, sessionId: string, turnId: string, provider: CodexProviderId = 'codex'): NormalizedMessage[] {
-  const id = `${provider}:${turnId}:${String(item.id)}`;
-  const base = { id, provider, sessionId, turnId };
+export function normalizeAppServerItem(item: AnyRecord, sessionId: string, turnId: string): NormalizedMessage[] {
+  const id = `codex:${turnId}:${String(item.id)}`;
+  const base = { id, provider: 'codex' as const, sessionId, turnId };
   const make = (fields: AnyRecord) => createNormalizedMessage({ ...base, kind: 'text', ...fields });
   const tool = (fields: AnyRecord) => {
     const rows = [make({ kind: 'tool_use', toolId: String(item.id), ...fields })];

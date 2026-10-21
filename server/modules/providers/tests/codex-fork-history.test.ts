@@ -74,6 +74,23 @@ test('metadata-only Codex forks show frozen inherited prompts, replies and edit 
   });
 });
 
+test('retained provider rows cannot shadow an indexed Codex fork history source', async () => {
+  await withRollouts(async (root) => {
+    const source = await rollout(root, 'shared-source', turn('turn-a', 'native source'));
+    await rollout(root, 'fork', [], await reference('shared-source', source));
+    const movedSource = path.join(root, 'retained-native-source.jsonl');
+    await writeFile(movedSource, await readFile(source));
+    await rm(source);
+    sessionsDb.createSession('shared-source', 'codex', root, 'Native', undefined, undefined, movedSource);
+    sessionsDb.createSession('shared-source', 'gptweb', root, 'Retired', undefined, '2099-01-01T00:00:00Z');
+
+    const provider = new CodexSessionsProvider();
+    const history = await provider.fetchHistory('fork');
+    assert.deepEqual(history.messages.map((message) => message.content), ['native source', 'answer: native source']);
+    assert.deepEqual(await provider.resolveEditAnchor('fork', 'turn-a'), { found: true, resumeThroughId: null });
+  });
+});
+
 test('forks of forks combine frozen ancestors and new local turns in order, including pagination', async () => {
   await withRollouts(async (root) => {
     const source = await rollout(root, 'source', turn('turn-a', 'first'));

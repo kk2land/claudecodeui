@@ -66,13 +66,8 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  * Use this as the source of truth whenever a function or payload needs to identify
  * a specific LLM integration.
  */
-export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh' | 'gptweb';
+export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
 
-//----------------- CODEX PROVIDER PROFILES ------------
-/** Codex protocol users with separate process, configuration and transcript ownership. */
-export type CodexProviderId = 'codex' | 'gptweb';
-
-// ---------------------------
 //----------------- DEEPSEEK HARNESS ------------
 /** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
 export type DshRuntimeMode = 'acp' | 'headless';
@@ -134,8 +129,6 @@ export type ProviderModelOption = {
   value: string;
   label: string;
   description?: string;
-  /** Explicit model input support; omitted for adapters without modality metadata. */
-  inputModalities?: Array<'text' | 'image'>;
   /** Stable SQLite row id used only by model-management actions. */
   recordId?: number;
   /** True for user-created rows; false for immutable CloudCLI defaults. */
@@ -764,8 +757,6 @@ export type CodexRpcFrame = {
 
 /** Injectable transport contract used by the native runtime and scripted protocol tests. */
 export type CodexRpcClient = {
-  /** Owned transports release their process when the runtime is closed. */
-  close?(): Promise<void>;
   readonly status?: NonNullable<CodexSessionState['diagnostics']>;
   request<T = AnyRecord>(method: string, params?: unknown): Promise<T>;
   onNotification(listener: (frame: CodexRpcFrame) => void): () => void;
@@ -801,8 +792,6 @@ export type ProviderRuntimeContext = {
     requestedModel?: string | null,
   ): Promise<string | undefined>;
   getProviderModels(): Promise<ProviderModelsDefinition>;
-  /** Runtime adapters validate attachments against the actual turn model before sending them. */
-  validateModelInput?(model: string | undefined, attachments: unknown): Promise<void>;
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   isProviderInstalled(): Promise<boolean>;
   /**

@@ -59,7 +59,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
   const formattedMessageContent = useMemo(
     () => {
       const content = formatUsageLimitText(String(message.content || ''));
-      return (provider === 'codex' || provider === 'gptweb') && message.type === 'assistant' && !message.isThinking
+      return provider === 'codex' && message.type === 'assistant' && !message.isThinking
         ? stripProposedPlanEnvelope(content)
         : content;
     },
@@ -225,9 +225,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                     ? t('messageTypes.tool')
                     : (provider === 'cursor'
                         ? t('messageTypes.cursor')
-                        : provider === 'gptweb'
-                          ? 'GPT Web'
-                          : provider === 'codex'
+                        : provider === 'codex'
                           ? t('messageTypes.codex')
                           : provider === 'dsh' ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' }) : provider === 'opencode'
                               ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })

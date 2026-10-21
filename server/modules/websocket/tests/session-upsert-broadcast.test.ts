@@ -140,14 +140,27 @@ test('a closed socket is skipped', async () => {
 test('copied threads broadcast the requested app session independently of the other provider', async () => {
   await withIsolatedDatabase(async () => {
     const codexId = sessionsDb.createSession('shared-thread', 'codex', '/workspace/native');
-    const webId = sessionsDb.createSession('shared-thread', 'gptweb', '/workspace/web', 'Web', undefined, '2099-01-01T00:00:00Z');
+    const dshId = sessionsDb.createSession('shared-thread', 'dsh', '/workspace/dsh', 'DSH', undefined, '2099-01-01T00:00:00Z');
     const connection = new FakeConnection();
     connectedClients.add(connection as never);
 
-    await broadcastSessionUpsertedBatch([codexId, webId]);
+    await broadcastSessionUpsertedBatch([codexId, dshId]);
 
     assert.deepEqual(connection.frames.map(frame => [frame.sessionId, frame.provider]), [
-      [codexId, 'codex'], [webId, 'gptweb'],
+      [codexId, 'codex'], [dshId, 'dsh'],
     ]);
+  });
+});
+
+test('retained GPT Web records are not broadcast into the sidebar', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('legacy-web', 'gptweb', '/workspace/legacy');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    await broadcastSessionUpserted('legacy-web');
+
+    assert.deepEqual(connection.frames, []);
+    assert.ok(sessionsDb.getSessionById('legacy-web'));
   });
 });

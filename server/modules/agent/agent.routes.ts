@@ -5,10 +5,10 @@ import express from 'express';
 
 import type { ProviderRunFunction } from '@/shared/types.js';
 
-import { isCodexProvider, normalizeProjectPath } from '@/shared/index.js';
+import { normalizeProjectPath } from '../../shared/utils.js';
 
 /** The providers an Agent API run can start: the ones with a runtime and a model catalog. */
-const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode', 'dsh', 'gptweb'];
+const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
 
 /** What the route reads off a session row it continues: the row, not the request, says which provider and project a session belongs to. */
 type AgentSessionRow = {
@@ -42,7 +42,6 @@ type AgentRouterDependencies = {
   queryCodex: ProviderRunFunction;
   queryOpenCode: ProviderRunFunction;
   queryDsh?: ProviderRunFunction;
-  queryGptweb?: ProviderRunFunction;
   GithubClient: typeof import('@octokit/rest').Octokit;
 };
 
@@ -895,7 +894,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
     }
 
     if (requestedProvider !== null && !AGENT_RUN_PROVIDERS.includes(requestedProvider)) {
-      return res.status(400).json({ error: `provider must be one of: ${AGENT_RUN_PROVIDERS.join(', ')}` });
+      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", "opencode", or "dsh"' });
     }
 
     // Validate GitHub branch/PR creation requirements
@@ -1062,11 +1061,10 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
           model: model || cursorDefaultModel,
           skipPermissions: true // Bypass permissions for Cursor
         }, run.writer);
-      } else if (isCodexProvider(provider)) {
-        const query = provider === 'gptweb' ? dependencies.queryGptweb : queryCodex;
-        if (!query) throw new Error('GPT Web runtime is not configured.');
+      } else if (provider === 'codex') {
+        console.log('🤖 Starting Codex SDK session');
 
-        await query(message.trim(), {
+        await queryCodex(message.trim(), {
           projectPath: finalProjectPath,
           cwd: finalProjectPath,
           sessionId: appSessionId,

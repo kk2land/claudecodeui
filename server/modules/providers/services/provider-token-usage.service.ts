@@ -7,7 +7,7 @@ import Database from 'better-sqlite3';
 
 import { sessionsDb } from '@/modules/database/index.js';
 import type { AnyRecord } from '@/shared/types.js';
-import { AppError, getCodexHome, isCodexProvider, getOpenCodeDatabasePath } from '@/shared/utils.js';
+import { AppError, getOpenCodeDatabasePath } from '@/shared/utils.js';
 
 type SessionRow = NonNullable<ReturnType<typeof sessionsDb.getSessionById>>;
 
@@ -460,12 +460,12 @@ export function createProviderTokenUsageService(
         return readOpenCodeTokenUsage(databasePath, providerSessionId);
       }
 
-      if (isCodexProvider(session.provider)) {
+      if (session.provider === 'codex') {
         const indexedFilePath = session.jsonl_path && dependencies.fileExists(session.jsonl_path)
           ? session.jsonl_path
           : null;
         const sessionFilePath = indexedFilePath ?? await findCodexSessionFile(
-          path.join(session.provider === 'gptweb' ? getCodexHome('gptweb') : path.join(dependencies.getHomeDirectory(), '.codex'), 'sessions'),
+          path.join(dependencies.getHomeDirectory(), '.codex', 'sessions'),
           providerSessionId,
           dependencies,
         );

@@ -1,16 +1,15 @@
+import os from 'node:os';
 import path from 'node:path';
-import { readFile, stat } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 
-import { appConfigDb, sessionsDb } from '@/modules/database/index.js';
+import { sessionsDb } from '@/modules/database/index.js';
 import {
   buildLookupMap,
-  getCodexHome,
   extractFirstValidJsonlData,
   findFilesRecursivelyCreatedAfter,
   normalizeSessionName,
   readFileTimestamps,
 } from '@/shared/utils.js';
-import type { CodexProviderId } from '@/shared/index.js';
 import type { IProviderSessionSynchronizer } from '@/shared/interfaces.js';
 
 type ParsedSession = {
@@ -23,38 +22,18 @@ type ParsedSession = {
  * Session indexer for Codex transcript artifacts.
  */
 export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
-  constructor(private readonly provider: CodexProviderId = 'codex') {}
-  private get codexHome() { return getCodexHome(this.provider); }
+  private readonly provider = 'codex' as const;
+  private readonly codexHome = path.join(os.homedir(), '.codex');
 
   /**
    * Scans ~/.codex/sessions and upserts discovered sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
-    const home = this.codexHome;
-    const sessionsRoot = path.join(home, 'sessions');
-    const boundary = new Date();
-    // Optional homes can be enabled after the global scan cursor has advanced.
-    // Persist their own progress, keyed by home, so each new profile starts with
-    // a full scan and restarts can continue incrementally.
-    const scanKey = this.provider === 'gptweb' ? `session_scan:gptweb:${home}` : null;
-    if (scanKey) {
-      try {
-        if (!(await stat(sessionsRoot)).isDirectory()) throw new Error('GPT Web sessions path is not a directory.');
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
-        throw error;
-      }
-      const stored = appConfigDb.get(scanKey);
-      const checkpoint = stored ? new Date(stored) : null;
-      since = checkpoint && Number.isFinite(checkpoint.getTime()) ? checkpoint : undefined;
-    }
-    const nameMap = await buildLookupMap(path.join(home, 'session_index.jsonl'), 'id', 'thread_name');
+    const nameMap = await buildLookupMap(path.join(this.codexHome, 'session_index.jsonl'), 'id', 'thread_name');
     const files = await findFilesRecursivelyCreatedAfter(
-      sessionsRoot,
+      path.join(this.codexHome, 'sessions'),
       '.jsonl',
-      since ?? null,
-      [],
-      this.provider === 'gptweb',
+      since ?? null
     );
 
     let processed = 0;
@@ -86,7 +65,6 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
       processed += 1;
     }
 
-    if (scanKey) appConfigDb.set(scanKey, boundary.toISOString());
     return processed;
   }
 

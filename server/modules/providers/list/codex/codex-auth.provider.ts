@@ -1,12 +1,12 @@
 import { readFile } from 'node:fs/promises';
+import os from 'node:os';
 import path from 'node:path';
 
 import spawn from 'cross-spawn';
 
-import type { CodexProviderId } from '@/shared/index.js';
 import type { IProviderAuth } from '@/shared/interfaces.js';
 import type { ProviderAuthStatus } from '@/shared/types.js';
-import { getCodexHome, getCodexProcessEnv, readObjectRecord, readOptionalString } from '@/shared/utils.js';
+import { readObjectRecord, readOptionalString } from '@/shared/utils.js';
 
 type CodexCredentialsStatus = {
   authenticated: boolean;
@@ -15,15 +15,13 @@ type CodexCredentialsStatus = {
   error?: string;
 };
 
-/** Codex provider composition uses this adapter to inspect CLI availability and profile credentials. */
 export class CodexProviderAuth implements IProviderAuth {
-  constructor(private readonly provider: CodexProviderId = 'codex') {}
   /**
    * Checks whether Codex is available to the server runtime.
    */
   private checkInstalled(): boolean {
     try {
-      spawn.sync('codex', ['--version'], { stdio: 'ignore', timeout: 5000, env: getCodexProcessEnv(this.provider) });
+      spawn.sync('codex', ['--version'], { stdio: 'ignore', timeout: 5000 });
       return true;
     } catch {
       return false;
@@ -39,7 +37,7 @@ export class CodexProviderAuth implements IProviderAuth {
 
     return {
       installed,
-      provider: this.provider,
+      provider: 'codex',
       authenticated: credentials.authenticated,
       email: credentials.email,
       method: credentials.method,
@@ -52,7 +50,7 @@ export class CodexProviderAuth implements IProviderAuth {
    */
   private async checkCredentials(): Promise<CodexCredentialsStatus> {
     try {
-      const authPath = path.join(getCodexHome(this.provider), 'auth.json');
+      const authPath = path.join(os.homedir(), '.codex', 'auth.json');
       const content = await readFile(authPath, 'utf8');
       const auth = readObjectRecord(JSON.parse(content)) ?? {};
       const tokens = readObjectRecord(auth.tokens) ?? {};
