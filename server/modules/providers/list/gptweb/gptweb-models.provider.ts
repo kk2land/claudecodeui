@@ -19,6 +19,11 @@ export class GptwebModelsProvider extends CodexProviderModels {
     private readonly fetchModels: typeof fetch = fetch,
   ) { super('gptweb', home); }
 
+  /** Providers' model service uses this predicate to enforce Web-only routing for every selection. */
+  isModelIdSupported(model: string): boolean {
+    return model.startsWith('chatgpt-web/') && model.length > 'chatgpt-web/'.length;
+  }
+
   override async getSupportedModels(): Promise<ProviderModelsDefinition> {
     const home = this.home;
     let config: AnyRecord;
@@ -101,7 +106,7 @@ export class GptwebModelsProvider extends CodexProviderModels {
     for (const raw of catalog.models) {
       const model = readObjectRecord(raw);
       const id = readOptionalString(model?.slug);
-      if (!id?.startsWith('chatgpt-web/') || model?.visibility !== 'list' || seen.has(id)) continue;
+      if (!id || !this.isModelIdSupported(id) || model?.visibility !== 'list' || seen.has(id)) continue;
       seen.add(id);
       const levels = Array.isArray(model.supported_reasoning_levels)
         ? model.supported_reasoning_levels.flatMap((level: unknown) => {
@@ -114,6 +119,9 @@ export class GptwebModelsProvider extends CodexProviderModels {
         value: id,
         label: readOptionalString(model.display_name) ?? id,
         description: readOptionalString(model.description),
+        ...(Array.isArray(model.input_modalities) ? { inputModalities: model.input_modalities.filter(
+          (value: unknown): value is 'text' | 'image' => value === 'text' || value === 'image',
+        ) } : {}),
         ...(levels.length ? { effort: {
           ...(defaultEffort && levels.some(level => level.value === defaultEffort) ? { default: defaultEffort } : {}),
           values: levels,

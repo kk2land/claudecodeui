@@ -134,6 +134,8 @@ export type ProviderModelOption = {
   value: string;
   label: string;
   description?: string;
+  /** Explicit model input support; omitted for adapters without modality metadata. */
+  inputModalities?: Array<'text' | 'image'>;
   /** Stable SQLite row id used only by model-management actions. */
   recordId?: number;
   /** True for user-created rows; false for immutable CloudCLI defaults. */
@@ -799,6 +801,8 @@ export type ProviderRuntimeContext = {
     requestedModel?: string | null,
   ): Promise<string | undefined>;
   getProviderModels(): Promise<ProviderModelsDefinition>;
+  /** Runtime adapters validate attachments against the actual turn model before sending them. */
+  validateModelInput?(model: string | undefined, attachments: unknown): Promise<void>;
   normalizeMessage(raw: unknown, sessionId: string | null): NormalizedMessage[];
   isProviderInstalled(): Promise<boolean>;
   /**

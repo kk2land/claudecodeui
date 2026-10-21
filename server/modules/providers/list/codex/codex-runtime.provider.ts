@@ -282,6 +282,7 @@ async function queryCodex(
   const providerSessionId = context.resolveProviderSessionId(sessionId);
 
   const resolvedModel = await context.resolveResumeModel(sessionId, model);
+  await context.validateModelInput?.(resolvedModel, options.attachments ?? [...(images ?? []), ...(files ?? [])]);
 
   const workingDirectory = cwd || projectPath || process.cwd();
   const { sandboxMode, approvalPolicy } = mapPermissionModeToCodexOptions(permissionMode);

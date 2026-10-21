@@ -106,7 +106,14 @@ const mergeProviderModels = (
   custom: CustomProviderModelRecord[],
   customModelsOnly: boolean,
 ): ProviderModelsDefinition => {
-  const customOptions = custom.map(toCustomProviderModelOption);
+  const customOptions = custom.map(record => {
+    const discovered = predefined.OPTIONS.find(option => option.value === record.modelId);
+    return {
+      ...toCustomProviderModelOption(record),
+      // Labels and effort are editable; discovered input limits still apply.
+      ...(discovered?.inputModalities ? { inputModalities: discovered.inputModalities } : {}),
+    };
+  });
   const customIds = new Set(customOptions.map((option) => option.value));
   const listOnlyCustomModels = customModelsOnly && customOptions.length > 0;
   return {
@@ -182,6 +189,21 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   const sessions = dependencies.sessions ?? sessionsDb;
   const settings = dependencies.settings ?? appConfigDb;
 
+  const assertModelSupported = (provider: LLMProvider, model: string): void => {
+    if (resolveProvider(provider).models.isModelIdSupported?.(model) === false) {
+      throw new AppError(`Model "${model}" cannot run with ${provider}. Select a model from this provider's catalog.`, {
+        code: 'UNSUPPORTED_PROVIDER_MODEL', statusCode: 400,
+      });
+    }
+  };
+
+  // Old custom rows remain recoverable/editable, but cannot reintroduce a model
+  // outside a provider's routing boundary through the custom-only toggle.
+  const readCustomModels = (provider: LLMProvider): CustomProviderModelRecord[] => (
+    catalog.listCustomProviderModels(provider).filter(record =>
+      resolveProvider(provider).models.isModelIdSupported?.(record.modelId) !== false)
+  );
+
   const isCustomModelsOnly = (provider: LLMProvider): boolean => (
     settings.get(customModelsOnlyConfigKey(provider)) === 'true'
   );
@@ -193,7 +215,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   ): ProviderModelsDefinition => mergeProviderModels(
     provider,
     predefined,
-    catalog.listCustomProviderModels(provider),
+    readCustomModels(provider),
     isCustomModelsOnly(provider),
   );
 
@@ -266,6 +288,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
   ): Promise<{ model: ProviderModelOption; models: ProviderModelsDefinition }> => {
     const predefined = await resolveProvider(provider).models.getSupportedModels();
     const normalized = normalizeCustomModelInput(input);
+    assertModelSupported(provider, normalized.id);
     assertModelIdAvailable(provider, predefined, normalized.id);
     assertEffortLevelsSupported(provider, normalized);
 
@@ -294,6 +317,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     const predefined = await resolveProvider(provider).models.getSupportedModels();
     const existing = readCustomModel(provider, recordId);
     const normalized = normalizeCustomModelInput(input);
+    assertModelSupported(provider, normalized.id);
     assertModelIdAvailable(provider, predefined, normalized.id, existing);
     assertEffortLevelsSupported(provider, normalized);
 
@@ -332,7 +356,7 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     const remainingCatalog = mergeProviderModels(
       provider,
       predefined,
-      catalog.listCustomProviderModels(provider).filter((record) => record.recordId !== recordId),
+      readCustomModels(provider).filter((record) => record.recordId !== recordId),
       isCustomModelsOnly(provider),
     );
     // Removing a custom override can reveal a discovered row with the same ID.
@@ -387,6 +411,8 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     if (!normalizedSessionId || !normalizedModel) {
       return null;
     }
+
+    assertModelSupported(provider, normalizedModel);
 
     const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
     if (!recordedSelection) {
@@ -451,10 +477,12 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     const normalizedRequestedModel = typeof options.requestedModel === 'string'
       ? options.requestedModel.trim()
       : '';
+    if (normalizedRequestedModel) assertModelSupported(provider, normalizedRequestedModel);
 
     if (normalizedSessionId) {
       const recordedSelection = readRecordedSessionSelection(normalizedSessionId);
       if (recordedSelection?.model) {
+        assertModelSupported(provider, recordedSelection.model);
         return {
           provider,
           sessionId: normalizedSessionId,
@@ -521,15 +549,22 @@ export const createProviderModelsService = (dependencies: ProviderModelsServiceD
     sessionId: string | undefined,
     requestedModel?: string | null,
   ): Promise<string | undefined> => {
-    void provider;
     const normalizedRequestedModel = typeof requestedModel === 'string' ? requestedModel.trim() : '';
     const normalizedSessionId = sessionId?.trim();
-    if (!normalizedSessionId) {
-      return normalizedRequestedModel || undefined;
+    const recordedModel = normalizedSessionId ? readRecordedSessionSelection(normalizedSessionId)?.model : null;
+    const resolvedModel = recordedModel || normalizedRequestedModel;
+    if (resolvedModel) {
+      assertModelSupported(provider, resolvedModel);
+      return resolvedModel;
     }
-
-    const recordedModel = readRecordedSessionSelection(normalizedSessionId)?.model;
-    return recordedModel || normalizedRequestedModel || undefined;
+    // A constrained provider must not let the CLI silently choose an unrelated
+    // native model from config.toml when a client omits the model option.
+    if (resolveProvider(provider).models.isModelIdSupported) {
+      const model = (await getProviderModels(provider)).DEFAULT;
+      assertModelSupported(provider, model);
+      return model;
+    }
+    return undefined;
   };
 
   return {

@@ -209,6 +209,7 @@
     "disabled": "Input disabled",
     "attachFiles": "Attach files",
     "attachImages": "Attach images",
+    "imagesNotSupported": "The selected model does not support images. Choose another model or remove the images.",
     "send": "Send",
     "stop": "Stop",
     "hintText": {

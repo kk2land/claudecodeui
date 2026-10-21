@@ -284,6 +284,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.settings.update(sessionId, { mode: options.collaborationMode });
     }
     session.model = await context.resolveResumeModel(sessionId, options.model) ?? session.model;
+    await context.validateModelInput?.(session.model, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
     if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
       writer.send({ ...createCompleteMessage({ provider: this.provider, sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
@@ -618,6 +619,14 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (action.action === 'steer') {
       const session = this.sessions.get(sessionId);
       if (!session || session.stopRequested || !session.turn || session.turn.terminal || session.turn.id !== action.expectedTurnId) {
+        throw new AppError('The target turn ended or is stopping. Your message is still queued.', { code: 'STALE_TURN', statusCode: 409 });
+      }
+      const targetTurn = session.turn;
+      await session.context.validateModelInput?.(session.model, action.attachments);
+      // Catalog lookup can outlive the turn or an explicit process stop. Check
+      // again before request(), which may otherwise lazily restart app-server.
+      if (this.sessions.get(sessionId) !== session || session.stopRequested || session.turn !== targetTurn
+        || targetTurn.terminal || targetTurn.id !== action.expectedTurnId) {
         throw new AppError('The target turn ended or is stopping. Your message is still queued.', { code: 'STALE_TURN', statusCode: 409 });
       }
       await this.client.request('turn/steer', { threadId: session.threadId, expectedTurnId: action.expectedTurnId,

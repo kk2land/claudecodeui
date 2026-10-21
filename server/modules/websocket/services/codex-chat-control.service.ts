@@ -114,7 +114,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Only an explicit RPC rejection proves non-delivery; disconnects and timeouts remain held.
-    const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL'].includes(error.code));
+    const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL', 'MODEL_IMAGES_NOT_SUPPORTED', 'MODEL_INPUT_VALIDATION_FAILED', 'UNSUPPORTED_PROVIDER_MODEL'].includes(error.code));
     const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;
     return { ...response, ok: delivery === 'accepted', error: delivery === 'accepted' ? undefined : message, delivery,
       codexState: sessionId && provider ? runtime.getState?.(provider!, sessionId) : undefined };

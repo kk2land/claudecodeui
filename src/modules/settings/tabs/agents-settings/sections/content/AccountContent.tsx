@@ -115,6 +115,7 @@ function SubscriptionOverrideNotice({ override }: SubscriptionOverrideNoticeProp
 export default function AccountContent({ agent, authStatus, onLogin }: AccountContentProps) {
   const { t } = useTranslation('settings');
   const config = agentConfig[agent];
+  const isGptweb = agent === 'gptweb';
 
   return (
     <div className="space-y-6">
@@ -141,7 +142,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                 {authStatus.loading ? (
                   t('agents.authStatus.checkingAuth')
                 ) : authStatus.authenticated ? (
-                  t('agents.authStatus.loggedInAs', {
+                  isGptweb ? t('auth:gptweb.catalogConnected') : t('agents.authStatus.loggedInAs', {
                     email: authStatus.email || t('agents.authStatus.authenticatedUser'),
                   })
                 ) : (
@@ -166,6 +167,10 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
             </div>
           </div>
 
+          {isGptweb && authStatus.authenticated && !authStatus.loading && (
+            <p className="text-sm text-muted-foreground">{t('auth:gptweb.verificationRequired')}</p>
+          )}
+
           {!authStatus.loading && authStatus.subscriptionOverride && (
             <SubscriptionOverrideNotice override={authStatus.subscriptionOverride} />
           )}
@@ -175,10 +180,10 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
               <div className="flex items-center justify-between">
                 <div>
                   <div className={`font-medium ${config.textClass}`}>
-                    {authStatus.authenticated ? t('agents.login.reAuthenticate') : t('agents.login.title')}
+                    {isGptweb ? t('auth:gptweb.setupButton') : authStatus.authenticated ? t('agents.login.reAuthenticate') : t('agents.login.title')}
                   </div>
                   <div className={`text-sm ${config.subtextClass}`}>
-                    {authStatus.authenticated
+                    {isGptweb ? t('auth:gptweb.setupDescription') : authStatus.authenticated
                       ? t('agents.login.reAuthDescription')
                       : t('agents.login.description', { agent: config.name })}
                   </div>
@@ -189,7 +194,7 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
                   size="sm"
                 >
                   <LogIn className="mr-2 h-4 w-4" />
-                  {authStatus.authenticated ? t('agents.login.reLoginButton') : t('agents.login.button')}
+                  {isGptweb ? t('auth:gptweb.setupButton') : authStatus.authenticated ? t('agents.login.reLoginButton') : t('agents.login.button')}
                 </Button>
               </div>
             </div>

@@ -1,6 +1,7 @@
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { AppError, isImageAttachmentDescriptor, normalizeAttachmentDescriptors } from '@/shared/index.js';
 import type {
   AnyRecord,
   CodexControlAction,
@@ -52,6 +53,25 @@ export function createProviderRuntimeService(
     resolveResumeModel: (sessionId, requestedModel) =>
       dependencies.resolveResumeModel(provider.id, sessionId, requestedModel),
     getProviderModels: async () => dependencies.getProviderModels(provider.id),
+    async validateModelInput(model, attachments) {
+      if (!normalizeAttachmentDescriptors(attachments).some(isImageAttachmentDescriptor)) return;
+      let catalog: Awaited<ReturnType<typeof dependencies.getProviderModels>>;
+      try {
+        catalog = await dependencies.getProviderModels(provider.id);
+      } catch (error) {
+        // Validation failed before any RPC was sent. Steer delivery must remain
+        // rejected/retryable rather than being recorded as an uncertain send.
+        throw new AppError(error instanceof Error ? error.message : 'Could not validate image support.', {
+          code: 'MODEL_INPUT_VALIDATION_FAILED', statusCode: error instanceof AppError ? error.statusCode : 503,
+        });
+      }
+      const option = catalog.OPTIONS.find(entry => entry.value === model);
+      if (option?.inputModalities && !option.inputModalities.includes('image')) {
+        throw new AppError('The selected model does not support image input. Choose another model or remove the images.', {
+          code: 'MODEL_IMAGES_NOT_SUPPORTED', statusCode: 400,
+        });
+      }
+    },
     normalizeMessage: (raw, sessionId) => provider.sessions.normalizeMessage(raw, sessionId),
     async isProviderInstalled() {
       try {

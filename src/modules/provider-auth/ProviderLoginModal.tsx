@@ -90,7 +90,8 @@ export default function ProviderLoginModal({
     <div className="fixed inset-0 z-[9999] flex items-center justify-center bg-black/50 p-4" data-escape-layer>
       <div className="max-w-md rounded-lg border bg-background p-6 text-foreground">
         <h2 className="text-lg font-semibold">GPT Web</h2>
-        <p className="my-4 text-sm">{t('gptwebSetup', { defaultValue: 'Start codex-chatgpt-web and finish its ChatGPT sign-in. Configure the directory selected by CODEX_GPTWEB_HOME, then reconnect.' })}</p>
+        <p className="my-4 text-sm">{t('auth:gptweb.setupDescription')}</p>
+        <p className="my-4 text-sm">{t('auth:gptweb.verificationRequired')}</p>
         <button type="button" onClick={onClose} className="rounded border px-4 py-2">{t('common.close', { defaultValue: 'Close' })}</button>
       </div>
     </div>

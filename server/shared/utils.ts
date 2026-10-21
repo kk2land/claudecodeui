@@ -1108,12 +1108,15 @@ export function sanitizeLeafDirectoryName(inputName: string, label = 'directory 
  * home directories. Pass `lastScanAt` to include only files created after the
  * previous scan, or pass `null` to perform a full rescan. Missing directories
  * are treated as empty because not every provider exists on every machine.
+ * Set `throwOnError` when a persisted cursor must advance only after a complete
+ * traversal; filesystem errors, including a disappearing subtree, then propagate.
  */
 export async function findFilesRecursivelyCreatedAfter(
   rootDir: string,
   extension: string,
   lastScanAt: Date | null,
-  fileList: string[] = []
+  fileList: string[] = [],
+  throwOnError = false,
 ): Promise<string[]> {
   try {
     const entries = await readdir(rootDir, { withFileTypes: true });
@@ -1121,7 +1124,7 @@ export async function findFilesRecursivelyCreatedAfter(
       const fullPath = path.join(rootDir, entry.name);
 
       if (entry.isDirectory()) {
-        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList);
+        await findFilesRecursivelyCreatedAfter(fullPath, extension, lastScanAt, fileList, throwOnError);
         continue;
       }
 
@@ -1139,7 +1142,8 @@ export async function findFilesRecursivelyCreatedAfter(
         fileList.push(fullPath);
       }
     }
-  } catch {
+  } catch (error) {
+    if (throwOnError) throw error;
     // Missing provider folders are expected in first-run or partial setups.
   }
 

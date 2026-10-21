@@ -196,6 +196,7 @@
     "disabled": "输入已禁用",
     "attachFiles": "附加文件",
     "attachImages": "附加图片",
+    "imagesNotSupported": "当前模型不支持图片，请更换模型或移除图片。",
     "send": "发送",
     "stop": "停止",
     "hintText": {

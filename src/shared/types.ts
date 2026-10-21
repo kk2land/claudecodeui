@@ -20,6 +20,8 @@ export type ProviderModelOption = {
   value: string;
   label: string;
   description?: string;
+  /** Explicit input support; omission preserves the provider's existing attachment behavior. */
+  inputModalities?: Array<'text' | 'image'>;
   recordId?: number;
   isCustom?: boolean;
   effort?: {

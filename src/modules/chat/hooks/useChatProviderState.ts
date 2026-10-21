@@ -702,6 +702,9 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     () => providerModelCatalog[provider]?.OPTIONS ?? [],
     [provider, providerModelCatalog],
   );
+  const selectedModelOption = getModelOption(provider, currentProviderModel);
+  const supportsImages = providerCapabilities?.[provider]?.supportsImages !== false
+    && selectedModelOption?.inputModalities?.includes('image') !== false;
 
   const applyProviderCatalog = useCallback((
     targetProvider: LLMProvider,
@@ -845,5 +848,6 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
+    supportsImages,
   };
 }

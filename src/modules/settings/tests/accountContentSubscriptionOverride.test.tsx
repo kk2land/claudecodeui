@@ -84,3 +84,11 @@ describe('AccountContent subscription override notice', () => {
     expect(screen.queryByTestId(NOTICE)).toBeNull();
   });
 });
+
+it('GPT Web reports model-service connectivity without claiming the browser login or tools were verified', () => {
+  render(<AccountContent agent="gptweb" authStatus={apiKeyStatus({ email: null, method: 'bridge_catalog' })} onLogin={() => {}} />);
+  expect(screen.getByText('Model service connected')).toBeTruthy();
+  expect(screen.queryByText(/Logged in as/)).toBeNull();
+  expect(screen.getByText(/browser sign-in and local tool access have not been verified/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: /Setup instructions/ })).toBeTruthy();
+});

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createProviderModelsService } from '@/modules/providers/services/provider-models.service.js';
+import { GptwebModelsProvider } from '@/modules/providers/list/gptweb/gptweb-models.provider.js';
 import type {
   CustomProviderModelInput,
   CustomProviderModelRecord,
@@ -129,6 +130,7 @@ const createTestService = (options: {
   activeModel?: (provider: LLMProvider, sessionId?: string) => string;
   onCatalogRead?: (provider: LLMProvider) => void;
   models?: (provider: LLMProvider) => ProviderModelsDefinition;
+  isModelIdSupported?: (provider: LLMProvider, model: string) => boolean;
 } = {}) => {
   const catalog = options.catalog ?? createCatalogStore();
   const sessions = options.sessions ?? createSessionStore();
@@ -139,6 +141,7 @@ const createTestService = (options: {
     settings,
     resolveProvider: (provider) => ({
       models: {
+        ...(options.isModelIdSupported ? { isModelIdSupported: (model: string) => options.isModelIdSupported!(provider, model) } : {}),
         getSupportedModels: async () => {
           options.onCatalogRead?.(provider);
           return options.models?.(provider) ?? createModels(`${provider}-default`);
@@ -167,6 +170,51 @@ test('provider catalogs merge source-controlled defaults with custom persistence
     isCustom: false,
   });
   assert.deepEqual(catalog.rows.get('codex'), undefined);
+});
+
+test('GPT Web cannot reintroduce native models through custom entries or the custom-only toggle', async () => {
+  const adapter = new GptwebModelsProvider('/unused');
+  const { service, catalog } = createTestService({
+    models: () => createModels('chatgpt-web/current'),
+    isModelIdSupported: (_provider, model) => adapter.isModelIdSupported(model),
+  });
+  const unsupported = (error: unknown) => error instanceof AppError && error.code === 'UNSUPPORTED_PROVIDER_MODEL';
+  await assert.rejects(service.createCustomModel('gptweb', { id: 'gpt-5.6-sol', model: 'Native' }), unsupported);
+  // Simulate an existing row created before this validation was introduced.
+  const legacy = catalog.createCustomProviderModel('gptweb', { id: 'native-old', model: 'Old native' });
+  const toggled = await service.setCustomModelsOnly('gptweb', true);
+  assert.equal(toggled.DEFAULT, 'chatgpt-web/current');
+  assert.deepEqual(toggled.OPTIONS.map(option => option.value), ['chatgpt-web/current']);
+  await assert.rejects(service.updateCustomModel('gptweb', legacy.recordId, { id: 'native-new', model: 'Native' }), unsupported);
+  await service.updateCustomModel('gptweb', legacy.recordId, { id: 'chatgpt-web/custom', model: 'Web' });
+  assert.equal((await service.getProviderModels('gptweb')).DEFAULT, 'chatgpt-web/custom');
+});
+
+test('GPT Web validates saved and requested execution models while preserving hidden Web sessions', async () => {
+  const adapter = new GptwebModelsProvider('/unused');
+  const sessions = createSessionStore({ unsafe: 'gpt-5.6-sol', hidden: 'chatgpt-web/legacy', empty: null });
+  const { service } = createTestService({ sessions,
+    models: () => createModels('chatgpt-web/current'),
+    isModelIdSupported: (_provider, model) => adapter.isModelIdSupported(model),
+  });
+  const unsupported = (error: unknown) => error instanceof AppError && error.code === 'UNSUPPORTED_PROVIDER_MODEL';
+  assert.throws(() => service.setSessionModel('gptweb', 'empty', 'gpt-5.6-sol'), unsupported);
+  await assert.rejects(service.resolveResumeModel('gptweb', 'unsafe'), unsupported);
+  await assert.rejects(service.resolveResumeModel('gptweb', undefined, 'gpt-5.6-sol'), unsupported);
+  await assert.rejects(service.resolveSessionModel('gptweb', { sessionId: 'empty', requestedModel: 'native' }), unsupported);
+  assert.equal(await service.resolveResumeModel('gptweb', 'hidden'), 'chatgpt-web/legacy');
+  assert.equal(await service.resolveResumeModel('gptweb', 'empty'), 'chatgpt-web/current');
+  assert.equal(await service.resolveResumeModel('gptweb', undefined), 'chatgpt-web/current');
+});
+
+test('custom labels cannot override discovered model input limits', async () => {
+  const { service, catalog } = createTestService({ models: () => ({
+    DEFAULT: 'chatgpt-web/manual', OPTIONS: [{ value: 'chatgpt-web/manual', label: 'Manual', inputModalities: ['text'] }],
+  }) });
+  catalog.createCustomProviderModel('gptweb', { id: 'chatgpt-web/manual', model: 'Custom label' });
+  const models = await service.getProviderModels('gptweb');
+  assert.equal(models.OPTIONS[0].label, 'Custom label');
+  assert.deepEqual(models.OPTIONS[0].inputModalities, ['text']);
 });
 
 test('the custom-models-only flag is off by default and leaves the merged catalog unchanged', async () => {

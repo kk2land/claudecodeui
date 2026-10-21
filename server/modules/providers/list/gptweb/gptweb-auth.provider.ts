@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import type { IProviderAuth, IProviderModels } from '@/shared/index.js';
 import type { ProviderAuthStatus } from '@/shared/types.js';
 
-/** GPT Web reports its separately configured bridge connection without starting a default-home login flow. */
+/** GPT Web checks model-service credentials; bridge_catalog does not verify the browser login or Full harness. */
 export class GptwebAuthProvider implements IProviderAuth {
   constructor(private readonly models: IProviderModels) {}
 

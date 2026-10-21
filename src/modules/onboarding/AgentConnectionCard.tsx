@@ -30,7 +30,7 @@ export default function AgentConnectionCard({
   const statusText = status.loading
     ? t('onboarding.checking')
     : status.authenticated
-      ? status.email || t('onboarding.connected')
+      ? provider === 'gptweb' ? t('gptweb.catalogConnected') : status.email || t('onboarding.connected')
       : status.error || t('onboarding.notConnected');
 
   return (
@@ -47,6 +47,9 @@ export default function AgentConnectionCard({
               {status.authenticated && <Check className="h-3.5 w-3.5 flex-shrink-0 text-emerald-500" />}
             </div>
             <div className="truncate text-xs text-muted-foreground" title={statusText}>{statusText}</div>
+            {provider === 'gptweb' && status.authenticated && !status.loading && (
+              <p className="mt-1 text-xs text-muted-foreground">{t('gptweb.verificationRequired')}</p>
+            )}
           </div>
         </div>
 

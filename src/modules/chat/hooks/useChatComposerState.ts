@@ -48,6 +48,8 @@ type UseChatComposerStateArgs = {
    */
   currentProviderModel: string;
   currentProviderEffort: string;
+  /** The selected model's image capability, refreshed when its catalog or selection changes. */
+  supportsImages?: boolean;
   codexControls?: CodexControls;
   /** Managed providers share allocation and finish pending runtime changes before sending. */
   prepareSessionForSend?: (initialMessage: string) => Promise<string | null>;
@@ -111,7 +113,9 @@ const createFakeSubmitEvent = () => {
 const MAX_ATTACHMENT_COUNT = 10;
 const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
 
-const isImageAttachment = (attachment: ChatAttachment) => {
+const isImageAttachment = (attachment: ChatAttachment | File) => {
+  if ('type' in attachment && attachment.type.startsWith('image/')) return true;
+  if (!('path' in attachment)) return /\.(gif|jpe?g|png|svg|webp)$/i.test(attachment.name || '');
   if (attachment.mimeType?.startsWith('image/')) return true;
   return /\.(gif|jpe?g|png|svg|webp)$/i.test(attachment.path || attachment.name || '');
 };
@@ -194,6 +198,7 @@ export function useChatComposerState({
   resolvePermissionModeForProvider,
   currentProviderModel,
   currentProviderEffort,
+  supportsImages = true,
   isLoading,
   codexControls,
   prepareSessionForSend,
@@ -599,6 +604,11 @@ export function useChatComposerState({
           return false;
         }
 
+        if (!supportsImages && isImageAttachment(file)) {
+          setFileErrors(previous => new Map(previous).set(file.name, t('input.imagesNotSupported')));
+          return false;
+        }
+
         if (file.size > MAX_ATTACHMENT_SIZE) {
           const fileName = file.name || 'Unknown file';
           setFileErrors((previous) => {
@@ -619,7 +629,7 @@ export function useChatComposerState({
     if (validFiles.length > 0) {
       setAttachedFiles((previous) => [...previous, ...validFiles].slice(0, MAX_ATTACHMENT_COUNT));
     }
-  }, []);
+  }, [supportsImages, t]);
 
   const handlePaste = useCallback(
     (event: ClipboardEvent<HTMLTextAreaElement>) => {
@@ -791,6 +801,17 @@ export function useChatComposerState({
         )
         || !selectedProject
       ) {
+        return;
+      }
+
+      // A model can change after files were attached. Keep the draft intact
+      // and explain the mismatch before uploading or allocating a session.
+      // Queued sends retain their own model and are checked by the backend.
+      if (!queuedSubmission && !supportsImages && (
+        currentAttachments.some(isImageAttachment)
+        || (previouslyUploadedAttachments as ChatAttachment[]).some(isImageAttachment)
+      )) {
+        addMessage({ type: 'error', content: t('input.imagesNotSupported'), timestamp: new Date() });
         return;
       }
 
@@ -1109,6 +1130,7 @@ export function useChatComposerState({
       addMessage,
       setIsUserScrolledUp,
       slashCommands,
+      supportsImages,
       t,
     ],
   );

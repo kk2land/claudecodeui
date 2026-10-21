@@ -40,6 +40,20 @@ test('GPT Web discovers only visible bridge models with their actual effort and 
   } finally { await rm(home, { recursive: true, force: true }); }
 });
 
+test('GPT Web retains per-model input modalities instead of assuming every Web model accepts images', async () => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'gptweb-inputs-'));
+  try {
+    await writeFile(path.join(home, 'config.toml'), 'openai_base_url = "http://localhost:17841/v1"');
+    const models = new GptwebModelsProvider(home, (async () => Response.json({ models: [
+      { ...webModel, slug: 'chatgpt-web/manual', input_modalities: ['text'] },
+      { ...webModel, slug: 'chatgpt-web/automatic', input_modalities: ['text', 'image', 'unknown'] },
+    ] })) as typeof fetch);
+    assert.deepEqual((await models.getSupportedModels()).OPTIONS.map(option => option.inputModalities), [
+      ['text'], ['text', 'image'],
+    ]);
+  } finally { await rm(home, { recursive: true, force: true }); }
+});
+
 test('GPT Web reads an active custom-provider profile without rewriting configuration', async () => {
   const home = await mkdtemp(path.join(os.tmpdir(), 'gptweb-profile-'));
   const original = process.env.GPTWEB_TEST_KEY;

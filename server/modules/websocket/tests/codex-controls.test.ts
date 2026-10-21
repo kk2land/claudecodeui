@@ -184,6 +184,22 @@ test('a rejected steer preserves the message until an explicit queue resume', as
   });
 });
 
+for (const code of ['MODEL_IMAGES_NOT_SUPPORTED', 'MODEL_INPUT_VALIDATION_FAILED']) {
+test(`local model validation (${code}) rejects steer without marking delivery uncertain or losing the draft`, async () => {
+  await harness(async h => {
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: 'keep my draft', queuedMessage: queued });
+    h.runtime.control = async () => { throw new AppError('Cannot send images', { code, statusCode: 400 }); };
+    h.send({ action: 'steer', messageId: queued.id, expectedTurnId: 't1' });
+    await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'rejected');
+    const draft = sessionDraftsDb.getDrafts(h.userId)[0];
+    assert.equal(draft.text, 'keep my draft');
+    assert.deepEqual(draft.queuedMessage, queued);
+    assert.equal(draft.queuedDelivery.status, 'held');
+  }, 'gptweb');
+});
+}
+
 test('failed stop never completes the run and scheduled interruption cannot start a replacement', async () => {
   await harness(async (h) => {
     const run = chatRunRegistry.startRun({ appSessionId: h.sessionId, provider: 'codex', providerSessionId: null, connection: null, userId: h.userId })!;

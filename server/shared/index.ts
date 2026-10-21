@@ -1,6 +1,8 @@
 export {
   appendFilesInputTag,
   buildCodexInputItems,
+  isImageAttachmentDescriptor,
+  normalizeAttachmentDescriptors,
   normalizeImageDescriptors,
   parseFilesInputTag,
 } from './image-attachments.js';

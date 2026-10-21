@@ -1,7 +1,7 @@
 import path from 'node:path';
-import { readFile } from 'node:fs/promises';
+import { readFile, stat } from 'node:fs/promises';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { appConfigDb, sessionsDb } from '@/modules/database/index.js';
 import {
   buildLookupMap,
   getCodexHome,
@@ -30,11 +30,31 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
    * Scans ~/.codex/sessions and upserts discovered sessions into DB.
    */
   async synchronize(since?: Date): Promise<number> {
-    const nameMap = await buildLookupMap(path.join(this.codexHome, 'session_index.jsonl'), 'id', 'thread_name');
+    const home = this.codexHome;
+    const sessionsRoot = path.join(home, 'sessions');
+    const boundary = new Date();
+    // Optional homes can be enabled after the global scan cursor has advanced.
+    // Persist their own progress, keyed by home, so each new profile starts with
+    // a full scan and restarts can continue incrementally.
+    const scanKey = this.provider === 'gptweb' ? `session_scan:gptweb:${home}` : null;
+    if (scanKey) {
+      try {
+        if (!(await stat(sessionsRoot)).isDirectory()) throw new Error('GPT Web sessions path is not a directory.');
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return 0;
+        throw error;
+      }
+      const stored = appConfigDb.get(scanKey);
+      const checkpoint = stored ? new Date(stored) : null;
+      since = checkpoint && Number.isFinite(checkpoint.getTime()) ? checkpoint : undefined;
+    }
+    const nameMap = await buildLookupMap(path.join(home, 'session_index.jsonl'), 'id', 'thread_name');
     const files = await findFilesRecursivelyCreatedAfter(
-      path.join(this.codexHome, 'sessions'),
+      sessionsRoot,
       '.jsonl',
-      since ?? null
+      since ?? null,
+      [],
+      this.provider === 'gptweb',
     );
 
     let processed = 0;
@@ -66,6 +86,7 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
       processed += 1;
     }
 
+    if (scanKey) appConfigDb.set(scanKey, boundary.toISOString());
     return processed;
   }
 

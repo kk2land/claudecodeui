@@ -128,6 +128,7 @@ function ChatInterface({
     resolvePermissionModeForProvider,
     supportsMessageEditing,
     supportsSessionForking,
+    supportsImages,
   } = useChatProviderState({
     selectedSession,
     selectedProject,
@@ -263,6 +264,7 @@ function ChatInterface({
     currentProviderModel,
     currentProviderEffort,
     isLoading: isProcessing,
+    supportsImages,
     codexControls: (provider === 'codex' || provider === 'gptweb') ? codexControls : undefined,
     prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
     executionIdsRef,
