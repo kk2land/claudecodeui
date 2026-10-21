@@ -868,3 +868,174 @@ test('an unconfirmed thread unload never commits the runtime switch', async () =
   await router.control!('app-session', { action: 'runtime', runtime: 'sdk' }, h.options, h.writer, h.context);
   assert.equal(h.settings().runtime, 'sdk');
 });
+
+test('a native user item without clientId inherits the submitted send ID for started and completed', async () => {
+  const h = harness();
+  let acknowledge!: (value: AnyRecord) => void;
+  h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+  const running = h.run('hello', { clientMessageId: 'composer-id' });
+  await eventually(() => h.calls.some(({ method }) => method === 'turn/start'));
+
+  // The notification arrives while turn/start is still awaiting its reply, so
+  // correlation cannot depend on the response having been applied first.
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-item', content: [{ type: 'text', text: 'hello' }],
+  } });
+  const started = h.events.filter((event) => event.kind === 'text' && event.role === 'user');
+  assert.equal(started.length, 1);
+  assert.equal(started[0].id, 'composer-id');
+  assert.equal(started[0].clientMessageId, 'composer-id');
+
+  acknowledge({ turn: { id: 'turn-1' } });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+
+  h.event('item/completed', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-item', content: [{ type: 'text', text: 'hello' }],
+  } });
+  const completed = h.events.filter((event) => event.kind === 'text' && event.role === 'user');
+  assert.equal(completed.length, 2);
+  for (const snapshot of completed) {
+    assert.equal(snapshot.id, 'composer-id');
+    assert.equal(snapshot.clientMessageId, 'composer-id');
+  }
+
+  h.finish();
+  await running;
+});
+
+test('native echoes without clientId keep sequential identical submissions and their own IDs distinct', async () => {
+  const h = harness();
+
+  const first = h.run('ping', { clientMessageId: 'first-send' });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-a', content: [{ type: 'text', text: 'ping' }],
+  } });
+
+  // A different native item repeating the words, still inside the same turn,
+  // must not reuse the ID the first item already owns.
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-a-lookalike', content: [{ type: 'text', text: 'ping' }],
+  } });
+  const afterLookalike = h.events.filter((event) => event.kind === 'text' && event.role === 'user');
+  assert.equal(afterLookalike.at(-1)?.id, 'codex:turn-1:native-a-lookalike');
+  assert.equal(afterLookalike.at(-1)?.clientMessageId, undefined);
+
+  h.finish('turn-1');
+  await first;
+
+  const second = h.run('ping', { clientMessageId: 'second-send' });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-2');
+  h.event('item/started', { turnId: 'turn-2', item: {
+    type: 'userMessage', id: 'native-b', content: [{ type: 'text', text: 'ping' }],
+  } });
+  h.finish('turn-2');
+  await second;
+
+  const userRows = h.events.filter((event) => event.kind === 'text' && event.role === 'user');
+  const ids = userRows.map((event) => event.clientMessageId ?? event.id);
+  assert.deepEqual(ids, ['first-send', 'codex:turn-1:native-a-lookalike', 'second-send']);
+});
+
+test('only a matching submitted input binds; foreign IDs, other content and autonomous turns do not', async () => {
+  const h = harness();
+  const running = h.run('ping', { clientMessageId: 'composer-id' });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'unrelated', content: [{ type: 'text', text: 'something else' }],
+  } });
+  const unrelated = h.events.filter((event) => event.kind === 'text' && event.role === 'user').at(-1);
+  assert.equal(unrelated?.id, 'codex:turn-1:unrelated');
+  assert.equal(unrelated?.clientMessageId, undefined);
+
+  // An explicit foreign ID stays authoritative even when the text matches.
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'foreign', clientId: 'foreign-send', content: [{ type: 'text', text: 'ping' }],
+  } });
+  const foreign = h.events.filter((event) => event.kind === 'text' && event.role === 'user').at(-1);
+  assert.equal(foreign?.id, 'foreign-send');
+  assert.equal(foreign?.clientMessageId, 'foreign-send');
+
+  // The first submitted input is still unclaimed, so its own echo binds once.
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'actual', content: [{ type: 'text', text: 'ping' }],
+  } });
+  const actual = h.events.filter((event) => event.kind === 'text' && event.role === 'user').at(-1);
+  assert.equal(actual?.clientMessageId, 'composer-id');
+
+  h.finish('turn-1');
+  await running;
+
+  // An autonomous goal turn has no submitted record, so it never inherits one.
+  h.event('turn/started', { turn: { id: 'goal-turn' } });
+  h.event('item/started', { turnId: 'goal-turn', item: {
+    type: 'userMessage', id: 'goal-item', content: [{ type: 'text', text: 'ping' }],
+  } });
+  const goal = h.events.filter((event) => event.kind === 'text' && event.role === 'user').at(-1);
+  assert.equal(goal?.id, 'codex:goal-turn:goal-item');
+  assert.equal(goal?.clientMessageId, undefined);
+  h.finish('goal-turn');
+});
+
+test('correlation compares input semantics and tolerates metadata differences', async () => {
+  const h = harness();
+  const running = h.run('describe this', {
+    clientMessageId: 'with-image',
+    attachments: [
+      { path: '/tmp/a.png', name: 'a.png', type: 'image/png' },
+      { path: '/tmp/notes.txt', name: 'notes.txt', type: 'text/plain' },
+    ],
+  });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+
+  const submitted = h.calls.find(({ method }) => method === 'turn/start')!.params;
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-with-image',
+    content: (submitted.input as AnyRecord[]).map((part) => (
+      part.type === 'text'
+        ? { type: 'text', text: part.text, text_elements: [{ start: 0, end: 4 }] }
+        : { type: 'localImage', path: part.path }
+    )),
+  } });
+
+  const row = h.events.filter((event) => event.kind === 'text' && event.role === 'user').at(-1);
+  assert.equal(row?.clientMessageId, 'with-image');
+  assert.deepEqual((row?.images as AnyRecord[] | undefined)?.map((image) => image.path), ['/tmp/a.png']);
+  h.finish();
+  await running;
+});
+
+test('an explicit matching clientId claims the submission for its own item only', async () => {
+  const h = harness();
+  const running = h.run('ping', { clientMessageId: 'first-send' });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+
+  // The provider names the send itself and may normalize the displayed text.
+  // A supplied matching clientId is stronger evidence than content, so that
+  // item owns the submission and a later item repeating the words must not
+  // inherit it as well.
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-first', clientId: 'first-send',
+    content: [{ type: 'text', text: 'ping (normalized display)' }],
+  } });
+  // Its completion snapshot omits clientId and inherits the ID from the item.
+  h.event('item/completed', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-first',
+    content: [{ type: 'text', text: 'ping (normalized display)' }],
+  } });
+  h.event('item/started', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'native-later', content: [{ type: 'text', text: 'ping' }],
+  } });
+
+  const userRows = h.events.filter((event) => event.kind === 'text' && event.role === 'user');
+  assert.equal(userRows.length, 3);
+  assert.deepEqual(
+    userRows.map((row) => row.clientMessageId),
+    ['first-send', 'first-send', undefined],
+  );
+  assert.equal(userRows[2].id, 'codex:turn-1:native-later');
+
+  h.finish();
+  await running;
+});

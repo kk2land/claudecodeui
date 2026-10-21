@@ -33,6 +33,21 @@ type NativeTurn = {
   items: Map<string, AnyRecord>;
   /** This run's chat.send opted into a native composer prediction for its turn. */
   composerPredictions: boolean;
+  /**
+   * The input this adapter submitted for the turn, and the ID sent with it.
+   * Native user items may arrive without `clientId`; correlation uses this
+   * record so the first input keeps the composer's identity. Absent for turns
+   * this adapter did not submit (autonomous goal continuations), which must
+   * never inherit an ID.
+   */
+  submittedInput?: NativeSubmittedInput;
+};
+
+type NativeSubmittedInput = {
+  clientId: string;
+  input: AnyRecord[];
+  /** Native item that already claimed this submission; later items cannot. */
+  boundItemId?: string;
 };
 
 /**
@@ -90,6 +105,26 @@ function buildInput(command: string, attachments: unknown): AnyRecord[] {
     { type: 'text', text: text.trim() ? text : 'Please analyze the attached file(s).', text_elements: [] },
     ...files.filter(isImageAttachmentDescriptor).map((file) => ({ type: 'localImage', path: file.path })),
   ];
+}
+
+/**
+ * Whether a native user item describes the input this adapter submitted.
+ *
+ * Only semantics are compared: ordered part types and their text or path.
+ * Native items carry extra metadata (`text_elements`, timestamps) that must not
+ * prevent correlation, and the submitted text is compared untrimmed because
+ * that is exactly what `turn/start` received. Anything unrecognized fails the
+ * comparison rather than risking an unrelated item being bound to this send.
+ */
+function matchesSubmittedInput(nativeContent: unknown, submittedInput: AnyRecord[]): boolean {
+  if (!Array.isArray(nativeContent) || nativeContent.length !== submittedInput.length) return false;
+  return nativeContent.every((part: AnyRecord, index) => {
+    const expected = submittedInput[index];
+    if (!part || part.type !== expected.type) return false;
+    if (part.type === 'text') return part.text === expected.text;
+    if (part.type === 'localImage') return part.path === expected.path;
+    return false;
+  });
 }
 
 /** Provider router uses this native runtime; injectable RPC/settings make lifecycle races testable. */
@@ -318,10 +353,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     const turn = this.newTurn(session, writer, null, options.composerPredictions === true);
     this.publish(session);
     try {
+      // Recorded before the RPC but inside the guarded block: item notifications
+      // can arrive while turn/start is still awaiting its reply, and they must
+      // find this identity, while a build failure keeps the existing cleanup.
+      const clientUserMessageId: string = options.clientMessageId ?? randomUUID();
+      const input = buildInput(command, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
+      turn.submittedInput = { clientId: clientUserMessageId, input };
       const result = await this.client.request('turn/start', {
         threadId: session.threadId,
-        input: buildInput(command, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]),
-        clientUserMessageId: options.clientMessageId ?? randomUUID(),
+        input,
+        clientUserMessageId,
         collaborationMode: this.collaboration(session),
         ...this.turnPermissions(options),
       });
@@ -554,10 +595,55 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     }
     if (item?.id) {
       if (item.type === 'collabAgentToolCall' && item.tool === 'spawnAgent') for (const child of item.receiverThreadIds ?? []) if (child !== session.threadId) session.children.add(child);
+      if (item.type === 'userMessage') this.correlateSubmittedInput(turn, item);
       if (item.type === 'userMessage' && item.clientId) this.confirmSteer(session.id, item.clientId);
       turn.items.set(item.id, item);
       for (const message of normalizeAppServerItem(item, session.id, turn.id ?? turnId ?? 'starting')) turn.writer.send(message);
     }
+  }
+
+  /**
+   * Gives a native user item the identity this adapter submitted under.
+   *
+   * A provider-supplied `clientId` is always authoritative. When it names this
+   * adapter's own submission, that item owns the submission, so a later item
+   * with equal text cannot claim it; the matching ID alone is sufficient, since
+   * the provider may normalize the displayed content. Otherwise the item
+   * inherits the ID already associated with the same native item ID — that is
+   * how a `completed` snapshot repeats what `started` established — and only
+   * then may it claim the still-unbound submitted input, provided the content
+   * matches what `turn/start` actually received. One native item owns that
+   * submission; other items keep their native ID so a repeated-looking turn
+   * never reuses it. Turns without a submitted record (autonomous goal
+   * continuations) are left untouched.
+   */
+  private correlateSubmittedInput(turn: NativeTurn, item: AnyRecord): void {
+    const submitted = turn.submittedInput;
+    if (item.clientId) {
+      if (submitted && !submitted.boundItemId && item.clientId === submitted.clientId) {
+        submitted.boundItemId = item.id;
+      }
+      return;
+    }
+
+    // A `completed` snapshot repeats the item `started` established; carry the
+    // ID that snapshot settled on, whichever source it came from.
+    const knownForItem = turn.items.get(item.id)?.clientId;
+    if (typeof knownForItem === 'string' && knownForItem.length > 0) {
+      item.clientId = knownForItem;
+      return;
+    }
+
+    if (!submitted) return;
+
+    if (submitted.boundItemId) {
+      if (submitted.boundItemId !== item.id) return;
+    } else {
+      if (!matchesSubmittedInput(item.content, submitted.input)) return;
+      submitted.boundItemId = item.id;
+    }
+
+    item.clientId = submitted.clientId;
   }
 
   private async interrupt(session: NativeSession, turn: NativeTurn): Promise<void> {
