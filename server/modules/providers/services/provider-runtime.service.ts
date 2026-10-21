@@ -55,9 +55,11 @@ export function createProviderRuntimeService(
     getProviderModels: async () => dependencies.getProviderModels(provider.id),
     async validateModelInput(model, attachments) {
       if (!normalizeAttachmentDescriptors(attachments).some(isImageAttachmentDescriptor)) return;
-      let catalog: Awaited<ReturnType<typeof dependencies.getProviderModels>>;
+      let catalog: Awaited<ReturnType<typeof provider.models.getSupportedModels>>;
       try {
-        catalog = await dependencies.getProviderModels(provider.id);
+        // Picker filters must not remove a resumed model's known input limits.
+        // Custom rows inherit these limits from the provider's source catalog.
+        catalog = await provider.models.getSupportedModels();
       } catch (error) {
         // Validation failed before any RPC was sent. Steer delivery must remain
         // rejected/retryable rather than being recorded as an uncertain send.
