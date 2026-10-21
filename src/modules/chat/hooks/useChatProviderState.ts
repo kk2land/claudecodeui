@@ -63,6 +63,7 @@ const FALLBACK_PERMISSION_MODES: Record<LLMProvider, PermissionMode[]> = {
 
 type ProviderCapabilities = {
   provider: LLMProvider;
+  hiddenFromModelPicker?: boolean;
   permissionModes: string[];
   defaultPermissionMode: string;
   supportsImages: boolean;
@@ -132,6 +133,7 @@ const getSessionSelectionKey = (provider: LLMProvider, sessionId: string): strin
   `${provider}:${sessionId}`
 );
 
+/** Used by chat's ChatInterface to keep provider selection, model catalogs and session controls in sync. */
 export function useChatProviderState({ selectedSession, selectedProject: _selectedProject }: UseChatProviderStateArgs) {
   const [permissionMode, setPermissionMode] = useState<PermissionMode>('default');
   const [pendingPermissionRequests, setPendingPermissionRequests] = useState<PendingPermissionRequest[]>([]);
@@ -160,12 +162,27 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
    * Backend-owned capability matrix keyed by provider. Drives the permission
    * mode picker (and is the extension point for future per-provider UI
    * differences) so the frontend stays free of hardcoded provider branching.
-   * Null until `/api/providers/capabilities` resolves; the static fallback
-   * map covers that window.
+   * Null until `/api/providers/capabilities` succeeds. Permission defaults
+   * still work while visibility is unconfirmed or a request is being retried.
    */
   const [providerCapabilities, setProviderCapabilities] = useState<
     Partial<Record<LLMProvider, ProviderCapabilities>> | null
   >(null);
+  // A failed visibility read needs a retry affordance instead of exposing every provider.
+  const [providerCapabilitiesFailed, setProviderCapabilitiesFailed] = useState(false);
+  // Each explicit retry starts a fresh, cancellable capabilities request.
+  const [providerCapabilitiesAttempt, setProviderCapabilitiesAttempt] = useState(0);
+  const retryProviderVisibility = useCallback(() => {
+    setProviderCapabilitiesAttempt((previous) => previous + 1);
+  }, []);
+
+  const hiddenModelProviders = useMemo(
+    // Wait for deployment visibility before exposing models from a faster catalog response.
+    () => providerCapabilities === null ? PROVIDERS : PROVIDERS.filter(
+      (targetProvider) => providerCapabilities[targetProvider]?.hiddenFromModelPicker,
+    ),
+    [providerCapabilities],
+  );
 
   const [providerModelCatalog, setProviderModelCatalog] = useState<
     Partial<Record<LLMProvider, ProviderModelsDefinition>>
@@ -232,13 +249,17 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
 
   useEffect(() => {
     let cancelled = false;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 10_000);
+    setProviderCapabilitiesFailed(false);
 
     const loadCapabilities = async () => {
       try {
-        const response = await api.providers.capabilities();
+        const response = await api.providers.capabilities({ signal: controller.signal });
         const body = (await response.json()) as ProviderCapabilitiesApiResponse;
-        if (cancelled || !body.success || !Array.isArray(body.data?.providers)) {
-          return;
+        if (cancelled) return;
+        if (!response.ok || !body.success || !Array.isArray(body.data?.providers)) {
+          throw new Error('Unable to load provider capabilities.');
         }
 
         const byProvider: Partial<Record<LLMProvider, ProviderCapabilities>> = {};
@@ -247,15 +268,22 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
         }
         setProviderCapabilities(byProvider);
       } catch (error) {
-        console.error('Error loading provider capabilities:', error);
+        if (!cancelled) {
+          console.error('Error loading provider capabilities:', error);
+          setProviderCapabilitiesFailed(true);
+        }
+      } finally {
+        clearTimeout(timeout);
       }
     };
 
     void loadCapabilities();
     return () => {
       cancelled = true;
+      controller.abort();
+      clearTimeout(timeout);
     };
-  }, []);
+  }, [providerCapabilitiesAttempt]);
 
   const getPermissionModesForProvider = useCallback((targetProvider: LLMProvider): PermissionMode[] => {
     const capabilityModes = providerCapabilities?.[targetProvider]?.permissionModes;
@@ -426,6 +454,19 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     setProvider(selectedSession.__provider);
     writeSelectedProvider(selectedSession.__provider);
   }, [provider, selectedSession]);
+
+  useEffect(() => {
+    // A stored choice or a just-closed session may belong to a hidden provider.
+    // Only new chats fall back; opening an existing session keeps its provider.
+    if (selectedSession || !hiddenModelProviders.includes(provider)) {
+      return;
+    }
+    const nextProvider = PROVIDERS.find((targetProvider) => !hiddenModelProviders.includes(targetProvider));
+    if (nextProvider) {
+      setProvider(nextProvider);
+      writeSelectedProvider(nextProvider);
+    }
+  }, [hiddenModelProviders, provider, selectedSession]);
 
   // Permission prompts belong to a session, not to the transient provider
   // selection that is synchronized after navigation.
@@ -699,8 +740,10 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     );
   }, [activeSessionSelection?.effort, currentProviderModel, provider, providerEfforts, reconcileStoredEffort]);
   const currentProviderModelOptions = useMemo(
-    () => providerModelCatalog[provider]?.OPTIONS ?? [],
-    [provider, providerModelCatalog],
+    () => !selectedSession && hiddenModelProviders.includes(provider)
+      ? []
+      : providerModelCatalog[provider]?.OPTIONS ?? [],
+    [hiddenModelProviders, provider, providerModelCatalog, selectedSession],
   );
   const selectedModelOption = getModelOption(provider, currentProviderModel);
   const supportsImages = providerCapabilities?.[provider]?.supportsImages !== false
@@ -841,6 +884,10 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     selectPermissionMode,
     cyclePermissionMode,
     providerModelCatalog,
+    hiddenModelProviders,
+    providerVisibilityLoading: providerCapabilities === null && !providerCapabilitiesFailed,
+    providerVisibilityError: providerCapabilities === null && providerCapabilitiesFailed,
+    retryProviderVisibility,
     providerModelsLoading,
     providerModelActions,
     selectProviderModel,

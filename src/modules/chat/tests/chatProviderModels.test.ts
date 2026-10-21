@@ -28,7 +28,7 @@ vi.mock('@/shared/api', () => ({
     },
     providers: {
       models: () => okJson({ success: true, data: null }),
-      capabilities: () => okJson({ success: true, data: null }),
+      capabilities: () => okJson({ success: true, data: { providers: [] } }),
       sessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveEffort: () => okJson({ success: true, data: null }),

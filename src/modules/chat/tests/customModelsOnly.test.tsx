@@ -82,7 +82,7 @@ vi.mock('@/shared/api', () => ({
           data: { provider, models: enabled ? CUSTOM_ONLY_CATALOG : MERGED_CATALOG },
         });
       },
-      capabilities: () => okJson({ success: true, data: null }),
+      capabilities: () => okJson({ success: true, data: { providers: [] } }),
       sessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveModel: () => okJson({ success: true, data: null }),
       setSessionActiveEffort: () => okJson({ success: true, data: null }),

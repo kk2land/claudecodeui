@@ -1,5 +1,5 @@
 import React, { useCallback, useMemo, useState } from "react";
-import { ChevronDown, Plus } from "lucide-react";
+import { ChevronDown, Loader2, Plus } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 
 import type {
@@ -59,6 +59,11 @@ type ProviderSelectionEmptyStateProps = {
   /** Records the pick as this provider's default and persists it. */
   setProviderModel: (provider: LLMProvider, model: string) => void;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
+  /** Backend-configured providers excluded from new-chat selection and its model library. */
+  hiddenModelProviders?: LLMProvider[];
+  providerVisibilityLoading?: boolean;
+  providerVisibilityError?: boolean;
+  onRetryProviderVisibility?: () => void;
   providerModelActions: ProviderModelActions;
   providerModelsLoading: boolean;
   tasksEnabled: boolean;
@@ -98,6 +103,10 @@ export default function ProviderSelectionEmptyState({
   providerModels,
   setProviderModel,
   providerModelCatalog,
+  hiddenModelProviders,
+  providerVisibilityLoading,
+  providerVisibilityError,
+  onRetryProviderVisibility,
   providerModelActions,
   providerModelsLoading,
   tasksEnabled,
@@ -127,13 +136,13 @@ export default function ProviderSelectionEmptyState({
 
   /** One collapsible branch per provider, in the order the picker lists them. */
   const visibleProviderGroups = useMemo<ModelGroup[]>(
-    () => PROVIDER_META.map((meta) => ({
+    () => PROVIDER_META.filter((meta) => !hiddenModelProviders?.includes(meta.id)).map((meta) => ({
       key: meta.id,
       provider: meta.id,
       name: meta.name,
       models: providerModelCatalog[meta.id]?.OPTIONS ?? [],
     })),
-    [providerModelCatalog],
+    [hiddenModelProviders, providerModelCatalog],
   );
 
   /**
@@ -145,10 +154,11 @@ export default function ProviderSelectionEmptyState({
     () => PROVIDER_META
       .filter((meta) => {
         const catalog = providerModelCatalog[meta.id];
-        return catalog?.CUSTOM_MODELS_ONLY === true && catalog.OPTIONS.some((option) => option.isCustom);
+        return !hiddenModelProviders?.includes(meta.id)
+          && catalog?.CUSTOM_MODELS_ONLY === true && catalog.OPTIONS.some((option) => option.isCustom);
       })
       .map((meta) => meta.name),
-    [providerModelCatalog],
+    [hiddenModelProviders, providerModelCatalog],
   );
 
   const nextTaskPrompt = t("tasks.nextTaskPrompt", {
@@ -156,6 +166,7 @@ export default function ProviderSelectionEmptyState({
   });
 
   const currentModel = providerModels[provider];
+  const isProviderHidden = hiddenModelProviders?.includes(provider) === true;
 
   const currentModelLabel = useMemo(() => {
     const config = getModelConfig(provider, providerModelCatalog);
@@ -187,6 +198,29 @@ export default function ProviderSelectionEmptyState({
   };
 
   if (!selectedSession && !currentSessionId) {
+    if (providerVisibilityLoading || providerVisibilityError) {
+      return (
+        <div className="flex h-full items-center justify-center px-4 text-center">
+          <div className="flex flex-col items-center gap-3">
+            {providerVisibilityError ? (
+              <>
+                <p role="alert" className="text-sm text-muted-foreground">
+                  {t("providerSelection.loadModelsFailed", { defaultValue: "Unable to load available models." })}
+                </p>
+                <Button type="button" variant="outline" onClick={onRetryProviderVisibility}>
+                  {t("providerSelection.retryModels", { defaultValue: "Retry" })}
+                </Button>
+              </>
+            ) : (
+              <p role="status" className="flex items-center gap-2 text-sm text-muted-foreground">
+                <Loader2 className="h-4 w-4 animate-spin" aria-hidden />
+                {t("providerSelection.loadingModels", { defaultValue: "Loading models…" })}
+              </p>
+            )}
+          </div>
+        </div>
+      );
+    }
     return (
       <div className="flex h-full items-center justify-center px-4">
         <div className="w-full max-w-[34.25rem]">
@@ -207,19 +241,24 @@ export default function ProviderSelectionEmptyState({
                 tabIndex={0}
               >
                 <div className="flex items-center gap-2 p-3">
-                  <LLMProviderLogo
-                    provider={provider}
-                    className="h-5 w-5 shrink-0"
-                  />
+                  {!isProviderHidden && (
+                    <LLMProviderLogo provider={provider} className="h-5 w-5 shrink-0" />
+                  )}
                   <div className="min-w-0 flex-1">
                     <div className="flex items-center gap-1">
                       <span className="text-xs font-semibold text-foreground">
-                        {getProviderDisplayName(provider)}
+                        {isProviderHidden
+                          ? t("providerSelection.chooseModel", { defaultValue: "Choose a model" })
+                          : getProviderDisplayName(provider)}
                       </span>
-                      <span className="text-xs text-muted-foreground">·</span>
-                      <span className="truncate text-xs text-foreground">
-                        {currentModelLabel}
-                      </span>
+                      {!isProviderHidden && (
+                        <>
+                          <span className="text-xs text-muted-foreground">·</span>
+                          <span className="truncate text-xs text-foreground">
+                            {currentModelLabel}
+                          </span>
+                        </>
+                      )}
                     </div>
                     <p className="mt-0.5 text-[11px] text-muted-foreground">
                       {t("providerSelection.clickToChange", {
@@ -256,6 +295,7 @@ export default function ProviderSelectionEmptyState({
                   variant="ghost"
                   size="sm"
                   onClick={openModelLibrary}
+                  disabled={visibleProviderGroups.length === 0}
                   className="h-8 shrink-0 rounded-lg px-2.5 text-xs"
                 >
                   <Plus className="h-3.5 w-3.5" />
@@ -311,13 +351,14 @@ export default function ProviderSelectionEmptyState({
               <ModelLibraryPanel
                 initialProvider={provider}
                 providerModelCatalog={providerModelCatalog}
+                hiddenModelProviders={hiddenModelProviders}
                 actions={providerModelActions}
                 onDone={closeModelLibrary}
               />
             </DialogContent>
           </Dialog>
 
-          <p className="mt-4 text-center text-sm text-muted-foreground/70">
+          {!isProviderHidden && <p className="mt-4 text-center text-sm text-muted-foreground/70">
             {
               {
                 claude: t("providerSelection.readyPrompt.claude", {
@@ -337,7 +378,7 @@ export default function ProviderSelectionEmptyState({
                 }),
               }[provider]
             }
-          </p>
+          </p>}
 
           <p className="mt-3 flex items-center justify-center gap-1.5 text-center text-xs text-muted-foreground/60">
             <Trans

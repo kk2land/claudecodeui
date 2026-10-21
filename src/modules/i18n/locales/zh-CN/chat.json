@@ -237,7 +237,10 @@
       "dsh": "已就绪，使用 DeepSeek Harness {{model}}"
     },
     "pressToSearch": "按 <kbd>{{shortcut}}</kbd> 搜索会话、文件和提交",
-    "chooseModelDescriptionCustomOnly": "{{providers, list}} 仅列出您的模型"
+    "chooseModelDescriptionCustomOnly": "{{providers, list}} 仅列出您的模型",
+    "loadingModels": "正在加载模型…",
+    "loadModelsFailed": "无法加载可用模型。",
+    "retryModels": "重试"
   },
   "session": {
     "continue": {

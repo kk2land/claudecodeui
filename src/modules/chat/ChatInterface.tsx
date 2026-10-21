@@ -121,6 +121,10 @@ function ChatInterface({
     selectPermissionMode,
     cyclePermissionMode,
     providerModelCatalog,
+    hiddenModelProviders = [],
+    providerVisibilityLoading,
+    providerVisibilityError,
+    retryProviderVisibility,
     providerModelsLoading,
     providerModelActions,
     selectProviderModel,
@@ -504,6 +508,10 @@ function ChatInterface({
               providerModels={providerModels}
               setProviderModel={setStoredProviderModel}
               providerModelCatalog={providerModelCatalog}
+              hiddenModelProviders={hiddenModelProviders}
+              providerVisibilityLoading={providerVisibilityLoading}
+              providerVisibilityError={providerVisibilityError}
+              onRetryProviderVisibility={retryProviderVisibility}
               providerModelActions={providerModelActions}
               providerModelsLoading={providerModelsLoading}
               tasksEnabled={tasksEnabled}
@@ -557,7 +565,7 @@ function ChatInterface({
             </div>
           )}
 
-          <ChatComposer
+          {(selectedSession || currentSessionId || !hiddenModelProviders.includes(provider)) && <ChatComposer
           pendingPermissionRequests={pendingPermissionRequests}
           handlePermissionDecision={handlePermissionDecision}
           handleGrantToolPermission={handleGrantToolPermission}
@@ -632,7 +640,7 @@ function ChatInterface({
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}
           isTextareaExpanded={isTextareaExpanded}
           sendByCtrlEnter={sendByCtrlEnter}
-        />
+        />}
         </div>
       </div>
 
@@ -640,6 +648,7 @@ function ChatInterface({
         payload={commandModalPayload}
         onClose={closeCommandModal}
         providerModelCatalog={providerModelCatalog}
+        hiddenModelProviders={hiddenModelProviders}
         providerModelActions={providerModelActions}
         activeProvider={provider}
         activeProviderModel={currentProviderModel}

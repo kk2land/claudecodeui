@@ -271,6 +271,8 @@
     "manageModels": "Manage models",
     "noModelsFound": "No models found.",
     "loadingModels": "Loading models…",
+    "loadModelsFailed": "Unable to load available models.",
+    "retryModels": "Retry",
     "clickToChange": "Click to change model"
   },
   "session": {

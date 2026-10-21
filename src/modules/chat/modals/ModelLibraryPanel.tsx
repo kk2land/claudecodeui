@@ -33,6 +33,8 @@ const PROVIDERS: Array<{ id: LLMProvider; label: string }> = [
 type ModelLibraryPanelProps = {
   initialProvider: LLMProvider;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
+  /** New-chat callers omit deployment-hidden providers; session model management stays available. */
+  hiddenModelProviders?: LLMProvider[];
   actions: ProviderModelActions;
   onDone?: () => void;
 };
@@ -48,11 +50,19 @@ type ModelLibraryPanelProps = {
 export default function ModelLibraryPanel({
   initialProvider,
   providerModelCatalog,
+  hiddenModelProviders,
   actions,
   onDone,
 }: ModelLibraryPanelProps) {
   const { t } = useTranslation();
-  const [selectedProvider, setSelectedProvider] = useState(initialProvider);
+  const visibleProviders = useMemo(
+    () => PROVIDERS.filter((provider) => !hiddenModelProviders?.includes(provider.id)),
+    [hiddenModelProviders],
+  );
+  const initialVisibleProvider = visibleProviders.find((provider) => provider.id === initialProvider)?.id
+    ?? visibleProviders[0]?.id ?? initialProvider;
+  // The library remembers the visible provider tab being browsed or edited.
+  const [selectedProvider, setSelectedProvider] = useState(initialVisibleProvider);
   const [editing, setEditing] = useState<ProviderModelOption | null>(null);
   const [model, setModel] = useState('');
   const [modelId, setModelId] = useState('');
@@ -76,8 +86,8 @@ export default function ModelLibraryPanel({
   const [customModelsOnlyErrors, setCustomModelsOnlyErrors] = useState<Partial<Record<LLMProvider, string>>>({});
 
   useEffect(() => {
-    setSelectedProvider(initialProvider);
-  }, [initialProvider]);
+    setSelectedProvider(initialVisibleProvider);
+  }, [initialVisibleProvider]);
 
   const options = useMemo(
     () => providerModelCatalog[selectedProvider]?.OPTIONS ?? [],
@@ -236,6 +246,10 @@ export default function ModelLibraryPanel({
     }
   };
 
+  if (visibleProviders.length === 0) {
+    return <p className="py-4 text-center text-sm text-muted-foreground">{t('chat:providerSelection.noModelsFound')}</p>;
+  }
+
   return (
     <div className="flex h-full min-h-0 flex-col gap-4">
       <div className="flex shrink-0 flex-col gap-3 border-b border-border/70 pb-4 sm:flex-row sm:items-start sm:justify-between">
@@ -261,7 +275,7 @@ export default function ModelLibraryPanel({
       </div>
 
       <div className="scrollbar-thin flex shrink-0 gap-1 overflow-x-auto rounded-xl border border-border/70 bg-muted/25 p-1">
-        {PROVIDERS.map((provider) => {
+        {visibleProviders.map((provider) => {
           const selected = provider.id === selectedProvider;
           return (
             <button

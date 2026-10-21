@@ -416,7 +416,7 @@ export const api = {
 
   // Provider (coding agent) endpoints — models, capabilities, sessions, MCP, skills.
   providers: {
-    capabilities: () => get('/api/providers/capabilities'),
+    capabilities: (options: ApiRequestOptions = {}) => get('/api/providers/capabilities', options),
     runtimeState: (provider: string, sessionId: string | null, options: ApiRequestOptions = {}) =>
       get(`/api/providers/${encodeURIComponent(provider)}/runtime${query({ sessionId: sessionId ?? undefined })}`, options),
     controlRuntime: (provider: string, sessionId: string, control: ProviderRuntimeAction) =>

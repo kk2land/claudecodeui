@@ -11,6 +11,8 @@ import { isCodexGoalEnabled } from '@/shared/index.js';
  */
 type ProviderCapabilities = {
   provider: LLMProvider;
+  /** Deployment setting for new-chat model pickers; does not disable existing sessions or runtimes. */
+  hiddenFromModelPicker?: boolean;
   /** Permission modes the provider runtime understands, in cycle order. */
   permissionModes: string[];
   defaultPermissionMode: string;
@@ -149,14 +151,20 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
  * Application service exposing the provider capability matrix. Used by the
  * Providers routes (the capabilities endpoints) and by the Providers model
  * service, which reads `effortLevels` to validate custom-model effort.
+ * The routes also expose deployment visibility without removing runtime capabilities.
  */
 export const providerCapabilitiesService = {
   getProviderCapabilities(provider: LLMProvider): ProviderCapabilities {
     const capabilities = PROVIDER_CAPABILITIES[provider];
-    return capabilities.nativeControls ? {
+    const hiddenProviders = (process.env.CLOUDCLI_HIDDEN_PROVIDERS ?? '')
+      .toLowerCase().split(/[,\s]+/);
+    return {
       ...capabilities,
-      nativeControls: { ...capabilities.nativeControls, goal: isCodexGoalEnabled() },
-    } : capabilities;
+      hiddenFromModelPicker: hiddenProviders.includes(provider),
+      ...(capabilities.nativeControls ? {
+        nativeControls: { ...capabilities.nativeControls, goal: isCodexGoalEnabled() },
+      } : {}),
+    };
   },
 
   listAllProviderCapabilities(): ProviderCapabilities[] {

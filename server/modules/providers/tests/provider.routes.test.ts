@@ -57,6 +57,33 @@ async function withProviderServer(
   }
 }
 
+test('hidden providers remain usable through session and model APIs', async () => {
+  const original = process.env.CLOUDCLI_HIDDEN_PROVIDERS;
+  try {
+    process.env.CLOUDCLI_HIDDEN_PROVIDERS = 'cursor';
+    await withProviderServer(async (baseUrl, workspacePath) => {
+      const capabilities = await fetch(`${baseUrl}/api/providers/capabilities`);
+      const body = await capabilities.json() as { data: { providers: Array<{ provider: string; hiddenFromModelPicker: boolean }> } };
+      assert.equal(body.data.providers.find((row) => row.provider === 'cursor')?.hiddenFromModelPicker, true);
+
+      const single = await fetch(`${baseUrl}/api/providers/cursor/capabilities`);
+      assert.equal((await single.json() as { data: { hiddenFromModelPicker: boolean } }).data.hiddenFromModelPicker, true);
+      const models = await fetch(`${baseUrl}/api/providers/cursor/models`);
+      assert.equal(models.status, 200);
+      assert.ok((await models.json() as { data: { models: { OPTIONS: unknown[] } } }).data.models.OPTIONS.length > 0);
+
+      const session = await fetch(`${baseUrl}/api/providers/sessions`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider: 'cursor', projectPath: workspacePath }),
+      });
+      assert.equal(session.status, 201);
+    });
+  } finally {
+    if (original === undefined) delete process.env.CLOUDCLI_HIDDEN_PROVIDERS;
+    else process.env.CLOUDCLI_HIDDEN_PROVIDERS = original;
+  }
+});
+
 test('session creation route names a CloudCLI session from the initial message', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     const response = await fetch(`${baseUrl}/api/providers/sessions`, {

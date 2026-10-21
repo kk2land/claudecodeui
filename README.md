@@ -277,6 +277,20 @@ CloudCLI UI - (https://cloudcli.ai).
 </div>
 
 
+### Hide providers from new-chat model selection
+
+Set `CLOUDCLI_HIDDEN_PROVIDERS` in the backend environment or `.env`, then restart the backend and reload the browser:
+
+```bash
+export CLOUDCLI_HIDDEN_PROVIDERS="cursor,opencode"
+```
+
+Supported IDs are `claude`, `codex`, `gptweb`, `cursor`, `opencode`, and `dsh`. Commas or whitespace separate entries; IDs are case-insensitive and unknown entries are ignored. An unset or empty value shows every provider.
+
+Hidden providers disappear from the new-chat model picker, its search results, and its model-library tabs, including all built-in and custom models. A previously selected hidden provider falls back to the first visible provider for new chats. If every provider is hidden, the picker is empty and the new-chat composer is unavailable. Existing sessions, stored model settings, provider runtimes, and API access remain available; this setting controls UI visibility only.
+
+The new-chat `/models` command and its **Manage models** view follow the same visibility setting. If loading visibility fails or takes more than 10 seconds, new-chat model selection shows an error with **Retry** instead of displaying unconfirmed providers. A successful response from an older backend without visibility fields defaults to showing all providers. Existing-session model controls remain available during a visibility error.
+
 ### DeepSeek Harness provider
 
 Select **DeepSeek Harness** in the provider picker. Install `@deepseek-ai/dsh` on the machine running CloudCLI and configure the same DSH home and credentials used by that service:

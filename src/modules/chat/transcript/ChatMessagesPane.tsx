@@ -45,6 +45,10 @@ type ChatMessagesPaneProps = {
   providerModels: Record<LLMProvider, string>;
   setProviderModel: (provider: LLMProvider, model: string) => void;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
+  hiddenModelProviders?: LLMProvider[];
+  providerVisibilityLoading?: boolean;
+  providerVisibilityError?: boolean;
+  onRetryProviderVisibility?: () => void;
   providerModelActions: ProviderModelActions;
   providerModelsLoading: boolean;
   tasksEnabled: boolean;
@@ -114,6 +118,10 @@ function ChatMessagesPane({
   providerModels,
   setProviderModel,
   providerModelCatalog,
+  hiddenModelProviders,
+  providerVisibilityLoading,
+  providerVisibilityError,
+  onRetryProviderVisibility,
   providerModelActions,
   providerModelsLoading,
   tasksEnabled,
@@ -237,6 +245,10 @@ function ChatMessagesPane({
           providerModels={providerModels}
           setProviderModel={setProviderModel}
           providerModelCatalog={providerModelCatalog}
+          hiddenModelProviders={hiddenModelProviders}
+          providerVisibilityLoading={providerVisibilityLoading}
+          providerVisibilityError={providerVisibilityError}
+          onRetryProviderVisibility={onRetryProviderVisibility}
           providerModelActions={providerModelActions}
           providerModelsLoading={providerModelsLoading}
           tasksEnabled={tasksEnabled}

@@ -28,6 +28,29 @@ test('DSH advertises image attachments for both supported transports', () => {
   assert.deepEqual(capabilities.runtimeManagement?.modes, ['acp', 'headless']);
 });
 
+test('provider visibility normalizes environment entries without removing capabilities', () => {
+  const original = process.env.CLOUDCLI_HIDDEN_PROVIDERS;
+  try {
+    process.env.CLOUDCLI_HIDDEN_PROVIDERS = ' Cursor, GPTWEB, cursor \n opencode,unknown, ';
+    const rows = providerCapabilitiesService.listAllProviderCapabilities();
+    assert.equal(rows.length, Object.keys(CURATED_CATALOGS).length);
+    assert.deepEqual(rows.filter((row) => row.hiddenFromModelPicker).map((row) => row.provider).sort(),
+      ['cursor', 'gptweb', 'opencode']);
+    assert.equal(providerCapabilitiesService.getProviderCapabilities('gptweb').hiddenFromModelPicker, true);
+    assert.equal(providerCapabilitiesService.getProviderCapabilities('gptweb').nativeControls?.plan, true);
+    assert.equal(providerCapabilitiesService.getProviderCapabilities('claude').hiddenFromModelPicker, false);
+
+    for (const value of [undefined, '', ' , \n ', 'unknown']) {
+      if (value === undefined) delete process.env.CLOUDCLI_HIDDEN_PROVIDERS;
+      else process.env.CLOUDCLI_HIDDEN_PROVIDERS = value;
+      assert.equal(providerCapabilitiesService.listAllProviderCapabilities().some((row) => row.hiddenFromModelPicker), false);
+    }
+  } finally {
+    if (original === undefined) delete process.env.CLOUDCLI_HIDDEN_PROVIDERS;
+    else process.env.CLOUDCLI_HIDDEN_PROVIDERS = original;
+  }
+});
+
 test('capability effort levels cover every level a curated model declares', () => {
   // Custom models may declare only these levels, so a level added to a curated
   // model has to be added here too, or users could not give it to their own.

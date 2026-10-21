@@ -31,6 +31,8 @@ type CommandResultModalProps = {
   payload: CommandModalPayload | null;
   onClose: () => void;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
+  /** Applied to model selection and library tabs only while no existing session is open. */
+  hiddenModelProviders?: LLMProvider[];
   providerModelActions: ProviderModelActions;
   activeProvider: LLMProvider;
   activeProviderModel: string;
@@ -230,6 +232,7 @@ function HelpContent({ data }: { data: HelpCommandData }) {
 function ModelsContent({
   data,
   providerModelCatalog,
+  hiddenModelProviders,
   providerModelActions,
   activeProvider,
   activeProviderModel,
@@ -238,6 +241,7 @@ function ModelsContent({
 }: {
   data: ModelCommandData;
   providerModelCatalog: Partial<Record<LLMProvider, ProviderModelsDefinition>>;
+  hiddenModelProviders?: LLMProvider[];
   providerModelActions: ProviderModelActions;
   activeProvider: LLMProvider;
   activeProviderModel: string;
@@ -303,13 +307,17 @@ function ModelsContent({
     }
   };
 
-  if (managingModels) {
+  // A modal opened before navigation can still carry the previous provider's payload.
+  const isProviderHidden = !hasConcreteSessionId && hiddenModelProviders?.includes(currentProvider);
+  if (managingModels || isProviderHidden) {
     return (
       <ModelLibraryPanel
+        key={hasConcreteSessionId ? currentSessionId : 'new-chat'}
         initialProvider={currentProvider}
         providerModelCatalog={providerModelCatalog}
+        hiddenModelProviders={hasConcreteSessionId ? undefined : hiddenModelProviders}
         actions={providerModelActions}
-        onDone={() => setManagingModels(false)}
+        onDone={isProviderHidden ? undefined : () => setManagingModels(false)}
       />
     );
   }
@@ -544,6 +552,7 @@ function CommandResultModal({
   payload,
   onClose,
   providerModelCatalog,
+  hiddenModelProviders,
   providerModelActions,
   activeProvider,
   activeProviderModel,
@@ -634,6 +643,7 @@ function CommandResultModal({
             <ModelsContent
               data={payload.data as ModelCommandData}
               providerModelCatalog={providerModelCatalog}
+              hiddenModelProviders={hiddenModelProviders}
               providerModelActions={providerModelActions}
               activeProvider={activeProvider}
               activeProviderModel={activeProviderModel}
