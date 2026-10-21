@@ -22,8 +22,13 @@ type ProviderCapabilities = {
   supportsFiles: boolean;
   /** Whether an in-flight run can be cancelled via chat.abort. */
   supportsAbort: boolean;
-  /** Native controls require the app-server runtime; SDK compatibility does not provide them. */
-  nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean };
+  /**
+   * Native controls require the app-server runtime; SDK compatibility does not
+   * provide them. `predictions` reports only that this integration can request
+   * Codex's native next-message suggestion, never that the signed-in account,
+   * region or model is eligible for the upstream composer-predictions beta.
+   */
+  nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean; predictions: boolean };
   /** Application transport/process controls, independent of provider-native plan or steer support. */
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /** Whether interactive tool permission prompts can reach the UI. */
@@ -96,7 +101,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsFiles: true,
     supportsAbort: true,
     supportsPermissionRequests: true,
-    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true },
+    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true, predictions: true },
     supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],

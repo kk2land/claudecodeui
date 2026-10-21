@@ -706,6 +706,28 @@ export type CodexUserInputRequest = {
   }>;
 };
 
+/**
+ * Next-message suggestion produced by Codex's native composer prediction.
+ *
+ * The runtime asks the app-server for it with the experimental
+ * `thread/prediction/request` RPC after a normal turn completes; this app never
+ * synthesizes the text itself and never starts an extra model turn. Only
+ * `ready` carries displayable text. `pending` means the request was
+ * acknowledged while the asynchronous result is outstanding; `unavailable`
+ * covers an empty result, a rejection, a failure and a timeout. A prediction
+ * problem is diagnostic only: it never becomes `CodexSessionState.error`, never
+ * changes the chat phase, and never surfaces a run-failure notification.
+ */
+export type CodexComposerPrediction = {
+  /** Native turn whose successful completion produced this request. */
+  sourceTurnId: string;
+  status: 'pending' | 'ready' | 'unavailable';
+  /** Suggested next user message; present only when `status` is `ready`. */
+  text?: string;
+  /** Low-priority reason the suggestion is unavailable; never a chat error. */
+  error?: string;
+};
+
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Resolved launcher and CLI identity; reading this never starts a process. */
@@ -726,6 +748,8 @@ export type CodexSessionState = {
   phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
   goal: CodexGoal | null;
   questions: CodexUserInputRequest[];
+  /** Native next-message suggestion; absent when none was requested for this turn. */
+  prediction?: CodexComposerPrediction;
   error?: string;
 };
 

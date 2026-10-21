@@ -96,8 +96,8 @@ test('pinned app-server steers, stops a real background process, forks and persi
     assert.ok(events.some((event) => event.kind === 'complete' && event.aborted));
     await until(() => { try { process.kill(processId!, 0); return false; } catch { return true; } }, 'native background terminal cleanup');
     const snapshot = await transport.request('thread/read', { threadId, includeTurns: true });
-    assert.equal(snapshot.thread.cliVersion, '0.156.1');
-    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.156.1');
+    assert.equal(snapshot.thread.cliVersion, '0.162.1');
+    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.162.1');
     assert.equal(snapshot.thread.turns.at(-1)?.status, 'interrupted');
     const fork = await transport.request('thread/fork', { threadId, cwd: root });
     assert.notEqual(fork.thread.id, threadId); await stat(fork.thread.path);

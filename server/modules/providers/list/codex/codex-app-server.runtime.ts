@@ -31,6 +31,23 @@ type NativeTurn = {
   finish(): void;
   terminal: boolean;
   items: Map<string, AnyRecord>;
+  /** This run's chat.send opted into a native composer prediction for its turn. */
+  composerPredictions: boolean;
+};
+
+/**
+ * The single outstanding native composer-prediction request of a live session.
+ *
+ * `threadId` and `sourceTurnId` are the exact identity a
+ * `thread/prediction/updated` notification must match. The timer bounds how
+ * long the UI may stay in `pending`. A late acknowledgement or notification
+ * for a replaced request finds another (or no) entry and is dropped, so it can
+ * never overwrite the state of a newer turn.
+ */
+type NativePredictionRequest = {
+  threadId: string;
+  sourceTurnId: string;
+  timer: ReturnType<typeof setTimeout>;
 };
 
 type NativeSession = {
@@ -45,6 +62,8 @@ type NativeSession = {
   setup: Promise<void> | null;
   goalMutation: Promise<void> | null;
   turn: NativeTurn | null;
+  /** Outstanding composer-prediction request; cleared by every invalidation point. */
+  prediction: NativePredictionRequest | null;
   // Fresh threads have no readable turns until native execution accepts input.
   historyReady: boolean;
   completedTurns: Set<string>;
@@ -93,6 +112,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     private readonly confirmSteer = (sessionId: string, requestId: string) => sessionDraftsDb.confirmSteer(sessionId, requestId),
     private readonly readStoredMessages = async (sessionId: string): Promise<NormalizedMessage[]> =>
       (await new CodexSessionsProvider().fetchHistory(sessionId)).messages,
+    // Bounds how long a native prediction may stay pending; tests inject a
+    // short value instead of waiting out the production deadline.
+    private readonly predictionTimeoutMs = 15_000,
   ) {
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
@@ -109,6 +131,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
           session.state.phase = stopped ? 'stopping' : 'failed';
           session.stopRequested = true;
           if (stopped) session.state.goal = null;
+          // A dropped prediction must not survive the process that would have answered it.
+          this.clearPrediction(session);
           if (session.turn && !session.turn.terminal) this.complete(session, stopped ? 'interrupted' : 'failed', stopped ? undefined : error.message);
           this.cancelRequests(session);
           session.state.phase = stopped ? 'idle' : 'failed';
@@ -123,7 +147,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   getState(sessionId: string): CodexSessionState {
     const session = this.sessions.get(sessionId);
-    if (session) return { ...session.state, diagnostics: this.client.status, queueHeld: this.settings.get(sessionId).queueHeld, goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions] };
+    if (session) return { ...session.state, diagnostics: this.client.status, queueHeld: this.settings.get(sessionId).queueHeld, goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions], ...(session.state.prediction ? { prediction: { ...session.state.prediction } } : {}) };
     const settings = this.settings.get(sessionId);
     const failure = this.failures.get(sessionId);
     if (failure) return { ...failure.state, ...settings, diagnostics: this.client.status };
@@ -161,7 +185,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session = {
       id: sessionId, threadId: providerId, writer, context, options, startedAt: Date.now(),
       state: { ...this.getState(sessionId), runtime: 'app-server', phase: 'starting', error: undefined }, model: '',
-      setup: null, goalMutation: null, turn: null, historyReady: Boolean(providerId), completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
+      setup: null, goalMutation: null, turn: null, prediction: null, historyReady: Boolean(providerId), completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
     };
     this.failures.delete(sessionId);
     this.sessions.set(sessionId, session);
@@ -242,10 +266,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     } };
   }
 
-  private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null): NativeTurn {
+  private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null, composerPredictions = false): NativeTurn {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
-    const turn: NativeTurn = { id, writer, done, finish, terminal: false, items: new Map() };
+    const turn: NativeTurn = { id, writer, done, finish, terminal: false, items: new Map(), composerPredictions };
+    // Anything still pending belongs to the turn this one replaces, including
+    // a suggestion already shown for it.
+    this.clearPrediction(session);
     session.turn = turn;
     session.writer = writer;
     session.state.turnId = id;
@@ -288,7 +315,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
     }
-    const turn = this.newTurn(session, writer, null);
+    const turn = this.newTurn(session, writer, null, options.composerPredictions === true);
     this.publish(session);
     try {
       const result = await this.client.request('turn/start', {
@@ -337,19 +364,102 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'error', content: error }));
     }
     this.publish(session);
+    const success = status === 'completed' && !['blocked', 'usageLimited', 'budgetLimited'].includes(session.state.goal?.status ?? '');
     turn.writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId: session.id, exitCode: status === 'failed' ? 1 : 0, aborted: status === 'interrupted' }),
       goalActive: session.state.goal?.status === 'active', stopping: session.stopRequested, turnId: turn.id,
-      success: status === 'completed' && !['blocked', 'usageLimited', 'budgetLimited'].includes(session.state.goal?.status ?? '') });
+      success });
     if (!session.stopRequested && session.state.goal?.status !== 'active') {
       const notice = { userId: turn.writer.userId ?? null, provider: 'codex', sessionId: session.options.sessionId ?? session.id, sessionName: session.options.sessionSummary ?? null };
       if (status === 'failed') notifyRunFailed({ ...notice, error: error ?? 'Codex turn failed.' });
       else if (status === 'completed') notifyRunStopped({ ...notice, stopReason: session.state.goal?.status ?? 'completed' });
     }
+    // Only an ordinary, successful, still-live turn asks for a suggestion. A
+    // failed, interrupted, stopping or goal-continued turn, or a runtime the
+    // user has already left, must never start one.
+    if (turn.composerPredictions && success && !session.stopRequested && !error
+      && session.state.goal?.status !== 'active' && this.sessions.get(session.id) === session) {
+      this.requestPrediction(session, turn.id);
+    }
     turn.finish();
+  }
+
+  /**
+   * Clears the session's prediction state and its timer. Every point that ends
+   * the turn it belongs to (new turn, stop, runtime handoff, process exit,
+   * close) calls this so a late result cannot resurrect an old suggestion.
+   */
+  private clearPrediction(session: NativeSession): void {
+    if (session.prediction) clearTimeout(session.prediction.timer);
+    session.prediction = null;
+    if (session.state.prediction) session.state.prediction = undefined;
+  }
+
+  private settlePrediction(session: NativeSession, sourceTurnId: string, value: { status: 'ready'; text: string } | { status: 'unavailable'; error?: string }): void {
+    // Identity is re-checked at the point of use: a stale reply for a previous
+    // turn, or one that raced a newer request, must not be published.
+    if (session.prediction?.sourceTurnId !== sourceTurnId || session.state.prediction?.sourceTurnId !== sourceTurnId) return;
+    clearTimeout(session.prediction.timer);
+    session.prediction = null;
+    session.state.prediction = { sourceTurnId, ...value };
+    this.publish(session);
+  }
+
+  /**
+   * Fire-and-forget native prediction request. It intentionally does not join
+   * the run promise: `turn.done`, the queue and the terminal `complete` event
+   * are already settled, and a rejected/unsupported RPC stays local to this
+   * diagnostic field instead of failing chat.
+   */
+  private requestPrediction(session: NativeSession, sourceTurnId: string | null): void {
+    const threadId = session.threadId;
+    if (!sourceTurnId || !threadId) return;
+    // Never restart a stopped app-server merely to fetch a suggestion; in
+    // tests the injected client exposes no status and this check is skipped.
+    if (this.client.status && !this.client.status.running) return;
+    // Defensive: a request can only be replaced by clearing its timer first.
+    this.clearPrediction(session);
+    const timer = setTimeout(() => {
+      if (session.prediction?.sourceTurnId !== sourceTurnId) return;
+      this.settlePrediction(session, sourceTurnId, { status: 'unavailable', error: 'Prediction timed out.' });
+    }, Math.max(1, this.predictionTimeoutMs));
+    timer.unref?.();
+    session.prediction = { threadId, sourceTurnId, timer };
+    session.state.prediction = { sourceTurnId, status: 'pending' };
+    this.publish(session);
+    void this.client.request('thread/prediction/request', { threadId, sourceTurnId }).catch((error: Error) => {
+      // The acknowledgement only confirms receipt; an error message means no
+      // result is coming, but it is never a chat-level failure.
+      if (session.prediction?.sourceTurnId !== sourceTurnId || session.threadId !== threadId) return;
+      this.settlePrediction(session, sourceTurnId, { status: 'unavailable', error: error.message || 'Prediction unavailable.' });
+    });
+  }
+
+  /**
+   * Applies one asynchronous `thread/prediction/updated` result. Its dispatch
+   * runs before the terminal-turn guard in `onNotification` because a
+   * prediction arrives after its turn has already completed, and it matches
+   * identity explicitly so child threads and replaced requests cannot write
+   * into this session.
+   */
+  private onPredictionUpdated(p: AnyRecord): void {
+    const session = [...this.sessions.values()].find((candidate) => candidate.threadId === p.threadId);
+    if (!session || !session.prediction || session.threadId !== p.threadId
+      || session.prediction.threadId !== p.threadId || session.prediction.sourceTurnId !== p.sourceTurnId
+      || session.state.prediction?.sourceTurnId !== p.sourceTurnId) return;
+    const result = p.result as AnyRecord | undefined;
+    const text = result?.type === 'completed' && typeof result.text === 'string' ? result.text.trim() : '';
+    if (result?.type === 'completed' && text) {
+      this.settlePrediction(session, p.sourceTurnId, { status: 'ready', text });
+      return;
+    }
+    this.settlePrediction(session, p.sourceTurnId, { status: 'unavailable' });
   }
 
   private onNotification(frame: CodexRpcFrame): void {
     const p = frame.params ?? {};
+    // Predictions are delivered for the main thread after its turn terminal,
+    // so they are handled before the active-turn guard below.
+    if (frame.method === 'thread/prediction/updated') { this.onPredictionUpdated(p); return; }
     if (frame.method === 'thread/closed') this.threadClosures.get(p.threadId)?.();
     if (frame.method === 'turn/completed') {
       const key = `${p.threadId}:${p.turn?.id}`;
@@ -461,6 +571,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     const session = this.sessions.get(sessionId);
     if (!session) return false;
     if (session.stop) return session.stop;
+    // Stop hides any suggestion immediately, before the native turn confirms.
+    this.clearPrediction(session);
     session.stopRequested = true;
     session.state.phase = 'stopping';
     this.settings.update(sessionId, { queueHeld: true });
@@ -810,6 +922,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.threadClosures.delete(threadId);
       // Even an uncertain unsubscribe must force a fresh resume on the next use.
       if (session) this.cancelRequests(session);
+      // The SDK continues the same rollout, so no native suggestion may survive the handoff.
+      if (session) this.clearPrediction(session);
       this.sessions.delete(sessionId);
       this.failures.delete(sessionId);
       if (stopVersion === (this.stopVersions.get(sessionId) ?? 0)) this.settings.update(sessionId, { queueHeld });
@@ -821,6 +935,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       await Promise.all(this.listActiveSessions().map(({ sessionId }) => this.abort(sessionId)));
       await codexAppServerTransport.close();
     }
+    for (const session of this.sessions.values()) this.clearPrediction(session);
     for (const unsubscribe of this.unsubscribe) unsubscribe();
     this.unsubscribe = [];
   }

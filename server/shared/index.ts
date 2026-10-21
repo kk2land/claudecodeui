@@ -9,6 +9,7 @@ export type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
   BackgroundTaskSummary,
+  CodexComposerPrediction,
   CodexControlAction,
   CodexGoal,
   CodexRpcClient,
