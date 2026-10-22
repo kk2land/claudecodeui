@@ -4,7 +4,7 @@ import { act, fireEvent, render, renderHook, screen } from '@testing-library/rea
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import { i18n } from '@/modules/i18n';
-import { ComposerPredictionOverlay, ComposerPredictionStatus } from '@/modules/chat/composer/ComposerPrediction';
+import { ComposerPredictionActions, ComposerPredictionStatus } from '@/modules/chat/composer/ComposerPrediction';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useComposerPrediction } from '@/modules/chat/hooks/useComposerPrediction';
 import { readStoredUiPreferences } from '@/shared/uiPreferences';
@@ -13,10 +13,11 @@ import { resetUserPreferences, writeUserPreference } from '@/shared/userSettings
 import type { CodexComposerPrediction, CodexComposerPredictionReason, CodexControls, Project, ProjectSession } from '@/shared/types';
 
 /**
- * Native Codex composer predictions are shown as ghost text that is *not* the
- * composer draft, accepted only by plain Tab or an explicit button, and retired
- * by any user intent. These tests exercise the real composer hook and the real
- * overlay component rather than mirroring the hook's internals.
+ * Native Codex composer predictions are painted only as the textarea's native
+ * placeholder, never as the composer draft, accepted only by plain Tab or an
+ * explicit button, and retired by any user intent. These tests exercise the
+ * real composer hook and the real actions/status components rather than
+ * mirroring the hook's internals.
  */
 
 const PROJECT: Project = { projectId: 'project-prediction', displayName: 'Prediction', fullPath: '/tmp/prediction' };
@@ -313,11 +314,14 @@ test('a queued message keeps the opt-in it was composed with', async () => {
   assert.equal(queued.result.current.composerPrediction.suggestion, null);
 });
 
-test('the overlay renders ghost text and its buttons accept or dismiss without submitting', () => {
+test('the actions row shows only the localized shortcuts and its buttons accept or dismiss without submitting', () => {
   const accept = vi.fn();
   const dismiss = vi.fn();
-  const view = render(<ComposerPredictionOverlay suggestion="Write the changelog." onAccept={accept} onDismiss={dismiss} />);
-  assert.equal(screen.getByTestId('composer-prediction').textContent, 'Write the changelog.');
+  const view = render(<ComposerPredictionActions onAccept={accept} onDismiss={dismiss} />);
+  // The suggestion itself is the textarea's placeholder, so the row below must
+  // not duplicate it; it only explains the keys and offers pointer/touch actions.
+  assert.equal(screen.getByTestId('composer-prediction-hint').textContent, 'Tab to use · Esc to hide');
+  assert.equal(view.container.textContent, 'Tab to use · Esc to hideUse×');
 
   fireEvent.click(screen.getByRole('button', { name: 'Use' }));
   assert.equal(accept.mock.calls.length, 1);
@@ -331,6 +335,19 @@ test('the overlay renders ghost text and its buttons accept or dismiss without s
   assert.equal(screen.getByRole('button', { name: /Suggestions on/ }).getAttribute('aria-pressed'), 'true');
   assert.ok(screen.getByTestId('composer-prediction-unavailable').textContent);
   status.unmount();
+});
+
+test('the actions row uses the localized shortcut hint in Chinese', async () => {
+  await act(async () => { await i18n.changeLanguage('zh-CN'); });
+  try {
+    const view = render(<ComposerPredictionActions onAccept={() => {}} onDismiss={() => {}} />);
+    assert.equal(screen.getByTestId('composer-prediction-hint').textContent, 'Tab 采用 · Esc 隐藏');
+    assert.equal(screen.getByRole('button', { name: '采用' }).textContent, '采用');
+    assert.equal(screen.getByRole('button', { name: '隐藏建议' }).getAttribute('aria-label'), '隐藏建议');
+    view.unmount();
+  } finally {
+    await act(async () => { await i18n.changeLanguage('en'); });
+  }
 });
 
 test('pending, empty, failed, rejected and timed-out predictions report visible localized state', async () => {

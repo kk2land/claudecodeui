@@ -4,9 +4,7 @@ import { SparklesIcon } from 'lucide-react';
 import type { CodexComposerPredictionReason } from '@/shared/types';
 import { cn } from '@/shared/utils';
 
-type ComposerPredictionOverlayProps = {
-  /** Ghost text from Codex's native prediction; never written into the textarea value. */
-  suggestion: string;
+type ComposerPredictionActionsProps = {
   /** Writes the suggestion into the composer as an editable draft; never submits. */
   onAccept(): void;
   /** Hides this turn's suggestion. */
@@ -15,19 +13,20 @@ type ComposerPredictionOverlayProps = {
 
 /**
  * Rendered by ChatComposer directly below the textarea while a native
- * suggestion is visible. It occupies its own row rather than painting over the
- * textarea, so the real value, draft and placeholder are untouched until the
- * user accepts.
+ * suggestion is visible. The suggestion itself is painted through the
+ * textarea's native placeholder, so this row only carries the localized
+ * shortcuts and the pointer/touch equivalents; the real value, draft and
+ * mention highlight stay untouched until the suggestion is accepted.
  */
-export function ComposerPredictionOverlay({ suggestion, onAccept, onDismiss }: ComposerPredictionOverlayProps) {
+export function ComposerPredictionActions({ onAccept, onDismiss }: ComposerPredictionActionsProps) {
   const { t } = useTranslation('chat');
   return (
-    <div className="flex items-start gap-2 border-t border-border/20 px-4 py-1.5" aria-live="polite">
+    <div className="flex items-center gap-2 border-t border-border/20 px-4 py-1.5" aria-live="polite">
       <p
-        data-testid="composer-prediction"
-        className="min-w-0 flex-1 whitespace-pre-wrap break-words text-sm leading-6 text-muted-foreground/70"
+        data-testid="composer-prediction-hint"
+        className="min-w-0 flex-1 truncate text-xs leading-5 text-muted-foreground/70"
       >
-        {suggestion}
+        {t('prediction.hint')}
       </p>
       {/* Mouse and touch accept without submitting: both buttons are type="button" inside the form. */}
       <button

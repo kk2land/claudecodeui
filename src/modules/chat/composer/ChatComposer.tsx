@@ -40,7 +40,7 @@ import { ScheduleMessagePopover } from '@/modules/chat/composer/ScheduleMessageP
 import { ScheduledMessageList } from '@/modules/chat/composer/ScheduledMessageList';
 import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import ComposerPermissionMenu from '@/modules/chat/composer/ComposerPermissionMenu';
-import { ComposerPredictionOverlay, ComposerPredictionStatus } from '@/modules/chat/composer/ComposerPrediction';
+import { ComposerPredictionActions, ComposerPredictionStatus } from '@/modules/chat/composer/ComposerPrediction';
 
 type MentionableFile = {
   name: string;
@@ -291,6 +291,13 @@ export default function ChatComposer({
       ? t('input.stop')
       : t('input.send');
 
+  // A visible native suggestion is painted through the textarea's own
+  // placeholder, so its value, draft and mention highlight stay untouched until
+  // the user accepts it. `input === ''` mirrors the prediction hook's own
+  // condition; any other text falls back to the ordinary placeholder.
+  const composerSuggestionHint = input === '' ? composerPrediction?.suggestion ?? null : null;
+  const textareaPlaceholder = composerSuggestionHint ?? placeholder;
+
   return (
     <div className="chat-composer-shell relative flex-shrink-0 px-2 pb-2 pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6">
       {!hasPendingPermissions && !hasControlPanel && (
@@ -460,13 +467,15 @@ export default function ChatComposer({
               onFocus={() => onInputFocusChange?.(true)}
               onBlur={() => onInputFocusChange?.(false)}
               onInput={onTextareaInput}
-              placeholder={placeholder}
+              // Keep the accessible name stable: the suggestion replaces the
+              // placeholder visually but must not rename the field.
+              aria-label={placeholder}
+              placeholder={textareaPlaceholder}
             />
-            {composerPrediction?.suggestion && (
-              <ComposerPredictionOverlay
-                suggestion={composerPrediction.suggestion}
-                onAccept={() => { composerPrediction.accept(); }}
-                onDismiss={composerPrediction.dismiss}
+            {composerSuggestionHint !== null && (
+              <ComposerPredictionActions
+                onAccept={() => { composerPrediction?.accept(); }}
+                onDismiss={() => { composerPrediction?.dismiss(); }}
               />
             )}
         </PromptInputBody>
