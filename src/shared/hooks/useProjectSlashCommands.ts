@@ -11,6 +11,9 @@ type ProviderSkill = {
   sourcePath?: string;
   pluginName?: string;
   pluginId?: string;
+  // Present only for providers with persisted per-skill enablement; undefined
+  // means the provider has no such setting rather than "disabled".
+  enabled?: boolean;
 };
 
 type ProviderSkillsResponse = {
@@ -36,6 +39,12 @@ const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
   const seenCommands = new Set<string>();
 
   return skills.filter((skill) => {
+    // A skill the user disabled in settings must not be offered in the slash
+    // menu, even though the settings list keeps showing it.
+    if (skill.enabled === false) {
+      return false;
+    }
+
     // Multiple physical Claude plugin folders can expose the same invocation.
     // The slash menu should show each executable command only once.
     const key = skill.command;

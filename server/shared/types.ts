@@ -996,13 +996,41 @@ export type ProviderSkillRemoveInput = {
 };
 
 /**
+ * Input for toggling one discovered provider skill on or off.
+ *
+ * `sourcePath` must be the `SKILL.md` file path returned by the provider's own
+ * skill listing, never an arbitrary file: adapters use it to update only the
+ * enablement entry for that skill. `enabled` is a boolean because the Codex
+ * config format rejects a missing or non-boolean value.
+ */
+export type ProviderSkillSetEnabledInput = {
+  sourcePath: string;
+  enabled: boolean;
+};
+
+/**
+ * Result of persisting one provider skill enablement change.
+ *
+ * `sourcePath` echoes the normalized skill file path the adapter wrote, so the
+ * caller can update exactly that row without refetching the whole list.
+ */
+export type ProviderSkillSetEnabledResult = {
+  provider: LLMProvider;
+  sourcePath: string;
+  enabled: boolean;
+};
+
+/**
  * Normalized skill record returned by provider skill adapters.
  *
  * The `command` value is the exact invocation text the selected provider expects
  * for this skill. Claude plugin skills use a namespaced command such as
  * `/plugin-name:skill-name`, while Codex skills use the `$skill-name` form.
  * `sourcePath` points to the skill markdown file that produced the record so
- * callers can distinguish duplicate skill names across scopes.
+ * callers can distinguish duplicate skill names across scopes. `enabled` is
+ * present only for providers that persist per-skill enablement (Codex today):
+ * the UI shows a switch only when it is a boolean, and an unconfigured skill
+ * reports `true`.
  */
 export type ProviderSkill = {
   provider: LLMProvider;
@@ -1013,6 +1041,7 @@ export type ProviderSkill = {
   sourcePath: string;
   pluginName?: string;
   pluginId?: string;
+  enabled?: boolean;
 };
 
 /**

@@ -18,6 +18,7 @@ import type {
   McpTransport,
   ProviderSkillCreateFile,
   ProviderSkillCreateInput,
+  ProviderSkillSetEnabledInput,
   ProviderRuntimeAction,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
@@ -311,6 +312,33 @@ const parseProviderSkillCreatePayload = (payload: unknown): ProviderSkillCreateI
   });
 
   return { entries };
+};
+
+/** Parses the per-skill enablement body: only these two typed fields are accepted. */
+const parseProviderSkillEnabledPayload = (payload: unknown): ProviderSkillSetEnabledInput => {
+  if (!payload || typeof payload !== 'object') {
+    throw new AppError('Request body must be an object.', {
+      code: 'INVALID_REQUEST_BODY',
+      statusCode: 400,
+    });
+  }
+
+  const body = payload as Record<string, unknown>;
+  const sourcePath = readOptionalQueryString(body.sourcePath);
+  if (!sourcePath) {
+    throw new AppError('sourcePath is required.', {
+      code: 'PROVIDER_SKILL_SOURCE_REQUIRED',
+      statusCode: 400,
+    });
+  }
+  if (typeof body.enabled !== 'boolean') {
+    throw new AppError('enabled must be true or false.', {
+      code: 'PROVIDER_SKILL_ENABLED_INVALID',
+      statusCode: 400,
+    });
+  }
+
+  return { sourcePath, enabled: body.enabled };
 };
 
 const parseProvider = (value: unknown): LLMProvider => {
@@ -764,6 +792,16 @@ router.delete(
     const result = await providerSkillsService.removeProviderSkill(provider, {
       directoryName: readPathParam(req.params.directoryName, 'directoryName'),
     });
+    res.json(createApiSuccessResponse(result));
+  }),
+);
+
+router.patch(
+  '/:provider/skills/enabled',
+  asyncHandler(async (req: Request, res: Response) => {
+    const provider = parseProvider(req.params.provider);
+    const input = parseProviderSkillEnabledPayload(req.body);
+    const result = await providerSkillsService.setProviderSkillEnabled(provider, input);
     res.json(createApiSuccessResponse(result));
   }),
 );

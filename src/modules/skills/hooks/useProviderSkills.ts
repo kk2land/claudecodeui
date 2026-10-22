@@ -130,6 +130,9 @@ const normalizeSkill = (
     sourcePath: String(skill.sourcePath ?? ''),
     pluginName: typeof skill.pluginName === 'string' ? skill.pluginName : undefined,
     pluginId: typeof skill.pluginId === 'string' ? skill.pluginId : undefined,
+    // Only an explicit boolean means the provider persists enablement; the UI
+    // renders a switch exactly when this is a boolean.
+    enabled: typeof skill.enabled === 'boolean' ? skill.enabled : undefined,
     projectDisplayName: shouldAttachProject
       ? project?.displayName ?? skill.projectDisplayName
       : skill.projectDisplayName,
@@ -219,6 +222,30 @@ const clearProviderSkillCache = (provider: SkillsProvider): void => {
   }
 };
 
+/**
+ * Writes one skill's enabled flag and returns the normalized result.
+ *
+ * The server echoes the skill file path it wrote, which the hook uses to
+ * update only that row instead of refetching every scope.
+ */
+const saveSkillEnabled = async (
+  provider: SkillsProvider,
+  sourcePath: string,
+  enabled: boolean,
+): Promise<{ sourcePath: string; enabled: boolean }> => {
+  const response = await api.providers.setSkillEnabled(provider, { sourcePath, enabled });
+  const data = await toResponseJson<ApiResponse<{
+    provider: SkillsProvider;
+    sourcePath: string;
+    enabled: boolean;
+  }>>(response);
+  if (!response.ok || !data.success) {
+    throw new Error(getApiErrorMessage(data, 'Failed to update the skill'));
+  }
+
+  return { sourcePath: data.data.sourcePath, enabled: data.data.enabled };
+};
+
 type UseProviderSkillsArgs = {
   selectedProvider: SkillsProvider;
   currentProjects: SkillsProject[];
@@ -230,7 +257,35 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
   const [isLoadingProjectScopes, setIsLoadingProjectScopes] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
   const [saveStatus, setSaveStatus] = useState<'success' | 'error' | null>(null);
+  // Holds both enablement transient states: the skill files whose request is in
+  // flight (their switch is disabled, which prevents duplicate submissions) and
+  // the last failure so the affected row can explain why it kept its value.
+  const [skillToggleState, setSkillToggleState] = useState<{ updatingPaths: string[]; error: string | null }>({
+    updatingPaths: [],
+    error: null,
+  });
   const activeLoadIdRef = useRef(0);
+  // Mirrors the provider the rendered state belongs to; requests started under
+  // a previous provider compare against it before touching state or cache.
+  const activeProviderRef = useRef(selectedProvider);
+  useEffect(() => {
+    activeProviderRef.current = selectedProvider;
+  }, [selectedProvider]);
+  // Bumped by every completed toggle. A list load captures the value when it
+  // starts and refuses to publish anything once it changed, which keeps a late
+  // response from overwriting the just-written enablement in state and cache.
+  const skillsVersionRef = useRef(new Map<SkillsProvider, number>());
+  // Names the load currently allowed to publish, so a toggle knows whether it
+  // has to schedule a fresh load to recover data the invalidated one dropped.
+  const inFlightLoadRef = useRef<{ loadId: number; provider: SkillsProvider } | null>(null);
+  // Counts in-flight toggles per provider-scoped pending key. Counting (rather
+  // than a flag) keeps one settled request from clearing the marker of another
+  // request for the same path, even after a provider switch and switch back.
+  const pendingToggleCountsRef = useRef(new Map<string, number>());
+  // Always points at the newest `refreshSkills`, whose identity changes when
+  // the project set changes. A toggle that settles later must recover the lost
+  // load with the current projects, not the ones captured when it started.
+  const latestRefreshSkillsRef = useRef<((options?: { force?: boolean }) => Promise<void>) | null>(null);
 
   const serializedProjectTargets = JSON.stringify(createProjectTargets(currentProjects));
   const projectTargets = useMemo<ProjectTarget[]>(
@@ -242,10 +297,26 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
   const refreshSkills = useCallback(async (options: { force?: boolean } = {}) => {
     const loadId = activeLoadIdRef.current + 1;
     activeLoadIdRef.current = loadId;
+    const providerAtLoad = selectedProvider;
+    const versionAtLoad = skillsVersionRef.current.get(providerAtLoad) ?? 0;
+    inFlightLoadRef.current = { loadId, provider: providerAtLoad };
+
+    // A load may publish only while it is both the newest one and still based
+    // on the enablement version it started with.
+    const isCurrentLoad = (): boolean => (
+      activeLoadIdRef.current === loadId
+      && (skillsVersionRef.current.get(providerAtLoad) ?? 0) === versionAtLoad
+    );
+    const finishLoad = (): void => {
+      if (inFlightLoadRef.current?.loadId === loadId) {
+        inFlightLoadRef.current = null;
+      }
+    };
 
     const cachedEntry = skillsCache.get(cacheKey);
     const canUseCache = !options.force && cachedEntry && Date.now() - cachedEntry.updatedAt < SKILLS_CACHE_TTL_MS;
     if (canUseCache) {
+      finishLoad();
       setSkills(cachedEntry.skills);
       setIsLoading(false);
       setIsLoadingProjectScopes(false);
@@ -268,7 +339,8 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
 
     try {
       const globalSkills = await fetchProviderSkills(selectedProvider);
-      if (activeLoadIdRef.current !== loadId) {
+      if (!isCurrentLoad()) {
+        finishLoad();
         return;
       }
 
@@ -278,7 +350,8 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
       firstError = error instanceof Error ? error.message : 'Failed to load skills';
     }
 
-    if (activeLoadIdRef.current !== loadId) {
+    if (!isCurrentLoad()) {
+      finishLoad();
       return;
     }
 
@@ -289,6 +362,7 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
       skillsCache.set(cacheKey, { skills: finalSkills, updatedAt: Date.now() });
       setSkills(finalSkills);
       setLoadError(firstError);
+      finishLoad();
       return;
     }
 
@@ -297,7 +371,7 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     await Promise.all(projectTargets.map(async (project) => {
       try {
         const projectSkills = await fetchProviderSkills(selectedProvider, project);
-        if (activeLoadIdRef.current !== loadId) {
+        if (!isCurrentLoad()) {
           return;
         }
 
@@ -308,7 +382,8 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
       }
     }));
 
-    if (activeLoadIdRef.current !== loadId) {
+    if (!isCurrentLoad()) {
+      finishLoad();
       return;
     }
 
@@ -317,7 +392,16 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     setSkills(finalSkills);
     setLoadError(firstError);
     setIsLoadingProjectScopes(false);
+    finishLoad();
   }, [cacheKey, projectTargets, selectedProvider]);
+
+  // Assigned from an effect, not during render (refs must not be touched while
+  // rendering). Effects flush before any awaited response can resume, so a
+  // toggle settling after a project-set change still recovers the dropped load
+  // with the newest targets rather than the ones captured when it started.
+  useEffect(() => {
+    latestRefreshSkillsRef.current = refreshSkills;
+  }, [refreshSkills]);
 
   const addSkills = useCallback(async (payload: ProviderSkillCreatePayload) => {
     try {
@@ -332,6 +416,91 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     }
   }, [refreshSkills, selectedProvider]);
 
+  /**
+   * Persists one skill's enabled flag.
+   *
+   * The write is committed to that provider's cache even when the user has
+   * switched providers meanwhile, so switching back cannot show the old value.
+   * Visible state, the error message and the pending marker are only touched
+   * while the request's provider is still the selected one. A concurrent list
+   * load is invalidated by bumping the provider's version; the hook then starts
+   * a fresh, load-id-guarded fetch so the visible list reflects the write.
+   */
+  const setSkillEnabled = useCallback(async (sourcePath: string, enabled: boolean) => {
+    const providerAtRequest = selectedProvider;
+    const pendingKey = `${providerAtRequest}:${sourcePath}`;
+    const pendingCounts = pendingToggleCountsRef.current;
+    // A second toggle for the same row is ignored, not queued: the first write
+    // is still authoritative and a duplicate would only race it in the config.
+    if ((pendingCounts.get(pendingKey) ?? 0) > 0) {
+      return;
+    }
+    pendingCounts.set(pendingKey, 1);
+    setSkillToggleState((previous) => ({
+      updatingPaths: previous.updatingPaths.includes(pendingKey)
+        ? previous.updatingPaths
+        : [...previous.updatingPaths, pendingKey],
+      error: null,
+    }));
+
+    try {
+      const result = await saveSkillEnabled(providerAtRequest, sourcePath, enabled);
+
+      const applyEnabled = (skill: ProviderSkill): ProviderSkill => (
+        skill.provider === providerAtRequest && skill.sourcePath === result.sourcePath
+          ? { ...skill, enabled: result.enabled }
+          : skill
+      );
+
+      // Bump first: any list response already in flight for this provider was
+      // based on the pre-write state and must never be published.
+      skillsVersionRef.current.set(
+        providerAtRequest,
+        (skillsVersionRef.current.get(providerAtRequest) ?? 0) + 1,
+      );
+      for (const [cacheKey, entry] of skillsCache.entries()) {
+        if (cacheKey.startsWith(`${providerAtRequest}:`)) {
+          skillsCache.set(cacheKey, {
+            skills: entry.skills.map(applyEnabled),
+            updatedAt: Date.now(),
+          });
+        }
+      }
+
+      if (activeProviderRef.current !== providerAtRequest) {
+        // Not the visible list; nothing else to schedule. The cache write above
+        // is what keeps the next switch back correct.
+        return;
+      }
+
+      setSkills((previous) => previous.map(applyEnabled));
+
+      // The invalidated response was dropped, so recover its data with the
+      // newest loader (current projects), which can never request the provider
+      // that was switched away from.
+      if (inFlightLoadRef.current?.provider === providerAtRequest) {
+        void (latestRefreshSkillsRef.current ?? refreshSkills)({ force: true });
+      }
+    } catch (error) {
+      if (activeProviderRef.current === providerAtRequest) {
+        setSkillToggleState((previous) => ({
+          ...previous,
+          error: error instanceof Error ? error.message : 'Failed to update the skill',
+        }));
+      }
+      throw error;
+    } finally {
+      // Duplicates return before registering, so this key has exactly one
+      // in-flight request. Deleting it is safe even while another provider is
+      // selected: keys carry the provider and the marker is rebuilt on switch.
+      pendingCounts.delete(pendingKey);
+      setSkillToggleState((previous) => ({
+        ...previous,
+        updatingPaths: previous.updatingPaths.filter((path) => path !== pendingKey),
+      }));
+    }
+  }, [refreshSkills, selectedProvider]);
+
   useEffect(() => {
     void refreshSkills();
 
@@ -342,6 +511,15 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
 
   useEffect(() => {
     setSaveStatus(null);
+    // Pending markers belong to the visible provider: rebuild them from the
+    // in-flight registry so switching away and back re-locks rows whose write
+    // has not settled yet instead of letting them be toggled twice.
+    const providerPrefix = `${selectedProvider}:`;
+    setSkillToggleState({
+      updatingPaths: [...pendingToggleCountsRef.current.keys()]
+        .filter((key) => key.startsWith(providerPrefix)),
+      error: null,
+    });
   }, [selectedProvider]);
 
   useEffect(() => {
@@ -359,7 +537,10 @@ export function useProviderSkills({ selectedProvider, currentProjects }: UseProv
     isLoadingProjectScopes,
     loadError,
     saveStatus,
+    updatingSkillPaths: skillToggleState.updatingPaths,
+    skillToggleError: skillToggleState.error,
     addSkills,
     refreshSkills,
+    setSkillEnabled,
   };
 }

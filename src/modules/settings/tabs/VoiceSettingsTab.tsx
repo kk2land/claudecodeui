@@ -2,7 +2,7 @@ import type { InputHTMLAttributes } from 'react';
 import { useTranslation } from 'react-i18next';
 
 import SettingsSection from '@/modules/settings/SettingsSection';
-import SettingsToggle from '@/modules/settings/SettingsToggle';
+import { SettingsToggle } from '@/shared/ui';
 import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPreferencesContext';
 import { useVoiceConfig } from '@/modules/settings/hooks/useVoiceConfig';
 

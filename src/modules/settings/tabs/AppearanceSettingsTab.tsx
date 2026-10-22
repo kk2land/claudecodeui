@@ -6,7 +6,7 @@ import { LanguageSelector } from '@/modules/i18n';
 import SettingsCard from '@/modules/settings/SettingsCard';
 import SettingsRow from '@/modules/settings/SettingsRow';
 import SettingsSection from '@/modules/settings/SettingsSection';
-import SettingsToggle from '@/modules/settings/SettingsToggle';
+import { SettingsToggle } from '@/shared/ui';
 
 type AppearanceSettingsTabProps = {
   projectSortOrder: ProjectSortOrder;

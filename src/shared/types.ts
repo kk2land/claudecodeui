@@ -1756,7 +1756,7 @@ export type SkillsProject = {
   path?: string;
 };
 
-/** One skill available to a provider, carrying its slash command, description, originating scope and source path plus the owning plugin or project when it came from one. */
+/** One skill available to a provider, carrying its slash command, description, originating scope and source path plus the owning plugin or project when it came from one. `enabled` is set only by providers that persist per-skill enablement (Codex), so its presence alone means the skill can be toggled. */
 export type ProviderSkill = {
   provider: SkillsProvider;
   name: string;
@@ -1768,6 +1768,7 @@ export type ProviderSkill = {
   pluginId?: string;
   projectDisplayName?: string;
   projectPath?: string;
+  enabled?: boolean;
 };
 
 /** One skill to upload, holding its SKILL.md content, the directory and file names to write it under, and any accompanying base64-encoded support files. */

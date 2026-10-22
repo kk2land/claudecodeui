@@ -609,5 +609,11 @@
     "installAriaLabel": "插件 git 仓库 URL",
     "tab": "标签",
     "runningStatus": "运行中"
+  },
+  "skillsPage": {
+    "toggleAriaLabel": "开启或关闭 {{name}}",
+    "enabled": "已开启",
+    "disabled": "已关闭",
+    "saving": "保存中…"
   }
 }

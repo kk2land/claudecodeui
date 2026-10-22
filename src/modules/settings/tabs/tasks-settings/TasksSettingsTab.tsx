@@ -4,7 +4,7 @@ import { useTasksSettings } from '@/modules/task-master';
 import SettingsCard from '@/modules/settings/SettingsCard';
 import SettingsRow from '@/modules/settings/SettingsRow';
 import SettingsSection from '@/modules/settings/SettingsSection';
-import SettingsToggle from '@/modules/settings/SettingsToggle';
+import { SettingsToggle } from '@/shared/ui';
 
 /** Rendered by Settings for the "tasks" tab, configuring task tracking preferences. */
 export default function TasksSettingsTab() {

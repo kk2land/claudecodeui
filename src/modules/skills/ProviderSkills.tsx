@@ -23,6 +23,7 @@ import {
   DialogContent,
   DialogTitle,
   Input,
+  SettingsToggle,
 } from '@/shared/ui';
 import { useProviderSkills } from '@/modules/skills/hooks/useProviderSkills';
 import type { ProviderSkill, ProviderSkillCreateEntryPayload, SkillsProject, SkillsProvider, SkillsScope } from '@/shared/types';
@@ -194,8 +195,11 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
     isLoadingProjectScopes,
     loadError,
     saveStatus,
+    updatingSkillPaths,
+    skillToggleError,
     addSkills,
     refreshSkills,
+    setSkillEnabled,
   } = useProviderSkills({ selectedProvider, currentProjects });
   const [queuedFiles, setQueuedFiles] = useState<QueuedSkillFile[]>([]);
   const [submitError, setSubmitError] = useState<string | null>(null);
@@ -651,6 +655,15 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
         </div>
       )}
 
+      {skillToggleError && (
+        <div
+          role="alert"
+          className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm text-red-700 dark:border-red-800/60 dark:bg-red-900/20 dark:text-red-200"
+        >
+          {skillToggleError}
+        </div>
+      )}
+
       {justInstalled && saveStatus === 'success' && !isAddDialogOpen && (
         <div className="inline-flex items-center gap-2 rounded-full border border-emerald-500/30 bg-emerald-500/10 px-3 py-1 text-xs font-medium text-emerald-700 dark:text-emerald-300">
           <CheckCircle2 className="h-4 w-4" />
@@ -699,39 +712,66 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
             </div>
 
             <div className="grid min-w-0 gap-3 lg:grid-cols-2">
-              {group.skills.map((skill) => (
-                <div
-                  key={`${skill.command}:${skill.sourcePath}:${skill.projectPath || 'global'}`}
-                  className="min-w-0 rounded-lg border border-border bg-card/50 p-4"
-                >
-                  <div className="min-w-0 space-y-1">
-                    <div className="break-all font-mono text-sm font-semibold text-foreground">{skill.command}</div>
-                    <div className="text-sm text-muted-foreground">{skill.name}</div>
-                  </div>
+              {group.skills.map((skill) => {
+                const supportsToggle = typeof skill.enabled === 'boolean';
+                // Pending markers are provider-scoped so a slow request from a
+                // previously selected provider cannot unlock this row.
+                const isUpdating = updatingSkillPaths.includes(`${skill.provider}:${skill.sourcePath}`);
+                return (
+                  <div
+                    key={`${skill.command}:${skill.sourcePath}:${skill.projectPath || 'global'}`}
+                    className="min-w-0 rounded-lg border border-border bg-card/50 p-4"
+                  >
+                    <div className="flex min-w-0 items-start justify-between gap-3">
+                      <div className="min-w-0 space-y-1">
+                        <div className="break-all font-mono text-sm font-semibold text-foreground">{skill.command}</div>
+                        <div className="text-sm text-muted-foreground">{skill.name}</div>
+                      </div>
+                      {supportsToggle && (
+                        <div className="flex flex-shrink-0 flex-col items-end gap-1">
+                          <SettingsToggle
+                            checked={skill.enabled === true}
+                            disabled={isUpdating}
+                            ariaLabel={t('skillsPage.toggleAriaLabel', { name: skill.name })}
+                            onChange={(enabled) => {
+                              void setSkillEnabled(skill.sourcePath, enabled).catch(() => undefined);
+                            }}
+                          />
+                          <span className="text-[11px] text-muted-foreground">
+                            {isUpdating
+                              ? t('skillsPage.saving')
+                              : skill.enabled === true
+                                ? t('skillsPage.enabled')
+                                : t('skillsPage.disabled')}
+                          </span>
+                        </div>
+                      )}
+                    </div>
 
-                  <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
-                    {skill.description || t('skillsPage.noDescription')}
-                  </p>
+                    <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
+                      {skill.description || t('skillsPage.noDescription')}
+                    </p>
 
-                  <div className="mt-4 flex flex-wrap items-center gap-2">
-                    {skill.pluginName && (
-                      <Badge variant="outline" className="rounded-full bg-background/70">
-                        {t('skillsPage.pluginBadge', { name: skill.pluginName })}
-                      </Badge>
-                    )}
-                    {skill.projectDisplayName && (
-                      <Badge variant="outline" className="rounded-full bg-background/70">
-                        {t('skillsPage.projectBadge', { name: skill.projectDisplayName })}
-                      </Badge>
-                    )}
-                  </div>
+                    <div className="mt-4 flex flex-wrap items-center gap-2">
+                      {skill.pluginName && (
+                        <Badge variant="outline" className="rounded-full bg-background/70">
+                          {t('skillsPage.pluginBadge', { name: skill.pluginName })}
+                        </Badge>
+                      )}
+                      {skill.projectDisplayName && (
+                        <Badge variant="outline" className="rounded-full bg-background/70">
+                          {t('skillsPage.projectBadge', { name: skill.projectDisplayName })}
+                        </Badge>
+                      )}
+                    </div>
 
-                  <div className="mt-4 min-w-0 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
-                    <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">{t('skillsPage.source')}</div>
-                    <code className="mt-1 block whitespace-normal break-all text-xs text-foreground">{skill.sourcePath}</code>
+                    <div className="mt-4 min-w-0 rounded-lg border border-border/60 bg-muted/20 px-3 py-2">
+                      <div className="text-[11px] font-medium uppercase tracking-[0.18em] text-muted-foreground">{t('skillsPage.source')}</div>
+                      <code className="mt-1 block whitespace-normal break-all text-xs text-foreground">{skill.sourcePath}</code>
+                    </div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </section>
         ))}

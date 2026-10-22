@@ -478,6 +478,10 @@ export const api = {
       get(`/api/providers/${encodeURIComponent(provider)}/skills${query({ workspacePath })}`),
     saveSkills: (provider: string, payload: unknown) =>
       post(`/api/providers/${provider}/skills`, payload),
+    setSkillEnabled: (
+      provider: string,
+      payload: { sourcePath: string; enabled: boolean },
+    ) => patch(`/api/providers/${provider}/skills/enabled`, payload),
   },
 
   // Slash commands

@@ -14,6 +14,8 @@ import type {
   ProviderMcpServer,
   ProviderSkillCreateInput,
   ProviderSkillRemoveInput,
+  ProviderSkillSetEnabledInput,
+  ProviderSkillSetEnabledResult,
   ProviderRuntimeContext,
   ProviderRuntimePermissionGateway,
   ProviderRuntimeWriter,
@@ -188,6 +190,17 @@ export interface IProviderSkills {
   removeSkill(
     input: ProviderSkillRemoveInput,
   ): Promise<{ removed: boolean; provider: LLMProvider; directoryName: string }>;
+
+  /**
+   * Persists whether one discovered skill is enabled.
+   *
+   * Optional by design: only providers with a native per-skill enablement
+   * setting implement it (Codex's `[[skills.config]]`). Providers that omit it
+   * are reported as not supporting the toggle rather than simulating one.
+   */
+  setSkillEnabled?(
+    input: ProviderSkillSetEnabledInput,
+  ): Promise<ProviderSkillSetEnabledResult>;
 }
 
 // ---------------------------

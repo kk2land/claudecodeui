@@ -7,8 +7,8 @@ type SettingsToggleProps = {
   disabled?: boolean;
 };
 
-/** Used by the settings module's appearance, browser-use, tasks and voice tabs to render a boolean setting switch. */
-export default function SettingsToggle({ checked, onChange, ariaLabel, disabled }: SettingsToggleProps) {
+/** Used by the settings module's appearance, browser-use, tasks and voice tabs and by the skills module's provider skill rows to render a boolean setting switch. */
+export function SettingsToggle({ checked, onChange, ariaLabel, disabled }: SettingsToggleProps) {
   return (
     <button
       type="button"

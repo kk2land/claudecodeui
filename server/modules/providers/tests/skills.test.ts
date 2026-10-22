@@ -346,6 +346,10 @@ test('providerSkillsService lists codex repository, user, and system skills', { 
   await fs.mkdir(workspacePath, { recursive: true });
 
   const restoreHomeDir = patchHomeDir(tempRoot);
+  // CODEX_HOME overrides ~/.codex everywhere in the adapter, so this test must
+  // clear an ambient value to keep asserting the patched home layout.
+  const previousCodexHome = process.env.CODEX_HOME;
+  delete process.env.CODEX_HOME;
   try {
     await writeSkill(
       path.join(workspacePath, '.agents', 'skills'),
@@ -395,6 +399,9 @@ test('providerSkillsService lists codex repository, user, and system skills', { 
     assert.equal(byName.get('codex-system')?.scope, 'system');
     assert.equal(byName.get('codex-root')?.command, '$codex-root');
   } finally {
+    if (previousCodexHome !== undefined) {
+      process.env.CODEX_HOME = previousCodexHome;
+    }
     restoreHomeDir();
     await fs.rm(tempRoot, { recursive: true, force: true });
   }

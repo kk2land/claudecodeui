@@ -721,7 +721,11 @@
       "project": "Project",
       "admin": "Admin",
       "system": "System"
-    }
+    },
+    "toggleAriaLabel": "Enable or disable {{name}}",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "saving": "Saving…"
   },
   "browserUse": {
     "title": "Browser",

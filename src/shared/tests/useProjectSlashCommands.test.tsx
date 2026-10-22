@@ -77,6 +77,29 @@ test('assembles built-in, deduped skills and custom commands in that order', asy
   assert.deepEqual(listSkills.mock.calls[0], ['claude', { workspacePath: '/work/triage-repo' }]);
 });
 
+test('a disabled provider skill is hidden from the slash menu but others stay', async () => {
+  listCommands.mockResolvedValue(jsonResponse({ builtIn: [{ name: '/help' }], custom: [] }));
+  listSkills.mockResolvedValue(jsonResponse({
+    success: true,
+    data: {
+      skills: [
+        { name: 'review', command: '$review', scope: 'user', sourcePath: '/skills/review/SKILL.md', enabled: false },
+        { name: 'commit', command: '$commit', scope: 'user', sourcePath: '/skills/commit/SKILL.md', enabled: true },
+        { name: 'legacy', command: '$legacy', scope: 'user', sourcePath: '/skills/legacy/SKILL.md' },
+      ],
+    },
+  }));
+
+  const { useProjectSlashCommands } = await import('@/shared/hooks/useProjectSlashCommands');
+  const { result } = renderHook(() => useProjectSlashCommands(project, 'codex'));
+
+  await waitFor(() => assert.equal(result.current.isLoading, false));
+  assert.deepEqual(
+    result.current.commands.map((command) => command.name),
+    ['/help', '$commit', '$legacy'],
+  );
+});
+
 test('no project yields an empty list without a request', async () => {
   const { useProjectSlashCommands } = await import('@/shared/hooks/useProjectSlashCommands');
   const { result } = renderHook(() => useProjectSlashCommands(null, 'claude'));
