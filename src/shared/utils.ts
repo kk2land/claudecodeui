@@ -112,14 +112,11 @@ export async function copyTextToClipboard(text: string): Promise<boolean> {
 /** localStorage key holding the user's completion-sound preference. Private to the sound helpers. */
 const NOTIFICATION_SOUND_ENABLED_STORAGE_KEY = 'notificationSoundEnabled';
 
-/** The browser's AudioContext constructor, including the webkit-prefixed fallback; undefined outside a browser. */
-const AudioContextConstructor =
-  typeof window !== 'undefined'
-    ? window.AudioContext || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-    : undefined;
+/** Path to the chime asset, resolved against the deployment base so sub-path hosting still finds it. */
+const NOTIFICATION_SOUND_PATH = `${import.meta.env?.BASE_URL ?? '/'}sounds/notification.wav`;
 
-/** Lazily created and reused, because browsers cap how many AudioContexts a page may open. */
-let audioContext: AudioContext | null = null;
+/** Lazily created and reused so repeated chimes reuse one element; private to `playNotificationSound`. */
+let notificationAudio: HTMLAudioElement | null = null;
 
 /** Reports whether the user has left completion sounds on; defaults to on when unset. */
 export const isNotificationSoundEnabled = (): boolean => {
@@ -139,46 +136,23 @@ export const setNotificationSoundEnabled = (enabled: boolean): void => {
   localStorage.setItem(NOTIFICATION_SOUND_ENABLED_STORAGE_KEY, String(enabled));
 };
 
-/** Returns the shared AudioContext, creating it on first use. Private to the sound helpers. */
-const getAudioContext = (): AudioContext | null => {
-  if (!AudioContextConstructor) {
+/** Returns the shared AudioElement, creating it on first use. Private to the sound helpers. */
+const getNotificationAudio = (): HTMLAudioElement | null => {
+  if (typeof Audio === 'undefined') {
     return null;
   }
 
-  if (!audioContext) {
-    audioContext = new AudioContextConstructor();
+  if (!notificationAudio) {
+    notificationAudio = new Audio(NOTIFICATION_SOUND_PATH);
+    // The asset already carries the approved loudness, so playback adds no extra gain.
+    notificationAudio.volume = 1;
   }
 
-  return audioContext;
-};
-
-/** Schedules one synthesized sine tone on the shared context. Private to `playNotificationSound`. */
-const playTone = (
-  context: AudioContext,
-  frequency: number,
-  startsAt: number,
-  duration: number,
-  peakVolume: number,
-): void => {
-  const oscillator = context.createOscillator();
-  const gain = context.createGain();
-
-  oscillator.type = 'sine';
-  oscillator.frequency.setValueAtTime(frequency, startsAt);
-
-  // Shape the volume so the synthesized tone starts and stops cleanly.
-  gain.gain.setValueAtTime(0.0001, startsAt);
-  gain.gain.exponentialRampToValueAtTime(peakVolume, startsAt + 0.015);
-  gain.gain.exponentialRampToValueAtTime(0.0001, startsAt + duration);
-
-  oscillator.connect(gain);
-  gain.connect(context.destination);
-  oscillator.start(startsAt);
-  oscillator.stop(startsAt + duration + 0.02);
+  return notificationAudio;
 };
 
 /**
- * Plays the two-tone notification chime, honouring the user's preference unless `force`
+ * Plays the notification chime file, honouring the user's preference unless `force`
  * is set (settings previews pass `force` so the user can hear the sound while it is off).
  */
 export const playNotificationSound = async ({ force = false } = {}): Promise<void> => {
@@ -186,19 +160,15 @@ export const playNotificationSound = async ({ force = false } = {}): Promise<voi
     return;
   }
 
-  const context = getAudioContext();
-  if (!context) {
+  const audio = getNotificationAudio();
+  if (!audio) {
     return;
   }
 
   try {
-    if (context.state === 'suspended') {
-      await context.resume();
-    }
-
-    const now = context.currentTime;
-    playTone(context, 740, now, 0.12, 0.075);
-    playTone(context, 988, now + 0.11, 0.16, 0.06);
+    // Restart from the beginning so back-to-back notifications are each audible.
+    audio.currentTime = 0;
+    await audio.play();
   } catch (error) {
     // Browsers may block audio until the page receives a user gesture.
     console.warn('Unable to play notification sound:', error);
