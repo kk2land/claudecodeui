@@ -1,64 +1,17 @@
-import { useEffect, useState } from 'react';
-
-import { api } from '@/shared/api';
 import { useUiPreferences } from '@/shared/context/UiPreferencesContext';
-import { readVoiceConfig, VOICE_CONFIG_SYNC_EVENT } from '@/shared/voiceConfig';
 
-// Voice UI is gated on the `voiceEnabled` UI preference (toggled in Quick Settings /
-// the Settings modal) and a configured voice backend.
-let healthRequest: Promise<boolean> | null = null;
-
-function checkVoiceHealth(): Promise<boolean> {
-  if (healthRequest) return healthRequest;
-  const request = api.voice.health()
-    .then(async (response) => {
-      if (!response.ok) throw new Error(`Voice health check failed (${response.status})`);
-      const data = await response.json();
-      return data?.configured === true;
-    })
-    .finally(() => {
-      healthRequest = null;
-    });
-  healthRequest = request;
-  return request;
-}
-
+/**
+ * Whether the voice controls (composer mic, read-aloud) should be shown. Only
+ * the user's `voiceEnabled` preference decides, toggled in Quick Settings / the
+ * Settings modal.
+ *
+ * This used to also require a configured backend: either a base URL in this
+ * browser's local voice config or a successful `/api/voice/health` probe. That
+ * is per-device state, so a phone without the desktop's stored base URL — or a
+ * server without `VOICE_API_BASE_URL` — removed the entry entirely, and the user
+ * could not even reach the error explaining why. Backend failures now surface
+ * through the recorder/player's own error message instead of hiding the control.
+ */
 export function useVoiceAvailable(): boolean {
-  // Read through the shared preferences owner. This used to re-parse the
-  // preferences blob and register its own storage + sync listeners, once per
-  // assistant message row.
-  const { voiceEnabled: enabled } = useUiPreferences();
-  const [available, setAvailable] = useState(false);
-
-  useEffect(() => {
-    let active = true;
-    let requestId = 0;
-
-    const check = async () => {
-      if (!enabled) {
-        setAvailable(false);
-        return;
-      }
-      if (readVoiceConfig().baseUrl.trim()) {
-        setAvailable(true);
-        return;
-      }
-      const id = ++requestId;
-      try {
-        const result = await checkVoiceHealth();
-        if (active && id === requestId) setAvailable(result);
-      } catch {
-        if (active && id === requestId) setAvailable(false);
-      }
-    };
-
-    void check();
-    window.addEventListener(VOICE_CONFIG_SYNC_EVENT, check);
-    return () => {
-      active = false;
-      window.removeEventListener(VOICE_CONFIG_SYNC_EVENT, check);
-    };
-  }, [enabled]);
-
-  return enabled && available;
+  return useUiPreferences().voiceEnabled;
 }
