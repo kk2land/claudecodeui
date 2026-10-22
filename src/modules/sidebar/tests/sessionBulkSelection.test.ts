@@ -283,7 +283,7 @@ test('Select all flips to Clear once every loaded row is ticked', () => {
   );
 });
 
-test('a page emptied by deleting every loaded row keeps Load more', () => {
+test('a page emptied by deleting every loaded row keeps Show more', () => {
   const onLoadMoreSessions = vi.fn();
   const emptied = renderSessions({ sessions: [], hasMoreSessions: true, onLoadMoreSessions });
 
@@ -292,15 +292,15 @@ test('a page emptied by deleting every loaded row keeps Load more', () => {
     false,
     'the server still has sessions, so the list must not say there are none',
   );
-  const loadMore = buttonWithText(emptied.container, 'Load more sessions');
-  assert.ok(loadMore, 'the rest of the sessions stay reachable without a refresh');
-  fireEvent.click(loadMore);
+  const showMore = buttonWithText(emptied.container, 'sessions.showMore');
+  assert.ok(showMore, 'the rest of the sessions stay reachable without a refresh');
+  fireEvent.click(showMore);
   assert.deepEqual(onLoadMoreSessions.mock.calls, [['project-1']]);
   emptied.unmount();
 
   const reallyEmpty = renderSessions({ sessions: [], hasMoreSessions: false });
   assert.equal(reallyEmpty.container.textContent?.includes('sessions.noSessions'), true);
-  assert.equal(buttonWithText(reallyEmpty.container, 'Load more sessions'), null);
+  assert.equal(buttonWithText(reallyEmpty.container, 'sessions.showMore'), null);
 });
 
 test('the compact layout selects with the same rules and hides its options button', () => {

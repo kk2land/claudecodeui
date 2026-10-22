@@ -1,3 +1,4 @@
+import { useEffect, useRef, useState } from 'react';
 import { CheckSquare, Plus, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
@@ -6,6 +7,17 @@ import { cn } from '@/shared/utils';
 import type { LLMProvider, Project, ProjectSession, SessionWithProvider, SidebarSessionSelection } from '@/shared/types';
 import SidebarSessionItem from '@/modules/sidebar/SidebarSessionItem';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
+
+/** How many of a project's loaded sessions one page of the sidebar list shows. */
+const PROJECT_SESSIONS_PAGE_SIZE = 5;
+
+/** Where the list stood when the user asked the server for more sessions. */
+type PendingServerReveal = {
+  /** Loaded sessions at request time, used to tell whether the response added rows. */
+  loaded: number;
+  /** Rows actually on screen at request time; the next reveal starts here. */
+  visible: number;
+};
 
 type SidebarProjectSessionsProps = {
   project: Project;
@@ -92,18 +104,63 @@ export default function SidebarProjectSessions({
   t,
 }: SidebarProjectSessionsProps) {
   const isCompact = useCompactSidebar();
+  // How many of the loaded sessions this project reveals. It pages over what is
+  // already loaded before it reaches the server, so a project never expands to
+  // everything the server holds in one click.
+  const [visibleSessionCount, setVisibleSessionCount] = useState(PROJECT_SESSIONS_PAGE_SIZE);
+  // Where the list stood when the user asked the server for more, or null when
+  // no request is outstanding. A response reveals exactly one page from there,
+  // so a slow reply cannot dump a whole server page (20 rows) onto the screen;
+  // a failed request adds nothing and reveals nothing.
+  const pendingServerRevealRef = useRef<PendingServerReveal | null>(null);
+
+  // Collapsing must forget the revealed pages so reopening starts at five rows
+  // again.
+  useEffect(() => {
+    setVisibleSessionCount(PROJECT_SESSIONS_PAGE_SIZE);
+    pendingServerRevealRef.current = null;
+  }, [isExpanded, project.projectId]);
+
+  // Both conditions live in one effect so the check for new rows always wins:
+  // a settled request that did add rows reveals one page, and one that added
+  // nothing (failure, or nothing left on the server) just clears the marker.
+  useEffect(() => {
+    const pendingReveal = pendingServerRevealRef.current;
+    if (pendingReveal === null) {
+      return;
+    }
+
+    if (sessions.length > pendingReveal.loaded) {
+      // The request added rows: reveal one page from the last row that was on
+      // screen, never the whole server page it returned.
+      pendingServerRevealRef.current = null;
+      setVisibleSessionCount(pendingReveal.visible + PROJECT_SESSIONS_PAGE_SIZE);
+      return;
+    }
+
+    if (!isLoadingMoreSessions) {
+      pendingServerRevealRef.current = null;
+    }
+  }, [isLoadingMoreSessions, sessions.length]);
 
   if (!isExpanded) {
     return null;
   }
 
   const hasSessions = sessions.length > 0;
+  const visibleSessions = sessions.slice(0, visibleSessionCount);
+  // Loaded sessions the reveal window still hides; independent of the server.
+  const hasHiddenSessions = sessions.length > visibleSessionCount;
   const isSelecting = selectedSessionIds !== null;
   // A session with a response in flight cannot be deleted — the same rule the
   // row's options menu applies — so it is not selectable either.
   const isSessionRunning = (session: SessionWithProvider) =>
     activeSessions.has(session.id) && !backgroundSessionIds.has(session.id);
-  const selectableSessionIds = sessions.filter((session) => !isSessionRunning(session)).map((session) => session.id);
+  // Selection is scoped to the rows on screen: a bulk delete must never reach a
+  // session the pager hides, nor one the server has not sent yet.
+  const selectableSessionIds = visibleSessions
+    .filter((session) => !isSessionRunning(session))
+    .map((session) => session.id);
   // Re-derived from the selectable rows rather than read straight off the
   // selection, so a row that started running after it was ticked drops out of
   // the count, the button and the ids the confirmation is opened with.
@@ -113,14 +170,34 @@ export default function SidebarProjectSessions({
   const checkedSessionIds = new Set(effectiveSelectedIds);
   const allLoadedSelected =
     selectableSessionIds.length > 0 && effectiveSelectedIds.length === selectableSessionIds.length;
-  // With more sessions on the server than on screen, the button only reaches the
-  // loaded rows, so it offers "Select all loaded" rather than a "Select all" it
-  // could not honour. Once those rows are ticked it flips to "Clear" either way.
+  // With rows still hidden behind the pager or on the server, the button only
+  // reaches the visible ones, so it offers "Select all loaded" rather than a
+  // "Select all" it could not honour. Once those rows are ticked it flips to
+  // "Clear" either way.
+  const hasMoreThanVisible = hasHiddenSessions || hasMoreSessions;
   const selectAllLabel = allLoadedSelected
     ? t('sessions.clearSelection')
-    : hasMoreSessions
+    : hasMoreThanVisible
       ? t('sessions.selectAllLoaded')
       : t('sessions.selectAll');
+  const hasMoreSessionsToShow = hasHiddenSessions || hasMoreSessions;
+
+  const showMoreSessions = () => {
+    if (hasHiddenSessions) {
+      setVisibleSessionCount((count) => count + PROJECT_SESSIONS_PAGE_SIZE);
+      return;
+    }
+
+    if (!hasMoreSessions || isLoadingMoreSessions) {
+      return;
+    }
+
+    // Every loaded row is already on screen: continue with the server's page,
+    // remembering where the list and the window stood so only one page of the
+    // response shows.
+    pendingServerRevealRef.current = { loaded: sessions.length, visible: visibleSessions.length };
+    onLoadMoreSessions(project.projectId);
+  };
 
   return (
     <div className="ml-3 space-y-1 border-l border-border pl-3">
@@ -209,7 +286,7 @@ export default function SidebarProjectSessions({
       )}
 
       {/* A page emptied by deleting every loaded row still has sessions behind
-          it on the server, so it keeps its "Load more" instead of "No sessions". */}
+          it on the server, so it keeps its "Show more" instead of "No sessions". */}
       {!initialSessionsLoaded ? (
         <SessionListSkeleton />
       ) : !hasSessions && !hasMoreSessions ? (
@@ -218,7 +295,7 @@ export default function SidebarProjectSessions({
         </div>
       ) : (
         <>
-          {sessions.map((session) => (
+          {visibleSessions.map((session) => (
             <SidebarSessionItem
               key={session.id}
               project={project}
@@ -245,15 +322,18 @@ export default function SidebarProjectSessions({
             />
           ))}
 
-          {hasMoreSessions && (
+          {/* One control for both stages: it reveals the next local page, then
+              once every loaded row is on screen it asks the server for more.
+              Hidden as soon as there is nothing left to show. */}
+          {hasMoreSessionsToShow && (
             <Button
               variant="ghost"
               size="sm"
               className="h-8 w-full justify-center text-xs text-muted-foreground hover:text-foreground"
-              onClick={() => onLoadMoreSessions(project.projectId)}
+              onClick={showMoreSessions}
               disabled={isLoadingMoreSessions}
             >
-              {isLoadingMoreSessions ? t('sessions.loadingSessions') : 'Load more sessions'}
+              {isLoadingMoreSessions ? t('sessions.loadingSessions') : t('sessions.showMore')}
             </Button>
           )}
         </>
