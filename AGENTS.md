@@ -31,3 +31,14 @@ See [DeepSeek Harness provider plan](docs/deepseek-harness-provider-plan.md) for
 ## DeepSeek Harness scope
 
 The DSH provider supports ACP and headless transports only. Do not add a DSH SDK runtime, native steer, or native plan mode. Inputs submitted during a run use the existing application queue. Preserve the existing Codex features independently.
+
+## Local manual testing
+
+Use this flow when a change needs to be verified in a real browser. Run the steps in order, from this repository:
+
+1. `/Users/agent/Projects/ops/init_claudecodeui.sh 1`
+2. `/Users/agent/Projects/ops/cloudcli.sh dev`
+
+Open `http://localhost:3000` for manual testing. The `dev` command serves the existing build output in `dist-server/server/modules/cli/cli.js` and runs in the foreground, so keep that terminal open for as long as you are testing; if you change code, rebuild so the served artifacts match the source.
+
+Credentials stay out of Git. The test username and password live in `.claude/local-testing.env` (untracked and gitignored) as `CLAUDECODEUI_TEST_USERNAME` and `CLAUDECODEUI_TEST_PASSWORD`; read them locally when you actually run a browser test. Never copy the password into tracked files or into this document.
