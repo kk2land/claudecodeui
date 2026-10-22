@@ -4,7 +4,7 @@ import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
-import { hydrateChatDrafts, persistQueuedMessage, readQueuedDelivery, readQueuedMessage, subscribeToChatDrafts, writeQueuedMessage } from '@/shared/chatDrafts';
+import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDelivery, readQueuedMessage, subscribeToChatDrafts, writeDraftText, writeQueuedMessage } from '@/shared/chatDrafts';
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
 type Args = {
@@ -108,6 +108,11 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
         const id = body.data?.sessionId;
         if (!id) throw new Error('No session id returned.');
         if (creation.current !== entry) throw new Error('The Codex selection or project changed while creating the session.');
+        // The new chat's latest draft must live under its session key before
+        // navigation, or switching to Plan mode drops what the user typed.
+        const draftScope = `project:${project.projectId}`;
+        writeDraftText(id, readDraftText(draftScope));
+        writeDraftText(draftScope, '');
         onSessionEstablished(id, { provider: 'codex', project, summary: body.data?.sessionName || 'Codex' });
         succeeded = true;
         return id as string;
