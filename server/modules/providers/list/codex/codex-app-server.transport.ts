@@ -13,6 +13,30 @@ type PendingRequest = {
   timer: ReturnType<typeof setTimeout>;
 };
 
+// A rollout can be observed empty for a few milliseconds while Codex flushes
+// its session metadata. Only these history-reading RPCs may repeat: neither
+// submits a user turn, so a retry cannot duplicate a message or a command.
+const EMPTY_ROLLOUT_RETRY_METHODS = new Set(['thread/read', 'thread/resume']);
+const EMPTY_ROLLOUT_RETRY_DELAYS_MS = [50, 100] as const;
+const EMPTY_ROLLOUT_MAX_ATTEMPTS = EMPTY_ROLLOUT_RETRY_DELAYS_MS.length + 1;
+// The app-server wraps this thread-store failure as
+// `failed to read thread: thread-store internal error: ...`; that exact wrapper
+// is an optional prefix here, never an arbitrary one. Full anchoring keeps
+// unrelated metadata failures fatal, both paths may contain spaces, and the
+// captured pair must name the same rollout file.
+const EMPTY_ROLLOUT_ERROR = /^(?:failed to read thread: thread-store internal error: )?failed to read session metadata (.+\.jsonl): rollout at (.+\.jsonl) is empty$/;
+
+/**
+ * True only for the transient "rollout ... is empty" rejection that Codex
+ * returns while a session file is still being flushed. Consumed by
+ * `CodexAppServerTransport.request` to repeat thread/read and thread/resume.
+ */
+function isEmptyRolloutMetadataError(error: unknown): boolean {
+  if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED') return false;
+  const match = EMPTY_ROLLOUT_ERROR.exec(error.message);
+  return Boolean(match) && match![1] === match![2];
+}
+
 /** Providers' runtime and fork adapter share this lazy, bidirectional stdio connection. */
 export class CodexAppServerTransport implements CodexRpcClient {
   private child: ChildProcessWithoutNullStreams | null = null;
@@ -54,7 +78,48 @@ export class CodexAppServerTransport implements CodexRpcClient {
 
   async request<T = Record<string, any>>(method: string, params?: unknown): Promise<T> {
     await this.ensureReady();
-    return this.call(method, params) as Promise<T>;
+    const canRetry = EMPTY_ROLLOUT_RETRY_METHODS.has(method);
+    // Bind the request to the connection it started on. A retry may only repeat
+    // on that same child, so a replacement process can never receive a replayed
+    // read/resume (not even before its own initialize completes).
+    const boundChild = this.child;
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return await this.call(method, params) as T;
+      } catch (error) {
+        const retryable = canRetry && isEmptyRolloutMetadataError(error) && attempt < EMPTY_ROLLOUT_MAX_ATTEMPTS
+          && this.isCurrentConnection(boundChild);
+        if (!retryable || !await this.waitToRetry(boundChild!, EMPTY_ROLLOUT_RETRY_DELAYS_MS[attempt - 1])) throw error;
+        // The timer fired on the live connection, but this continuation can run
+        // after a later stop/exit and an explicit request already replaced the
+        // process. Re-check here, immediately before the next send.
+        if (!this.isCurrentConnection(boundChild)) throw error;
+      }
+    }
+  }
+
+  /** A retry target is usable only while it is still the current, live child. */
+  private isCurrentConnection(child: ChildProcessWithoutNullStreams | null): boolean {
+    return child !== null && this.child === child && !this.closed && !this.isStopping;
+  }
+
+  /**
+   * Waits out one retry delay without spawning, resuming or re-initializing.
+   * Resolves false when the bound child is no longer the live connection, so
+   * the caller rethrows the original error instead of targeting a replacement.
+   */
+  private waitToRetry(child: ChildProcessWithoutNullStreams, delayMs: number): Promise<boolean> {
+    return new Promise((resolve) => {
+      if (!this.isCurrentConnection(child)) return resolve(false);
+      const stopped = () => { child.off('exit', onStop); child.off('close', onStop); clearTimeout(timer); resolve(false); };
+      const onStop = () => stopped();
+      const timer = setTimeout(() => {
+        child.off('exit', onStop); child.off('close', onStop);
+        resolve(this.isCurrentConnection(child));
+      }, delayMs);
+      child.once('exit', onStop);
+      child.once('close', onStop);
+    });
   }
 
   get status() {

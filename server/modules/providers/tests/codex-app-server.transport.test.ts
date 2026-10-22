@@ -26,7 +26,20 @@ function fakeProcess(pid = 43210) {
   child.kill = () => { queueMicrotask(() => child.emit('exit', 0, null)); return true; };
   const transport = new CodexAppServerTransport({ spawn: () => child, timeoutMs: 20 });
   return { child, frames, transport, onFrame: (handler: typeof receive) => { receive = handler; },
-    reply: (frame: CodexRpcFrame) => child.stdout.emit('data', `${JSON.stringify(frame)}\n`) };
+    reply: (frame: CodexRpcFrame) => child.stdout.emit('data', `${JSON.stringify(frame)}\n`),
+    reject: (frame: CodexRpcFrame, message: string) => child.stdout.emit('data', `${JSON.stringify({ id: frame.id, error: { code: -32603, message } })}\n`) };
+}
+
+// The exact error the user reported. The app-server wraps the thread-store
+// failure, so the retry matcher must recognise this whole string — including
+// the real rollout path — and not merely a cut-down suffix of it.
+function emptyRolloutMessage(file = '/Users/agent/workspaces/tap/.codex/sessions/2026/10/21/rollout-2026-10-21T21-34-22-01a15e74-9c29-7ad3-ad63-0fca9258ec00.jsonl') {
+  return `failed to read thread: thread-store internal error: failed to read session metadata ${file}: rollout at ${file} is empty`;
+}
+
+// The same failure surfaced without the app-server's thread-read wrapper.
+function unwrappedEmptyRolloutMessage(file = '/Users/agent/.codex/sessions/2026/10/21/rollout-2026-10-21T21-34-22-01a15e74-9c29-7ad3-ad63-0fca9258ec00.jsonl') {
+  return `failed to read session metadata ${file}: rollout at ${file} is empty`;
 }
 
 test('production spawn explicitly disables Goals unless the env opt-in is true', async (t) => {
@@ -320,6 +333,160 @@ test('EPIPE clears pending requests and emits one process failure', async () => 
   await h.transport.close();
 });
 
+for (const method of ['thread/read', 'thread/resume'] as const) {
+  test(`${method} retries one transient empty rollout on the same process and returns its result`, async () => {
+    const h = fakeProcess();
+    const seen: string[] = [];
+    h.onFrame((frame) => {
+      if (frame.id === undefined) return;
+      seen.push(frame.method!);
+      if (seen.length === 1) return h.reject(frame, emptyRolloutMessage());
+      h.reply({ id: frame.id, result: { thread: { id: 'native-thread', turns: [] } } });
+    });
+    const result = await h.transport.request(method, { threadId: 'native-thread', includeTurns: true });
+    assert.deepEqual(result, { thread: { id: 'native-thread', turns: [] } });
+    assert.deepEqual(seen, [method, method]);
+    assert.equal(h.frames.filter((frame) => frame.method === 'initialize').length, 1, 'retry must not re-handshake');
+    assert.equal(h.transport.status.pid, h.child.pid);
+    assert.equal(h.transport.status.pendingRequests, 0);
+    await h.transport.close();
+  });
+}
+
+test('a persistently empty rollout stops at the bounded attempt count with the original error', async () => {
+  const h = fakeProcess();
+  const seen: Array<{ id?: string | number; method?: string; params?: unknown }> = [];
+  h.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    seen.push({ id: frame.id, method: frame.method, params: frame.params });
+    h.reject(frame, emptyRolloutMessage());
+  });
+  const params = { threadId: 'native-thread', includeTurns: true };
+  await assert.rejects(h.transport.request('thread/read', params), (error: any) => {
+    assert.equal(error.code, 'CODEX_APP_SERVER_REJECTED');
+    // The complete native message survives, not a rewritten or truncated one.
+    assert.equal(error.message, emptyRolloutMessage());
+    return true;
+  });
+  assert.equal(seen.length, 3, 'three total attempts');
+  assert.ok(seen.every((frame) => frame.method === 'thread/read' && JSON.stringify(frame.params) === JSON.stringify(params)), 'same method and params every attempt');
+  assert.equal(h.transport.status.pendingRequests, 0);
+  assert.equal(h.transport.status.pid, h.child.pid, 'bounded failure keeps the process');
+  await h.transport.close();
+});
+
+test('the exact reported error is retried, while malformed or arbitrary wrappers fail immediately', async () => {
+  const pathWithSpaces = '/Users/agent/my sessions/2026/10/21/rollout-2026-10-21T21-34-22-01a15e74.jsonl';
+  const cases: Array<[string, 'retry' | RegExp | ((message: string) => boolean)]> = [
+    [emptyRolloutMessage(), 'retry'],
+    [emptyRolloutMessage(pathWithSpaces), 'retry'],
+    // Only the one known app-server wrapper is an allowed prefix.
+    [unwrappedEmptyRolloutMessage(), 'retry'],
+    ['failed to read thread: failed to read session metadata /tmp/session.jsonl: rollout at /tmp/session.jsonl is empty', /failed to read thread/],
+    ['unexpected prefix: failed to read thread: thread-store internal error: failed to read session metadata /tmp/session.jsonl: rollout at /tmp/session.jsonl is empty', /unexpected prefix/],
+    ['failed to read thread: thread-store internal error: failed to read session metadata /tmp/session.jsonl: unexpected end of file', /unexpected end of file/],
+    ['failed to read thread: thread-store internal error: failed to read session metadata /tmp/session.jsonl: rollout at /tmp/session.jsonl is empty but the index is corrupt', /is empty but the index is corrupt/],
+    ['failed to read thread: thread-store internal error: rollout at /tmp/session.jsonl is empty', /thread-store internal error/],
+    ['failed to read thread: thread-store internal error: failed to read session metadata /tmp/session.jsonl: rollout at /tmp/other.jsonl is empty', /failed to read session metadata/],
+    [`${emptyRolloutMessage()}\n`, /empty\n/],
+    ['', (message: string) => message === ''],
+  ];
+  for (const [message, expected] of cases) {
+    const h = fakeProcess();
+    let attempts = 0;
+    h.onFrame((frame) => {
+      if (frame.id === undefined) return;
+      attempts++;
+      // The recognised shape recovers on the second attempt; the rest must not repeat.
+      if (expected === 'retry' && attempts > 1) return h.reply({ id: frame.id, result: { thread: { id: 'native-thread' } } });
+      h.reject(frame, message);
+    });
+    if (expected === 'retry') {
+      assert.deepEqual(await h.transport.request('thread/read', { threadId: 'native-thread' }), { thread: { id: 'native-thread' } }, message);
+      assert.equal(attempts, 2, message);
+    } else if (typeof expected === 'function') {
+      await assert.rejects(h.transport.request('thread/read', { threadId: 'native-thread' }), (error: any) => expected(error.message));
+      assert.equal(attempts, 1, 'must not retry an empty message');
+    } else {
+      await assert.rejects(h.transport.request('thread/read', { threadId: 'native-thread' }), expected, message);
+      assert.equal(attempts, 1, `must not retry: ${message}`);
+    }
+    await h.transport.close();
+  }
+});
+
+test('empty-rollout retries exclude turn/start, turn/steer, thread/fork and non-rejection failures', async () => {
+  for (const method of ['turn/start', 'turn/steer', 'thread/fork', 'thread/goal/get']) {
+    const h = fakeProcess();
+    let attempts = 0;
+    h.onFrame((frame) => { if (frame.id !== undefined) { attempts++; h.reject(frame, emptyRolloutMessage()); } });
+    await assert.rejects(h.transport.request(method, { threadId: 'native-thread' }), /is empty/);
+    assert.equal(attempts, 1, `${method} must not be retried`);
+    await h.transport.close();
+  }
+  // A timeout has an unknown outcome; repeating it could submit work twice.
+  const timedOut = fakeProcess();
+  await assert.rejects(timedOut.transport.request('thread/read', { threadId: 'native-thread' }), { code: 'CODEX_APP_SERVER_TIMEOUT' });
+  assert.equal(timedOut.frames.filter((frame) => frame.method === 'thread/read').length, 1);
+  assert.equal(timedOut.transport.status.pendingRequests, 0);
+  await timedOut.transport.close();
+});
+
+test('a stop during the retry wait aborts the retry without signalling or spawning a replacement', async (t) => {
+  const h = fakeProcess();
+  const kill = t.mock.method(h.child, 'kill', () => true);
+  h.onFrame((frame) => { if (frame.id !== undefined) h.reject(frame, emptyRolloutMessage()); });
+  const pending = assert.rejects(h.transport.request('thread/read', { threadId: 'native-thread' }), /is empty/);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  const stopping = h.transport.stop();
+  await pending;
+  // The retry wait observed the stop instead of re-sending to the child.
+  assert.equal(h.frames.filter((frame) => frame.method === 'thread/read').length, 1);
+  assert.deepEqual(kill.mock.calls.map((call) => call.arguments), [['SIGTERM']]);
+  assert.equal(h.transport.status.pendingRequests, 0);
+  h.child.emit('exit', null, 'SIGTERM');
+  await stopping;
+  assert.equal(h.transport.status.running, false);
+  await h.transport.close();
+});
+
+test('a child exit during the retry wait fails the read instead of re-sending to a replacement', async () => {
+  const first = fakeProcess(43210);
+  const replacement = fakeProcess(43211);
+  const children = [first.child, replacement.child];
+  let spawns = 0;
+  const transport = new CodexAppServerTransport({ spawn: () => { spawns++; return children.shift()!; }, timeoutMs: 100 });
+  first.onFrame((frame) => { if (frame.id !== undefined) first.reject(frame, emptyRolloutMessage()); });
+  replacement.onFrame((frame) => { if (frame.id !== undefined) replacement.reply({ id: frame.id, result: { thread: {} } }); });
+  const pending = assert.rejects(transport.request('thread/read', { threadId: 'native-thread' }), /is empty/);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  first.child.emit('exit', 1, null);
+  await pending;
+  assert.equal(first.frames.filter((frame) => frame.method === 'thread/read').length, 1);
+  assert.equal(spawns, 1, 'the retry must not restart the process');
+  assert.equal(transport.status.running, false);
+  assert.equal(transport.status.pendingRequests, 0);
+  // A later explicit request may lazily start a new process, but it carries no retried read.
+  await transport.request('ping');
+  assert.equal(transport.status.pid, replacement.child.pid);
+  assert.equal(replacement.frames.filter((frame) => frame.method === 'thread/read').length, 0);
+  await transport.close();
+});
+
+test('closing during the retry wait ends the request with the original error and cleans pending state', async () => {
+  const h = fakeProcess();
+  h.onFrame((frame) => { if (frame.id !== undefined) h.reject(frame, emptyRolloutMessage()); });
+  const pending = assert.rejects(h.transport.request('thread/read', { threadId: 'native-thread' }), /is empty/);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  await h.transport.close();
+  await pending;
+  assert.equal(h.frames.filter((frame) => frame.method === 'thread/read').length, 1);
+  assert.equal(h.transport.status.pendingRequests, 0);
+  assert.equal(h.transport.status.running, false);
+  // A closed transport refuses new work rather than reviving the child.
+  await assert.rejects(h.transport.request('thread/read', { threadId: 'native-thread' }), /shutting down/);
+});
+
 test('default production transport reports the bundled CLI without spawning or sending RPC', async (t) => {
   // A lazy `status` read must expose the bundled 0.163.0 identity so a mounted
   // session can opt into predictions before the first send, while spawning
@@ -356,4 +523,137 @@ test('a custom spawn never borrows the bundled CLI version', async () => {
   assert.equal(status.launcherPath, null);
   assert.equal(status.cliVersion, null, 'a custom spawn must wait for its real handshake');
   await h.transport.close();
+});
+
+// ---------------------------------------------------------------------------
+// End-to-end through the runtime: the real transport retry must let the user's
+// `restoreHistory` path recover, and a failed thread/read must still never be
+// reported as a successful Stop.
+// ---------------------------------------------------------------------------
+function runtimeHarness(timeoutMs = 20) {
+  const h = fakeProcess();
+  // fakeProcess defaults to a 20ms RPC timeout; a Stop test needs turn/start to
+  // stay pending while it aborts.
+  const transport = new CodexAppServerTransport({ spawn: () => h.child, timeoutMs });
+  let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
+  const runtime = new CodexAppServerRuntime(transport, {
+    get: () => settings,
+    update: (_id, patch) => { settings = { ...settings, ...patch }; return settings; },
+  }, 2000, () => {});
+  const writer = { send() {}, setSessionId() {}, nextTurn() { return writer; } };
+  const context = {
+    resolveProviderSessionId: () => 'native-thread',
+    resolveResumeModel: async () => 'test-model',
+    getProviderModels: async () => ({ DEFAULT: 'test-model', OPTIONS: [] }),
+    normalizeMessage: () => [],
+    isProviderInstalled: async () => true,
+  };
+  return { ...h, transport, runtime, writer, context };
+}
+
+test('runtime history restoration recovers from one empty rollout response', async () => {
+  const h = runtimeHarness();
+  let reads = 0;
+  h.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    if (frame.method === 'thread/resume') h.reply({ id: frame.id, result: { thread: { id: 'native-thread' } } });
+    else if (frame.method === 'thread/goal/get') h.reply({ id: frame.id, result: { goal: null } });
+    else if (frame.method === 'thread/read') {
+      reads++;
+      if (reads === 1) h.reject(frame, emptyRolloutMessage());
+      else h.reply({ id: frame.id, result: { thread: { turns: [{ id: 'turn-1', items: [] }] } } });
+    } else h.reply({ id: frame.id, result: {} });
+  });
+  try {
+    const state = await h.runtime.control('app-session', { action: 'goal', operation: 'get' }, { sessionId: 'app-session', cwd: '/tmp' }, h.writer, h.context);
+    assert.equal(reads, 2, 'one transient empty read is retried');
+    assert.equal(state.phase, 'idle', 'restoreHistory observed the recovered result');
+    assert.equal(h.transport.status.pendingRequests, 0);
+    assert.equal(h.transport.status.pid, h.child.pid);
+  } finally {
+    await h.runtime.close();
+    await h.transport.close();
+  }
+});
+
+test('runtime reports a persistently empty restore and never confirms a stop through it', async () => {
+  const h = runtimeHarness();
+  let reads = 0;
+  h.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    if (frame.method === 'thread/resume') h.reply({ id: frame.id, result: { thread: { id: 'native-thread' } } });
+    else if (frame.method === 'thread/read') { reads++; h.reject(frame, emptyRolloutMessage()); }
+    else h.reply({ id: frame.id, result: {} });
+  });
+  try {
+    await assert.rejects(h.runtime.control('app-session', { action: 'goal', operation: 'get' }, { sessionId: 'app-session', cwd: '/tmp' }, h.writer, h.context), /is empty/);
+    assert.equal(reads, 3, 'bounded attempts, then the original error surfaces');
+    assert.equal(h.transport.status.pendingRequests, 0);
+  } finally {
+    await h.runtime.close();
+    await h.transport.close();
+  }
+});
+
+test('an empty-rollout Stop confirmation read is bounded and reported as an unconfirmed stop', async () => {
+  const h = runtimeHarness(500);
+  let reads = 0;
+  h.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    if (frame.method === 'turn/start') return; // stays unanswered below
+    if (frame.method === 'thread/start') h.reply({ id: frame.id, result: { thread: { id: 'native-thread' } } });
+    else if (frame.method === 'thread/goal/get') h.reply({ id: frame.id, result: { goal: null } });
+    // An uncertain turn id is exactly when Stop must re-read the thread.
+    else if (frame.method === 'thread/read') { reads++; h.reject(frame, emptyRolloutMessage()); }
+    else h.reply({ id: frame.id, result: {} });
+  });
+  const context = { ...h.context, resolveProviderSessionId: () => null };
+  let running: Promise<unknown> | null = null;
+  try {
+    running = h.runtime.run('hello', { sessionId: 'app-session', cwd: '/tmp' }, h.writer, context);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(h.runtime.getState('app-session').turnId, null, 'the turn id is still uncertain');
+    assert.equal(await h.runtime.abort('app-session', false), false);
+    assert.equal(h.runtime.getState('app-session').phase, 'stopFailed');
+    assert.equal(reads, 3, 'three bounded confirmation attempts, never a fabricated success');
+    // Only the unanswered turn/start remains pending; no read retry is left behind.
+    assert.equal(h.frames.filter((frame) => frame.method === 'thread/read').length, 3);
+    assert.equal(h.runtime.getState('app-session').phase, 'stopFailed');
+  } finally {
+    h.reply({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+    await running?.catch(() => {});
+    await h.runtime.close();
+    await h.transport.close();
+  }
+});
+
+test('a retry already released by its timer cannot cross into a replacement process', async (t) => {
+  const first = fakeProcess(43210);
+  const replacement = fakeProcess(43211);
+  const children = [first.child, replacement.child];
+  const transport = new CodexAppServerTransport({ spawn: () => children.shift()!, timeoutMs: 100 });
+  first.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    if (frame.method === 'thread/read') first.reject(frame, emptyRolloutMessage());
+    else first.reply({ id: frame.id, result: {} });
+  });
+  replacement.onFrame((frame) => { if (frame.id !== undefined) replacement.reply({ id: frame.id, result: {} }); });
+  try {
+    await transport.request('ping');
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const stale = transport.request('thread/read', { threadId: 'old-thread' })
+      .then(() => 'unexpected success', () => 'rejected');
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(first.frames.filter((frame) => frame.method === 'thread/read').length, 1);
+    // Resolve the backoff, then replace the process before its await continuation runs.
+    t.mock.timers.tick(50);
+    first.child.emit('exit', 1, null);
+    const explicitFreshRequest = transport.request('ping');
+    await explicitFreshRequest;
+    assert.equal(await stale, 'rejected');
+    assert.equal(replacement.frames.filter((frame) => frame.method === 'thread/read').length, 0);
+  } finally {
+    t.mock.timers.reset();
+    await transport.close();
+  }
 });
