@@ -14,6 +14,8 @@ export type ProviderCapabilityRow = {
   /** `predictions` only says the integration can ask for a native suggestion; it is never an eligibility claim. */
   nativeControls?: { goal?: boolean; predictions?: boolean };
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
+  /** Whether the server offers this provider's account quota card; absent or false hides it and skips its cache request. */
+  accountRateLimits?: boolean;
 };
 
 /** One selectable model in a provider's model menu, including its optional reasoning-effort choices. */
@@ -1368,6 +1370,30 @@ export type ProviderAuthStatus = {
 
 /** The authentication state of every CLI provider at once, keyed by LLMProvider, so onboarding and settings can render each provider's connected, loading and error state from one object returned by useProviderAuthStatus. */
 export type ProviderAuthStatusMap = Record<LLMProvider, ProviderAuthStatus>;
+
+// ---------------------------
+
+//----------------- CODEX ACCOUNT RATE LIMITS ------------
+
+/** One Codex account quota window as the server normalizes it: the remaining percentage (0-100, already inverted from `usedPercent`) and the Unix-seconds reset instant, which is null when Codex omitted it. */
+export type CodexRateLimitWindow = {
+  remainingPercent: number;
+  resetsAt: number | null;
+};
+
+/** The signed-in Codex account's cached quota: either window may be missing, `updatedAt` is the server clock in Unix milliseconds, and `stale` means the app-server exited or a refresh failed so the values may be out of date. Expired windows are never restored to a full quota. */
+export type CodexRateLimitSnapshot = {
+  weekly: CodexRateLimitWindow | null;
+  fiveHour: CodexRateLimitWindow | null;
+  updatedAt: number;
+  stale: boolean;
+};
+
+/** Payload of the Codex quota GET endpoint and of the `codex_rate_limits_updated` websocket frame: the deployment flag plus the cached snapshot, which is null before the account has reported quota and after an account change. */
+export type CodexRateLimitsState = {
+  enabled: boolean;
+  snapshot: CodexRateLimitSnapshot | null;
+};
 
 // ---------------------------
 

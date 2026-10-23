@@ -1,5 +1,6 @@
 import type { AgentCategory, AgentContextByProvider, AgentProvider, AgentSettingsProject, ClaudePermissionsState, CodexPermissionMode, CursorPermissionsState, McpProject, SkillsProject } from '@/shared/types';
 import { McpServers } from '@/modules/mcp';
+import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
 import { ProviderSkills } from '@/modules/skills';
 import AccountContent from '@/modules/settings/tabs/agents-settings/sections/content/AccountContent';
 import PermissionsContent from '@/modules/settings/tabs/agents-settings/sections/content/PermissionsContent';
@@ -30,6 +31,9 @@ export default function AgentCategoryContentSection({
   onCodexPermissionModeChange,
   projects,
 }: AgentCategoryContentSectionProps) {
+  // Deployment-gated quota card availability comes from the server capability
+  // matrix, so the panel never offers a Codex quota view the backend disabled.
+  const capabilities = useProviderCapabilities();
   return (
     <div className="min-w-0 flex-1 overflow-y-auto overflow-x-hidden p-3 md:p-4">
       {selectedCategory === 'account' && (
@@ -37,6 +41,7 @@ export default function AgentCategoryContentSection({
           agent={selectedAgent}
           authStatus={agentContextById[selectedAgent].authStatus}
           onLogin={agentContextById[selectedAgent].onLogin}
+          rateLimitsEnabled={capabilities.codex?.accountRateLimits === true}
         />
       )}
 

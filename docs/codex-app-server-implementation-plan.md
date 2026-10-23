@@ -7,6 +7,7 @@ Codex app-server 接入实施记录与计划
 **当前实现与使用**
 
 - 输入框上方提供 Plan/执行模式切换；`/plan` 仅切换模式，`/plan <任务>` 使用原生协作模式执行。运行中的 Plan 任务保持排队。选择“执行计划”会切回执行模式并填入实施提示词，用户发送后开始执行。
+- 账号额度默认关闭。仅设置服务端环境变量 `CLOUDCLI_CODEX_RATE_LIMITS_ENABLED=true` 后，设置→Agents→Codex→账号中显示额度卡片；修改后重启后端并刷新浏览器。卡片显示周额度剩余百分比，Codex 报告 5 小时额度时一并显示。打开卡片只读取内存缓存，不启动 app-server；点击刷新才发送一次 `account/rateLimits/read`（进程未运行时按需启动，并发刷新合并为一次）。普通 app-server 使用期间的 `account/rateLimits/updated` 会持续填充缓存，退出后保留旧值并标记过期，`account/updated` 清空缓存防止跨账号串号。该功能不轮询、不保活，也不改变空闲退出机制。
 - Goal 默认关闭。仅设置服务端环境变量 `CLOUDCLI_CODEX_GOAL_ENABLED=true` 后开启；修改后重启后端并刷新浏览器，无需为切换开关重新构建前端。后端 capabilities 决定目标面板、`/goal` 提示及请求入口；服务端同时拒绝关闭状态下的目标创建/继续，并将开关传给原生进程的 `features.goals`，包含 SDK 兼容运行器。Plan、steer 和普通聊天独立于此开关。
 - 开启后，`/goal` 打开目标编辑器；`/goal <目标>`、`/goal pause|resume|clear` 和面板控件共用服务。展示全部六种原生状态、累计 token 和时间。预算仅在明确填写时设置；耗尽后不自动清零或提高。Plan 中创建的 Goal 保存为 paused。
 - 排队卡片保留删除及更多菜单中的编辑操作；只有活跃且可引导的 turn 显示可用的“引导”。服务端原子占用消息，accepted 才消费；拒绝保留，结果未知挂起，重连读取原生历史核对。无法证明是否接收时，停止任务后可明确选择重新排队或丢弃。

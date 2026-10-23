@@ -399,6 +399,20 @@
       }
     },
     "connectionStatus": "Connection Status",
+    "rateLimits": {
+      "title": "Account quota",
+      "description": "Codex reports the remaining quota for the signed-in account.",
+      "refresh": "Refresh",
+      "loading": "Reading the cached quota...",
+      "empty": "No quota data yet. Use Refresh to read it from Codex.",
+      "weekly": "Weekly limit",
+      "weeklyUnavailable": "The weekly limit is not reported for this account.",
+      "fiveHour": "5-hour limit",
+      "remaining": "{{percent}}% left",
+      "resetsAt": "Resets {{time}}",
+      "stale": "These values may be out of date. Refresh to update them.",
+      "refreshFailed": "Refresh failed"
+    },
     "subscriptionOverride": {
       "title": "Your subscription login is not being used",
       "description": "{{variable}} is set in {{source}}, so Claude Code bills every request to that key as pay-as-you-go API usage instead of using your subscription login.",

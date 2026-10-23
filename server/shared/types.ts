@@ -847,6 +847,46 @@ export type CodexRpcClient = {
 };
 // ---------------------------
 
+//----------------- CODEX ACCOUNT RATE LIMITS ------------
+/**
+ * One Codex account quota window, normalized from the app-server's
+ * `account/rateLimits` buckets. `remainingPercent` is already inverted from
+ * `usedPercent` and clamped to 0..100 with at most two decimals. `resetsAt` is
+ * the protocol's Unix-seconds reset instant, or null when Codex omitted it.
+ */
+export type CodexRateLimitWindow = {
+  remainingPercent: number;
+  resetsAt: number | null;
+};
+
+/**
+ * Cached Codex account quota as the providers routes and the settings card see
+ * it. Windows are identified by duration, not by the protocol's
+ * primary/secondary names, and either may be null: a missing weekly window is
+ * shown as unavailable, a missing five-hour window is hidden. `updatedAt` is
+ * the server clock in Unix milliseconds. `stale` means the app-server exited or
+ * a refresh failed, so the values may no longer be current; an expired window is
+ * never restored to a full quota.
+ */
+export type CodexRateLimitSnapshot = {
+  weekly: CodexRateLimitWindow | null;
+  fiveHour: CodexRateLimitWindow | null;
+  updatedAt: number;
+  stale: boolean;
+};
+
+/**
+ * Cached Codex account quota payload returned by the providers routes and
+ * broadcast as `codex_rate_limits_updated`. `enabled` mirrors the deployment
+ * flag; `snapshot` is null until the account has reported quota, and after an
+ * account change clears it. Contains no credentials.
+ */
+export type CodexRateLimitsState = {
+  enabled: boolean;
+  snapshot: CodexRateLimitSnapshot | null;
+};
+// ---------------------------
+
 export type ProviderPermissionDecision = {
   allow: boolean;
   /** Explicit native approval scope; absent for providers using a boolean decision. */

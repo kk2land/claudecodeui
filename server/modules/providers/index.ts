@@ -10,5 +10,10 @@ export { providerModelsService } from './services/provider-models.service.js';
 // pending titles and resolve edited messages' provider-owned resume points.
 export { sessionsService } from './services/sessions.service.js';
 
+// codexRateLimitsService: used by the Codex rate-limit routes (cache + manual
+// refresh) and by the server bootstrap, which broadcasts its updates on the
+// existing authenticated chat websocket.
+export { codexRateLimitsService } from './list/codex/codex-rate-limits.service.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';

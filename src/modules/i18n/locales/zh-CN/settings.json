@@ -382,6 +382,20 @@
       }
     },
     "connectionStatus": "连接状态",
+    "rateLimits": {
+      "title": "账号额度",
+      "description": "Codex 会报告当前登录账号的剩余额度。",
+      "refresh": "刷新",
+      "loading": "正在读取缓存的额度...",
+      "empty": "暂无额度数据。点击刷新从 Codex 读取。",
+      "weekly": "周额度",
+      "weeklyUnavailable": "该账号未报告周额度。",
+      "fiveHour": "5 小时额度",
+      "remaining": "剩余 {{percent}}%",
+      "resetsAt": "重置于 {{time}}",
+      "stale": "这些数值可能已过期，请刷新。",
+      "refreshFailed": "刷新失败"
+    },
     "login": {
       "title": "登录",
       "reAuthenticate": "重新认证",

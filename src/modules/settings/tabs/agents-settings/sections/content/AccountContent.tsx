@@ -2,12 +2,15 @@ import { AlertTriangle, LogIn } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import { Badge, Button, LLMProviderLogo } from '@/shared/ui';
+import { CodexRateLimitsCard } from '@/modules/settings/tabs/agents-settings/sections/content/CodexRateLimitsCard';
 import type { AgentProvider, ProviderAuthStatus, ProviderAuthSubscriptionOverride } from '@/shared/types';
 
 type AccountContentProps = {
   agent: AgentProvider;
   authStatus: ProviderAuthStatus;
   onLogin: () => void;
+  /** Whether the server offers this provider's account quota card; false hides it and skips its cache read. */
+  rateLimitsEnabled?: boolean;
 };
 
 type AgentVisualConfig = {
@@ -104,7 +107,7 @@ function SubscriptionOverrideNotice({ override }: SubscriptionOverrideNoticeProp
 }
 
 /** Rendered by AgentCategoryContentSection for the "account" category to show sign-in state for one provider. */
-export default function AccountContent({ agent, authStatus, onLogin }: AccountContentProps) {
+export default function AccountContent({ agent, authStatus, onLogin, rateLimitsEnabled = false }: AccountContentProps) {
   const { t } = useTranslation('settings');
   const config = agentConfig[agent];
 
@@ -157,6 +160,10 @@ export default function AccountContent({ agent, authStatus, onLogin }: AccountCo
               )}
             </div>
           </div>
+
+          {agent === 'codex' && rateLimitsEnabled && (
+            <CodexRateLimitsCard enabled={rateLimitsEnabled} />
+          )}
 
           {!authStatus.loading && authStatus.subscriptionOverride && (
             <SubscriptionOverrideNotice override={authStatus.subscriptionOverride} />

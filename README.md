@@ -291,6 +291,18 @@ Hidden providers disappear from the new-chat model picker, its search results, a
 
 The new-chat `/models` command and its **Manage models** view follow the same visibility setting. If loading visibility fails or takes more than 10 seconds, new-chat model selection shows an error with **Retry** instead of displaying unconfirmed providers. A successful response from an older backend without visibility fields defaults to showing all providers. Existing-session model controls remain available during a visibility error.
 
+### Codex account quota card
+
+Set `CLOUDCLI_CODEX_RATE_LIMITS_ENABLED=true` in the backend environment or `.env`, then restart the backend and reload the browser:
+
+```bash
+export CLOUDCLI_CODEX_RATE_LIMITS_ENABLED=true
+```
+
+Settings → Agents → Codex → **Account** then shows the signed-in account's remaining weekly quota, plus the 5-hour quota when Codex reports one. Opening the panel reads only the server's in-memory cache, so it never starts the Codex app-server; **Refresh** sends one `account/rateLimits/read` RPC, starting the app-server only if it is not already running, and concurrent refreshes share that request. Quota updates reported during ordinary Codex chat fill the same cache, and every connected browser receives them through the existing chat websocket.
+
+If the app-server exits or a refresh fails, the last values are kept and marked out of date rather than reset to a full quota; refreshing restores current values. An account change clears the cache so one account's quota can never appear under another. The feature is off by default, never polls, and does not keep the app-server alive.
+
 ### DeepSeek Harness provider
 
 Select **DeepSeek Harness** in the provider picker. Install `@deepseek-ai/dsh` on the machine running CloudCLI and configure the same DSH home and credentials used by that service:

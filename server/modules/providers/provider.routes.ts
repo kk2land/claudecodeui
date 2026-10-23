@@ -10,6 +10,7 @@ import { providerSkillsService } from '@/modules/providers/services/skills.servi
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { providerRuntimeManagementService } from '@/modules/providers/services/provider-runtime-management.service.js';
+import { codexRateLimitsService } from '@/modules/providers/list/codex/codex-rate-limits.service.js';
 import type {
   CustomProviderModelEffort,
   CustomProviderModelInput,
@@ -660,6 +661,26 @@ router.get(
     const provider = parseProvider(req.params.provider);
     const status = await providerAuthService.getProviderAuthStatus(provider);
     res.json(createApiSuccessResponse(status));
+  }),
+);
+
+/** Returns only the in-memory Codex quota cache; it never starts or contacts the app-server. */
+router.get(
+  '/codex/rate-limits',
+  asyncHandler(async (_req: Request, res: Response) => {
+    res.json(createApiSuccessResponse(codexRateLimitsService.getState()));
+  }),
+);
+
+/**
+ * Manual Codex quota refresh: the service checks the deployment flag, sends the
+ * single `account/rateLimits/read` RPC (starting the app-server only when it is
+ * not already running) and coalesces concurrent refreshes into one request.
+ */
+router.post(
+  '/codex/rate-limits/refresh',
+  asyncHandler(async (_req: Request, res: Response) => {
+    res.json(createApiSuccessResponse(await codexRateLimitsService.refresh()));
   }),
 );
 

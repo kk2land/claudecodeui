@@ -424,6 +424,11 @@ export const api = {
     authStatus: (provider: string) =>
       get(`/api/providers/${encodeURIComponent(provider)}/auth/status`),
     claudeSettingsPermissions: () => get('/api/providers/claude/settings-permissions'),
+    // Codex account quota: `codexRateLimits` reads only the server's in-memory
+    // cache (mounting the settings card must never start the app-server), while
+    // `refreshCodexRateLimits` is the explicit manual refresh RPC.
+    codexRateLimits: () => get('/api/providers/codex/rate-limits'),
+    refreshCodexRateLimits: () => post('/api/providers/codex/rate-limits/refresh'),
 
     models: (provider: string) => get(`/api/providers/${provider}/models`),
     createModel: (provider: string, input: unknown) =>

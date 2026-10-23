@@ -84,3 +84,24 @@ test('Goals require an explicit environment opt-in in both capability endpoints'
     else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = original;
   }
 });
+
+test('Codex account rate limits require an explicit environment opt-in', () => {
+  const original = process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED;
+  try {
+    for (const value of [undefined, '', 'false', '1', 'TRUE', 'true']) {
+      if (value === undefined) delete process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED;
+      else process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED = value;
+      const expected = value === 'true';
+      assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').accountRateLimits, expected);
+      assert.equal(
+        providerCapabilitiesService.listAllProviderCapabilities().find((row) => row.provider === 'codex')?.accountRateLimits,
+        expected,
+      );
+      // No other provider ever exposes a Codex quota card.
+      assert.equal(providerCapabilitiesService.getProviderCapabilities('claude').accountRateLimits, undefined);
+    }
+  } finally {
+    if (original === undefined) delete process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED;
+    else process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED = original;
+  }
+});

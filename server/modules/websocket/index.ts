@@ -8,4 +8,7 @@ export { broadcastSessionUpserted, broadcastSessionUpsertedBatch } from './servi
 // runDetachedChatTurn: used by the scheduled-messages module to run a turn
 // from a timer, with no socket to stream to or report errors on.
 export { runDetachedChatTurn } from './services/chat-websocket.service.js';
+// Consumed by the server bootstrap to publish Codex account quota updates on
+// the existing authenticated chat sockets instead of a second transport.
+export { broadcastCodexRateLimits } from './services/codex-rate-limits-broadcast.service.js';
 export type { ProviderRuntimeGateway } from '@/shared/types.js';

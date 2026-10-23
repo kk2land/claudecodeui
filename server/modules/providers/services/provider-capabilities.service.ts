@@ -1,5 +1,5 @@
 import type { LLMProvider } from '@/shared/index.js';
-import { isCodexGoalEnabled } from '@/shared/index.js';
+import { isCodexGoalEnabled, isCodexRateLimitsEnabled } from '@/shared/index.js';
 
 /**
  * Static, backend-owned description of what one provider integration supports.
@@ -32,6 +32,12 @@ type ProviderCapabilities = {
   nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean; predictions: boolean };
   /** Application transport/process controls, independent of provider-native plan or steer support. */
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
+  /**
+   * Whether the account settings panel may show this provider's quota card.
+   * Deployment-gated and off by default, so the frontend hides the card (and
+   * skips its cache request) instead of branching on the provider id.
+   */
+  accountRateLimits?: boolean;
   /** Whether interactive tool permission prompts can reach the UI. */
   supportsPermissionRequests: boolean;
   /** Whether the token-usage endpoint has data for this provider. */
@@ -168,6 +174,9 @@ export const providerCapabilitiesService = {
       ...(capabilities.nativeControls ? {
         nativeControls: { ...capabilities.nativeControls, goal: isCodexGoalEnabled() },
       } : {}),
+      // Only Codex exposes a quota card; the deployment flag decides whether the
+      // panel offers it, so the frontend never has to branch on the provider id.
+      ...(provider === 'codex' ? { accountRateLimits: isCodexRateLimitsEnabled() } : {}),
     };
   },
 

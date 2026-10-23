@@ -12,10 +12,11 @@ import cors from 'cors';
 import { AppError, findApplicationRoot, getModuleDirectory, IS_PLATFORM, terminalTextStyles } from '@/shared/utils.js';
 import {
     closeSessionsWatcher,
+    codexRateLimitsService,
     initializeSessionsWatcher,
     providerRuntimeService,
 } from '@/modules/providers/index.js';
-import { chatRunRegistry, createWebSocketServer } from '@/modules/websocket/index.js';
+import { broadcastCodexRateLimits, chatRunRegistry, createWebSocketServer } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -124,6 +125,12 @@ createWebSocketServer(server, {
         },
     },
     getPluginPort,
+});
+
+// Codex quota changes are published on the existing authenticated chat sockets,
+// so the settings account card never opens a second transport or polls.
+codexRateLimitsService.subscribe((event) => {
+    broadcastCodexRateLimits({ enabled: event.enabled, snapshot: event.snapshot });
 });
 
 app.use(cors({ exposedHeaders: ['X-Refreshed-Token', 'X-Auth-Error'] }));

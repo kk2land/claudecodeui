@@ -49,6 +49,17 @@ export function isCodexGoalEnabled(): boolean {
   return process.env.CLOUDCLI_CODEX_GOAL_ENABLED === 'true';
 }
 
+/**
+ * Providers' Codex rate-limit service uses this opt-in for the account quota
+ * card, its GET cache endpoint and the manual refresh RPC. Only the literal
+ * value `true` enables it; changing the deployment setting requires a backend
+ * restart. While off, no rate-limit RPC is sent and no notification is
+ * published, so ordinary app-server use stays untouched.
+ */
+export function isCodexRateLimitsEnabled(): boolean {
+  return process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED === 'true';
+}
+
 // ---------------------------
 //----------------- NORMALIZED MESSAGE HELPER INPUT TYPES ------------
 /**
