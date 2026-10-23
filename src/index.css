@@ -715,10 +715,11 @@
       opacity: 1 !important;
     }
     
-    /* Only disable hover states for interactive elements, not containers */
-    button:hover,
+    /* Only disable hover states for interactive elements, not containers.
+       State switches must keep their checked/muted background and disabled opacity. */
+    button:not([role="switch"]):hover,
     [role="button"]:hover,
-    .cursor-pointer:hover,
+    .cursor-pointer:not([role="switch"]):hover,
     a:hover,
     .hover\:bg-gray-50:hover,
     .hover\:bg-gray-100:hover,
