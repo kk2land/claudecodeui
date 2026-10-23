@@ -855,6 +855,9 @@ export function useSessionStore() {
   }, [notify]);
 
   const appendRealtime = useCallback((sessionId: string, msg: NormalizedMessage) => {
+    // Socket data is untrusted at runtime despite its TypeScript cast. A row
+    // without identity would poison reconciliation and block terminal events.
+    if (typeof msg.id !== 'string' || !msg.id.trim()) return;
     const slot = getSlot(sessionId);
     const normalizedMessage =
       msg.sessionId === sessionId

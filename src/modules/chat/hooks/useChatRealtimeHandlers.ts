@@ -16,6 +16,11 @@ const hasActionablePermissionRequests = (requests: Array<{ toolName?: unknown }>
   return Array.isArray(requests) && requests.some((request) => isActionablePermissionRequest(request));
 };
 
+// Global socket broadcasts and lifecycle frames are not transcript rows.
+const TRANSCRIPT_MESSAGE_KINDS = new Set([
+  'text', 'thinking', 'tool_use', 'tool_result', 'error', 'task_status', 'task_notification',
+]);
+
 type UseChatRealtimeHandlersArgs = {
   isActive: boolean;
   subscribe: (listener: (event: ServerEvent) => void) => () => void;
@@ -113,6 +118,10 @@ export function useChatRealtimeHandlers({
       if (!msg.kind) {
         return;
       }
+
+      // Owned by the settings quota subscription; it has no transcript ID or
+      // session and must not inherit the currently viewed conversation.
+      if (msg.kind === 'codex_rate_limits_updated') return;
 
       const activeViewSessionId = activeViewSessionIdRef.current;
       const sid = (typeof msg.sessionId === 'string' && msg.sessionId) || activeViewSessionId;
@@ -261,12 +270,7 @@ export function useChatRealtimeHandlers({
       }
 
       // --- All other messages: route to store ---
-      const shouldPersist =
-        msg.kind !== 'complete'
-        && msg.kind !== 'status'
-        && msg.kind !== 'permission_request'
-        && msg.kind !== 'permission_resolved'
-        && msg.kind !== 'permission_cancelled';
+      const shouldPersist = TRANSCRIPT_MESSAGE_KINDS.has(msg.kind);
 
       if (sid && shouldPersist) {
         sessionStore.appendRealtime(sid, msg as unknown as NormalizedMessage);
