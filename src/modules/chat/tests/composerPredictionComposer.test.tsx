@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 
-import { act, fireEvent, render, screen } from '@testing-library/react';
+import { act, fireEvent, render, screen, within } from '@testing-library/react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
@@ -39,7 +39,9 @@ const controls = (prediction?: CodexControls['state'] extends infer S ? S extend
   control: vi.fn().mockResolvedValue(undefined), steer: vi.fn().mockResolvedValue(undefined),
 });
 
-function Harness({ codexControls }: { codexControls: CodexControls }) {
+type HarnessOverrides = Partial<React.ComponentProps<typeof ChatComposer>>;
+
+function Harness({ codexControls, overrides }: { codexControls: CodexControls; overrides?: HarnessOverrides }) {
   const send = vi.fn();
   const composer = useChatComposerState({
     selectedProject: PROJECT,
@@ -127,9 +129,13 @@ function Harness({ codexControls }: { codexControls: CodexControls }) {
       onTextareaPaste={composer.handlePaste}
       onTextareaScrollSync={composer.syncInputOverlayScroll}
       onTextareaInput={composer.handleTextareaInput}
+      onTextareaResize={composer.resizeTextarea}
       placeholder={PLACEHOLDER}
       isTextareaExpanded={composer.isTextareaExpanded}
+      isInputFocused={composer.isInputFocused}
+      onInputFocusChange={composer.handleInputFocusChange}
       composerPrediction={composer.composerPrediction as ComposerPredictionControls}
+      {...overrides}
     />
   );
 }
@@ -259,4 +265,283 @@ test('the real composer moves a pending request through ready, empty and rejecte
   // A rejected request names the rejection without claiming a specific build.
   rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-3', status: 'unavailable', reason: 'rejected' })} />);
   assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, 'Codex rejected the suggestion request');
+});
+
+/* ─── Mobile capsule / expansion ─────────────────────────────────── */
+
+const stubPhone = () => {
+  vi.stubGlobal('innerWidth', 412);
+};
+
+/** State-level patches beyond prediction, matching the Codex control fixture shape. */
+const mobileControls = (patch: Partial<NonNullable<CodexControls['state']>>): CodexControls => {
+  const base = controls();
+  return { ...base, state: { ...base.state!, ...patch } };
+};
+
+test('mobile idle is one short capsule line that expands in place on focus and keeps a draft', async () => {
+  stubPhone();
+  const view = render(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'ready', text: 'Explain the failing test.' })} />);
+
+  const textarea = await findTextarea();
+  assert.equal(screen.getAllByRole('textbox').length, 1);
+  assert.equal(textarea.getAttribute('rows'), '1');
+  assert.equal(textarea.placeholder, 'Ask Codex');
+  assert.equal(textarea.getAttribute('aria-label'), PLACEHOLDER);
+  assert.ok(screen.getByRole('button', { name: 'Add attachment or action' }));
+  assert.ok(screen.getByRole('button', { name: 'Send' }));
+
+  await act(async () => { textarea.focus(); });
+  // Same live textarea, now three rows tall with the suggestion actions inline
+  // in the footer beside `+` — exactly one group, none under the textarea.
+  assert.equal(screen.getAllByRole('textbox').length, 1);
+  assert.equal(textarea.getAttribute('rows'), '3');
+  assert.equal(textarea.placeholder, 'Explain the failing test.');
+  assert.equal(screen.getAllByTestId('composer-prediction-hint').length, 1);
+  assert.ok(screen.getByRole('button', { name: 'Chat settings' }));
+  const tools = screen.getByRole('button', { name: 'Add attachment or action' }).closest('[data-slot="prompt-input-tools"]');
+  assert.ok(tools?.contains(screen.getByRole('button', { name: 'Use' })));
+  assert.ok(tools?.contains(screen.getByRole('button', { name: 'Hide suggestion' })));
+
+  textarea.focus();
+  const onSubmit = vi.fn((event: Event) => event.preventDefault());
+  textarea.closest('form')!.addEventListener('submit', onSubmit);
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Use' })); });
+  assert.equal(onSubmit.mock.calls.length, 0);
+  assert.equal(textarea.value, 'Explain the failing test.');
+  // A non-empty draft survives blur and keeps the expanded frame.
+  await act(async () => { textarea.blur(); });
+  assert.equal(textarea.value, 'Explain the failing test.');
+  assert.equal(textarea.placeholder, PLACEHOLDER);
+
+  await act(async () => { fireEvent.change(textarea, { target: { value: '' } }); });
+  await act(async () => { textarea.blur(); });
+  assert.equal(textarea.placeholder, 'Ask Codex');
+  assert.equal(textarea.getAttribute('rows'), '1');
+
+  // Desktop keeps the separate shortcut row below the textarea.
+  vi.stubGlobal('innerWidth', 1024);
+  await act(async () => { window.dispatchEvent(new Event('resize')); });
+  view.rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-6', status: 'ready', text: 'Desktop suggestion.' })} />);
+  const desktopTextarea = await findTextarea();
+  assert.equal(desktopTextarea.getAttribute('rows'), null);
+  const desktopHint = screen.getByTestId('composer-prediction-hint');
+  assert.ok(!desktopHint.closest('[data-slot="prompt-input-tools"]'));
+});
+
+test('the + sheet reaches chat settings and drives the real model, effort and permission options', async () => {
+  stubPhone();
+  const onSelectModel = vi.fn();
+  const onSelectEffort = vi.fn();
+  const onSelectPermissionMode = vi.fn();
+  const overrides: HarnessOverrides = {
+    model: 'gpt-5.4',
+    availableModelOptions: [
+      { value: 'gpt-5.4', label: 'GPT-5.4' },
+      { value: 'gpt-5.5', label: 'GPT-5.5' },
+    ],
+    onSelectModel,
+    effort: 'high',
+    availableEffortOptions: [{ value: 'low' }, { value: 'high' }] as never,
+    onSelectEffort,
+    availablePermissionModes: ['default', 'plan'],
+    onSelectPermissionMode,
+  };
+  const view = render(
+    <Harness codexControls={controls()} overrides={overrides} />,
+  );
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+  const actions = await screen.findByRole('dialog', { name: 'Add to message' });
+  fireEvent.click(within(actions).getByRole('button', { name: 'Chat settings' }));
+  const settings = await screen.findByRole('dialog', { name: 'Chat settings' });
+
+  const comboboxes = within(settings).getAllByRole('combobox') as HTMLSelectElement[];
+  assert.equal(comboboxes.length, 3);
+  assert.deepEqual(Array.from(comboboxes[0].options).map((option) => option.value), ['gpt-5.4', 'gpt-5.5']);
+  fireEvent.change(comboboxes[0], { target: { value: 'gpt-5.5' } });
+  assert.deepEqual(onSelectModel.mock.calls, [['gpt-5.5']]);
+  fireEvent.change(comboboxes[1], { target: { value: 'low' } });
+  assert.deepEqual(onSelectEffort.mock.calls, [['low']]);
+  fireEvent.change(comboboxes[2], { target: { value: 'plan' } });
+  assert.deepEqual(onSelectPermissionMode.mock.calls, [['plan']]);
+
+  // Both the close icon and the footer action are named Done; use the footer.
+  const done = within(settings).getAllByRole('button', { name: 'Done' });
+  fireEvent.click(done[done.length - 1]);
+  assert.equal(screen.queryByRole('dialog'), null);
+
+  // No advertised effort levels means no invented reasoning section.
+  view.rerender(<Harness codexControls={controls()} overrides={{ ...overrides, availableEffortOptions: [] }} />);
+  fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+  fireEvent.click(within(await screen.findByRole('dialog', { name: 'Add to message' })).getByRole('button', { name: 'Chat settings' }));
+  const settingsWithoutEffort = await screen.findByRole('dialog', { name: 'Chat settings' });
+  assert.equal(within(settingsWithoutEffort).getAllByRole('combobox').length, 2);
+  fireEvent.keyDown(document, { key: 'Escape' });
+  assert.equal(screen.queryByRole('dialog'), null);
+});
+
+test('blocking questions and a held queue stay outside the sheet and keep their answers across it', async () => {
+  stubPhone();
+  const codex = mobileControls({
+    queueHeld: true,
+    questions: [{
+      requestId: 'q-request', turnId: 'turn-1', isBlocking: true,
+      questions: [{
+        id: 'format', header: 'Format', question: 'Which format?', isOther: true, isSecret: false,
+        options: [{ label: 'JSON', description: 'Structured' }],
+      }],
+    }],
+  });
+  render(<Harness codexControls={codex} />);
+
+  // Both stay beside the input, not behind a sheet.
+  assert.ok(await screen.findByText('Which format?'));
+  const resume = screen.getByRole('button', { name: 'Resume queue' });
+  fireEvent.click(resume);
+  assert.deepEqual(vi.mocked(codex.control).mock.calls, [[{ action: 'queue-resume' }]]);
+
+  fireEvent.change(screen.getByLabelText('Which format?'), { target: { value: 'YAML' } });
+  fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+  fireEvent.click(within(await screen.findByRole('dialog', { name: 'Add to message' })).getByRole('button', { name: 'Chat settings' }));
+  const settingsDone = within(await screen.findByRole('dialog', { name: 'Chat settings' }))
+    .getAllByRole('button', { name: 'Done' });
+  fireEvent.click(settingsDone[settingsDone.length - 1]);
+
+  assert.equal((screen.getByLabelText('Which format?') as HTMLInputElement).value, 'YAML');
+  fireEvent.click(screen.getByRole('button', { name: 'Send answers' }));
+  await act(async () => {});
+  assert.deepEqual(vi.mocked(codex.control).mock.calls.at(-1), [
+    { action: 'answer', requestId: 'q-request', answers: { format: { answers: ['YAML'] } } },
+  ]);
+});
+
+test('the mobile Plan badge follows native app-server plan, never SDK or an unsupported permission mode', async () => {
+  stubPhone();
+  const view = render(
+    <Harness codexControls={controls()} overrides={{ permissionMode: 'default' }} />,
+  );
+  const tools = () => screen.getByRole('button', { name: 'Add attachment or action' })
+    .closest('[data-slot="prompt-input-tools"]');
+  assert.equal(within(tools() as HTMLElement).queryByText('Plan'), null);
+
+  // Native app-server plan shows even though the generic permission is default.
+  view.rerender(
+    <Harness codexControls={mobileControls({ mode: 'plan' })} overrides={{ permissionMode: 'default' }} />,
+  );
+  assert.ok(within(tools() as HTMLElement).getByText('Plan'));
+
+  // A stale native plan on the SDK runtime is not a real plan session.
+  view.rerender(
+    <Harness codexControls={mobileControls({ runtime: 'sdk', mode: 'plan' })} overrides={{ permissionMode: 'default' }} />,
+  );
+  assert.equal(within(tools() as HTMLElement).queryByText('Plan'), null);
+
+  view.rerender(
+    <Harness codexControls={mobileControls({ mode: 'default' })} overrides={{ permissionMode: 'default' }} />,
+  );
+  assert.equal(within(tools() as HTMLElement).queryByText('Plan'), null);
+
+  // Without Codex, only a provider that actually advertises Plan shows it.
+  view.rerender(
+    <Harness codexControls={controls()} overrides={{ codexControls: undefined, providerLabel: 'Claude', permissionMode: 'plan', availablePermissionModes: ['default', 'plan'] }} />,
+  );
+  assert.ok(within(tools() as HTMLElement).getByText('Plan'));
+
+  view.rerender(
+    <Harness codexControls={controls()} overrides={{ codexControls: undefined, providerLabel: 'DeepSeek Harness', permissionMode: 'plan', availablePermissionModes: ['default'] }} />,
+  );
+  assert.equal(within(tools() as HTMLElement).queryByText('Plan'), null);
+});
+
+test('leaving the phone with either sheet open closes it, unlocks body scroll and does not reopen on return', async () => {
+  stubPhone();
+  render(<Harness codexControls={controls()} />);
+  const resizeTo = async (width: number) => {
+    vi.stubGlobal('innerWidth', width);
+    await act(async () => { window.dispatchEvent(new Event('resize')); });
+  };
+
+  for (const sheetName of ['Add to message', 'Chat settings']) {
+    if (sheetName === 'Chat settings') {
+      fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+      fireEvent.click(within(await screen.findByRole('dialog', { name: 'Add to message' })).getByRole('button', { name: 'Chat settings' }));
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+    }
+    assert.ok(await screen.findByRole('dialog', { name: sheetName }));
+    assert.equal(String(document.body.style.overflow), 'hidden');
+
+    await resizeTo(1024);
+    assert.equal(screen.queryAllByRole('dialog').length, 0, `${sheetName} must close on desktop`);
+    assert.equal(document.body.style.overflow, '');
+
+    await resizeTo(412);
+    assert.equal(screen.queryAllByRole('dialog').length, 0, `${sheetName} must stay closed back on mobile`);
+  }
+});
+
+test('a short mobile draft recomputes the textarea height when the layout changes, keeping value and caret', async () => {
+  stubPhone();
+  const onSubmit = vi.fn((event: Event) => event.preventDefault());
+  render(<Harness codexControls={controls()} overrides={{ onSubmit: onSubmit as never }} />);
+  const textarea = await findTextarea();
+  const form = textarea.closest('form')!;
+  form.addEventListener('submit', onSubmit);
+
+  // Model the real measurement: the mobile 16px font wraps sooner and is
+  // taller than the desktop 14px one, so a stale inline height is observable.
+  Object.defineProperty(textarea, 'scrollHeight', {
+    configurable: true,
+    get: () => (window.innerWidth < 640 ? 96 : 64),
+  });
+  await act(async () => { fireEvent.change(textarea, { target: { value: 'short draft' } }); });
+  await act(async () => { fireEvent.input(textarea); });
+  assert.equal(textarea.style.height, '96px');
+
+  textarea.setSelectionRange(3, 7);
+  const resizeTo = async (width: number) => {
+    vi.stubGlobal('innerWidth', width);
+    await act(async () => { window.dispatchEvent(new Event('resize')); });
+  };
+  await resizeTo(1024);
+  assert.equal(textarea.style.height, '64px');
+  assert.equal(textarea.value, 'short draft');
+  assert.deepEqual([textarea.selectionStart, textarea.selectionEnd], [3, 7]);
+
+  await resizeTo(412);
+  assert.equal(textarea.style.height, '96px');
+  assert.equal(onSubmit.mock.calls.length, 0);
+
+  // Blank desktop keeps its native two-row height rather than an expanded one.
+  await act(async () => { fireEvent.change(textarea, { target: { value: '' } }); });
+  await resizeTo(1024);
+  assert.equal(textarea.style.height, 'auto');
+  assert.equal(textarea.getAttribute('rows'), null);
+});
+
+test('the inline schedule menu works inside the + sheet and schedules without submitting', async () => {
+  stubPhone();
+  const onScheduleMessage = vi.fn();
+  const onSubmit = vi.fn((event: Event) => event.preventDefault());
+  render(
+    <Harness
+      codexControls={controls()}
+      overrides={{ onScheduleMessage, onSubmit: onSubmit as never }}
+    />,
+  );
+
+  const textarea = await findTextarea();
+  await act(async () => { fireEvent.change(textarea, { target: { value: 'send this later' } }); });
+  fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+  const actions = await screen.findByRole('dialog', { name: 'Add to message' });
+  fireEvent.click(within(actions).getByRole('button', { name: 'Schedule this message' }));
+
+  const menu = within(actions).getByRole('menu', { name: 'Schedule this message' });
+  fireEvent.click(within(menu).getByRole('menuitemradio', { name: /In 15 minutes/ }));
+  assert.equal(onScheduleMessage.mock.calls.length, 1);
+  assert.ok(onScheduleMessage.mock.calls[0][0] instanceof Date);
+  assert.equal(onSubmit.mock.calls.length, 0);
+  assert.equal(screen.queryByRole('dialog'), null);
+  assert.equal(textarea.value, 'send this later');
 });

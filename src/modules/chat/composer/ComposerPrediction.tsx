@@ -9,47 +9,73 @@ type ComposerPredictionActionsProps = {
   onAccept(): void;
   /** Hides this turn's suggestion. */
   onDismiss(): void;
+  /**
+   * ChatComposer renders the desktop shortcut row below the textarea and, on
+   * mobile, the same actions inline in the footer next to `+`. Inline drops the
+   * row chrome and hides the keyboard hint visually while keeping it for
+   * screen readers.
+   */
+  inline?: boolean;
 };
 
 /**
- * Rendered by ChatComposer directly below the textarea while a native
- * suggestion is visible. The suggestion itself is painted through the
- * textarea's native placeholder, so this row only carries the localized
- * shortcuts and the pointer/touch equivalents; the real value, draft and
- * mention highlight stay untouched until the suggestion is accepted.
+ * Rendered by ChatComposer below the desktop textarea and inline in the mobile
+ * footer while a native suggestion is visible. The suggestion itself is painted
+ * through the textarea's native placeholder, so these actions only carry the
+ * localized shortcuts and the pointer/touch equivalents; the real value, draft
+ * and mention highlight stay untouched until the suggestion is accepted.
  */
-export function ComposerPredictionActions({ onAccept, onDismiss }: ComposerPredictionActionsProps) {
+export function ComposerPredictionActions({ onAccept, onDismiss, inline = false }: ComposerPredictionActionsProps) {
   const { t } = useTranslation('chat');
   return (
-    <div className="flex items-center gap-2 border-t border-border/20 px-4 py-1.5" aria-live="polite">
+    <div
+      className={cn(
+        'flex items-center gap-2',
+        inline ? 'shrink-0' : 'border-t border-border/20 px-4 py-1.5',
+      )}
+      aria-live="polite"
+    >
       <p
         data-testid="composer-prediction-hint"
-        className="min-w-0 flex-1 truncate text-xs leading-5 text-muted-foreground/70"
+        className={cn(
+          'min-w-0 flex-1 truncate text-xs leading-5 text-muted-foreground/70',
+          inline && 'sr-only',
+        )}
       >
         {t('prediction.hint')}
       </p>
       {/* Mouse and touch accept without submitting: both buttons are type="button" inside the form. */}
       <button
         type="button"
+        // Pointer-down must not blur the textarea: blank blur would collapse the
+        // mobile composer and remove this button before its click fires.
+        onPointerDown={(event) => event.preventDefault()}
         onMouseDown={(event) => event.preventDefault()}
         onClick={(event) => {
           event.preventDefault();
           onAccept();
         }}
         title={t('prediction.acceptHint')}
-        className="shrink-0 rounded-md border border-border/50 bg-card/90 px-2 py-0.5 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        className={cn(
+          'shrink-0 rounded-md border border-border/50 bg-card/90 font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground',
+          inline ? 'h-9 px-3 text-xs' : 'px-2 py-0.5 text-[11px]',
+        )}
       >
         {t('prediction.accept')}
       </button>
       <button
         type="button"
+        onPointerDown={(event) => event.preventDefault()}
         onMouseDown={(event) => event.preventDefault()}
         onClick={(event) => {
           event.preventDefault();
           onDismiss();
         }}
         aria-label={t('prediction.dismiss')}
-        className="shrink-0 rounded-md px-1.5 py-0.5 text-[11px] text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground"
+        className={cn(
+          'shrink-0 rounded-md text-muted-foreground/70 transition-colors hover:bg-muted hover:text-foreground',
+          inline ? 'flex h-9 w-9 items-center justify-center text-sm' : 'px-1.5 py-0.5 text-[11px]',
+        )}
       >
         ×
       </button>

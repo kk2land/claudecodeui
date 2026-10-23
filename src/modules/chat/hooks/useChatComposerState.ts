@@ -1622,6 +1622,7 @@ export function useChatComposerState({
     handlePaste,
     handleTextareaClick,
     handleTextareaInput,
+    resizeTextarea,
     syncInputOverlayScroll,
     handleClearInput,
     handleAbortSession,

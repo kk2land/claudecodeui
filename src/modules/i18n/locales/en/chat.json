@@ -497,5 +497,24 @@
     "customModelsOnlyHint": "Hide the built-in {{provider}} models from every model picker and make your first model the default. Built-in models stay listed until you add a model.",
     "builtInModelsHidden": "Hidden from model pickers while “Use only my models” is on.",
     "customModelsOnlyFailed": "Unable to change this setting."
+  },
+  "mobileComposer": {
+    "actions": "Add attachment or action",
+    "actionsTitle": "Add to message",
+    "settings": "Chat settings",
+    "settingsTitle": "Chat settings",
+    "modelSettings": "Model & runtime",
+    "done": "Done",
+    "compactPlaceholder": "Ask {{provider}}",
+    "permissions": "Permissions",
+    "prediction": "Next-message suggestions",
+    "runtime": "Runtime settings",
+    "loadingModels": "Loading models…",
+    "noModels": "No models available",
+    "tokenUsage": "Token usage",
+    "plan": "Plan",
+    "model": "Model",
+    "reasoning": "Reasoning",
+    "effortDefault": "Default"
   }
 }

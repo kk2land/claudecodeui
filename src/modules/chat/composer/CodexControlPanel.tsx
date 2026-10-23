@@ -1,4 +1,5 @@
 import { useId, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Square, Settings2 } from 'lucide-react';
 
@@ -37,8 +38,20 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
   );
 }
 
-/** ChatComposer displays native Plan, Goal, runtime selection and request_user_input controls here. */
-export function CodexControlPanel({ controls, onExecutePlan }: { controls: CodexControls; onExecutePlan(): void }) {
+/**
+ * ChatComposer displays native Plan, Goal, runtime selection and request_user_input controls here.
+ *
+ * `settingsContainer` lets the mobile composer move routine settings into its
+ * bottom sheet while this component stays mounted, so local objective/budget
+ * state survives closing the sheet. Undefined keeps the desktop placement;
+ * null renders only the blocking notices/questions that must stay beside the
+ * input; an element portals the settings into it.
+ */
+export function CodexControlPanel({ controls, onExecutePlan, settingsContainer }: {
+  controls: CodexControls;
+  onExecutePlan(): void;
+  settingsContainer?: Element | null;
+}) {
   const { t, i18n } = useTranslation('chat');
   const { state, error, pending } = controls;
   const runtimePanelId = useId();
@@ -53,8 +66,7 @@ export function CodexControlPanel({ controls, onExecutePlan }: { controls: Codex
   const native = state?.runtime !== 'sdk';
   const startedAt = state?.diagnostics?.startedAt != null ? new Date(state.diagnostics.startedAt) : null;
   const button = 'inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-border/60 bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40';
-  return (
-    <div className="mx-auto mb-2 w-full min-w-0 max-w-[54.25rem] space-y-2 text-sm">
+  const settings = <div className="min-w-0 space-y-2 text-sm">
       <div className="flex items-start gap-2">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           {native && <>
@@ -64,10 +76,12 @@ export function CodexControlPanel({ controls, onExecutePlan }: { controls: Codex
             </button>
             {state?.mode === 'plan' && <button type="button" className={button} disabled={pending || busy}
               onClick={() => void controls.control({ action: 'mode', mode: 'default' }).then(onExecutePlan).catch(() => {})}>{t('codex.executePlan')}</button>}
-            {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
-            {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
-            {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
-              onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
+            {settingsContainer === undefined && <>
+              {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
+              {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
+              {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
+                onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
+            </>}
           </>}
         </div>
         <button type="button" className={`${button} gap-1.5`} aria-expanded={runtimeOpen}
@@ -136,8 +150,40 @@ export function CodexControlPanel({ controls, onExecutePlan }: { controls: Codex
           <button type="submit" className={button} disabled={pending || !objective.trim()}>{t(goal ? 'codex.replaceGoal' : 'codex.createGoal')}</button>
         </form>
       </details>}
+    </div>;
+
+  const notices = <div className="min-w-0 space-y-2 text-sm">
+      {settingsContainer !== undefined && native && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || state?.queueHeld) && (
+        <div className="flex flex-wrap items-center gap-2">
+          {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
+          {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
+          {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
+            onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
+        </div>
+      )}
       {(error || state?.error) && <p role="alert" className="text-xs text-destructive">{error || state?.error}</p>}
       {state?.questions.map((request) => <NativeQuestion key={request.requestId} request={request} controls={controls} />)}
+    </div>;
+
+  // Desktop keeps the historical order and spacing; mobile only mounts the
+  // notices when one exists, so an idle composer grows no extra toolbar.
+  const hasNotices = Boolean(
+    (settingsContainer !== undefined && native
+      && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || state?.queueHeld))
+      || error || state?.error || state?.questions.length,
+  );
+  if (settingsContainer === undefined) {
+    return (
+      <div className="mx-auto mb-2 w-full min-w-0 max-w-[54.25rem] space-y-2 text-sm">
+        {settings}
+        {hasNotices && notices}
+      </div>
+    );
+  }
+  return (
+    <div className={hasNotices ? 'mx-auto mb-2 w-full min-w-0 max-w-[54.25rem] space-y-2' : 'contents'}>
+      {settingsContainer && createPortal(settings, settingsContainer)}
+      {hasNotices && notices}
     </div>
   );
 }

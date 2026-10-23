@@ -15,6 +15,11 @@ import {
 type ScheduleMessagePopoverProps = {
   disabled: boolean;
   onSchedule: (scheduledFor: Date) => void;
+  /**
+   * Mobile sheets have a focus trap, so the menu renders inside the sheet's own
+   * flow instead of a body portal. Desktop keeps the anchored portal.
+   */
+  inline?: boolean;
 };
 
 /** Offsets people actually mean when they say "later". */
@@ -41,14 +46,14 @@ function toLocalInputValue(date: Date): string {
  * Rendered by chat's ChatComposer beside the send button so the message in the
  * box can be sent later instead of now.
  */
-export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessagePopoverProps) {
+export function ScheduleMessagePopover({ disabled, onSchedule, inline = false }: ScheduleMessagePopoverProps) {
   const { t } = useTranslation('chat');
   const [isOpen, setIsOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
   // Portalled and anchored like the model and permission menus: the composer
   // sits inside the scrolling transcript's stacking context, so a popover
   // positioned inside it is clipped by the message pane.
-  const { triggerRef, menuRef, anchor, updateAnchor } = useComposerMenuAnchor(isOpen, close);
+  const { triggerRef, menuRef, anchor, updateAnchor } = useComposerMenuAnchor(isOpen && !inline, close);
   // Seeded an hour out, because a picker that opens on "now" is never what
   // scheduling means.
   const [customValue, setCustomValue] = useState(() => toLocalInputValue(new Date(Date.now() + 3_600_000)));
@@ -60,31 +65,7 @@ export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessage
 
   const ariaLabel = t('schedule.trigger');
 
-  return (
-    <>
-      <button
-        ref={triggerRef}
-        type="button"
-        disabled={disabled}
-        onClick={() => {
-          updateAnchor();
-          setIsOpen((current) => !current);
-        }}
-        aria-haspopup="menu"
-        aria-expanded={isOpen}
-        aria-label={ariaLabel}
-        title={ariaLabel}
-        className={cn(
-          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-muted-foreground transition-colors',
-          disabled ? 'cursor-not-allowed opacity-40' : 'hover:bg-muted hover:text-foreground',
-          isOpen && 'text-foreground',
-        )}
-      >
-        <Clock className="h-4 w-4" />
-      </button>
-
-      {isOpen && anchor && createPortal(
-        <ComposerMenuSurface anchor={anchor} menuRef={menuRef} ariaLabel={ariaLabel}>
+  const scheduleMenu = <>
           <ComposerMenuHeading>{t('schedule.heading')}</ComposerMenuHeading>
           {QUICK_OFFSETS_MINUTES.map((minutes) => (
             <ComposerMenuItem
@@ -122,9 +103,41 @@ export function ScheduleMessagePopover({ disabled, onSchedule }: ScheduleMessage
               {t('schedule.confirm')}
             </button>
           </div>
+        </>;
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        onClick={() => {
+          if (!inline) updateAnchor();
+          setIsOpen((current) => !current);
+        }}
+        aria-haspopup="menu"
+        aria-expanded={isOpen}
+        aria-label={ariaLabel}
+        title={ariaLabel}
+        className={cn(
+          'flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-border/60 bg-muted/40 text-muted-foreground transition-colors',
+          disabled ? 'cursor-not-allowed opacity-40' : 'hover:bg-muted hover:text-foreground',
+          isOpen && 'text-foreground',
+        )}
+      >
+        <Clock className="h-4 w-4" />
+      </button>
+
+      {isOpen && (inline ? (
+        <div role="menu" aria-label={ariaLabel} className="mt-2 w-full basis-full rounded-xl border border-border bg-popover p-1 text-popover-foreground shadow-sm">
+          {scheduleMenu}
+        </div>
+      ) : anchor && createPortal(
+        <ComposerMenuSurface anchor={anchor} menuRef={menuRef} ariaLabel={ariaLabel}>
+          {scheduleMenu}
         </ComposerMenuSurface>,
         document.body,
-      )}
+      ))}
     </>
   );
 }

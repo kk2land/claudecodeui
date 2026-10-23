@@ -244,6 +244,7 @@ function ChatInterface({
     handlePaste,
     handleTextareaClick,
     handleTextareaInput,
+    resizeTextarea,
     syncInputOverlayScroll,
     handleClearInput,
     handleAbortSession,
@@ -641,6 +642,7 @@ function ChatInterface({
           onTextareaPaste={handlePaste}
           onTextareaScrollSync={syncInputOverlayScroll}
           onTextareaInput={handleTextareaInput}
+          onTextareaResize={resizeTextarea}
           isInputFocused={isInputFocused}
           onInputFocusChange={handleInputFocusChange}
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}

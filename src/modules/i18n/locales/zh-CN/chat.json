@@ -403,5 +403,24 @@
     "customModelsOnlyHint": "在所有模型选择器中隐藏 {{provider}} 的内置模型，并将您的第一个模型设为默认模型。在您添加模型之前，内置模型仍会显示。",
     "builtInModelsHidden": "开启“仅使用我的模型”时，这些模型不会出现在模型选择器中。",
     "customModelsOnlyFailed": "无法更改此设置。"
+  },
+  "mobileComposer": {
+    "actions": "附件与操作",
+    "actionsTitle": "添加到消息",
+    "settings": "聊天设置",
+    "settingsTitle": "聊天设置",
+    "modelSettings": "模型与运行设置",
+    "done": "完成",
+    "compactPlaceholder": "向 {{provider}} 提问",
+    "permissions": "权限",
+    "prediction": "下一条消息建议",
+    "runtime": "运行设置",
+    "loadingModels": "正在加载模型…",
+    "noModels": "无可用模型",
+    "tokenUsage": "Token 用量",
+    "plan": "计划",
+    "model": "模型",
+    "reasoning": "思考强度",
+    "effortDefault": "默认"
   }
 }
