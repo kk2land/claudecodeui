@@ -118,6 +118,27 @@ export default function PluginTabContent({
             }
             return res.json();
           },
+
+          // Read-only provider model catalog for plugins whose forms let users
+          // pick a model. This is an allowlisted host capability rather than a
+          // generic passthrough, so a plugin cannot reach arbitrary endpoints.
+          async models(provider: 'codex' | 'dsh'): Promise<unknown> {
+            if (provider !== 'codex' && provider !== 'dsh') {
+              throw new Error(`Unsupported provider: ${String(provider)}`);
+            }
+            const res = await api.providers.models(provider);
+            if (!res.ok) {
+              throw new Error(`Failed to load ${provider} models (HTTP ${res.status})`);
+            }
+            const body = await res.json() as {
+              success?: boolean;
+              data?: { provider?: string; models?: unknown };
+            };
+            if (!body.success || !body.data?.models) {
+              throw new Error(`Failed to load ${provider} models`);
+            }
+            return body.data.models;
+          },
         };
 
         await mod.mount?.(container, pluginHostApi);

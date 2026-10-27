@@ -625,7 +625,7 @@
     margin-bottom: 5px;
   }
   .cron-table .cron-toggle-cell::before {
-    content: "自动调度";
+    content: "临时自动调度";
     display: block;
     color: var(--cron-muted);
     font-size: 11px;
@@ -666,4 +666,500 @@
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
   overflow: hidden;
+}
+
+/* Full-project configuration editor. The dialog owns its own scroll so the footer stays reachable. */
+.cron-editor-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 900;
+  display: flex;
+  background: var(--cron-bg);
+}
+.cron-editor {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  min-height: 0;
+  background: var(--cron-bg);
+}
+.cron-editor > header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 18px 24px;
+  border-bottom: 1px solid var(--cron-border);
+}
+.cron-editor > header h2 {
+  font-size: 18px;
+}
+.cron-editor > header p {
+  margin-top: 4px;
+}
+.cron-editor-views {
+  display: flex;
+  padding: 3px;
+  border: 1px solid var(--cron-border);
+  border-radius: 7px;
+  background: var(--cron-soft);
+}
+.cron-editor-views button {
+  border: 0;
+  padding: 5px 10px;
+  background: transparent;
+  color: var(--cron-muted);
+}
+.cron-editor-views button[aria-pressed="true"] {
+  background: var(--cron-bg);
+  color: var(--cron-ink);
+}
+.cron-editor-loading {
+  padding: 60px 24px;
+  text-align: center;
+  color: var(--cron-muted);
+}
+.cron-editor-banner {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 11px 24px;
+  border-bottom: 1px solid var(--cron-border);
+  background: var(--cron-blue-soft);
+  font-size: 12px;
+}
+.cron-editor-banner > span {
+  flex: 1;
+  min-width: 200px;
+}
+.cron-editor-warning {
+  background: #fdf4e3;
+  color: #7a4a05;
+}
+.cron-plugin[data-theme="dark"] .cron-editor-warning {
+  background: #33280f;
+  color: #f0c987;
+}
+.cron-editor-conflict {
+  flex-direction: column;
+  align-items: stretch;
+  background: #fceceb;
+  color: #7c2d2a;
+}
+.cron-plugin[data-theme="dark"] .cron-editor-conflict {
+  background: #3a1f1e;
+  color: #f3b3b1;
+}
+.cron-editor-conflict-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.cron-editor-conflict-head strong {
+  flex: 1;
+  min-width: 220px;
+  font-weight: 500;
+}
+.cron-editor-conflict-diff {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+  margin-top: 10px;
+}
+.cron-editor-conflict-diff label {
+  display: block;
+  font-size: 11px;
+  color: inherit;
+}
+.cron-editor-conflict-diff pre {
+  margin: 5px 0 0;
+  max-height: 220px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid var(--cron-border);
+  border-radius: 6px;
+  background: var(--cron-bg);
+  color: var(--cron-ink);
+  font:
+    11px/1.6 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  white-space: pre;
+}
+.cron-editor-defaults {
+  padding: 14px 24px;
+  border-bottom: 1px solid var(--cron-border);
+  flex-shrink: 0;
+}
+.cron-editor-defaults[open] {
+  max-height: 35vh;
+  overflow: auto;
+}
+.cron-editor-defaults summary {
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+}
+.cron-editor-defaults-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 4px 18px;
+  margin-top: 12px;
+}
+.cron-editor-defaults-grid label {
+  display: block;
+  font-size: 11px;
+  color: var(--cron-muted);
+}
+.cron-editor-defaults-grid input,
+.cron-editor-defaults-grid select {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 9px;
+  border: 1px solid var(--cron-border);
+  border-radius: 6px;
+  background: var(--cron-bg);
+  color: var(--cron-ink);
+  font-size: 12px;
+}
+.cron-editor-content {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.cron-editor-content[disabled] {
+  opacity: 0.72;
+}
+.cron-editor-body {
+  display: grid;
+  grid-template-columns: 260px minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+.cron-editor-side {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  padding: 16px;
+  border-right: 1px solid var(--cron-border);
+  overflow: auto;
+  background: var(--cron-soft);
+}
+.cron-editor-add {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+.cron-editor-add button {
+  flex: 1;
+  font-size: 11px;
+  padding: 6px 8px;
+}
+.cron-editor-tasks {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.cron-editor-tasks button {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 1px;
+  width: 100%;
+  padding: 9px 10px;
+  text-align: left;
+  background: var(--cron-bg);
+  border-color: transparent;
+}
+.cron-editor-tasks button[aria-pressed="true"] {
+  border-color: var(--cron-blue);
+}
+.cron-editor-tasks small {
+  margin: 0;
+}
+.cron-editor-tasks em {
+  font-style: normal;
+  font-size: 10px;
+  margin-top: 3px;
+  padding: 1px 6px;
+  border-radius: 4px;
+  background: var(--cron-blue-soft);
+  color: var(--cron-blue);
+}
+.cron-editor-tasks .cron-draft-new {
+  background: #e5f5ed;
+  color: var(--cron-green);
+}
+.cron-plugin[data-theme="dark"] .cron-editor-tasks .cron-draft-new {
+  background: #1e3428;
+}
+.cron-editor-removed {
+  border-top: 1px dashed var(--cron-border);
+  padding-top: 10px;
+  font-size: 11px;
+}
+.cron-editor-removed h3 {
+  margin-bottom: 7px;
+  color: var(--cron-muted);
+}
+.cron-editor-removed > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 0;
+}
+.cron-editor-removed button {
+  padding: 3px 7px;
+  font-size: 10px;
+}
+.cron-editor-form {
+  min-width: 0;
+  overflow: auto;
+  padding: 18px 24px 26px;
+}
+.cron-editor-form-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+}
+.cron-editor-form-head h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+.cron-editor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 0 18px;
+}
+.cron-editor-form label {
+  display: block;
+  font-size: 11px;
+  color: var(--cron-muted);
+  margin-bottom: 14px;
+}
+.cron-editor-form input:not([type="checkbox"]):not([type="radio"]),
+.cron-editor-form select,
+.cron-editor-form textarea {
+  display: block;
+  width: 100%;
+  margin-top: 5px;
+  padding: 7px 9px;
+  border: 1px solid var(--cron-border);
+  border-radius: 6px;
+  background: var(--cron-bg);
+  color: var(--cron-ink);
+  font-size: 12px;
+}
+.cron-editor-form textarea {
+  resize: vertical;
+  font:
+    12px/1.6 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+}
+.cron-editor-form .cron-invalid-input {
+  border-color: var(--cron-red);
+}
+.cron-editor-form small {
+  margin-top: 4px;
+  line-height: 1.5;
+}
+.cron-editor-form small button {
+  display: inline-flex;
+  margin-left: 8px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--cron-blue);
+  font-size: 10px;
+}
+.cron-editor-section {
+  border: 0;
+  border-top: 1px solid var(--cron-border);
+  margin: 0 0 6px;
+  padding: 14px 0 0;
+}
+.cron-editor-section legend {
+  padding: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--cron-ink);
+}
+.cron-editor-weekdays {
+  display: flex;
+  gap: 5px 12px;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.cron-editor-weekdays label {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  color: var(--cron-ink);
+}
+.cron-editor-next ol {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  font-size: 12px;
+}
+.cron-editor-next li {
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.cron-editor-json {
+  display: flex;
+  flex-direction: column;
+  flex: 1;
+  min-height: 0;
+  padding: 16px 24px;
+  overflow: hidden;
+}
+.cron-editor-json textarea {
+  flex: 1;
+  min-height: 200px;
+  padding: 14px;
+  border: 1px solid var(--cron-border);
+  border-radius: 8px;
+  background: var(--cron-soft);
+  color: var(--cron-ink);
+  resize: none;
+  font:
+    12px/1.7 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+}
+.cron-editor-json-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--cron-muted);
+  overflow-wrap: anywhere;
+}
+.cron-editor-footer {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+  padding: 12px 24px;
+  border-top: 1px solid var(--cron-border);
+  background: var(--cron-soft);
+}
+.cron-editor-summary {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--cron-muted);
+}
+.cron-editor-summary .cron-editor-valid {
+  color: var(--cron-green);
+}
+.cron-editor-summary .cron-editor-invalid {
+  color: var(--cron-red);
+}
+.cron-editor-load {
+  color: var(--cron-blue);
+}
+.cron-editor-reenable {
+  color: #a15c00;
+  font-weight: 500;
+}
+.cron-plugin[data-theme="dark"] .cron-editor-reenable {
+  color: #f0b45e;
+}
+.cron-editor-errors ul {
+  margin: 4px 0 0;
+  padding-left: 17px;
+  color: var(--cron-red);
+  max-height: 120px;
+  overflow: auto;
+}
+.cron-editor-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.cron-editor-empty {
+  padding: 50px 10px;
+  text-align: center;
+  color: var(--cron-muted);
+}
+.cron-project-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cron-project-picker button {
+  display: flex;
+  flex-direction: column;
+  align-items: start;
+  gap: 2px;
+  padding: 11px 13px;
+  text-align: left;
+  border-color: var(--cron-border);
+}
+.cron-project-picker small {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 760px) {
+  .cron-editor-body {
+    display: flex;
+    flex-direction: column;
+  }
+  .cron-editor-side {
+    border-right: 0;
+    border-bottom: 1px solid var(--cron-border);
+    max-height: 22vh;
+    flex-shrink: 0;
+  }
+  .cron-editor-form {
+    flex: 1;
+    min-height: 0;
+  }
+  .cron-editor-footer {
+    align-items: stretch;
+  }
+  .cron-editor-actions {
+    justify-content: flex-end;
+  }
+  .cron-editor > header,
+  .cron-editor-defaults,
+  .cron-editor-form,
+  .cron-editor-json,
+  .cron-editor-footer,
+  .cron-editor-banner {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
 }

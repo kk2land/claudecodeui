@@ -6,16 +6,20 @@ import {
   CircleCheck,
   Clock3,
   Download,
+  PencilLine,
   Play,
   Settings2,
   Square,
   X,
 } from "lucide-react";
 import { schedulerApi, type SchedulerHost } from "./api.js";
+import { ConfigurationEditor } from "./ConfigurationEditor.js";
+import { COMMON_TIMEZONES } from "./configurationDraft.js";
 import {
   environmentRowsToMap,
   type PublicSchedulerSettings,
   type SchedulerImport,
+  type SchedulerProject,
   type SchedulerRun,
   type SchedulerTask,
   type SchedulerTaskRow,
@@ -41,20 +45,6 @@ const time = (value: string | null | undefined, zone?: string) =>
       })
     : "—";
 const key = (task: SchedulerTaskRow) => task.projectId + ":" + task.taskId;
-// Common IANA zones; offsets are shown only where the zone has no DST.
-const COMMON_TIMEZONES = [
-  { value: "Asia/Shanghai", label: "中国 · Asia/Shanghai（UTC+08）" },
-  { value: "Asia/Tokyo", label: "日本 · Asia/Tokyo（UTC+09）" },
-  { value: "Asia/Hong_Kong", label: "中国香港 · Asia/Hong_Kong" },
-  { value: "Asia/Singapore", label: "新加坡 · Asia/Singapore" },
-  { value: "Asia/Kolkata", label: "印度 · Asia/Kolkata" },
-  { value: "UTC", label: "协调世界时 · UTC" },
-  { value: "Europe/London", label: "英国 · Europe/London" },
-  { value: "Europe/Berlin", label: "德国 · Europe/Berlin" },
-  { value: "America/New_York", label: "美国东部 · America/New_York" },
-  { value: "America/Los_Angeles", label: "美国西部 · America/Los_Angeles" },
-  { value: "Australia/Sydney", label: "澳大利亚 · Australia/Sydney" },
-];
 // Stable row identity keeps the focused input mounted while its name changes.
 let envRowSequence = 0;
 type EnvRow = { id: number; name: string; value: string };
@@ -93,8 +83,13 @@ function Scheduler({ host }: { host: SchedulerHost }) {
   const [pendingToggles, setPendingToggles] = useState<Set<string>>(new Set());
   // Ignore poll responses captured before a switch update so they cannot undo its display.
   const taskRevision = useRef(0);
-  // The chosen scope only affects presentation and import defaults.
-  const [scope, setScope] = useState<"current" | "all">("current");
+  // The chosen scope only affects presentation and import defaults; no project means "all".
+  const [scope, setScope] = useState<"current" | "all">(
+    host.context.project ? "current" : "all",
+  );
+  // "current" is only meaningful while a host project is open; without one every row shows.
+  const effectiveScope: "current" | "all" =
+    scope === "current" && context.project ? "current" : "all";
   // Stable identity keeps an open detail view attached to its project across polling updates.
   const [selected, setSelected] = useState<string | null>(null);
   // Settings come from the authenticated API; editing stays local to the settings panel.
@@ -107,16 +102,32 @@ function Scheduler({ host }: { host: SchedulerHost }) {
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("alerts");
   // Import previews are shown in a separate, dismissible dialog.
   const [loadingConfig, setLoadingConfig] = useState(false);
+  // The configuration editor is pinned to the project chosen at entry, not to host context.
+  const [editor, setEditor] = useState<SchedulerProject | null>(null);
+  // Projects are fetched only when the editor entry needs a single project choice.
+  const [projectChoices, setProjectChoices] = useState<SchedulerProject[] | null>(
+    null,
+  );
+  // Prevents double-opening while the project inventory is read.
+  const [openingEditor, setOpeningEditor] = useState(false);
+  // The context listener needs the current editor state without resubscribing to the host.
+  const editorOpen = useRef(false);
   // Operations report errors/results in one accessible status area.
   const [message, setMessage] = useState("");
+  useEffect(() => {
+    editorOpen.current = editor !== null;
+  }, [editor]);
   useEffect(
     () =>
       host.onContextChange((next) => {
         setContext(next);
         if (previousProject.current !== next.project?.name) {
           previousProject.current = next.project?.name;
-          setSelected(null);
-          setView("tasks");
+          // An open editor keeps its own project and shows a leave reminder instead.
+          if (!editorOpen.current) {
+            setSelected(null);
+            setView("tasks");
+          }
         }
       }),
     [host],
@@ -152,7 +163,8 @@ function Scheduler({ host }: { host: SchedulerHost }) {
   }, [api]);
   const currentTask = tasks.find((task) => key(task) === selected);
   const visible = tasks.filter(
-    (task) => scope === "all" || task.projectId === context.project?.name,
+    (task) =>
+      effectiveScope === "all" || task.projectId === context.project?.name,
   );
   const operate = async (
     operation: () => Promise<unknown>,
@@ -186,6 +198,73 @@ function Scheduler({ host }: { host: SchedulerHost }) {
       });
     }
   };
+  // Only the "current project" scope with an open host project opens the editor directly.
+  // "All projects" always asks for one explicit project, even when a host project exists.
+  const openEditor = async () => {
+    if (openingEditor) return;
+    const current =
+      effectiveScope === "current" ? context.project?.name : undefined;
+    if (current) {
+      // The host only exposes the opaque project id; reuse a loaded row's display name when known.
+      const known = tasks.find((task) => task.projectId === current);
+      setEditor({
+        id: current,
+        name: known?.projectName ?? "",
+        path: known?.projectPath ?? context.project?.path ?? "",
+      });
+      setProjectChoices(null);
+      return;
+    }
+    setOpeningEditor(true);
+    try {
+      const data = await api.projects();
+      if (!data.projects.length) {
+        setMessage("没有可编辑的项目");
+        return;
+      }
+      // A single project needs no further choice; multiple projects require an explicit pick.
+      if (data.projects.length === 1) {
+        setEditor(data.projects[0]!);
+        setProjectChoices(null);
+        return;
+      }
+      setProjectChoices(data.projects);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setOpeningEditor(false);
+    }
+  };
+  if (editor)
+    return (
+      <div className="cron-plugin" data-theme={context.theme}>
+        <style>{styles}</style>
+        {message && (
+          <div className="cron-notice" role="status">
+            <span>{message}</span>
+            <button aria-label="关闭提示" onClick={() => setMessage("")}>
+              <X size={14} />
+            </button>
+          </div>
+        )}
+        <ConfigurationEditor
+          host={host}
+          project={editor}
+          hostProjectId={context.project?.name ?? null}
+          pluginTimezone={settings?.timezone ?? null}
+          onExit={() => setEditor(null)}
+          onSaved={() => {
+            setEditor(null);
+            // Keep showing the project that was actually edited instead of hiding it.
+            if (context.project?.name !== editor.id) setScope("all");
+            setSelected(null);
+            setView("tasks");
+            void operate(async () => {}, "配置已保存并装载");
+          }}
+          onError={setMessage}
+        />
+      </div>
+    );
   return (
     <div className="cron-plugin" data-theme={context.theme}>
       <style>{styles}</style>
@@ -249,23 +328,34 @@ function Scheduler({ host }: { host: SchedulerHost }) {
               </button>
               <button
                 className="cron-primary"
-                onClick={() => setLoadingConfig(true)}
+                disabled={openingEditor}
+                onClick={() => void openEditor()}
+              >
+                <PencilLine size={15} />
+                编辑任务
+              </button>
+              <button
+                onClick={() =>
+                  setLoadingConfig(true)
+                }
               >
                 <Download size={15} />
-                装载任务
+                从文件重新装载
               </button>
             </div>
           </header>
           <div className="cron-toolbar">
             <div className="cron-segment">
               <button
-                aria-pressed={scope === "current"}
+                aria-pressed={effectiveScope === "current"}
+                disabled={!context.project}
+                title={context.project ? undefined : "当前没有打开的项目"}
                 onClick={() => setScope("current")}
               >
                 当前项目
               </button>
               <button
-                aria-pressed={scope === "all"}
+                aria-pressed={effectiveScope === "all"}
                 onClick={() => setScope("all")}
               >
                 全部项目
@@ -283,7 +373,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                 <th>任务</th>
                 <th>执行计划 / 下次运行</th>
                 <th>执行方式</th>
-                <th>自动调度</th>
+                <th>临时自动调度</th>
                 <th>运行状态</th>
               </tr>
             </thead>
@@ -301,7 +391,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                       {task.definition.name}
                     </button>
                     <small>
-                      {scope === "all" ? task.projectName + " · " : ""}
+                      {effectiveScope === "all" ? task.projectName + " · " : ""}
                       {task.taskId}
                     </small>
                   </td>
@@ -331,7 +421,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                       type="button"
                       role="switch"
                       className="cron-task-switch"
-                      aria-label={`${task.projectName} / ${task.definition.name} 自动调度`}
+                      aria-label={`${task.projectName} / ${task.definition.name} 临时自动调度`}
                       aria-checked={task.definition.enabled}
                       disabled={pendingToggles.has(key(task))}
                       onClick={() => void toggleTask(task)}
@@ -369,21 +459,27 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           </table>
           {!visible.length && (
             <div className="cron-empty">
-              尚未装载定时任务。请在项目中配置 .cloudcli/project-schedules.json
-              后点击“装载任务”。
+              尚未装载定时任务。点击“编辑任务”创建或修改项目配置，或点击“从文件重新装载”读取已有
+              .cloudcli/project-schedules.json。
             </div>
           )}
           <footer className="cron-footer">
             <code>.cloudcli/project-schedules.json</code>
             <span>默认禁止同一任务并发</span>
-            <span>开关仅控制后续自动调度，不中断运行；不修改 JSON，重新装载以 JSON 为准。</span>
+            <span>
+              “临时自动调度”开关只改插件数据库，不中断运行，也不修改 JSON；“编辑任务”保存后写入文件并装载。
+            </span>
           </footer>
         </>
       )}
       {loadingConfig && (
         <ImportDialog
           api={api}
-          projectId={scope === "current" ? context.project?.name : undefined}
+          projectId={
+            effectiveScope === "current" && context.project
+              ? context.project.name
+              : undefined
+          }
           onClose={() => setLoadingConfig(false)}
           onLoaded={(results) => {
             setLoadingConfig(false);
@@ -401,6 +497,55 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           onError={setMessage}
         />
       )}
+      {projectChoices && (
+        <ProjectPicker
+          projects={projectChoices}
+          onClose={() => setProjectChoices(null)}
+          onPick={(project) => {
+            setProjectChoices(null);
+            setEditor(project);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function ProjectPicker({
+  projects,
+  onClose,
+  onPick,
+}: {
+  projects: SchedulerProject[];
+  onClose(): void;
+  onPick(project: SchedulerProject): void;
+}) {
+  return (
+    <div className="cron-modal-backdrop">
+      <section
+        className="cron-modal"
+        role="dialog"
+        aria-modal="true"
+        aria-label="选择要编辑的项目"
+      >
+        <header>
+          <div>
+            <h2>选择要编辑的项目</h2>
+            <p>没有当前打开的项目，请先选择唯一项目；编辑期间不会跟随宿主切换。</p>
+          </div>
+          <button aria-label="关闭项目选择" onClick={onClose}>
+            <X size={16} />
+          </button>
+        </header>
+        <div className="cron-modal-content cron-project-picker">
+          {projects.map((project) => (
+            <button key={project.id} onClick={() => onPick(project)}>
+              <strong>{project.name}</strong>
+              <small>{project.path}</small>
+            </button>
+          ))}
+        </div>
+      </section>
     </div>
   );
 }

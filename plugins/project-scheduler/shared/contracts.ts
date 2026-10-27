@@ -50,8 +50,16 @@ export function environmentRowsToMap(
   }
   return { env: Object.fromEntries(env) };
 }
-/** A fresh CLI invocation; a DSH model may include its native provider/model route. */
-export type SchedulerAgent = { provider: "codex" | "dsh"; model: string };
+/**
+ * A fresh CLI invocation; a DSH model may include its native provider/model route. `effort` is
+ * the provider's reasoning level; an explicit `"default"` cancels inherited effort and is never
+ * sent as a CLI argument, while an omitted value keeps the old behavior.
+ */
+export type SchedulerAgent = {
+  provider: "codex" | "dsh";
+  model: string;
+  effort?: string;
+};
 /** Validated task definition, snapshotted before each invocation. */
 export type SchedulerTask = {
   id: string;
@@ -138,6 +146,56 @@ export type SchedulerImport = {
   updated: number;
   removed: number;
   error?: string;
+};
+/**
+ * Raw project configuration document used by the visual/JSON editor. `text` is the unmodified
+ * UTF-8 file contents so unknown fields survive a round trip, `revision` is the SHA-256 of those
+ * bytes (null when the file is absent), and `exists` distinguishes an empty draft from a file.
+ * Invalid JSON is returned verbatim together with `error` so the editor can repair it.
+ */
+export type SchedulerConfigurationDocument = {
+  project: SchedulerProject;
+  text: string;
+  revision: string | null;
+  exists: boolean;
+  error?: string;
+};
+/** Change counters shared by the configuration preview and save result. */
+export type SchedulerConfigurationChanges = {
+  added: number;
+  updated: number;
+  removed: number;
+  reEnabled: number;
+};
+/** One validated task with up to five upcoming ISO timestamps; disabled tasks have none. */
+export type SchedulerConfigurationTaskPreview = {
+  taskId: string;
+  nextRuns: string[];
+};
+/**
+ * Non-mutating validation of a draft. `changes` compares the draft with the currently loaded
+ * normalized definitions; `reEnabled` counts tasks the draft turns back on after a temporary
+ * database-only disable.
+ */
+export type SchedulerConfigurationPreview = {
+  valid: boolean;
+  errors?: string[];
+  tasks: SchedulerConfigurationTaskPreview[];
+  changes: SchedulerConfigurationChanges;
+};
+/**
+ * Result of saving and loading a draft. A conflict never overwrites the file and carries the
+ * current document in `latest`. A write can succeed while loading fails; then `saved` is true,
+ * `loaded` is false, and `revision` identifies the new file for a same-revision retry.
+ */
+export type SchedulerConfigurationSave = {
+  saved: boolean;
+  loaded: boolean;
+  revision: string | null;
+  changes: SchedulerConfigurationChanges;
+  error?: string;
+  conflict?: boolean;
+  latest?: SchedulerConfigurationDocument;
 };
 /** Incremental, UTF-8-safe log chunk bounded independently of total output. */
 export type SchedulerLog = {

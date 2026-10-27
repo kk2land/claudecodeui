@@ -64,6 +64,12 @@ function timezone(value: unknown, fallback: string): string {
   new Intl.DateTimeFormat("en", { timeZone: result });
   return result;
 }
+/**
+ * Resolves one agent entry against defaults. A model is inherited only while the provider stays
+ * the same; effort additionally requires the same effective model, so switching provider or model
+ * never drags the previous selection's effort along. An explicit `"default"` effort is meaningful:
+ * it cancels inherited effort and is not forwarded to the CLI.
+ */
 function agent(value: unknown, fallback?: SchedulerAgent): SchedulerAgent {
   if (value === undefined)
     return fallback ?? { provider: "codex", model: "default" };
@@ -71,10 +77,39 @@ function agent(value: unknown, fallback?: SchedulerAgent): SchedulerAgent {
   const provider = input.provider ?? fallback?.provider ?? "codex";
   if (provider !== "codex" && provider !== "dsh")
     throw new Error("agent.provider 仅支持 codex、dsh");
-  const model = text(input.model, "agent.model", fallback?.model ?? "default");
+  const inheritedModel =
+    fallback && fallback.provider === provider ? fallback.model : undefined;
+  const model = text(input.model, "agent.model", inheritedModel ?? "default");
   if (provider === "dsh" && (model.startsWith("/") || model.endsWith("/")))
     throw new Error("DSH 模型路由的 provider、model 不能为空");
-  return { provider, model };
+  const effort = optionalEffort(input.effort, "agent.effort");
+  const inheritedEffort =
+    input.effort === undefined &&
+    fallback?.effort !== undefined &&
+    fallback.provider === provider &&
+    fallback.model === model
+      ? fallback.effort
+      : undefined;
+  const resolved = effort ?? inheritedEffort;
+  if (
+    provider === "dsh" &&
+    resolved !== undefined &&
+    resolved !== "default" &&
+    model === "default"
+  )
+    throw new Error("DSH 非默认 effort 需要显式 agent.model（provider/model）");
+  return {
+    provider,
+    model,
+    ...(resolved === undefined ? {} : { effort: resolved }),
+  };
+}
+/** Accepts only non-empty, NUL-free effort identifiers; an explicit "default" disables effort. */
+function optionalEffort(value: unknown, label: string): string | undefined {
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !value.trim() || value.includes("\0"))
+    throw new Error(label + " 必须是非空且无 NUL 的字符串");
+  return value;
 }
 
 /** Used by import and tests to validate an entire project before any storage or timer changes. */

@@ -5,13 +5,38 @@
 
 ## 配置与装载
 
-点击「装载当前项目」或「装载全部项目」，读取已登记且未归档项目的 .cloudcli/project-schedules.json。
+右上角「编辑任务」是主入口，直接编辑项目的 .cloudcli/project-schedules.json：
+
+- 当前项目作用域且有打开的项目时，编辑该项目；「全部项目」或无打开项目时先在入口选择唯一项目。
+  编辑界面固定显示所选项目名，不随宿主切换悄悄改文件；宿主切换只提示，可继续编辑或放弃草稿。
+- 左侧任务草稿列表支持新增、复制、删除，标出新增、已修改及基线缺少的待删除任务并可撤销。
+  复制自动分配 1–128 字符的唯一 ID；修改任务 ID 视为删除旧 ID、新增新 ID。
+- 右侧表单编辑名称、ID、配置中启用、类型、命令与 args 或 provider/model/effort 与 prompt、cwd、
+  timeout、allowConcurrent、env，以及项目默认时区、defaults.agent、timeoutSeconds、
+  allowConcurrent、alerts.telegram。留空表示继承，不会写入写死的默认值。
+- 原始 JSON 文本是唯一草稿源，视觉表单与 JSON 视图共享同一份文本；未知字段、未修改的任务和
+  省略的继承项原样保留。JSON 非法时保留原文并显示错误，可切到 JSON 修复，视觉表单与保存禁用。
+- 计划模板覆盖每隔 N 秒/分钟（1–59）、每天、每周加星期、自定义 Cron，生成 5 或 6 段表达式并
+  显示人类可读解释；非模板原 Cron 不会被自动改写。
+- 预览由服务端按当前草稿 debounce 校验，返回最多 5 次未来运行时间及装载变化；过期响应不会
+  授权保存。运行时间按任务/项目时区显示并标注时区，继承时也明确说明实际使用的时区。
+
+「保存并装载」先校验，写文件成功后装载，随后回到列表并刷新。所有编辑、预览都在本地，不写文件、
+不执行草稿。即使草稿相对文件没有变化也允许保存装载，用于恢复数据库中的临时关闭状态；需要当前
+预览有效。保存期间编辑器整体锁定，避免把请求发出后的新输入静默丢掉。运行中的任务不受影响。
+`saved: true, loaded: false` 表示文件已写入但装载失败：编辑器与新 revision 保留，可重试装载。
+revision 冲突时保留草稿，并排显示最新文件原文，可明确选择「放弃草稿并读取最新文件」。
+文件不存在时服务端返回空配置，首次保存才创建文件。
+未保存离开时先内联确认；浏览器关闭由 beforeunload 阻止。
+
+「从文件重新装载」是次级入口，用于直接读取已有文件。
 按项目、任务 ID 新增或更新；勾选同步删除时删除配置中缺失的任务。重复装载不重复注册。
 每个项目先整体校验再原子提交；配置损坏或不存在不修改旧任务。装载不会中断当前运行。
 重启恢复已装载定义，不自动重读文件，不补跑停机期间的时间点。
 
-任务列表的「自动调度」开关仅更新插件数据库，不修改项目 JSON，重启后仍保留。
-关闭后停止后续自动运行，不中断正在执行的任务，仍可手动执行。
+任务列表的「临时自动调度」开关仅更新插件数据库，不修改项目 JSON，重启后仍保留。
+关闭后停止后续自动运行，不中断正在执行的任务，仍可手动执行。它与编辑器中文件的
+「配置中启用」字段是两套状态：前者是数据库临时开关，后者写入 JSON 的 `enabled`。
 再次装载该任务时，以 JSON 中的 `enabled` 为准覆盖开关状态（省略时为 `true`）。
 
     {
@@ -20,7 +45,7 @@
       "defaults": {
         "allowConcurrent": false,
         "timeoutSeconds": 3600,
-        "agent": { "provider": "codex", "model": "default" }
+        "agent": { "provider": "codex", "model": "gpt-6-sol", "effort": "high" }
       },
       "tasks": [
         {
@@ -30,11 +55,31 @@
         {
           "id": "review", "name": "每日检查", "type": "prompt",
           "cron": "0 0 9 * * *",
-          "agent": { "provider": "dsh", "model": "deepseek-official/deepseek-v4-flash" },
+          "agent": {
+            "provider": "dsh",
+            "model": "deepseek-official/deepseek-v4-flash",
+            "effort": "high"
+          },
           "prompt": "检查项目状态，报告问题与建议。"
         }
       ]
     }
+
+`agent` 字段为 `provider`（codex 或 dsh）、`model` 与可选的 `effort`：
+
+- provider/model 下拉列表来自宿主的已认证模型目录（`GET /api/providers/:provider/models`），
+  不写死模型清单；列表加载失败或宿主不提供该能力时保留文件已有值并明确提示，可重试。
+- 任务省略 provider 时继承项目 `defaults.agent.provider`（再缺省为 codex）；省略 model 时
+  只有 provider 相同才继承项目 model，否则使用 `default`。effort 仅在同一 provider 且同一
+  生效 model 下才继承。
+- `effort` 可选值来自当前生效 model 的目录声明；`"default"` 表示显式不传 effort 并覆盖继承，
+  省略表示继承/未设置。未知的历史 effort 会原样保留，不会被自动改写。
+- 切换 provider 会清空任务显式 model 并把 effort 置为 `default`；切换 model 同样把显式
+  effort 置为 `default`，避免把上一个 provider/model 的参数带到新选择。
+- DSH headless 的 effort 只在显式 provider/model 路由下生效，因此 DSH 配非 default effort
+  却使用 `default` model 会在保存预览时被拒绝，而不是等运行才发现。
+- Codex 以 `-c model_reasoning_effort="…"` 作为单个 argv 传入 `codex exec`；DSH 将
+  `reasoningEffort` 写入临时 `agent-default-model` patch。`default` 与未设置都不传参数。
 
 Cron 接受五或六段，六段首项为秒；时区使用 IANA 名称。cwd 默认为项目根目录，必须在项目内。
 脚本以 command、args 直接启动；管道请显式使用 bash -lc。任务 env 不能覆盖插件内部执行控制变量。
@@ -87,4 +132,6 @@ Agent 会话不保存，调度日志仍保存；stderr 非空本身不代表失�
 手动停止、并发跳过不告警。发送结果单独记录，有限退避重试不重新执行任务。
 测试按钮会实际发送消息。Token 不返回浏览器、不注入任务进程、不写项目文件。
 
-npm run build:plugins 构建插件；普通 dev/build 包含插件构建。npm run test:cron 验证核心行为。
+npm run build:plugins 构建插件；普通 dev/build 包含插件构建。npm run test:cron 验证核心行为；
+plugins/project-scheduler/tests/configuration-editor-ui.test.ts 用 jsdom 挂载真实打包产物，
+覆盖草稿 helper 与编辑器交互（先构建插件再运行）。

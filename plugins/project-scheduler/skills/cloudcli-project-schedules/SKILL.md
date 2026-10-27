@@ -53,6 +53,7 @@ CloudCLI 的「定时任务 → 装载当前项目」读取入库；装载只按
 - 脚本任务：`command` 必填，`args` 为字符串数组；命令直接启动，不经隐式 shell。需要管道或重定向时显式使用 `bash -lc`。
 - 提示词任务：`prompt` 必填。
 - `agent`：对象，例如 `{ "provider": "codex", "model": "default" }`；`provider` 仅支持 `codex` 或 `dsh`，`model` 缺省为 `"default"`。DSH 的 `model` 可写 `provider/model` 路由。
+- `agent.effort`：可选，使用所选 provider/model 支持的推理强度；不要假定所有模型支持相同选项。省略时仅在 provider 和 model 都与项目默认一致时继承项目 effort；`"default"` 明确使用执行器默认值。DSH 指定非默认 effort 时必须同时选定非 `"default"` 的模型。切换 provider 不继承旧 provider 的 model 或 effort。
 - 项目级 `alerts.telegram: false` 对该项目所有任务关闭 Telegram 告警；任务内没有单独的告警配置字段。
 
 ## 完整示例

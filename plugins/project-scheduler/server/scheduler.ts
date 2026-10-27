@@ -5,10 +5,18 @@ import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { Cron } from "croner";
 import { parseTasks } from "./configuration.js";
+import {
+  previewProjectConfiguration,
+  readProjectConfiguration,
+  saveProjectConfiguration,
+} from "./configuration-editor.js";
 import { appendLog, readLog } from "./logs.js";
 import { terminateTree } from "./process-tree.js";
 import type { SchedulerStore } from "./store.js";
 import type {
+  SchedulerConfigurationDocument,
+  SchedulerConfigurationPreview,
+  SchedulerConfigurationSave,
   SchedulerImport,
   SchedulerProject,
   SchedulerRun,
@@ -213,6 +221,68 @@ export class ProjectScheduler {
       throw new Error("项目不存在或已归档");
     this.store.setTaskEnabled(projectId, taskId, enabled);
     this.refresh();
+  }
+  /** Used by the configuration editor; only a fresh host allowlist ID is accepted. */
+  private configurationProject(projectId: string): SchedulerProject | undefined {
+    if (typeof projectId !== "string" || !projectId.trim()) return undefined;
+    return this.projects().find((project) => project.id === projectId);
+  }
+  /**
+   * Reads the raw project JSON for the visual/JSON editor. An invalid document is returned
+   * verbatim with an error so it can be repaired; a missing file stays a non-creating empty draft.
+   */
+  readConfiguration(projectId: string): SchedulerConfigurationDocument | undefined {
+    const project = this.configurationProject(projectId);
+    return project ? readProjectConfiguration(project) : undefined;
+  }
+  /** Validates a draft against the live settings and loaded definitions without writing anything. */
+  previewConfiguration(
+    projectId: string,
+    text: string,
+  ): SchedulerConfigurationPreview | undefined {
+    const project = this.configurationProject(projectId);
+    if (!project) return undefined;
+    return previewProjectConfiguration(
+      project,
+      text,
+      this.store.settings(),
+      this.loadedTasks(projectId),
+    );
+  }
+  /**
+   * Saves and loads a validated draft. The file is replaced atomically first and the store is
+   * imported afterwards, so a load failure still reports the written revision for a retry.
+   */
+  saveConfiguration(
+    projectId: string,
+    text: string,
+    revision: string | null,
+  ): SchedulerConfigurationSave | undefined {
+    const project = this.configurationProject(projectId);
+    if (!project) return undefined;
+    if (this.closing)
+      return {
+        saved: false,
+        loaded: false,
+        revision: null,
+        changes: { added: 0, updated: 0, removed: 0, reEnabled: 0 },
+        error: "调度器正在停止",
+      };
+    return saveProjectConfiguration({
+      project,
+      text,
+      revision,
+      settings: this.store.settings(),
+      loaded: this.loadedTasks(projectId),
+      importProject: (tasks) => this.store.importProject(projectId, tasks, true),
+      refresh: () => this.refresh(),
+    });
+  }
+  private loadedTasks(projectId: string): SchedulerTask[] {
+    return this.store
+      .definitions()
+      .filter((row) => row.projectId === projectId)
+      .map((row) => row.definition);
   }
   start(
     projectId: string,

@@ -108,6 +108,10 @@ export async function runAgent(
         "--ephemeral",
         "--json",
         ...(agent.model === "default" ? [] : ["--model", agent.model]),
+        // Passed as one argv item so a configured effort can never be parsed as extra CLI flags.
+        ...(agent.effort && agent.effort !== "default"
+          ? ["-c", "model_reasoning_effort=" + JSON.stringify(agent.effort)]
+          : []),
         "-",
       ];
     } else {
@@ -123,6 +127,12 @@ export async function runAgent(
         // The checkpoint policy requires sessionPersistence, which is disabled above.
         { id: "session-checkpoint-policy", disabled: true },
       ];
+      const effort =
+        agent.effort && agent.effort !== "default" ? agent.effort : undefined;
+      if (effort && agent.model === "default")
+        throw new Error(
+          "DSH 非默认 effort 需要显式 agent.model（provider/model）",
+        );
       if (agent.model !== "default") {
         const slash = agent.model.indexOf("/");
         patch.push({
@@ -133,6 +143,8 @@ export async function runAgent(
                 ? env.CLOUDCLI_DSH_PROVIDER || "deepseek-official"
                 : agent.model.slice(0, slash),
             model: slash < 0 ? agent.model : agent.model.slice(slash + 1),
+            // Headless effort only exists together with an explicit model route.
+            ...(effort ? { reasoningEffort: effort } : {}),
           },
         });
       }

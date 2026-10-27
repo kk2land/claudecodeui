@@ -25,7 +25,7 @@ app.use((req, res, next) => {
   }
   next();
 });
-app.use(express.json({ limit: "1mb" }));
+app.use(express.json({ limit: "3mb" }));
 const route =
   (
     handler: (req: express.Request) => unknown | Promise<unknown>,
@@ -48,6 +48,43 @@ const publicSettings = (): PublicSchedulerSettings => {
 app.get(
   "/projects",
   route(() => ({ projects: scheduler.projects() })),
+);
+app.get(
+  "/configuration",
+  route((req) => {
+    const projectId =
+      typeof req.query.projectId === "string" ? req.query.projectId : "";
+    const document = scheduler.readConfiguration(projectId);
+    if (!document) throw new Error("项目不存在或已归档");
+    return document;
+  }),
+);
+app.post(
+  "/configuration/preview",
+  route((req) => {
+    const { projectId, text } = req.body ?? {};
+    if (typeof projectId !== "string" || !projectId.trim())
+      throw new Error("需要项目 ID");
+    if (typeof text !== "string") throw new Error("需要配置文本");
+    const preview = scheduler.previewConfiguration(projectId, text);
+    if (!preview) throw new Error("项目不存在或已归档");
+    return preview;
+  }),
+);
+app.post(
+  "/configuration/save",
+  route((req) => {
+    const { projectId, text, revision } = req.body ?? {};
+    if (typeof projectId !== "string" || !projectId.trim())
+      throw new Error("需要项目 ID");
+    if (typeof text !== "string") throw new Error("需要配置文本");
+    // The version must be sent explicitly; an omitted revision must never imply "create".
+    if (revision !== null && typeof revision !== "string")
+      throw new Error("revision 必须是字符串或 null");
+    const result = scheduler.saveConfiguration(projectId, text, revision);
+    if (!result) throw new Error("项目不存在或已归档");
+    return result;
+  }),
 );
 app.get(
   "/tasks",
