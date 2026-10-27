@@ -5,11 +5,15 @@ import path from 'path';
 import spawn from 'cross-spawn';
 
 import { scanPlugins, getPluginsConfig, getPluginDir } from './plugin-registry.service.js';
+import { bundledPluginEnvironment, syncBundledPluginContext } from './bundled-plugins.service.js';
 
 // Map<pluginName, { process, port }>
 const runningPlugins = new Map();
 // Map<pluginName, Promise<port>> — in-flight start operations
 const startingPlugins = new Map();
+const restartTimers = new Map();
+const stoppedPlugins = new Set();
+let shuttingDown = false;
 
 /**
  * Build the environment handed to a plugin server subprocess.
@@ -28,7 +32,9 @@ function buildPluginEnv(name) {
     HOME: process.env.HOME,
     NODE_ENV: process.env.NODE_ENV || 'production',
     PLUGIN_NAME: name,
+    ...bundledPluginEnvironment(name),
   };
+  if (process.versions.electron) env.ELECTRON_RUN_AS_NODE = '1';
 
   if (process.platform === 'win32') {
     const WINDOWS_ESSENTIALS = [
@@ -52,6 +58,8 @@ function buildPluginEnv(name) {
  * to stdout within 10 seconds.
  */
 export function startPluginServer(name, pluginDir, serverEntry) {
+  if (shuttingDown) return Promise.reject(new Error('Host is shutting down'));
+  stoppedPlugins.delete(name);
   if (runningPlugins.has(name)) {
     return Promise.resolve(runningPlugins.get(name).port);
   }
@@ -65,10 +73,10 @@ export function startPluginServer(name, pluginDir, serverEntry) {
 
     const serverPath = path.join(pluginDir, serverEntry);
 
-    const pluginProcess = spawn('node', [serverPath], {
+    const pluginProcess = spawn(process.execPath, [serverPath], {
       cwd: pluginDir,
       env: buildPluginEnv(name),
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
     });
 
     let resolved = false;
@@ -95,9 +103,15 @@ export function startPluginServer(name, pluginDir, serverEntry) {
             clearTimeout(timeout);
             resolved = true;
             runningPlugins.set(name, { process: pluginProcess, port: msg.port });
+            const contextTimer = setInterval(() => {
+              try { syncBundledPluginContext(name); } catch (error) { console.error('[Plugins] Project context unavailable:', error.message); }
+            }, 5000);
+            contextTimer.unref();
 
             pluginProcess.on('exit', () => {
-              runningPlugins.delete(name);
+              clearInterval(contextTimer);
+              if (runningPlugins.get(name)?.process === pluginProcess) runningPlugins.delete(name);
+              if (name === 'project-scheduler' && !runningPlugins.has(name)) scheduleRestart(name, pluginDir, serverEntry);
             });
 
             console.log(`[Plugins] Server started for "${name}" on port ${msg.port}`);
@@ -123,7 +137,7 @@ export function startPluginServer(name, pluginDir, serverEntry) {
 
     pluginProcess.on('exit', (code) => {
       clearTimeout(timeout);
-      runningPlugins.delete(name);
+      if (runningPlugins.get(name)?.process === pluginProcess) runningPlugins.delete(name);
       if (!resolved) {
         resolved = true;
         reject(new Error(`Plugin server exited with code ${code} before reporting ready`));
@@ -142,13 +156,17 @@ export function startPluginServer(name, pluginDir, serverEntry) {
  * Returns a Promise that resolves when the process has fully exited.
  */
 export function stopPluginServer(name) {
+  stoppedPlugins.add(name);
+  clearTimeout(restartTimers.get(name));
+  restartTimers.delete(name);
+  if (startingPlugins.has(name)) return startingPlugins.get(name).catch(() => {}).then(() => stopPluginServer(name));
   const entry = runningPlugins.get(name);
   if (!entry) return Promise.resolve();
 
   return new Promise((resolve) => {
     const cleanup = () => {
       clearTimeout(forceKillTimer);
-      runningPlugins.delete(name);
+      if (runningPlugins.get(name)?.process === entry.process) runningPlugins.delete(name);
       resolve();
     };
 
@@ -186,11 +204,27 @@ export function isPluginRunning(name) {
  * Stop all running plugin servers (called on host shutdown).
  */
 export function stopAllPlugins() {
+  shuttingDown = true;
+  for (const timer of restartTimers.values()) clearTimeout(timer);
+  restartTimers.clear();
   const stops = [];
-  for (const [name] of runningPlugins) {
+  for (const name of new Set([...runningPlugins.keys(), ...startingPlugins.keys()])) {
     stops.push(stopPluginServer(name));
   }
   return Promise.all(stops);
+}
+
+function scheduleRestart(name, directory, entry, delay = 1000) {
+  if (shuttingDown || runningPlugins.has(name) || stoppedPlugins.has(name) || getPluginsConfig()[name]?.enabled === false) return;
+  const timer = setTimeout(() => {
+    restartTimers.delete(name);
+    startPluginServer(name, directory, entry).catch(error => {
+      console.error('[Plugins] Scheduler restart failed:', error.message);
+      scheduleRestart(name, directory, entry, Math.min(delay * 2, 30000));
+    });
+  }, delay);
+  timer.unref();
+  restartTimers.set(name, timer);
 }
 
 /**

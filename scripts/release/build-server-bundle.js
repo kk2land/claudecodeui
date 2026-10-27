@@ -120,6 +120,7 @@ await fs.mkdir(bundleRoot, { recursive: true });
 
 await copyRequired(stageDir, 'dist');
 await copyRequired(stageDir, 'dist-server');
+await copyRequired(stageDir, 'plugins');
 await copyRequired(stageDir, 'public');
 await copyRequired(stageDir, 'shared');
 await copyRequired(stageDir, 'package-lock.json');

@@ -5,6 +5,7 @@ type PluginManifest = Record<string, unknown> & {
   dirName?: string;
   enabled?: boolean;
   server?: unknown;
+  builtin?: boolean;
 };
 
 type PluginConfig = Record<string, { enabled?: boolean; secrets?: Record<string, unknown> }>;
@@ -27,6 +28,7 @@ type PluginDependencies = {
   isServerRunning(pluginName: string): boolean;
   joinPath(...parts: string[]): string;
   logError(message: string, error: unknown): void;
+  internalHeaders?(pluginName: string): Record<string, string>;
 };
 
 function validatePluginName(pluginName: string): void {
@@ -99,7 +101,7 @@ export function createPluginsService(dependencies: PluginDependencies) {
       config[pluginName] = { ...config[pluginName], enabled };
       dependencies.saveConfig(config);
       if (plugin.server && enabled) await startServerIfAvailable(plugin);
-      if (plugin.server && !enabled && dependencies.isServerRunning(pluginName)) {
+      if (plugin.server && !enabled) {
         await dependencies.stopServer(pluginName);
       }
       return { success: true, name: pluginName, enabled };
@@ -115,6 +117,7 @@ export function createPluginsService(dependencies: PluginDependencies) {
     },
     async update(pluginName: string) {
       validatePluginName(pluginName);
+      if (this.getManifest(pluginName).builtin) throw new AppError('Bundled plugins are updated with CloudCLI', { code: 'BUNDLED_PLUGIN_MANAGED', statusCode: 400 });
       const wasRunning = dependencies.isServerRunning(pluginName);
       if (wasRunning) await dependencies.stopServer(pluginName);
       let updatedManifest: unknown;
@@ -142,17 +145,18 @@ export function createPluginsService(dependencies: PluginDependencies) {
         const plugin = this.getManifest(pluginName);
         if (!plugin.server) throw new AppError('Plugin server is not running', { code: 'PLUGIN_SERVER_UNAVAILABLE', statusCode: 503 });
         if (!plugin.enabled) throw new AppError('Plugin is disabled', { code: 'PLUGIN_DISABLED', statusCode: 503 });
-        const pluginDirectory = dependencies.joinPath(
+        const pluginDirectory = dependencies.getPluginDirectory(pluginName) ?? dependencies.joinPath(
           dependencies.getPluginsDirectory(),
           plugin.dirName ?? plugin.name,
         );
         port = await dependencies.startServer(pluginName, pluginDirectory, plugin.server);
       }
       const secrets = dependencies.readConfig()[pluginName]?.secrets ?? {};
-      return { port, secrets };
+      return { port, secrets, internalHeaders: dependencies.internalHeaders?.(pluginName) ?? {} };
     },
     async uninstall(pluginName: string) {
       validatePluginName(pluginName);
+      if (this.getManifest(pluginName).builtin) throw new AppError('Bundled plugins can be disabled, not uninstalled', { code: 'BUNDLED_PLUGIN_MANAGED', statusCode: 400 });
       if (dependencies.isServerRunning(pluginName)) await dependencies.stopServer(pluginName);
       await dependencies.uninstall(pluginName);
       return { success: true, name: pluginName };

@@ -12,6 +12,7 @@ import {
 } from './plugin-process.service.js';
 import { createPluginsRouter } from './plugins.routes.js';
 import { createPluginsService } from './plugins.service.js';
+import { bundledPluginHeaders } from './bundled-plugins.service.js';
 
 const pluginsService = createPluginsService({
   scanPlugins, readConfig: getPluginsConfig, saveConfig: savePluginsConfig,
@@ -27,6 +28,7 @@ const pluginsService = createPluginsService({
   getServerPort: getPluginPort, isServerRunning: isPluginRunning,
   joinPath: path.join,
   logError: (message, error) => console.error(message, error),
+  internalHeaders: bundledPluginHeaders,
 });
 
 /** Plugin router assembled with filesystem, loader, and process adapters. */

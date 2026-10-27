@@ -1259,6 +1259,8 @@ type McpImportMode = 'form' | 'json';
 
 /** An installed CloudCLI plugin's manifest and runtime status (entry point, slot, permissions, enabled and server-running flags); always import this type explicitly from `@/shared/types`, because `Plugin` is also a DOM global and an unimported reference silently resolves to that instead. */
 export type Plugin = {
+  /** Bundled plugins are updated with the app and can be enabled or disabled. */
+  builtin?: boolean;
   name: string;
   displayName: string;
   version: string;

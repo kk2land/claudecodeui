@@ -298,7 +298,7 @@ function PluginCard({
 
           {/* Controls */}
           <div className="flex flex-shrink-0 items-center gap-2">
-            <button
+            {!plugin.builtin && <button
               onClick={onUpdate}
               disabled={updating || !plugin.repoUrl}
               title={plugin.repoUrl ? t('pluginSettings.pullLatest') : t('pluginSettings.noGitRemote')}
@@ -310,9 +310,9 @@ function PluginCard({
               ) : (
                 <RefreshCw className="h-3.5 w-3.5" />
               )}
-            </button>
+            </button>}
 
-            <button
+            {!plugin.builtin && <button
               onClick={onUninstall}
               title={confirmingUninstall ? t('pluginSettings.confirmUninstall') : t('pluginSettings.uninstallPlugin')}
               aria-label={t('pluginSettings.uninstallPlugin')}
@@ -322,7 +322,7 @@ function PluginCard({
                 }`}
             >
               <Trash2 className="h-3.5 w-3.5" />
-            </button>
+            </button>}
 
             <ToggleSwitch checked={plugin.enabled} onChange={onToggle} ariaLabel={`${plugin.enabled ? t('pluginSettings.disable') : t('pluginSettings.enable')} ${plugin.displayName}`} />
           </div>
@@ -530,7 +530,7 @@ export default function PluginSettingsTab() {
   };
 
   const isOfficialPlugin = (plugin: Plugin) => {
-    return OFFICIAL_PLUGIN_RECOMMENDATIONS.some((recommendation) => (
+    return Boolean(plugin.builtin) || OFFICIAL_PLUGIN_RECOMMENDATIONS.some((recommendation) => (
       pluginMatchesRecommendation(plugin, recommendation)
     ));
   };

@@ -111,7 +111,11 @@ export default function PluginTabContent({
 
           async rpc(method: string, path: string, body?: unknown): Promise<unknown> {
             const res = await api.plugins.rpc(pluginName, method, path, body);
-            if (!res.ok) throw new Error(`RPC error ${res.status}`);
+            if (!res.ok) {
+              const detail = await res.json().catch(() => null) as { error?: string | { message?: string } } | null;
+              const message = typeof detail?.error === 'string' ? detail.error : detail?.error?.message;
+              throw new Error(message || `RPC error ${res.status}`);
+            }
             return res.json();
           },
         };

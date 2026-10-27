@@ -38,9 +38,10 @@ export function createPluginsRouter(service: ReturnType<typeof createPluginsServ
   router.post('/:name/update', respond((req) => service.update(routeParameter(req.params.name))));
   router.all('/:name/rpc/*', async (req, res, next) => {
     try {
-      const { port, secrets } = await service.prepareRpc(routeParameter(req.params.name));
+      const { port, secrets, internalHeaders } = await service.prepareRpc(routeParameter(req.params.name));
       const headers: Record<string, string> = {
         'content-type': String(req.headers['content-type'] ?? 'application/json'),
+        ...internalHeaders,
       };
       for (const [key, value] of Object.entries(secrets)) {
         headers[`x-plugin-secret-${key.toLowerCase()}`] = String(value);

@@ -16,7 +16,8 @@
     "dist/",
     "dist-server/",
     "scripts/",
-    "README.md"
+    "README.md",
+    "plugins/"
   ],
   "homepage": "https://cloudcli.ai",
   "repository": {
@@ -28,7 +29,7 @@
   },
   "scripts": {
     "dev": "concurrently --kill-others \"npm run server:dev\" \"npm run client\"",
-    "preserver": "node scripts/promote-dist-server.mjs recover",
+    "preserver": "node scripts/promote-dist-server.mjs recover && node scripts/build-builtin-plugins.mjs --if-missing",
     "server": "node dist-server/server/index.js",
     "server:dev": "tsx --tsconfig server/tsconfig.json server/index.ts",
     "server:dev-watch": "tsx watch --tsconfig server/tsconfig.json server/index.ts",
@@ -41,16 +42,16 @@
     "desktop:dist:win": "npm run build && npm run desktop:stage && electron-builder --projectDir .desktop-build/desktop-app --win nsis",
     "server:bundle": "npm run build && node scripts/release/build-server-bundle.js",
     "desktop:icon:mac": "node electron/scripts/generate-macos-icon.js",
-    "build": "npm run build:client && npm run build:server",
+    "build": "npm run build:plugins && npm run build:client && npm run build:server",
     "build:client": "vite build",
     "prebuild:server": "node -e \"require('node:fs').rmSync('dist-server.next', { recursive: true, force: true })\"",
     "build:server": "tsc -p server/tsconfig.json && tsc-alias -p server/tsconfig.json",
     "postbuild:server": "node scripts/promote-dist-server.mjs",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p plugins/project-scheduler/tsconfig.json",
     "test": "tsx --tsconfig server/tsconfig.json --test \"server/**/*.test.ts\" \"server/**/*.test.js\"",
     "test:client": "vitest run",
-    "lint": "oxlint src/ server/",
+    "lint": "oxlint src/ server/ plugins/project-scheduler/",
     "lint:server": "oxlint server/",
     "lint:client": "oxlint src/",
     "lint:fix": "oxlint src/ server/ --fix",
@@ -59,7 +60,10 @@
     "prepublishOnly": "npm run build",
     "postinstall": "node scripts/fix-node-pty.js",
     "prepare": "husky",
-    "update:platform": "./update-platform.sh"
+    "update:platform": "./update-platform.sh",
+    "build:plugins": "node scripts/build-builtin-plugins.mjs",
+    "preserver:dev": "npm run build:plugins",
+    "test:cron": "npm run build:plugins && node --import tsx --test plugins/project-scheduler/tests/*.test.ts"
   },
   "build": {
     "appId": "ai.cloudcli.desktop",
@@ -80,7 +84,8 @@
       "shared/",
       "server/",
       "package.json",
-      "!**/node_modules/@anthropic-ai/claude-agent-sdk-{darwin,linux,win32}-*/**"
+      "!**/node_modules/@anthropic-ai/claude-agent-sdk-{darwin,linux,win32}-*/**",
+      "plugins/"
     ],
     "protocols": [
       {
@@ -171,11 +176,13 @@
     "clsx": "^2.1.1",
     "cmdk": "^1.1.1",
     "cors": "^2.8.5",
+    "croner": "^9.1.0",
     "cross-spawn": "^7.0.3",
     "dompurify": "^3.4.7",
     "express": "^4.18.2",
     "fuse.js": "^7.0.0",
     "gray-matter": "^4.0.3",
+    "https-proxy-agent": "^7.0.6",
     "i18next": "^25.7.4",
     "ignore": "^7.0.6",
     "jsonwebtoken": "^9.0.2",
@@ -230,6 +237,7 @@
     "cross-env": "^10.1.0",
     "electron": "^38.0.0",
     "electron-builder": "^26.16.1",
+    "esbuild": "^0.25.8",
     "eslint": "^9.39.3",
     "eslint-import-resolver-typescript": "^4.4.4",
     "eslint-plugin-boundaries": "^6.0.2",

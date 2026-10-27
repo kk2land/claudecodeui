@@ -5,6 +5,7 @@ import os from 'os';
 
 import { spawn } from 'cross-spawn';
 
+import { getBundledPlugin, getBundledPluginDirectory } from './bundled-plugins.service.js';
 import {
   createPluginGitError, createPluginGitSpawnError, getPluginGitSpawnOptions, stopPluginGitOnServerExit,
 } from './plugin-git.service.js';
@@ -157,10 +158,15 @@ export function scanPlugins() {
   try {
     entries = fs.readdirSync(pluginsDir, { withFileTypes: true });
   } catch {
-    return plugins;
+    entries = [];
   }
 
   const seenNames = new Set();
+  const bundled = getBundledPlugin();
+  if (bundled) {
+    plugins.push({ ...bundled, permissions: [], enabled: config[bundled.name]?.enabled !== false });
+    seenNames.add(bundled.name);
+  }
 
   for (const entry of entries) {
     if (!entry.isDirectory()) continue;
@@ -229,6 +235,8 @@ export function scanPlugins() {
 }
 
 export function getPluginDir(name) {
+  const bundled = getBundledPluginDirectory(name);
+  if (bundled) return bundled;
   const plugins = scanPlugins();
   const plugin = plugins.find(p => p.name === name);
   if (!plugin) return null;
@@ -384,6 +392,7 @@ export function installPluginFromGit(url) {
 
 export function updatePluginFromGit(name) {
   return new Promise((resolve, reject) => {
+    if (getBundledPluginDirectory(name)) return reject(new Error('Bundled plugins are updated with CloudCLI'));
     const pluginDir = getPluginDir(name);
     if (!pluginDir) {
       return reject(new Error(`Plugin "${name}" not found`));
@@ -452,6 +461,7 @@ export function updatePluginFromGit(name) {
 }
 
 export async function uninstallPlugin(name) {
+  if (getBundledPluginDirectory(name)) throw new Error('Bundled plugins can be disabled, not uninstalled');
   const pluginDir = getPluginDir(name);
   if (!pluginDir) {
     throw new Error(`Plugin "${name}" not found`);
