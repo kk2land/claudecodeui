@@ -39,9 +39,16 @@ export class SchedulerStore {
     const row = this.db
       .prepare("SELECT body FROM settings WHERE id=1")
       .get() as { body: string } | undefined;
-    return row
-      ? (JSON.parse(row.body) as SchedulerSettings)
-      : defaultSettings();
+    if (!row) return defaultSettings();
+    const stored = JSON.parse(row.body) as SchedulerSettings;
+    // Rows written before the global execution environment existed have no env field.
+    return {
+      ...stored,
+      env:
+        stored.env && typeof stored.env === "object" && !Array.isArray(stored.env)
+          ? stored.env
+          : {},
+    };
   }
   saveSettings(settings: SchedulerSettings): void {
     this.db

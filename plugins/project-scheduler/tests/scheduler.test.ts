@@ -6,8 +6,13 @@ import path from "node:path";
 import { ProjectScheduler } from "../server/scheduler.js";
 import { SchedulerStore } from "../server/store.js";
 import { appendLog, readLog } from "../server/logs.js";
-import { parseTasks, defaultSettings } from "../server/configuration.js";
-import type { SchedulerRun } from "../shared/contracts.js";
+import {
+  parseTasks,
+  defaultSettings,
+  updateSettings,
+} from "../server/configuration.js";
+import { environmentRowsToMap } from "../shared/contracts.js";
+import type { SchedulerRun, SchedulerSettings } from "../shared/contracts.js";
 
 function fixture(t: TestContext) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cron-test-"));
@@ -537,4 +542,226 @@ test("interrupted alerts honor the original run snapshot during recovery and mai
     assert.equal(run.status, "interrupted");
     assert.equal(run.alertStatus, ["deleted", "disabled"].includes(run.taskId) ? "pending" : "none");
   }
+});
+
+test("historical settings without env read back as an empty map and saveSettings keeps it", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cron-env-store-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const store = new SchedulerStore(directory);
+  try {
+    // Simulate a row written before the execution environment existed.
+    const legacy = { ...defaultSettings() } as Partial<SchedulerSettings>;
+    delete legacy.env;
+    store.saveSettings(legacy as SchedulerSettings);
+    assert.deepEqual(store.settings().env, {});
+    const saved = store.settings();
+    store.saveSettings({ ...saved, env: { SHARED: "one" } });
+    assert.deepEqual(store.settings().env, { SHARED: "one" });
+  } finally {
+    store.close();
+  }
+});
+
+test("settings env validation rejects arrays, non-strings, NUL, reserved names and duplicate editor rows", () => {
+  const previous = { ...defaultSettings(), env: { KEEP: "old" } };
+  for (const env of [
+    [],
+    { OK: 1 },
+    { OK: null },
+    { OK: "a\0b" },
+    { "1BAD": "x" },
+    { "BAD-NAME": "x" },
+    { AGENT_EXEC: "x" },
+    { CLOUDCLI_HOST_ROOT: "x" },
+    { CLOUDCLI_PROJECTS_FILE: "x" },
+    { CLOUDCLI_PLUGIN_TOKEN: "x" },
+    { CLOUDCLI_SCHEDULER_AGENT: "x" },
+    { cloudcli_plugin_token: "x" },
+    { Cloudcli_Host_Root: "x" },
+  ])
+    assert.throws(() => updateSettings({ env }, previous), /env|设置/);
+  // A rejected value must not leak into the error message.
+  assert.throws(
+    () => updateSettings({ env: { SECRET: 42 } }, previous),
+    (error: Error) => !error.message.includes("42"),
+  );
+  assert.deepEqual(
+    environmentRowsToMap([
+      { name: "A", value: "1" },
+      { name: "A", value: "2" },
+    ]).error,
+    "变量名 “A” 重复，请先修改或删除",
+  );
+  assert.match(
+    environmentRowsToMap([{ name: "A", value: "1" }, { name: "BAD-NAME", value: "2" }])
+      .error ?? "",
+    /不合法/,
+  );
+  assert.match(
+    environmentRowsToMap([{ name: "CLOUDCLI_PLUGIN_TOKEN", value: "2" }]).error ?? "",
+    /保留/,
+  );
+  // A row added but left completely blank is ignored rather than blocking a save.
+  assert.deepEqual(
+    environmentRowsToMap([
+      { name: "", value: "" },
+      { name: "OK", value: "1" },
+    ]).env,
+    { OK: "1" },
+  );
+  // A value without a name is still an error.
+  assert.match(
+    environmentRowsToMap([{ name: "", value: "orphan" }]).error ?? "",
+    /变量名不能为空/,
+  );
+  // Values may be multi-line; they are preserved verbatim.
+  assert.deepEqual(
+    environmentRowsToMap([{ name: "MULTI", value: "line1\nline2" }]).env,
+    { MULTI: "line1\nline2" },
+  );
+});
+
+test("settings env is preserved when omitted and cleared by an empty object", () => {
+  const previous = { ...defaultSettings(), env: { DB: "postgres://local" } };
+  assert.deepEqual(updateSettings({}, previous).env, { DB: "postgres://local" });
+  assert.deepEqual(updateSettings({ env: {} }, previous).env, {});
+  assert.deepEqual(updateSettings({ env: { A: "b" } }, previous).env, { A: "b" });
+  // Valid names must not collide with Object.prototype or disappear during conversion.
+  const special = Object.fromEntries([["__proto__", "literal"], ["constructor", "value"]]);
+  assert.deepEqual(updateSettings({ env: special }, previous).env, special);
+  assert.deepEqual(environmentRowsToMap(
+    Object.entries(special).map(([name, value]) => ({ name, value })),
+  ).env, special);
+});
+
+test("global env reaches scripts and prompts, task env wins, and saves apply without reload", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cron-env-run-"));
+  const project = path.join(root, "project");
+  fs.mkdirSync(path.join(project, ".cloudcli"), { recursive: true });
+  const catalog = path.join(root, "projects.json");
+  fs.writeFileSync(
+    catalog,
+    JSON.stringify({
+      generatedAt: Date.now(),
+      projects: [{ id: "p", name: "project", path: project }],
+    }),
+  );
+  // Fake Codex binary so AGENT_EXEC and the prompt task print the inherited environment.
+  const cpu = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const suffix =
+    process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl";
+  const pkg = path.join(
+    root,
+    "node_modules",
+    "@openai",
+    "codex-" + process.platform + "-" + process.arch,
+  );
+  const binary = path.join(pkg, "vendor", cpu + "-" + suffix, "bin", "codex");
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  fs.writeFileSync(path.join(pkg, "package.json"), "{}");
+  fs.writeFileSync(
+    binary,
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"item.completed",item:{id:"a",type:"agent_message",text:"agent:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH}})));',
+    { mode: 0o700 },
+  );
+  const dsh = path.join(root, "dsh");
+  fs.writeFileSync(
+    dsh,
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"final",text:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH,reason:{kind:"completed"}})));',
+    { mode: 0o700 },
+  );
+  const script =
+    'console.log("script:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH);' +
+    'const r=require("child_process").spawnSync(process.env.AGENT_EXEC,["hi"],{encoding:"utf8"});' +
+    'process.stdout.write(r.stdout||"");process.stderr.write(r.stderr||"");' +
+    "process.exit(r.status??1)";
+  const configFile = path.join(project, ".cloudcli/project-schedules.json");
+  const config = JSON.stringify({
+    version: 1,
+    tasks: [
+      {
+        id: "script",
+        type: "script",
+        cron: "0 0 0 1 1 *",
+        command: process.execPath,
+        args: ["-e", script],
+        env: { BOTH: "task" },
+      },
+      {
+        id: "prompt",
+        type: "prompt",
+        cron: "0 0 0 1 1 *",
+        prompt: "run",
+        agent: { provider: "dsh", model: "default" },
+        env: { BOTH: "task-prompt" },
+      },
+    ],
+  });
+  fs.writeFileSync(configFile, config);
+  const originalConfig = fs.readFileSync(configFile, "utf8");
+  const previousRoot = process.env.CLOUDCLI_HOST_ROOT;
+  const previousDsh = process.env.CLOUDCLI_DSH_BIN;
+  const previousToken = process.env.CLOUDCLI_PLUGIN_TOKEN;
+  process.env.CLOUDCLI_HOST_ROOT = root;
+  process.env.CLOUDCLI_DSH_BIN = dsh;
+  process.env.CLOUDCLI_PLUGIN_TOKEN = "host-token";
+  const store = new SchedulerStore(path.join(root, "data"));
+  const scheduler = new ProjectScheduler(store, catalog);
+  t.after(async () => {
+    await scheduler.close();
+    store.close();
+    if (previousRoot === undefined) delete process.env.CLOUDCLI_HOST_ROOT;
+    else process.env.CLOUDCLI_HOST_ROOT = previousRoot;
+    if (previousDsh === undefined) delete process.env.CLOUDCLI_DSH_BIN;
+    else process.env.CLOUDCLI_DSH_BIN = previousDsh;
+    if (previousToken === undefined) delete process.env.CLOUDCLI_PLUGIN_TOKEN;
+    else process.env.CLOUDCLI_PLUGIN_TOKEN = previousToken;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  const wait = (id: string) =>
+    waitFor(() => store.run(id), (run) => Boolean(run?.endedAt));
+  store.saveSettings({
+    ...store.settings(),
+    env: { GLOBAL_ONLY: "global-1", BOTH: "global" },
+  });
+  scheduler.load(undefined, false, true);
+  const scriptRun = scheduler.start("p", "script", "manual");
+  await wait(scriptRun.id);
+  // Script, its AGENT_EXEC child, and the prompt all see the global value; task.env wins for BOTH.
+  assert.match(
+    scheduler.log(scriptRun.id, "stdout", 0).text,
+    /script:global-1\/task[\s\S]*agent:global-1\/task/,
+  );
+  // DSH prompt tasks receive the same global variables, and their task env wins.
+  const promptRun = scheduler.start("p", "prompt", "manual");
+  await wait(promptRun.id);
+  assert.match(
+    scheduler.log(promptRun.id, "stdout", 0).text,
+    /dsh:global-1\/task-prompt/,
+  );
+  // No reload: the next run reads the newly saved settings.
+  store.saveSettings({
+    ...store.settings(),
+    env: { GLOBAL_ONLY: "global-2", BOTH: "global" },
+  });
+  const next = scheduler.start("p", "prompt", "manual");
+  await wait(next.id);
+  assert.match(
+    scheduler.log(next.id, "stdout", 0).text,
+    /dsh:global-2\/task-prompt/,
+  );
+  // The token stays stripped and neither project JSON nor run snapshots carry the global env.
+  assert.equal(fs.readFileSync(configFile, "utf8"), originalConfig);
+  for (const id of [scriptRun.id, promptRun.id, next.id]) {
+    const snapshot = scheduler.snapshot(id).task!;
+    assert.equal(snapshot.env.GLOBAL_ONLY, undefined);
+  }
+  // Stored definitions and snapshots keep only task-level env.
+  assert.deepEqual(
+    Object.fromEntries(
+      store.definitions().map((row) => [row.taskId, row.definition.env]),
+    ),
+    { prompt: { BOTH: "task-prompt" }, script: { BOTH: "task" } },
+  );
 });

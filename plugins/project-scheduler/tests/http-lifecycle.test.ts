@@ -10,7 +10,7 @@ import type { SchedulerRun } from "../shared/contracts.js";
 
 test(
   "authenticated plugin lifecycle, real seconds cron, restart recovery, and private settings",
-  { timeout: 20000 },
+  { timeout: 30000 },
   async (t) => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "cron-http-")),
       project = path.join(root, "project");
@@ -35,7 +35,7 @@ test(
             command: process.execPath,
             args: [
               "-e",
-              'console.log(process.env.CLOUDCLI_PLUGIN_TOKEN || "no-token")',
+              'console.log((process.env.CLOUDCLI_PLUGIN_TOKEN || "no-token") + ":" + (process.env.GLOBAL_TEST || "none"))',
             ],
           },
           {
@@ -172,13 +172,56 @@ test(
     const tick = history.runs.find((run) => run.status === "success")!;
     assert.equal(
       (await first.request("/runs/" + tick.id + "/log")).text.trim(),
-      "no-token",
+      "no-token:none",
     );
     const settings = await first.request("/settings", "PUT", {
       telegram: { enabled: false, botToken: "123:fake_secret", chatId: "456" },
     });
     assert.equal(settings.telegram.botTokenConfigured, true);
     assert.equal(JSON.stringify(settings).includes("fake_secret"), false);
+    const saved = await first.request("/settings", "PUT", {
+      env: { GLOBAL_TEST: "v1" },
+    });
+    assert.deepEqual(saved.env, { GLOBAL_TEST: "v1" });
+    // The next cron tick reads the saved environment without a plugin reload.
+    const nextTick = await until(
+      async () => {
+        const data = (await first.request("/runs?projectId=p&taskId=tick")) as {
+          runs: SchedulerRun[];
+        };
+        const fresh = data.runs.find(
+          (item) =>
+            item.status === "success" && item.startedAt > tick.startedAt,
+        );
+        if (!fresh) return "";
+        return ((await first.request("/runs/" + fresh.id + "/log")) as {
+          text: string;
+        }).text.trim();
+      },
+      (text) => text === "no-token:v1",
+    );
+    assert.equal(nextTick, "no-token:v1");
+    // Reserved names fail the request and never echo the submitted value.
+    for (const env of [
+      { AGENT_EXEC: "/tmp/evil" },
+      { CLOUDCLI_PLUGIN_TOKEN: "stolen" },
+      { BAD: 1 },
+      [],
+    ]) {
+      const response = await fetch("http://127.0.0.1:" + first.port + "/settings", {
+        method: "PUT",
+        headers: {
+          authorization: "Bearer private-test-token",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ env }),
+      });
+      assert.equal(response.status, 400);
+      const body = (await response.json()) as { error: string };
+      assert.equal(body.error.includes("stolen"), false);
+      assert.equal(body.error.includes("/tmp/evil"), false);
+    }
+    assert.deepEqual((await first.request("/settings")).env, { GLOBAL_TEST: "v1" });
     const { run } = (await first.request("/run", "POST", {
       projectId: "p",
       taskId: "slow",

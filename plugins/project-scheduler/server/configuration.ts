@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { Cron } from "croner";
+import { environmentNameError } from "../shared/contracts.js";
 import type {
   SchedulerAgent,
   SchedulerSettings,
@@ -38,6 +39,25 @@ function boolean(value: unknown, label: string, fallback: boolean): boolean {
   if (value === undefined) return fallback;
   if (typeof value !== "boolean") throw new Error(label + " 必须是布尔值");
   return value;
+}
+/**
+ * Used by task parsing and plugin settings so both execution entrypoints share one policy:
+ * an object (never an array) of strings keyed by shell-safe, non-reserved names without NUL.
+ * Error messages name only the offending key, never its value, because values may carry
+ * credentials.
+ */
+function environment(value: unknown, label: string): Record<string, string> {
+  const result: [string, string][] = [];
+  for (const [name, entry] of Object.entries(object(value, label))) {
+    if (
+      environmentNameError(name) ||
+      typeof entry !== "string" ||
+      entry.includes("\0")
+    )
+      throw new Error(label + " 无效：" + name);
+    result.push([name, entry]);
+  }
+  return Object.fromEntries(result);
 }
 function timezone(value: unknown, fallback: string): string {
   const result = text(value, "timezone", fallback);
@@ -111,21 +131,7 @@ export function parseTasks(
       throw new Error(id + ": cwd 必须在项目内");
     if (!fs.statSync(realCwd).isDirectory())
       throw new Error(id + ": cwd 必须是目录");
-    const env: Record<string, string> = {};
-    if (row.env !== undefined)
-      for (const [key, entry] of Object.entries(object(row.env, "env"))) {
-        if (
-          !/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) ||
-          key === "AGENT_EXEC" ||
-          key === "CLOUDCLI_HOST_ROOT" ||
-          key.startsWith("CLOUDCLI_PLUGIN_") ||
-          key.startsWith("CLOUDCLI_SCHEDULER_") ||
-          typeof entry !== "string" ||
-          entry.includes("\0")
-        )
-          throw new Error(id + ": env 无效：" + key);
-        env[key] = entry;
-      }
+    const env = row.env === undefined ? {} : environment(row.env, id + ": env");
     const args = row.args === undefined ? [] : row.args;
     if (
       !Array.isArray(args) ||
@@ -162,18 +168,22 @@ export function parseTasks(
   });
 }
 
-/** Used by storage initialization; no secrets or executable paths are exposed as editable UI environment. */
+/** Used by storage initialization to supply defaults, including an empty execution environment. */
 export function defaultSettings(): SchedulerSettings {
   return {
     retentionDays: 30,
     timeoutSeconds: 3600,
     maxConcurrentRuns: 4,
     timezone: "Asia/Shanghai",
+    env: {},
     telegram: { enabled: false, botToken: "", chatId: "", proxy: "" },
   };
 }
 
-/** Used by the settings API; empty token input preserves the stored credential. */
+/**
+ * Used by the settings API; empty token input preserves the stored credential and an omitted
+ * env keeps the stored map, while an explicit empty object clears it.
+ */
 export function updateSettings(
   value: unknown,
   previous: SchedulerSettings,
@@ -202,6 +212,8 @@ export function updateSettings(
       100,
     ),
     timezone: timezone(input.timezone, previous.timezone),
+    env:
+      input.env === undefined ? { ...previous.env } : environment(input.env, "env"),
     telegram: {
       enabled: boolean(
         tg.enabled,

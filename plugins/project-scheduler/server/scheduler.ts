@@ -289,7 +289,12 @@ export class ProjectScheduler {
     task: SchedulerTask,
     directory: string,
   ): void {
-    const env = { ...process.env };
+    // Precedence is process.env < settings.env < task.env; the worker applies task.env last.
+    // Reading settings here keeps already-running workers on the values they started with.
+    const env = {
+      ...process.env,
+      ...this.store.settings().env,
+    };
     delete env.CLOUDCLI_PLUGIN_TOKEN;
     const worker = fork(
       fileURLToPath(new URL("../dist/worker.mjs", import.meta.url)),

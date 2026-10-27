@@ -36,7 +36,8 @@
 }
 .cron-plugin button,
 .cron-plugin input,
-.cron-plugin select {
+.cron-plugin select,
+.cron-plugin textarea {
   font: inherit;
 }
 .cron-plugin button {
@@ -57,7 +58,8 @@
 }
 .cron-plugin button:focus-visible,
 .cron-plugin input:focus-visible,
-.cron-plugin select:focus-visible {
+.cron-plugin select:focus-visible,
+.cron-plugin textarea:focus-visible {
   outline: 2px solid var(--cron-blue);
   outline-offset: 2px;
 }
@@ -387,7 +389,8 @@
   margin-bottom: 18px;
 }
 .cron-form input:not([type="checkbox"]),
-.cron-form select {
+.cron-form select,
+.cron-form textarea {
   display: block;
   width: 100%;
   padding: 9px 11px;
@@ -396,6 +399,15 @@
   background: var(--cron-bg);
   color: var(--cron-ink);
   margin-top: 7px;
+}
+.cron-form textarea {
+  resize: vertical;
+  min-height: 62px;
+  font:
+    12px/1.7 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    monospace;
 }
 .cron-plugin .cron-task-switch {
   display: inline-flex;
@@ -439,6 +451,40 @@
 }
 .cron-wide {
   grid-column: 1/-1;
+}
+.cron-env-form {
+  max-width: 760px;
+}
+.cron-env-intro {
+  margin-bottom: 18px;
+}
+.cron-env-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+.cron-env-row {
+  display: grid;
+  grid-template-columns: minmax(140px, 0.8fr) minmax(0, 2fr) auto;
+  align-items: start;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--cron-border);
+  border-radius: 8px;
+  background: var(--cron-soft);
+}
+.cron-form .cron-env-row label {
+  margin-bottom: 0;
+  min-width: 0;
+}
+.cron-env-row textarea {
+  min-height: 62px;
+  background: var(--cron-bg);
+}
+.cron-env-remove {
+  align-self: center;
+  white-space: nowrap;
 }
 .cron-settings-footer {
   display: flex;
@@ -532,6 +578,12 @@
   .cron-form-grid {
     grid-template-columns: minmax(0, 1fr);
   }
+  .cron-env-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .cron-env-remove {
+    justify-self: start;
+  }
   .cron-table thead {
     display: none;
   }
@@ -587,7 +639,8 @@
     margin-bottom: 5px;
   }
   .cron-form input:not([type="checkbox"]),
-  .cron-form select {
+  .cron-form select,
+  .cron-form textarea {
     font-size: 16px;
   }
   .cron-modal-backdrop {

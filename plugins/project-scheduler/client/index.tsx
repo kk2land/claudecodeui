@@ -12,12 +12,13 @@ import {
   X,
 } from "lucide-react";
 import { schedulerApi, type SchedulerHost } from "./api.js";
-import type {
-  PublicSchedulerSettings,
-  SchedulerImport,
-  SchedulerRun,
-  SchedulerTask,
-  SchedulerTaskRow,
+import {
+  environmentRowsToMap,
+  type PublicSchedulerSettings,
+  type SchedulerImport,
+  type SchedulerRun,
+  type SchedulerTask,
+  type SchedulerTaskRow,
 } from "../shared/contracts.js";
 import styles from "./scheduler.css";
 
@@ -54,6 +55,18 @@ const COMMON_TIMEZONES = [
   { value: "America/Los_Angeles", label: "美国西部 · America/Los_Angeles" },
   { value: "Australia/Sydney", label: "澳大利亚 · Australia/Sydney" },
 ];
+// Stable row identity keeps the focused input mounted while its name changes.
+let envRowSequence = 0;
+type EnvRow = { id: number; name: string; value: string };
+// Settings panes: alert delivery, the shared execution environment, and runtime/log policy.
+type SettingsTab = "alerts" | "environment" | "runtime";
+const envRow = (name = "", value = ""): EnvRow => ({
+  id: ++envRowSequence,
+  name,
+  value,
+});
+const envRowsFrom = (env: Record<string, string>): EnvRow[] =>
+  Object.entries(env).map(([name, value]) => envRow(name, value));
 function Badge({ run }: { run: SchedulerRun }) {
   return (
     <span className={"cron-badge cron-" + run.status}>
@@ -84,16 +97,14 @@ function Scheduler({ host }: { host: SchedulerHost }) {
   const [scope, setScope] = useState<"current" | "all">("current");
   // Stable identity keeps an open detail view attached to its project across polling updates.
   const [selected, setSelected] = useState<string | null>(null);
-  // Only the settings pane owns editable settings; no execution-environment pane exists.
+  // Settings come from the authenticated API; editing stays local to the settings panel.
   const [settings, setSettings] = useState<PublicSchedulerSettings | null>(
     null,
   );
   // A view switch preserves task identity while the user inspects plugin settings.
   const [view, setView] = useState<"tasks" | "detail" | "settings">("tasks");
   // Log retention links open the runtime pane directly; the regular settings entry opens alerts.
-  const [settingsTab, setSettingsTab] = useState<"alerts" | "runtime">(
-    "alerts",
-  );
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>("alerts");
   // Import previews are shown in a separate, dismissible dialog.
   const [loadingConfig, setLoadingConfig] = useState(false);
   // Operations report errors/results in one accessible status area.
@@ -407,7 +418,7 @@ function RunDetail({
   api: ReturnType<typeof schedulerApi>;
   retention: number;
   onBack(): void;
-  onSettings(tab: "alerts" | "runtime"): void;
+  onSettings(tab: SettingsTab): void;
   onError(message: string): void;
   onRun(): void;
 }) {
@@ -864,7 +875,7 @@ function SettingsPanel({
   onError,
 }: {
   settings: PublicSchedulerSettings;
-  initialTab: "alerts" | "runtime";
+  initialTab: SettingsTab;
   api: ReturnType<typeof schedulerApi>;
   onBack(): void;
   onSave(settings: PublicSchedulerSettings): void;
@@ -872,20 +883,37 @@ function SettingsPanel({
 }) {
   // Settings editing is kept local until save; no stored token is fetched back into an input.
   const [draft, setDraft] = useState(settings);
-  // Only alert and runtime/log tabs exist per the approved interface.
-  const [tab, setTab] = useState<"alerts" | "runtime">(initialTab);
+  // The execution-environment tab edits the global env map; alerts and runtime keep their forms.
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
+  // Env rows carry stable ids so renaming a variable does not remount or blur its input.
+  const [envRows, setEnvRows] = useState<EnvRow[]>(() =>
+    envRowsFrom(settings.env),
+  );
   // Empty token input means retain the existing secret.
   const [token, setToken] = useState("");
   // Prevent duplicate settings writes and test messages.
   const [busy, setBusy] = useState(false);
+  const updateEnvRow = (id: number, change: Partial<Omit<EnvRow, "id">>) =>
+    setEnvRows((rows) =>
+      rows.map((row) => (row.id === id ? { ...row, ...change } : row)),
+    );
   const save = async (test: boolean) => {
+    // Duplicate or invalid names fail here; never let the map silently collapse rows.
+    const environment = environmentRowsToMap(envRows);
+    if (environment.error) {
+      onError(environment.error);
+      setTab("environment");
+      return;
+    }
     setBusy(true);
     try {
       const value = await api.saveSettings({
         ...draft,
+        env: environment.env,
         telegram: { ...draft.telegram, botToken: token },
       });
       setDraft(value);
+      setEnvRows(envRowsFrom(value.env));
       setToken("");
       onSave(value);
       if (test) {
@@ -916,6 +944,12 @@ function SettingsPanel({
           onClick={() => setTab("alerts")}
         >
           告警渠道
+        </button>
+        <button
+          aria-pressed={tab === "environment"}
+          onClick={() => setTab("environment")}
+        >
+          执行环境
         </button>
         <button
           aria-pressed={tab === "runtime"}
@@ -986,7 +1020,8 @@ function SettingsPanel({
             失败、启动失败、超时及意外中断发送告警。告警发送失败不会重新执行任务。
           </p>
         </div>
-      ) : (
+      ) : null}
+      {tab === "runtime" && (
         <div className="cron-form cron-form-grid">
           <label>
             默认时区
@@ -1062,6 +1097,78 @@ function SettingsPanel({
           </p>
           <p className="cron-wide">
             默认时区和超时用于下次装载；并发上限、日志保留及告警设置保存后生效。
+          </p>
+        </div>
+      )}
+      {tab === "environment" && (
+        <div className="cron-form cron-env-form">
+          <h3>所有项目共用</h3>
+          <p className="cron-env-intro">
+            这些变量会附加到所有项目的脚本任务和提示词任务（包括脚本调用的
+            AGENT_EXEC）。任务 <code>env</code> 中的同名变量优先；宿主已有变量被这里的值覆盖。
+          </p>
+          <div className="cron-env-rows">
+            {envRows.map((row, index) => (
+              <div className="cron-env-row" key={row.id}>
+                <label>
+                  变量名
+                  <input
+                    className="cron-env-name"
+                    value={row.name}
+                    disabled={busy}
+                    spellCheck={false}
+                    autoComplete="off"
+                    placeholder="例如 DATABASE_URL"
+                    onChange={(event) =>
+                      updateEnvRow(row.id, { name: event.target.value })
+                    }
+                  />
+                </label>
+                <label>
+                  变量值
+                  <textarea
+                    className="cron-env-value"
+                    value={row.value}
+                    disabled={busy}
+                    rows={2}
+                    spellCheck={false}
+                    placeholder="支持多行"
+                    onChange={(event) =>
+                      updateEnvRow(row.id, { value: event.target.value })
+                    }
+                  />
+                </label>
+                <button
+                  type="button"
+                  className="cron-danger cron-env-remove"
+                  aria-label={"删除变量 " + (row.name || index + 1)}
+                  disabled={busy}
+                  onClick={() =>
+                    setEnvRows((rows) =>
+                      rows.filter((item) => item.id !== row.id),
+                    )
+                  }
+                >
+                  删除
+                </button>
+              </div>
+            ))}
+            {!envRows.length && (
+              <p className="cron-muted">尚未配置额外环境变量。</p>
+            )}
+          </div>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={() => setEnvRows((rows) => [...rows, envRow()])}
+          >
+            添加变量
+          </button>
+          <p>
+            保存后下一次执行直接生效，正在运行的任务保持启动时的环境。变量名只能包含字母、数字与下划线且不能以数字开头；
+            AGENT_EXEC、CLOUDCLI_HOST_ROOT、CLOUDCLI_PROJECTS_FILE 及
+            CLOUDCLI_PLUGIN_、CLOUDCLI_SCHEDULER_ 前缀为调度器保留。所有项目脚本与提示词共用此配置，任务
+            <code>env</code> 可覆盖同名变量。
           </p>
         </div>
       )}

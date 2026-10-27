@@ -23,7 +23,7 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   fs.writeFileSync(
     binary,
     // No turn.completed event: AGENT_EXEC must still succeed on a normal zero exit.
-    '#!/usr/bin/env node\nconst prompt=require("fs").readFileSync(0,"utf8");console.log(JSON.stringify({type:"item.completed",item:{id:"answer",type:"agent_message",text:process.argv.join("|")+"\\n"+prompt}}));',
+    '#!/usr/bin/env node\nconst prompt=require("fs").readFileSync(0,"utf8");console.log(JSON.stringify({type:"item.completed",item:{id:"answer",type:"agent_message",text:process.argv.join("|")+"\\n"+prompt+"\\nGLOBAL="+(process.env.GLOBAL_AGENT_EXEC||"none")}}));',
     { mode: 0o700 },
   );
   fs.mkdirSync(path.join(project, ".cloudcli"), { recursive: true });
@@ -56,6 +56,8 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   const previous = process.env.CLOUDCLI_HOST_ROOT;
   process.env.CLOUDCLI_HOST_ROOT = root;
   const store = new SchedulerStore(path.join(root, "data"));
+  // Saved settings must reach the script and the AGENT_EXEC child it spawns.
+  store.saveSettings({ ...store.settings(), env: { GLOBAL_AGENT_EXEC: "shared" } });
   const scheduler = new ProjectScheduler(store, catalog);
   t.after(async () => {
     await scheduler.close();
@@ -73,4 +75,5 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   const output = scheduler.log(run.id, "stdout", 0).text;
   assert.match(output, /--ephemeral\|--json\|--model\|script-model/);
   assert.match(output, /literal \$HOME; quote " and\n多行/);
+  assert.match(output, /GLOBAL=shared/);
 });
