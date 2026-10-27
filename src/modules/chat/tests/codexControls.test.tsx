@@ -212,3 +212,19 @@ test('native item snapshots replace one row while different items and turns stay
   const messages = h.result.current.getMessages('snapshot-session');
   expect(messages.map((message) => message.content)).toEqual(['one two', 'tool follow-up', 'second turn']);
 });
+
+for (const mobile of [false, true]) {
+  test(`empty paused queues hide resume and queued messages restore it (${mobile ? 'mobile' : 'desktop'})`, () => {
+    const value = controls({ queueHeld: true, phase: 'idle', turnId: null });
+    const settingsContainer = mobile ? null : undefined;
+    const view = render(<CodexControlPanel controls={value} onExecutePlan={() => {}} settingsContainer={settingsContainer} />);
+    expect(screen.queryByRole('button', { name: 'Resume queue' })).toBeNull();
+    if (mobile) expect(view.container.textContent).toBe('');
+    view.rerender(<CodexControlPanel controls={value} onExecutePlan={() => {}} settingsContainer={settingsContainer} hasQueuedDraft />);
+    fireEvent.click(screen.getByRole('button', { name: 'Resume queue' }));
+    expect(value.control).toHaveBeenCalledWith({ action: 'queue-resume' });
+    view.rerender(<CodexControlPanel controls={value} onExecutePlan={() => {}} settingsContainer={settingsContainer} hasQueuedDraft={false} />);
+    expect(screen.queryByRole('button', { name: 'Resume queue' })).toBeNull();
+    expect(value.state?.queueHeld).toBe(true);
+  });
+}

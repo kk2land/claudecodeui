@@ -13,16 +13,18 @@ import type { ProviderRuntimeControls } from '@/shared/types';
  * and error notices beside the input, and an element portals them into the
  * mobile settings sheet.
  */
-export function ProviderRuntimePanel({ controls, providerLabel, settingsContainer }: {
+export function ProviderRuntimePanel({ controls, providerLabel, settingsContainer, hasQueuedDraft = false }: {
   controls: ProviderRuntimeControls;
   providerLabel: string;
   settingsContainer?: Element | null;
+  hasQueuedDraft?: boolean;
 }) {
   const { t, i18n } = useTranslation('chat');
   const panelId = useId();
   // Process details remain collapsed until the user opens runtime settings.
   const [open, setOpen] = useState(false);
   const { state, pending, error } = controls;
+  const showResumeQueue = Boolean(state?.queueHeld && hasQueuedDraft);
   const transitioning = state?.phase === 'switching' || state?.phase === 'stopping';
   const busy = state?.phase !== 'idle';
   const stoppable = Boolean(state && controls.stoppableModes.includes(state.runtime));
@@ -30,7 +32,7 @@ export function ProviderRuntimePanel({ controls, providerLabel, settingsContaine
   const button = 'inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-border/60 bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40';
   const settings = <div className="min-w-0 space-y-2 text-sm">
       <div className="flex flex-wrap items-center justify-end gap-2">
-        {settingsContainer === undefined && state?.queueHeld && <button type="button" className={`${button} mr-auto`} disabled={pending || transitioning}
+        {settingsContainer === undefined && showResumeQueue && <button type="button" className={`${button} mr-auto`} disabled={pending || transitioning}
           onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('runtime.resumeQueue')}</button>}
         <button type="button" className={`${button} gap-1.5`} aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((value) => !value)}>
           <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />{providerLabel}
@@ -88,11 +90,11 @@ export function ProviderRuntimePanel({ controls, providerLabel, settingsContaine
           {t(`runtime.${state!.phase}`)}
         </p>
       )}
-      {settingsContainer !== undefined && state?.queueHeld && <button type="button" className={`${button} mr-auto`} disabled={pending || transitioning}
+      {settingsContainer !== undefined && showResumeQueue && <button type="button" className={`${button} mr-auto`} disabled={pending || transitioning}
         onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('runtime.resumeQueue')}</button>}
       {error && <p role="alert" className="text-xs text-destructive">{error}</p>}
     </div>;
-  const hasNotices = Boolean((settingsContainer !== undefined && (state?.queueHeld || transitioning)) || error);
+  const hasNotices = Boolean((settingsContainer !== undefined && (showResumeQueue || transitioning)) || error);
 
   if (settingsContainer === undefined) {
     return (
