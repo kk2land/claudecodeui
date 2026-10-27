@@ -235,6 +235,7 @@ function ChatInterface({
     handleSubmit,
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
+    queuedDrafts,
     queuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,
@@ -606,6 +607,7 @@ function ChatInterface({
           codexControls={provider === 'codex' ? codexControls : undefined}
           runtimeControls={runtimeControls.available ? runtimeControls : undefined}
           onExecutePlan={() => handleVoiceTranscript(t('codex.implementPrompt'), false)}
+          queuedDrafts={queuedDrafts}
           queuedDraft={queuedDraft}
           backgroundSendPrompt={backgroundSendPrompt}
           onResolveBackgroundSendPrompt={resolveBackgroundSendPrompt}

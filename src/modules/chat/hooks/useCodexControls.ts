@@ -4,7 +4,7 @@ import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
-import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDelivery, readQueuedMessage, subscribeToChatDrafts, writeDraftText, writeQueuedMessage } from '@/shared/chatDrafts';
+import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDelivery, readQueuedMessage, readQueuedMessages, subscribeToChatDrafts, writeDraftText, writeQueuedMessages } from '@/shared/chatDrafts';
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
 type Args = {
@@ -161,12 +161,16 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
 
   const steer = useCallback(async () => {
     if (!sessionId) return;
+    // Only the queue head may be steered: it is the oldest pending turn, and
+    // promoting a later entry would reorder what the user queued.
     const message = readQueuedMessage(sessionId);
     const state = snapshots[sessionId];
     if (!message || !state?.turnId) return;
     if (!message.id) {
       message.id = createUuid();
-      writeQueuedMessage(sessionId, message);
+      // Stamp only the head; rewriting the whole queue keeps every later
+      // entry untouched and in order.
+      writeQueuedMessages(sessionId, [message, ...readQueuedMessages(sessionId).slice(1)]);
     }
     try {
       await persistQueuedMessage(sessionId);

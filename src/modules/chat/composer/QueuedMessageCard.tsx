@@ -8,19 +8,30 @@ type QueuedMessageCardProps = {
   canSteerMode?: boolean;
   content: string;
   attachmentCount?: number;
+  /** Only the queue head is dispatched or steered next. */
+  isHead?: boolean;
+  /** 1-based position in the FIFO queue, for the position badge. */
+  position?: number;
+  /** Total queued entries, so the badge can read "1 of 3". */
+  total?: number;
   onEdit: () => void;
   onDelete: () => void;
 };
 
 /**
- * Rendered by chat's ChatComposer to show the message queued for a busy
- * session, with edit and delete actions before it is auto-sent.
+ * Rendered by chat's ChatComposer to show one message queued for a busy
+ * session, in FIFO order, with edit and delete actions before it is auto-sent.
+ * Native steer is offered only for the head, because only the head is the turn
+ * the provider would take next.
  */
 export default function QueuedMessageCard({
   content,
   controls,
   canSteerMode = true,
   attachmentCount = 0,
+  isHead = true,
+  position = 1,
+  total = 1,
   onEdit,
   onDelete,
 }: QueuedMessageCardProps) {
@@ -28,8 +39,8 @@ export default function QueuedMessageCard({
   const state = controls?.state;
   const delivery = controls?.delivery;
   const locked = Boolean(controls?.pending || ['steering', 'unknown'].includes(delivery?.status ?? ''));
-  const canSteer = Boolean(canSteerMode && state?.turnId && state.phase === 'running' && !locked);
-  const showSteer = state?.runtime === 'app-server';
+  const canSteer = Boolean(isHead && canSteerMode && state?.turnId && state.phase === 'running' && !locked);
+  const showSteer = isHead && state?.runtime === 'app-server';
 
   return (
     <div className="settings-content-enter mx-auto mb-2 max-w-[54.25rem] rounded-xl rounded-t-none border border-dashed border-primary/25 bg-primary/[0.04] px-3 py-2">
@@ -39,8 +50,15 @@ export default function QueuedMessageCard({
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-primary/70">
             <span>{t('input.queue.label', { defaultValue: 'Queued' })}</span>
+            {total > 1 && (
+              <span className="normal-case text-muted-foreground/60" title={t('input.queue.positionHint', { defaultValue: 'Queue position' })}>
+                {t('input.queue.position', { position, total, defaultValue: '{{position}} of {{total}}' })}
+              </span>
+            )}
             <span className="normal-case text-muted-foreground/60">
-              · {t(locked ? 'codex.confirming' : delivery?.status === 'held' || state?.queueHeld ? 'codex.queueHeld' : 'input.queue.willSend', { defaultValue: 'Will send when this finishes' })}
+              · {isHead
+                ? t(locked ? 'codex.confirming' : delivery?.status === 'held' || state?.queueHeld ? 'codex.queueHeld' : 'input.queue.willSend', { defaultValue: 'Will send when this finishes' })
+                : t('input.queue.waitingBehind', { defaultValue: 'Waiting behind the queued message above' })}
             </span>
           </div>
           <p className="mt-0.5 line-clamp-2 break-words text-sm text-foreground/90">{content}</p>

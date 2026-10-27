@@ -15,7 +15,7 @@ import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIc
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
 import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
-import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
+import { DEFAULT_EFFORT_VALUE, MAX_QUEUED_MESSAGES } from '@/shared/constants';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
 import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
@@ -78,7 +78,10 @@ type ChatComposerProps = {
   onClearInput: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
-  queuedDraft: QueuedDraft | null;
+  /** The whole pending FIFO queue for the open session, oldest first. */
+  queuedDrafts?: QueuedDraft[];
+  /** Head of `queuedDrafts`; retained for single-message callers and tests. */
+  queuedDraft?: QueuedDraft | null;
   codexControls?: CodexControls;
   runtimeControls?: ProviderRuntimeControls;
   onExecutePlan?: () => void;
@@ -91,8 +94,9 @@ type ChatComposerProps = {
   scheduledMessages: ScheduledMessage[];
   onScheduleMessage: (scheduledFor: Date) => void;
   onCancelScheduledMessage: (id: string) => void;
-  onEditQueuedDraft: () => void;
-  onDeleteQueuedDraft: () => void;
+  /** `id` is preferred; `position` keeps unticketed legacy entries addressable. */
+  onEditQueuedDraft: (id?: string, position?: number) => void;
+  onDeleteQueuedDraft: (id?: string, position?: number) => void;
   attachedFiles: File[];
   onRemoveAttachment: (index: number) => void;
   fileErrors: Map<string, string>;
@@ -166,6 +170,7 @@ export default function ChatComposer({
   onSubmit,
   isDragActive,
   queuedDraft,
+  queuedDrafts,
   codexControls,
   runtimeControls,
   onExecutePlan,
@@ -352,19 +357,29 @@ export default function ChatComposer({
     }
   }, [isMobile, mobileCompact, hasDraft, textareaRef, onTextareaResize, onTextareaScrollSync]);
 
-  const hasQueuedDraft = Boolean(queuedDraft);
+  // Every card renders in FIFO order; `queuedDraft` alone is still honoured so
+  // single-message callers keep working.
+  const pendingDrafts = queuedDrafts ?? (queuedDraft ? [queuedDraft] : []);
+  const hasQueuedDraft = pendingDrafts.length > 0;
+  const queueFull = pendingDrafts.length >= MAX_QUEUED_MESSAGES;
+  // A full queue still routes a submit through the queue action: the hook
+  // rejects it visibly and keeps the text. Falling through to `onAbortSession`
+  // would stop the running turn instead of refusing the fourth message.
   const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
-  const submitHint = canQueueDraft
-    ? hasQueuedDraft
-      ? t('input.hintText.updateQueued', { defaultValue: 'Enter to update queued message' })
-      : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
-    : sendByCtrlEnter
-      ? t('input.hintText.ctrlEnter')
-      : t('input.hintText.enter');
+  const submitHint = queueFull && isLoading
+    ? t('input.hintText.queueFull', {
+      count: MAX_QUEUED_MESSAGES,
+      defaultValue: 'Queue is full ({{count}}). Send or delete one first',
+    })
+    : canQueueDraft
+      ? hasQueuedDraft
+        ? t('input.hintText.queueNext', { defaultValue: 'Enter to queue another message' })
+        : t('input.hintText.queue', { defaultValue: 'Enter to queue your next message' })
+      : sendByCtrlEnter
+        ? t('input.hintText.ctrlEnter')
+        : t('input.hintText.enter');
   const submitAriaLabel = canQueueDraft
-    ? hasQueuedDraft
-      ? t('input.queue.update', { defaultValue: 'Update queued message' })
-      : t('input.queue.sendNext', { defaultValue: 'Queue next message' })
+    ? t('input.queue.sendNext', { defaultValue: 'Queue next message' })
     : isLoading
       ? t('input.stop')
       : t('input.send');
@@ -487,18 +502,22 @@ export default function ChatComposer({
         </div>
       )}
 
-      {queuedDraft && (
+      {pendingDrafts.map((draft, index) => (
         <QueuedMessageCard
-          content={queuedDraft.content}
-          attachmentCount={
-            queuedDraft.uploadedAttachments?.length ?? queuedDraft.attachments.length
-          }
+          key={draft.id ?? `${index}-${draft.content.slice(0, 24)}`}
+          content={draft.content}
+          attachmentCount={draft.uploadedAttachments?.length ?? draft.attachments.length}
           controls={codexControls}
-          canSteerMode={queuedDraft.options?.collaborationMode !== 'plan'}
-          onEdit={onEditQueuedDraft}
-          onDelete={onDeleteQueuedDraft}
+          canSteerMode={draft.options?.collaborationMode !== 'plan'}
+          // Only the head is dispatchable next; later cards are shown in order
+          // with the same edit/delete actions but cannot precede the head.
+          isHead={index === 0}
+          position={index + 1}
+          total={pendingDrafts.length}
+          onEdit={() => onEditQueuedDraft(draft.id, index)}
+          onDelete={() => onDeleteQueuedDraft(draft.id, index)}
         />
-      )}
+      ))}
 
       {!hasQuestionPanel && <div className="relative mx-auto max-w-[54.25rem]">
         {showFileDropdown && filteredFiles.length > 0 && (

@@ -68,6 +68,19 @@ export const SETTINGS_MAIN_TABS: SettingsMainTabMeta[] = [
 
 // ---------------------------
 
+//----------------- CHAT QUEUE ------------
+
+/**
+ * How many messages one chat scope may queue behind an in-flight turn.
+ *
+ * The composer refuses a further submission visibly instead of dropping it,
+ * and the server validates the same cap. Keep this in sync with the backend's
+ * `MAX_QUEUED_MESSAGES`.
+ */
+export const MAX_QUEUED_MESSAGES = 3;
+
+// ---------------------------
+
 //----------------- CHAT REASONING EFFORT ------------
 
 /**

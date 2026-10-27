@@ -1,4 +1,5 @@
 import { api } from '@/shared/api';
+import { MAX_QUEUED_MESSAGES } from '@/shared/constants';
 import type { QueuedDelivery, QueuedSendOptions } from '@/shared/types';
 
 /**
@@ -32,7 +33,8 @@ type StoredQueuedMessage = {
 
 type DraftRecord = {
   text: string;
-  queuedMessage: StoredQueuedMessage | null;
+  /** The pending FIFO queue, oldest first. Empty when nothing is queued. */
+  queuedMessages: StoredQueuedMessage[];
   queuedDelivery?: QueuedDelivery;
 };
 
@@ -48,7 +50,15 @@ const MIRROR_STORAGE_KEY = 'chat-drafts';
  */
 const SERVER_WRITE_DEBOUNCE_MS = 1_000;
 
-const EMPTY_DRAFT: DraftRecord = { text: '', queuedMessage: null };
+const EMPTY_DRAFT: DraftRecord = { text: '', queuedMessages: [] };
+
+/** Thrown when a write would exceed the per-chat queue cap; the caller keeps the message. */
+export class QueueLimitError extends Error {
+  constructor() {
+    super(`At most ${MAX_QUEUED_MESSAGES} messages can be queued for one chat.`);
+    this.name = 'QueueLimitError';
+  }
+}
 
 const listeners = new Set<() => void>();
 
@@ -61,8 +71,44 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 );
 
 const isEmptyDraft = (draft: DraftRecord): boolean => (
-  draft.text === '' && draft.queuedMessage === null
+  draft.text === '' && draft.queuedMessages.length === 0
 );
+
+/**
+ * Turns one stored entry into a usable queued message, or null when it has
+ * nothing to send. Mirror and server payloads are untyped at runtime, and
+ * older attachment-only queues can omit `content`, which must never reach the
+ * composer as undefined.
+ */
+const normalizeQueuedMessage = (value: unknown): StoredQueuedMessage | null => {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const queued = value as StoredQueuedMessage;
+  const attachments = Array.isArray(queued.attachments)
+    ? queued.attachments
+    : Array.isArray(queued.images)
+      ? queued.images
+      : [];
+  const content = typeof queued.content === 'string' ? queued.content : '';
+  return content.trim() || attachments.length > 0
+    ? { ...queued, content, attachments }
+    : null;
+};
+
+/**
+ * Reads a stored queue from any shape this app has ever persisted: the current
+ * array, or the legacy single object under `queuedMessage`. The cap is applied
+ * on read so a hand-edited mirror can never render more cards than the server
+ * would accept.
+ */
+const normalizeQueuedMessages = (value: unknown): StoredQueuedMessage[] => {
+  const raw = Array.isArray(value) ? value : value ? [value] : [];
+  return raw
+    .map(normalizeQueuedMessage)
+    .filter((message): message is StoredQueuedMessage => message !== null)
+    .slice(0, MAX_QUEUED_MESSAGES);
+};
 
 function readMirror(): Map<string, DraftRecord> {
   try {
@@ -83,9 +129,8 @@ function readMirror(): Map<string, DraftRecord> {
       }
       restored.set(scope, {
         text: typeof value.text === 'string' ? value.text : '',
-        queuedMessage: isRecord(value.queuedMessage)
-          ? (value.queuedMessage as StoredQueuedMessage)
-          : null,
+        // A mirror written before the queue existed holds the legacy singleton.
+        queuedMessages: normalizeQueuedMessages(value.queuedMessages ?? value.queuedMessage),
       });
     }
     return restored;
@@ -131,7 +176,7 @@ function flushServerWrites(): Promise<void> {
       try {
         const response = !draft || isEmptyDraft(draft)
           ? await api.user.deleteDraft(scope)
-          : await api.user.saveDraft(scope, { text: draft.text, queuedMessage: draft.queuedMessage });
+          : await api.user.saveDraft(scope, { text: draft.text, queuedMessages: draft.queuedMessages });
         if (response && !response.ok) throw new Error(`Draft save failed (${response.status})`);
       } catch (error) { failure ??= error; }
       finally {
@@ -182,7 +227,7 @@ function updateDraft(scope: string, update: Partial<DraftRecord>): void {
   const current = drafts.get(scope) ?? EMPTY_DRAFT;
   const next: DraftRecord = { ...current, ...update };
 
-  if (next.text === current.text && next.queuedMessage === current.queuedMessage) {
+  if (next.text === current.text && next.queuedMessages === current.queuedMessages) {
     return;
   }
 
@@ -208,35 +253,79 @@ export function writeDraftText(scope: string, text: string): void {
   updateDraft(scope, { text });
 }
 
-export function readQueuedMessage(scope: string): StoredQueuedMessage | null {
-  const queued = drafts.get(scope)?.queuedMessage ?? null;
-  if (!queued) {
-    return null;
-  }
-
-  const attachments = Array.isArray(queued.attachments)
-    ? queued.attachments
-    : Array.isArray(queued.images)
-      ? queued.images
-      : [];
-  // Mirror and server payloads are untyped at runtime. Older attachment-only
-  // queues can omit content; never pass undefined into the composer or trim.
-  const content = typeof queued.content === 'string' ? queued.content : '';
-
-  // A queued message with neither text nor attachments has nothing to send.
-  return content.trim() || attachments.length > 0
-    ? { ...queued, content, attachments }
-    : null;
+/**
+ * The whole pending queue for a scope, oldest first.
+ *
+ * Entries are normalized on every read so payloads stored by older clients
+ * (legacy `images`, missing `content`) are safe to render and send.
+ */
+export function readQueuedMessages(scope: string): StoredQueuedMessage[] {
+  return (drafts.get(scope)?.queuedMessages ?? [])
+    .map(normalizeQueuedMessage)
+    .filter((message): message is StoredQueuedMessage => message !== null);
 }
 
+/** Head-of-queue compatibility helper for single-message callers. */
+export function readQueuedMessage(scope: string): StoredQueuedMessage | null {
+  return readQueuedMessages(scope)[0] ?? null;
+}
+
+/**
+ * Appends a queued message, or updates an entry that already has the same
+ * ticket. Throws {@link QueueLimitError} when the queue is full so the caller
+ * can keep the user's text and attachments in the composer.
+ */
 export function writeQueuedMessage(scope: string, message: StoredQueuedMessage): void {
-  updateDraft(scope, { queuedMessage: message });
+  const queue = readQueuedMessages(scope);
+  const index = message.id ? queue.findIndex((entry) => entry.id === message.id) : -1;
+  if (index >= 0) {
+    const next = [...queue];
+    next[index] = message;
+    updateDraft(scope, { queuedMessages: next });
+  } else {
+    if (queue.length >= MAX_QUEUED_MESSAGES) {
+      throw new QueueLimitError();
+    }
+    updateDraft(scope, { queuedMessages: [...queue, message] });
+  }
   // Queueing is a send-like action, so persist it before the tab can close.
   flushServerWritesNow();
 }
 
-export function clearQueuedMessage(scope: string): void {
-  updateDraft(scope, { queuedMessage: null });
+/**
+ * Replaces the whole pending queue, used by the composer to reconcile its
+ * rendered list (edits and deletions included) with the durable store. The tail
+ * is never inferred: the caller passes every entry it still wants queued.
+ */
+export function writeQueuedMessages(scope: string, messages: StoredQueuedMessage[]): void {
+  if (messages.length > MAX_QUEUED_MESSAGES) {
+    throw new QueueLimitError();
+  }
+  const current = readQueuedMessages(scope);
+  if (JSON.stringify(current) === JSON.stringify(messages)) {
+    return;
+  }
+  updateDraft(scope, { queuedMessages: messages });
+  flushServerWritesNow();
+}
+
+/**
+ * Removes one queued entry. Without an id the head is removed, matching the
+ * single-slot helper this replaces; with an id only that entry is removed, so
+ * editing or deleting a later card cannot dispatch an earlier one.
+ */
+export function clearQueuedMessage(scope: string, messageId?: string): void {
+  const queue = readQueuedMessages(scope);
+  if (queue.length === 0) {
+    return;
+  }
+  const next = messageId
+    ? queue.filter((entry) => entry.id !== messageId)
+    : queue.slice(1);
+  if (next.length === queue.length) {
+    return;
+  }
+  updateDraft(scope, { queuedMessages: next });
   // Editing or cancelling must beat the server's next dispatcher poll.
   flushServerWritesNow();
 }
@@ -258,7 +347,13 @@ export function subscribeToChatDrafts(listener: () => void): () => void {
  */
 export async function hydrateChatDrafts(): Promise<void> {
   const generation = draftGeneration;
-  let serverDrafts: Array<{ scope?: unknown; text?: unknown; queuedMessage?: unknown; queuedDelivery?: QueuedDelivery }> = [];
+  let serverDrafts: Array<{
+    scope?: unknown;
+    text?: unknown;
+    queuedMessage?: unknown;
+    queuedMessages?: unknown;
+    queuedDelivery?: QueuedDelivery;
+  }> = [];
 
   try {
     const response = await api.user.drafts();
@@ -288,9 +383,9 @@ export async function hydrateChatDrafts(): Promise<void> {
     merged.set(scope, {
       queuedDelivery: draft.queuedDelivery,
       text: typeof draft.text === 'string' ? draft.text : '',
-      queuedMessage: isRecord(draft.queuedMessage)
-        ? (draft.queuedMessage as StoredQueuedMessage)
-        : null,
+      // `queuedMessages` is authoritative when present; the head field is the
+      // fallback for a server that has not been upgraded yet.
+      queuedMessages: normalizeQueuedMessages(draft.queuedMessages ?? draft.queuedMessage),
     });
   }
 

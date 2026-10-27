@@ -1938,24 +1938,42 @@ export type ProviderRuntimeGateway = {
 
 //----------------- DURABLE CHAT DRAFTS ------------
 /**
- * One chat scope's unsent state: the text still in the composer, plus the
- * message queued behind an in-flight turn. Both are optional — a scope can
- * hold only a draft, only a queued message, or both.
+ * One chat scope's unsent state: the text still in the composer, plus the FIFO
+ * queue of messages waiting behind an in-flight turn. Both are optional — a
+ * scope can hold only a draft, only queued messages, or both.
+ *
+ * `queuedMessage` mirrors the queue head for clients and helpers that still
+ * understand a single pending turn. New code reads `queuedMessages`, the whole
+ * ordered queue, so a second or third entry is never lost.
  */
 export type SessionDraftRecord = {
   scope: string;
   text: string;
+  /** Head of the queue, retained for single-message compatibility. */
   queuedMessage: unknown | null;
+  /** The pending FIFO queue, oldest first (never more than MAX_QUEUED_MESSAGES). */
+  queuedMessages: unknown[];
   updatedAt: string;
   queuedDelivery: { status: string; requestId: string | null; error: string | null };
 };
 
-/** A server-owned queued turn together with the exact stored value used to claim it once. */
+/**
+ * A server-owned queued turn together with the exact stored value used to
+ * claim its head once. `queuedMessage` is that head; `claimToken` is the raw
+ * JSON previously read from the row, so a concurrent edit invalidates the
+ * claim and the claimer cannot remove a message it never inspected.
+ */
 export type QueuedSessionMessageRecord = {
   userId: number;
   sessionId: string;
   queuedMessage: unknown;
   claimToken: string;
+  /**
+   * Receipt id reserved by `claimQueuedMessage` for the popped head. It keeps
+   * a stale browser PUT from resurrecting the in-flight turn, and is deleted
+   * (restoring the head) when the run could not be admitted.
+   */
+  dispatchRequestId?: string;
 };
 
 // ---------------------------

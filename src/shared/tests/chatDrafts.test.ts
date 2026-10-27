@@ -11,7 +11,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
  * mirror once at module scope.
  */
 
-type SavedDraft = { scope: string; text: string; queuedMessage?: unknown };
+type SavedDraft = { scope: string; text: string; queuedMessages?: unknown[] };
 
 const savedDrafts: SavedDraft[] = [];
 const deletedScopes: string[] = [];
@@ -30,7 +30,7 @@ vi.mock('@/shared/api', () => ({
           headers: { 'Content-Type': 'application/json' },
         });
       },
-      saveDraft: async (scope: string, draft: { text: string; queuedMessage?: unknown }) => {
+      saveDraft: async (scope: string, draft: { text: string; queuedMessages?: unknown[] }) => {
         savedDrafts.push({ scope, ...draft });
         return new Response('{}', { status: 200 });
       },
@@ -70,7 +70,7 @@ test('a draft is readable synchronously and reaches the server after the debounc
 
   await vi.advanceTimersByTimeAsync(1_500);
   assert.deepEqual(savedDrafts, [
-    { scope: 'session-a', text: 'half a thought', queuedMessage: null },
+    { scope: 'session-a', text: 'half a thought', queuedMessages: [] },
   ]);
 });
 
@@ -173,7 +173,7 @@ test('a queued message round-trips alongside the draft text', async () => {
   assert.deepEqual(savedDrafts, [{
     scope: 'session-a',
     text: 'still editing',
-    queuedMessage: { content: 'send this next', attachments: [] },
+    queuedMessages: [{ content: 'send this next', attachments: [] }],
   }]);
 });
 
@@ -339,4 +339,89 @@ test('sign-out discards a former account’s late draft hydration', async () => 
     assert.equal(store.readDraftText('session-a'), '');
     assert.equal(store.readDraftText('session-b'), 'B draft');
   } finally { request.mockRestore(); }
+});
+
+test('a queue keeps three messages in FIFO order and rejects a fourth without losing it', async () => {
+  const store = await loadStore();
+
+  for (const content of ['one', 'two', 'three']) {
+    store.writeQueuedMessage('session-a', { id: content, content });
+  }
+
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ content }) => content), ['one', 'two', 'three']);
+  assert.equal(store.readQueuedMessage('session-a')?.content, 'one', 'the head is the single-slot view');
+
+  assert.throws(
+    () => store.writeQueuedMessage('session-a', { id: 'four', content: 'four' }),
+    store.QueueLimitError,
+  );
+  assert.deepEqual(
+    store.readQueuedMessages('session-a').map(({ content }) => content),
+    ['one', 'two', 'three'],
+    'the rejected message did not replace or truncate the queue',
+  );
+});
+
+test('re-writing an entry with the same ticket updates it instead of appending', async () => {
+  const store = await loadStore();
+  store.writeQueuedMessage('session-a', { id: 'a', content: 'first draft' });
+  store.writeQueuedMessage('session-a', { id: 'b', content: 'second' });
+
+  store.writeQueuedMessage('session-a', { id: 'a', content: 'first draft, edited' });
+
+  assert.deepEqual(
+    store.readQueuedMessages('session-a').map(({ content }) => content),
+    ['first draft, edited', 'second'],
+  );
+});
+
+test('deleting one queued entry by id leaves the others in order', async () => {
+  const store = await loadStore();
+  for (const content of ['one', 'two', 'three']) store.writeQueuedMessage('session-a', { id: content, content });
+
+  store.clearQueuedMessage('session-a', 'two');
+
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ content }) => content), ['one', 'three']);
+});
+
+test('a queue persisted as an array survives a reload; a legacy singleton is adopted', async () => {
+  const first = await loadStore();
+  for (const content of ['one', 'two', 'three']) first.writeQueuedMessage('session-a', { id: content, content });
+
+  const second = await loadStore();
+  assert.deepEqual(second.readQueuedMessages('session-a').map(({ content }) => content), ['one', 'two', 'three']);
+
+  localStorage.setItem('chat-drafts', JSON.stringify({
+    'session-legacy': { text: '', queuedMessage: { content: 'legacy singleton' } },
+  }));
+  const third = await loadStore();
+  assert.deepEqual(third.readQueuedMessages('session-legacy').map(({ content }) => content), ['legacy singleton']);
+});
+
+test('hydrate restores a whole server queue and adopts a legacy singleton payload', async () => {
+  serverDrafts = [
+    { scope: 'session-a', text: '', queuedMessages: [{ id: 'a', content: 'one' }, { id: 'b', content: 'two' }, { id: 'c', content: 'three' }] },
+    { scope: 'session-legacy', text: '', queuedMessage: { id: 'old', content: 'legacy' } },
+  ];
+
+  const store = await loadStore();
+  await store.hydrateChatDrafts();
+
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ content }) => content), ['one', 'two', 'three']);
+  assert.deepEqual(store.readQueuedMessages('session-legacy').map(({ content }) => content), ['legacy']);
+});
+
+test('a whole-queue write persists every entry rather than a single slot', async () => {
+  const store = await loadStore();
+  store.writeQueuedMessages('session-a', [
+    { id: 'a', content: 'one' },
+    { id: 'b', content: 'two' },
+  ]);
+  await vi.advanceTimersByTimeAsync(0);
+
+  assert.deepEqual(savedDrafts.at(-1), {
+    scope: 'session-a',
+    text: '',
+    queuedMessages: [{ id: 'a', content: 'one' }, { id: 'b', content: 'two' }],
+  });
 });

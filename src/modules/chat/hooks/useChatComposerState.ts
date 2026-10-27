@@ -15,18 +15,20 @@ import { useTranslation } from 'react-i18next';
 
 import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
-import { PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
+import { MAX_QUEUED_MESSAGES, PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
 import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
+  QueueLimitError,
   clearQueuedMessage,
   hydrateChatDrafts,
   readDraftText,
-  readQueuedMessage,
+  readQueuedMessages,
   subscribeToChatDrafts,
   writeDraftText,
   writeQueuedMessage,
+  writeQueuedMessages,
 } from '@/shared/chatDrafts';
 import { escapeRegExp } from '@/modules/chat/utils/chatFormatting';
 import { describeBackgroundTask, ownBackgroundTasks } from '@/modules/chat/utils/backgroundTasks';
@@ -154,17 +156,38 @@ const uploadAttachmentFiles = async (files: File[]): Promise<unknown[]> => {
 };
 
 
-const restoreQueuedDraft = (sessionKey: string): QueuedDraft | null => {
-  const saved = readQueuedMessage(sessionKey);
-  return saved
-    ? {
-        id: saved.id,
-        content: saved.content,
-        attachments: [],
-        uploadedAttachments: saved.attachments ?? saved.images,
-        options: saved.options,
-      }
-    : null;
+const toQueuedDraft = (saved: {
+  id?: string;
+  content: string;
+  options?: QueuedSendOptions;
+  attachments?: unknown[];
+  images?: unknown[];
+}): QueuedDraft => ({
+  id: saved.id,
+  content: saved.content,
+  attachments: [],
+  uploadedAttachments: saved.attachments ?? saved.images,
+  options: saved.options,
+});
+
+const restoreQueuedDrafts = (sessionKey: string): QueuedDraft[] => (
+  readQueuedMessages(sessionKey).map(toQueuedDraft)
+);
+
+/** Maps a composer entry to the JSON-safe shape the queue store persists. */
+const toStoredQueuedMessage = (draft: QueuedDraft) => ({
+  id: draft.id,
+  content: draft.content,
+  options: draft.options,
+  attachments: draft.uploadedAttachments,
+});
+
+/** Compares two queues by their durable identity and content, ignoring empty drafts. */
+const queuedDraftsEqual = (left: QueuedDraft[], right: QueuedDraft[]): boolean => {
+  const comparable = (drafts: QueuedDraft[]) => drafts
+    .filter((draft) => draft.content.trim() || (draft.uploadedAttachments?.length ?? 0) > 0)
+    .map((draft) => JSON.stringify([draft.id, draft.content, draft.options, draft.uploadedAttachments]));
+  return comparable(left).join('\u0000') === comparable(right).join('\u0000');
 };
 
 const getNotificationSessionSummary = (
@@ -338,24 +361,30 @@ export function useChatComposerState({
     scope: draftScope,
   });
 
-  const [queuedDraft, setQueuedDraft] = useState<QueuedDraft | null>(() => {
+  // Every message waiting behind the in-flight turn for the open session, in
+  // FIFO order. The server dispatches the head only, so the list (not a single
+  // slot) is what the cards, edits and deletes operate on.
+  const [queuedDrafts, setQueuedDrafts] = useState<QueuedDraft[]>(() => {
     if (typeof window === 'undefined' || !sessionKey) {
-      return null;
+      return [];
     }
-    return restoreQueuedDraft(sessionKey);
+    return restoreQueuedDrafts(sessionKey);
   });
-  // Which session the in-memory `queuedDraft` belongs to. On a session switch
+  // Which session the in-memory `queuedDrafts` belong to. On a session switch
   // there is one commit where `sessionKey` already points at the new session
-  // while `queuedDraft` still holds the old session's draft; the persistence
+  // while the list still holds the old session's drafts; the persistence
   // effect must not write across that gap.
   const queuedDraftSessionRef = useRef<string | null>(sessionKey);
+  // Head-of-queue compatibility for callers that still ask about "the" queued
+  // draft (prediction suppression, hints and the control panels).
+  const queuedDraft = queuedDrafts[0] ?? null;
 
   // Persisted user switch for native suggestions, read through the shared
   // preference store so these hooks stay mountable without app providers.
   const composerPredictionsPreference = useComposerPredictionsPreference();
   // Every condition that makes a suggestion inapplicable is combined here so
   // the overlay cannot render a suggestion the composer would not send from.
-  const predictionSuppressed = attachedFiles.length > 0 || Boolean(queuedDraft) || Boolean(editingAnchorId)
+  const predictionSuppressed = attachedFiles.length > 0 || queuedDrafts.length > 0 || Boolean(editingAnchorId)
     || composerPredictionsBlocked || Boolean(codexControls?.state?.questions.length);
   const composerPrediction = useComposerPrediction({
     enabled: composerPredictionsEligible && composerPredictionsPreference.enabled,
@@ -769,22 +798,39 @@ export function useChatComposerState({
     resolveBackgroundSendPrompt('cancel');
   }, [draftScope, resolveBackgroundSendPrompt]);
 
-  // Persist a message to send "when this finishes" and show it as the queued
-  // card. Used while a turn is in flight and when the user chooses to queue
-  // behind background work. Attachments must already be uploaded.
+  // Shown in the transcript and reused by the store refusal, so the cap is
+  // explained in the user's language.
+  const queueFullMessage = t('input.hintText.queueFull', {
+    count: MAX_QUEUED_MESSAGES,
+    defaultValue: 'Queue is full ({{count}}). Send or delete one first',
+  });
+
+  // Persist a message to send "when this finishes" and append it to the
+  // ordered queue. Used while a turn is in flight and when the user chooses to
+  // queue behind background work. Attachments must already be uploaded.
   const queueMessage = useCallback(
-    (draft: QueuedDraft, queuedSessionKey: string | null) => {
+    (draft: QueuedDraft, queuedSessionKey: string | null): boolean => {
       // Reuse one ticket across the synchronous write, UI state and persistence effect.
       const durableDraft = { ...draft, id: draft.id ?? createUuid() };
       if (queuedSessionKey) {
-        // Write the claim ticket synchronously after upload; this closes the
-        // gap before React's persistence effect runs.
-        writeQueuedMessage(queuedSessionKey, {
-          id: durableDraft.id,
-          content: durableDraft.content,
-          options: durableDraft.options,
-          attachments: durableDraft.uploadedAttachments,
-        });
+        try {
+          // Write the claim ticket synchronously after upload; this closes the
+          // gap before React's persistence effect runs.
+          writeQueuedMessage(queuedSessionKey, {
+            id: durableDraft.id,
+            content: durableDraft.content,
+            options: durableDraft.options,
+            attachments: durableDraft.uploadedAttachments,
+          });
+        } catch (error) {
+          // The store enforces the same cap as the server. Keep the message in
+          // the composer: nothing was queued, so nothing may be cleared.
+          if (error instanceof QueueLimitError) {
+            addMessage({ type: 'error', content: queueFullMessage, timestamp: new Date() });
+            return false;
+          }
+          throw error;
+        }
       }
 
       // Recorded under the session the message was queued FOR, and before
@@ -796,11 +842,19 @@ export function useChatComposerState({
       // sessions during upload, the durable record is already enough; do
       // not attach its UI card to the newly opened composer.
       if (queuedSessionKey && sessionKeyRef.current !== queuedSessionKey) {
-        return;
+        return true;
       }
 
       queuedDraftSessionRef.current = queuedSessionKey;
-      setQueuedDraft(durableDraft);
+      setQueuedDrafts((previous) => {
+        const index = previous.findIndex((entry) => entry.id === durableDraft.id);
+        if (index < 0) {
+          return [...previous, durableDraft];
+        }
+        const next = [...previous];
+        next[index] = durableDraft;
+        return next;
+      });
       setInput('');
       inputValueRef.current = '';
       setAttachedFiles([]);
@@ -813,8 +867,9 @@ export function useChatComposerState({
       if (draftScopeRef.current) {
         writeDraftText(draftScopeRef.current, '');
       }
+      return true;
     },
-    [recordSentMessage, resetCommandMenuState, setInput],
+    [addMessage, queueFullMessage, recordSentMessage, resetCommandMenuState, setInput],
   );
 
   const submitMessage = useCallback(
@@ -872,14 +927,22 @@ export function useChatComposerState({
       // descriptors that can be sent even if another session is open later.
       if (isLoading) {
         // A run can restart in the tiny gap between scheduling and flushing a
-        // queued submission. Put the same durable draft back without uploading
-        // its files again.
+        // queued submission. Put the same durable entry back without uploading
+        // its files again, and never duplicate it in the queue.
         if (queuedSubmission) {
           queuedDraftSessionRef.current = sessionKey;
-          setQueuedDraft(queuedSubmission);
+          setQueuedDrafts((previous) => previous.some((entry) => entry.id === queuedSubmission.id)
+            ? previous
+            : [...previous, queuedSubmission]);
           return;
         }
 
+        // Check the cap before uploading: a rejected fourth message must not
+        // touch the files or clear the composer.
+        if (sessionKey && readQueuedMessages(sessionKey).length >= MAX_QUEUED_MESSAGES) {
+          addMessage({ type: 'error', content: queueFullMessage, timestamp: new Date() });
+          return;
+        }
         const queuedOptions = { ...buildSendOptions(currentInput), ...(planTask ? { collaborationMode: 'plan' } : {}) };
         const queuedSessionKey = sessionKey;
         let uploadedAttachments: unknown[] = [];
@@ -1046,7 +1109,13 @@ export function useChatComposerState({
           if (editingAnchorId) return;
           if (queuedSubmission) {
             queuedDraftSessionRef.current = sessionKey;
-            setQueuedDraft(queuedSubmission);
+            setQueuedDrafts((previous) => previous.some((entry) => entry.id === queuedSubmission.id)
+              ? previous
+              : [...previous, queuedSubmission]);
+            return;
+          }
+          if (readQueuedMessages(targetSessionId).length >= MAX_QUEUED_MESSAGES) {
+            addMessage({ type: 'error', content: queueFullMessage, timestamp: new Date() });
             return;
           }
           // Attachments were uploaded above; queue the same descriptors.
@@ -1190,18 +1259,20 @@ export function useChatComposerState({
     handleSubmitRef.current = handleSubmit;
   }, [handleSubmit]);
 
-  // The VPS dispatcher owns sending. While the card is visible, periodically
-  // reconcile only its removal so the UI notices when the server claims it.
+  // The VPS dispatcher owns sending. While cards are visible, periodically
+  // reconcile the list so the UI notices which head the server claimed and
+  // keeps the untouched tail on screen.
   useEffect(() => {
-    if (!sessionKey || !queuedDraft) {
+    if (!sessionKey || queuedDrafts.length === 0) {
       return;
     }
     let cancelled = false;
     const reconcile = async () => {
       await hydrateChatDrafts();
-      if (!cancelled && !readQueuedMessage(sessionKey)) {
+      const saved = restoreQueuedDrafts(sessionKey);
+      if (!cancelled) {
         queuedDraftSessionRef.current = sessionKey;
-        setQueuedDraft(null);
+        setQueuedDrafts((previous) => (queuedDraftsEqual(previous, saved) ? previous : saved));
       }
     };
     const timer = setInterval(() => void reconcile(), 5_000);
@@ -1209,22 +1280,53 @@ export function useChatComposerState({
       cancelled = true;
       clearInterval(timer);
     };
-  }, [queuedDraft, sessionKey]);
+  }, [queuedDrafts.length, sessionKey]);
 
-  const editQueuedDraft = useCallback(() => {
-    if (!queuedDraft) {
+  /**
+   * Loads one queued entry back into the composer and removes exactly that
+   * entry, so editing the second card never dispatches the first.
+   */
+  const editQueuedDraft = useCallback((queuedDraftId?: string, queuedDraftPosition?: number) => {
+    const index = queuedDraftId
+      ? queuedDrafts.findIndex((draft) => draft.id === queuedDraftId)
+      : (queuedDraftPosition ?? (queuedDrafts.length > 0 ? 0 : -1));
+    const target = index >= 0 ? queuedDrafts[index] : undefined;
+    if (!target) {
       return;
     }
-    setQueuedDraft(null);
-    setInput(queuedDraft.content);
-    inputValueRef.current = queuedDraft.content;
-    setAttachedFiles(queuedDraft.attachments);
+    // Remove by position, so entries without a ticket are not all removed.
+    const remaining = queuedDrafts.filter((_, position) => position !== index);
+    setQueuedDrafts(remaining);
+    if (sessionKey && queuedDraftSessionRef.current === sessionKey) {
+      // Persist the removal before setInput notifies the draft store, otherwise
+      // the subscription could read the pre-edit queue and restore the card.
+      try {
+        writeQueuedMessages(sessionKey, remaining.map(toStoredQueuedMessage));
+      } catch (error) {
+        if (!(error instanceof QueueLimitError)) throw error;
+      }
+    }
+    setInput(target.content);
+    inputValueRef.current = target.content;
+    setAttachedFiles(target.attachments);
     textareaRef.current?.focus();
-  }, [queuedDraft]);
+  }, [queuedDrafts, sessionKey, setInput]);
 
-  const deleteQueuedDraft = useCallback(() => {
-    setQueuedDraft(null);
-  }, []);
+  /** Removes one queued entry (the head when no id is given) and its durable record. */
+  const deleteQueuedDraft = useCallback((queuedDraftId?: string, queuedDraftPosition?: number) => {
+    const index = queuedDraftId
+      ? queuedDrafts.findIndex((draft) => draft.id === queuedDraftId)
+      : (queuedDraftPosition ?? (queuedDrafts.length > 0 ? 0 : -1));
+    if (index < 0) {
+      return;
+    }
+    const target = queuedDrafts[index];
+    setQueuedDrafts((previous) => previous.filter((_, position) => position !== index));
+    if (sessionKey && target?.id) {
+      // Remove only this entry server-side; the rest of the queue must stay.
+      clearQueuedMessage(sessionKey, target.id);
+    }
+  }, [queuedDrafts, sessionKey]);
 
   // A voice transcript either fills the input (to edit before sending) or, when the
   // user tapped "stop and send", is submitted straight away. Mirror the value into
@@ -1272,45 +1374,39 @@ export function useChatComposerState({
     writeDraftText(draftScope, inputState.value);
   }, [inputState, draftScope]);
 
-  // Persist the queued draft under its session's key. Must be defined BEFORE
-  // the swap effect below: on a session switch there is one commit where
-  // `sessionKey` already points at the new session while `queuedDraft` (and
-  // the owner ref) still describe the old one — the ref mismatch makes this
-  // effect skip that commit instead of writing/clearing across sessions.
+  // Persist the whole queue under its session's key — never a single slot, or
+  // every write would erase the tail. Must be defined BEFORE the swap effect
+  // below: on a session switch there is one commit where `sessionKey` already
+  // points at the new session while the list (and the owner ref) still describe
+  // the old one — the ref mismatch makes this effect skip that commit instead
+  // of writing/clearing across sessions.
   useEffect(() => {
     if (!sessionKey || queuedDraftSessionRef.current !== sessionKey) {
       return;
     }
-    if (
-      queuedDraft
-      && (queuedDraft.content.trim() || (queuedDraft.uploadedAttachments?.length ?? 0) > 0)
-    ) {
-      writeQueuedMessage(sessionKey, {
-        id: queuedDraft.id,
-        content: queuedDraft.content,
-        options: queuedDraft.options,
-        attachments: queuedDraft.uploadedAttachments,
-      });
-    } else {
-      clearQueuedMessage(sessionKey);
+    const sendable = queuedDrafts.filter(
+      (draft) => draft.content.trim() || (draft.uploadedAttachments?.length ?? 0) > 0,
+    );
+    try {
+      writeQueuedMessages(sessionKey, sendable.map(toStoredQueuedMessage));
+    } catch (error) {
+      if (!(error instanceof QueueLimitError)) throw error;
+      addMessage({ type: 'error', content: error.message, timestamp: new Date() });
     }
-  }, [queuedDraft, sessionKey]);
+  }, [addMessage, queuedDrafts, sessionKey]);
 
-  // Switching sessions swaps in that session's queued draft. Browser File
+  // Switching sessions swaps in that session's whole queue. Browser File
   // objects are local to the mounted composer, while their already-uploaded
   // descriptors restore from storage and remain sendable.
   useEffect(() => {
     queuedDraftSessionRef.current = sessionKey;
     if (!sessionKey) {
-      setQueuedDraft(null);
+      setQueuedDrafts([]);
       return;
     }
     const restore = () => {
-      const saved = restoreQueuedDraft(sessionKey);
-      setQueuedDraft((previous) => {
-        const comparable = (draft: QueuedDraft | null) => draft && JSON.stringify({ id: draft.id, content: draft.content, options: draft.options, attachments: draft.uploadedAttachments });
-        return comparable(previous) === comparable(saved) ? previous : saved;
-      });
+      const saved = restoreQueuedDrafts(sessionKey);
+      setQueuedDrafts((previous) => (queuedDraftsEqual(previous, saved) ? previous : saved));
     };
     restore();
     return subscribeToChatDrafts(restore);
@@ -1613,6 +1709,8 @@ export function useChatComposerState({
     } satisfies ComposerPredictionControls,
     backgroundSendPrompt,
     resolveBackgroundSendPrompt,
+    queuedDrafts,
+    // Single-slot compatibility for callers that only need the head.
     queuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,

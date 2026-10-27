@@ -501,6 +501,10 @@ const migrateCodexSessionControls = (db: Database): void => {
   db.exec(QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL);
   db.exec(`
     UPDATE queued_steer_receipts SET status = 'unknown' WHERE status = 'steering';
+    -- A dispatch claim always pops its turn from the queue before starting the
+    -- run, so this receipt only exists to stop a stale snapshot resurrecting
+    -- it. Treat it as delivered on restart: keep the guard, free the slot.
+    UPDATE queued_steer_receipts SET status = 'accepted' WHERE status = 'dispatching';
     UPDATE session_drafts SET queue_status = 'unknown', queue_error = 'Awaiting delivery confirmation after server restart.' WHERE queue_status = 'steering';
   `);
 };

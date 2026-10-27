@@ -115,11 +115,11 @@ test('saveDraft stores the text and queued message under the given scope', () =>
 
   assert.deepEqual(saved, [[5, 'session-1', {
     text: 'half a thought',
-    queuedMessage: { content: 'later' },
+    queuedMessages: [{ content: 'later' }],
   }]]);
 });
 
-test('saveDraft defaults a missing queued message to null rather than dropping the row', () => {
+test('saveDraft defaults a missing queue to empty rather than dropping the row', () => {
   const saved: unknown[][] = [];
   const service = createUserService(createDependencies({
     drafts: {
@@ -131,7 +131,48 @@ test('saveDraft defaults a missing queued message to null rather than dropping t
 
   service.saveDraft(5, 'session-1', { scope: 'session-1', text: 'typing' });
 
-  assert.deepEqual(saved, [[5, 'session-1', { text: 'typing', queuedMessage: null }]]);
+  assert.deepEqual(saved, [[5, 'session-1', { text: 'typing', queuedMessages: [] }]]);
+});
+
+test('saveDraft accepts a whole FIFO queue and rejects a fourth entry', () => {
+  const saved: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    drafts: {
+      getDrafts: () => [],
+      saveDraft: (...args) => saved.push(args),
+      deleteDraft: () => undefined,
+    },
+  }));
+  const queue = ['one', 'two', 'three'].map((content) => ({ content }));
+
+  service.saveDraft(5, 'session-1', { scope: 'session-1', queuedMessages: queue });
+  assert.deepEqual(saved, [[5, 'session-1', { text: '', queuedMessages: queue }]]);
+
+  assert.throws(
+    () => service.saveDraft(5, 'session-1', {
+      queuedMessages: [...queue, { content: 'four' }],
+    }),
+    (error: Error & { code?: string }) => error.code === 'QUEUE_LIMIT_REACHED',
+  );
+});
+
+test('saveDraft adopts a legacy single queued message and rejects a non-array queue', () => {
+  const saved: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    drafts: {
+      getDrafts: () => [],
+      saveDraft: (...args) => saved.push(args),
+      deleteDraft: () => undefined,
+    },
+  }));
+
+  service.saveDraft(5, 'session-1', { queuedMessage: { content: 'legacy' } });
+  assert.deepEqual(saved, [[5, 'session-1', { text: '', queuedMessages: [{ content: 'legacy' }] }]]);
+
+  assert.throws(
+    () => service.saveDraft(5, 'session-1', { queuedMessages: 'not-an-array' }),
+    (error: Error & { code?: string }) => error.code === 'INVALID_QUEUED_MESSAGES',
+  );
 });
 
 test('saveDraft rejects a blank or over-long scope', () => {

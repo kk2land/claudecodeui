@@ -1,15 +1,18 @@
-import { AppError } from '@/shared/utils.js';
+import { AppError, MAX_QUEUED_MESSAGES } from '@/shared/index.js';
 
 type GitConfig = {
   git_name: string | null;
   git_email: string | null;
 };
 
-/** One chat scope's unsent composer text and queued message. */
+/** One chat scope's unsent composer text and pending FIFO queue. */
 type DraftRecord = {
   scope: string;
   text: string;
+  /** Head of the queue, mirrored for single-message compatibility. */
   queuedMessage: unknown | null;
+  /** The whole pending queue, oldest first. */
+  queuedMessages: unknown[];
   updatedAt: string;
 };
 
@@ -26,7 +29,7 @@ type UserDependencies = {
   };
   drafts: {
     getDrafts(userId: number): DraftRecord[];
-    saveDraft(userId: number, scope: string, draft: { text: string; queuedMessage: unknown | null }): void;
+    saveDraft(userId: number, scope: string, draft: { text: string; queuedMessages: unknown[] }): void;
     deleteDraft(userId: number, scope: string): void;
   };
   readSystemGitConfig(): Promise<GitConfig>;
@@ -46,6 +49,57 @@ const MAX_KEY_LENGTH = 200;
 
 /** Guards against a runaway composer filling the database with one row. */
 const MAX_DRAFT_TEXT_LENGTH = 100_000;
+
+const isRecord = (value: unknown): value is Record<string, unknown> => (
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+/**
+ * Reads the pending queue from a draft PUT body.
+ *
+ * `queuedMessages` is the whole FIFO queue and is authoritative whenever it is
+ * present, including an empty array that clears the queue. Bodies from older
+ * clients only carry `queuedMessage`; that singleton is adopted as a one-entry
+ * queue. A queue longer than the shared cap is rejected instead of silently
+ * truncated, so the client can keep the message in its composer and tell the
+ * user why it was not queued.
+ */
+const readQueuedMessages = (payload: { queuedMessage?: unknown; queuedMessages?: unknown }): unknown[] => {
+  if (payload.queuedMessages !== undefined) {
+    if (!Array.isArray(payload.queuedMessages)) {
+      throw new AppError('Queued messages must be sent as an array', {
+        code: 'INVALID_QUEUED_MESSAGES',
+        statusCode: 400,
+      });
+    }
+    if (payload.queuedMessages.length > MAX_QUEUED_MESSAGES) {
+      throw new AppError(`At most ${MAX_QUEUED_MESSAGES} messages can be queued for one chat.`, {
+        code: 'QUEUE_LIMIT_REACHED',
+        statusCode: 409,
+      });
+    }
+    for (const message of payload.queuedMessages) {
+      if (!isRecord(message)) {
+        throw new AppError('Each queued message must be an object', {
+          code: 'INVALID_QUEUED_MESSAGES',
+          statusCode: 400,
+        });
+      }
+    }
+    return payload.queuedMessages;
+  }
+
+  if (payload.queuedMessage == null) {
+    return [];
+  }
+  if (!isRecord(payload.queuedMessage)) {
+    throw new AppError('A queued message must be an object', {
+      code: 'INVALID_QUEUED_MESSAGES',
+      statusCode: 400,
+    });
+  }
+  return [payload.queuedMessage];
+};
 
 const readDraftScope = (value: unknown): string => {
   const scope = typeof value === 'string' ? value.trim() : '';
@@ -165,7 +219,7 @@ export function createUserService(dependencies: UserDependencies) {
 
     saveDraft(userId: number, scopeInput: unknown, body: unknown) {
       const scope = readDraftScope(scopeInput);
-      const payload = (body ?? {}) as { text?: unknown; queuedMessage?: unknown };
+      const payload = (body ?? {}) as { text?: unknown; queuedMessage?: unknown; queuedMessages?: unknown };
       const text = typeof payload.text === 'string' ? payload.text : '';
 
       if (text.length > MAX_DRAFT_TEXT_LENGTH) {
@@ -177,7 +231,7 @@ export function createUserService(dependencies: UserDependencies) {
 
       dependencies.drafts.saveDraft(userId, scope, {
         text,
-        queuedMessage: payload.queuedMessage ?? null,
+        queuedMessages: readQueuedMessages(payload),
       });
       return { success: true };
     },

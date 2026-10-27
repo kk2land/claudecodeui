@@ -58,11 +58,38 @@ async function sendClaimedQueuedMessage(
 ): Promise<void> {
   const message = readQueuedMessage(candidate.queuedMessage);
   if (!message) {
+    // An unusable legacy entry is consumed without reserving a slot forever.
+    sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
     sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
     return;
   }
 
-  const result = await runDetachedChatTurn(
+  // The claim removed only the head and reserved its slot; the tail stays
+  // queued. A turn that could not be admitted is put back at the head, so it is
+  // retried ahead of the tail. Once admitted the receipt stays accepted, which
+  // also stops a delayed browser PUT from resurrecting the turn.
+  try {
+    const started = await sendClaimedQueuedMessageHead(candidate, message, runtime);
+    if (started) {
+      sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    console.error('[ScheduledMessages] Queued message dispatch failed', {
+      sessionId: candidate.sessionId,
+      error: reason,
+    });
+  }
+}
+
+/** Returns whether the turn was admitted; an unadmitted claim is put back. */
+async function sendClaimedQueuedMessageHead(
+  candidate: QueuedSessionMessageRecord,
+  message: StoredQueuedMessage,
+  runtime: ProviderRuntimeGateway,
+): Promise<boolean> {
+  const previousRun = chatRunRegistry.getRun(candidate.sessionId);
+  const dispatch = runDetachedChatTurn(
     {
       sessionId: candidate.sessionId,
       userId: candidate.userId,
@@ -72,13 +99,40 @@ async function sendClaimedQueuedMessage(
     { runtime },
   );
 
-  // The registry check and run reservation are separate operations. If a run
-  // wins that tiny race, put the turn back so the next poll tries again.
-  if (!result.started && result.error === 'A run was already in progress for this session.') {
-    sessionDraftsDb.restoreQueuedMessage(candidate);
-    return;
+  // Detached dispatch reserves its run synchronously, but settles after the
+  // provider finishes. Release the pending slot as soon as this run starts:
+  // the running turn must not count toward the three waiting messages.
+  const admittedRun = chatRunRegistry.getRun(candidate.sessionId);
+  const admitted = Boolean(admittedRun && admittedRun !== previousRun);
+  if (admitted) {
+    sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
   }
-  sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
+
+  try {
+    const result = await dispatch;
+
+    // The registry check and run reservation are separate operations. If a run
+    // wins that tiny race, put the turn back at the head so the next poll tries
+    // again. A run that did start and then failed is consumed rather than
+    // retried: its turn may already have reached the provider.
+    if (!result.started) {
+      sessionDraftsDb.restoreQueuedMessage(candidate);
+      return false;
+    }
+    sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
+    return true;
+  } catch (error) {
+    // A rejected dispatch before the run was reserved (unavailable provider,
+    // deleted session, failing `hasRuntime`) never reached the provider, so the
+    // head goes back at the front of the untouched tail. Once admitted the
+    // receipt becomes accepted instead: retrying could deliver the turn twice.
+    if (admitted) {
+      sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
+    } else {
+      sessionDraftsDb.restoreQueuedMessage(candidate);
+    }
+    throw error;
+  }
 }
 
 /**

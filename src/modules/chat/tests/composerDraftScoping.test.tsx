@@ -91,7 +91,7 @@ test('opening DSH and editing an attachment-only queue keeps composer input a st
 
   await act(async () => { view.result.current.editQueuedDraft(); });
   assert.equal(view.result.current.input.trim(), '');
-  assert.equal(view.result.current.queuedDraft, null);
+  assert.deepEqual(view.result.current.queuedDrafts, []);
 });
 
 test('a draft is stored under the open session, not the project', async () => {

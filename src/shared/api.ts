@@ -542,7 +542,9 @@ export const api = {
     savePreferences: (updates: Record<string, unknown>) =>
       patch('/api/user/preferences', updates),
     drafts: () => get('/api/user/drafts'),
-    saveDraft: (scope: string, draft: { text: string; queuedMessage?: unknown }) =>
+    // `queuedMessages` is the whole FIFO queue; `queuedMessage` remains
+    // accepted by the server for older clients.
+    saveDraft: (scope: string, draft: { text: string; queuedMessages?: unknown[]; queuedMessage?: unknown }) =>
       put('/api/user/drafts', { scope, ...draft }),
     deleteDraft: (scope: string) => del('/api/user/drafts', { scope }),
   },

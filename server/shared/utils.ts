@@ -1419,3 +1419,49 @@ export function unifiedDiffToTexts(unifiedDiff: string): { oldText: string; newT
 }
 
 // ---------------------------
+
+//----------------- DURABLE QUEUED MESSAGES ------------
+
+/**
+ * Maximum number of pending turns one chat scope may queue.
+ *
+ * Shared by the draft route (which rejects a fourth entry instead of silently
+ * dropping it) and the repository (which refuses a write that would exceed it).
+ * Keep the frontend's `MAX_QUEUED_MESSAGES` value in sync.
+ */
+export const MAX_QUEUED_MESSAGES = 3;
+
+/**
+ * Normalizes a stored `queued_message` value into an ordered queue.
+ *
+ * Rows written before the queue existed hold a single JSON object rather than
+ * an array; that legacy singleton is adopted as a one-entry queue on read so
+ * existing pending messages survive the upgrade. Anything unparseable is
+ * treated as absent rather than fatal, matching the previous single-slot read.
+ */
+export function readQueuedMessages(raw: string | null): unknown[] {
+  if (!raw) {
+    return [];
+  }
+
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      return parsed.filter((entry) => entry !== null && entry !== undefined);
+    }
+    return parsed === null || parsed === undefined ? [] : [parsed];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Serializes a queue for `session_drafts.queued_message`.
+ *
+ * The column keeps its historical name and JSON type. An empty queue stores
+ * NULL so the dispatcher's `queued_message IS NOT NULL` filter and the
+ * existing indexes keep working unchanged.
+ */
+export function serializeQueuedMessages(messages: unknown[]): string | null {
+  return messages.length === 0 ? null : JSON.stringify(messages);
+}

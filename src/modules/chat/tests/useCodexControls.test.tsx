@@ -60,7 +60,7 @@ test('restores controls and assigns a persisted steer ID without native randomUU
   const steer = sendMessage.mock.calls.find(([message]) => message.control.action === 'steer')?.[0];
   expect(steer?.control.messageId).toMatch(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/);
   expect(saved).toHaveBeenCalledWith('session-http', expect.objectContaining({
-    queuedMessage: expect.objectContaining({ id: steer.control.messageId, content: 'queued guidance' }),
+    queuedMessages: [expect.objectContaining({ id: steer.control.messageId, content: 'queued guidance' })],
   }));
   const requestIds = sendMessage.mock.calls.map(([message]) => message.requestId);
   expect(new Set(requestIds).size).toBe(requestIds.length);
