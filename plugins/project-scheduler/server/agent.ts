@@ -6,7 +6,8 @@ import { StringDecoder } from "node:string_decoder";
 import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import spawn from "cross-spawn";
-import type { SchedulerAgent } from "../shared/contracts.js";
+import type { SchedulerAgent, SchedulerTokenUsage } from "../shared/contracts.js";
+import { USAGE_DIRECTORY_ENV, UsageAccumulator, UsageSidecar } from "./usage.js";
 
 /** Used by prompt workers and AGENT_EXEC; resolves the host dependency rather than a global CLI. */
 export function resolveCodexBinary(
@@ -91,9 +92,35 @@ export async function runAgent(
     stderr(text: string): void;
     event(text: string): void;
     child(child: ChildProcess): void;
+    /** Called with the invocation totals whenever more provider usage has been observed. */
+    usage?(usage: SchedulerTokenUsage | null): void;
   },
   isolated = true,
-): Promise<{ code: number | null; success: boolean; reason?: string }> {
+): Promise<{
+  code: number | null;
+  success: boolean;
+  reason?: string;
+  usage: SchedulerTokenUsage | null;
+}> {
+  const accumulator = new UsageAccumulator();
+  // AGENT_EXEC inherits this directory from the worker, so every invocation gets its own sidecar.
+  const usageRoot = process.env[USAGE_DIRECTORY_ENV];
+  const sidecar =
+    usageRoot && path.isAbsolute(usageRoot)
+      ? new UsageSidecar(usageRoot)
+      : undefined;
+  let reported: SchedulerTokenUsage | null = null;
+  const publish = () => {
+    const usage = accumulator.usage;
+    if (!usage) return;
+    reported = usage;
+    try {
+      sidecar?.write(usage);
+    } catch {
+      // Accounting is best-effort; it must never fail an otherwise valid run.
+    }
+    output.usage?.(usage);
+  };
   const directory = fs.mkdtempSync(
     path.join(os.tmpdir(), "cloudcli-cron-agent-"),
   );
@@ -199,6 +226,13 @@ export async function runAgent(
       output.event(raw + "\n");
       try {
         const event = JSON.parse(raw) as Record<string, any>;
+        // Usage is read from provider terminal accounting events only, never from stdout text.
+        if (
+          agent.provider === "codex"
+            ? accumulator.codex(event)
+            : accumulator.dsh(event)
+        )
+          publish();
         if (agent.provider === "codex") {
           if (event.item) {
             emitCodexText(event.item as Record<string, unknown>);
@@ -286,12 +320,13 @@ export async function runAgent(
     if (stderrTail) output.stderr(stderrTail);
     // The exit status is authoritative: a normal zero exit succeeds even without a terminal
     // event, while null or non-zero exits fail with the streamed event reason when available.
-    if (internalFault) return { code, success: false, reason: internalFault };
-    if (code === 0) return { code, success: true };
+    if (internalFault) return { code, success: false, reason: internalFault, usage: reported };
+    if (code === 0) return { code, success: true, usage: reported };
     return {
       code,
       success: false,
       reason: eventReason ?? "Agent 进程未以退出码 0 结束",
+      usage: reported,
     };
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

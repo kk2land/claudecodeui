@@ -301,6 +301,13 @@
   color: var(--cron-muted);
   border-bottom: 1px solid var(--cron-border);
 }
+.cron-tokens {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  min-width: 0;
+  cursor: help;
+}
 .cron-output {
   margin: 0;
   padding: 17px;

@@ -45,6 +45,43 @@ const time = (value: string | null | undefined, zone?: string) =>
       })
     : "—";
 const key = (task: SchedulerTaskRow) => task.projectId + ":" + task.taskId;
+const token = (value: number | null | undefined) =>
+  typeof value === "number" && Number.isFinite(value)
+    ? value.toLocaleString("zh-CN")
+    : "—";
+/**
+ * Per-run token totals beside the run status. Metrics the provider never reported stay "—" so
+ * an unknown value is never shown as a real zero. Codex cache tokens overlap its input; DSH
+ * cache read/write are separate from input, which the tooltip explains.
+ */
+function TokenUsage({ run }: { run: SchedulerRun }) {
+  const usage = run.usage ?? null;
+  const read = usage?.cacheReadTokens,
+    write = usage?.cacheWriteTokens;
+  const known = (value: number | null | undefined): value is number =>
+    typeof value === "number";
+  const cache = known(read) || known(write) ? (read ?? 0) + (write ?? 0) : null;
+  const cachePartial = known(read) !== known(write);
+  return (
+    <span
+      className="cron-tokens"
+      aria-label="本次运行 Token"
+      title={
+        "本次运行（含脚本内 AGENT_EXEC 调用）累计的模型 token。" +
+        "Codex 的缓存 token 已包含在输入中；DSH 的输入不含缓存读写，缓存单独统计。" +
+        "— 表示该指标未上报，不代表 0。" +
+        (cachePartial ? " 仅一侧缓存指标已上报，缓存合计可能不完整。" : "")
+      }
+    >
+      <span>输入 {token(usage?.inputTokens)}</span>
+      <span>输出 {token(usage?.outputTokens)}</span>
+      <span>
+        缓存 {token(cache)}
+        {cachePartial ? "*" : ""}
+      </span>
+    </span>
+  );
+}
 // Stable row identity keeps the focused input mounted while its name changes.
 let envRowSequence = 0;
 type EnvRow = { id: number; name: string; value: string };
@@ -793,6 +830,7 @@ function RunDetail({
                   耗时 {Math.floor(duration / 60)}分{duration % 60}秒
                 </span>
                 <span>退出码 {run.exitCode ?? "—"}</span>
+                <TokenUsage run={run} />
               </>
             ) : (
               "尚无运行记录"

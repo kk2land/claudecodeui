@@ -424,6 +424,8 @@ type RpcMode = {
   >;
   /** Omits host.models entirely to emulate an older host. */
   withoutModels?: boolean;
+  /** Per-run records returned by GET /runs; omitted means no run history. */
+  runs?: Array<Record<string, unknown>>;
 };
 
 async function mountPlugin(mode: RpcMode = {}) {
@@ -470,6 +472,8 @@ async function mountPlugin(mode: RpcMode = {}) {
           telegram: { enabled: false, chatId: "", proxy: "", botTokenConfigured: false },
         };
       if (path === "/tasks") return { tasks: mode.tasks ?? [] };
+      if (path.startsWith("/runs?"))
+        return { runs: mode.runs ?? [] };
       if (path === "/projects")
         return {
           projects: mode.projects ?? [
@@ -1311,6 +1315,122 @@ test("DOM: catalog failures keep the draft and a retry loads fresh levels", asyn
     );
     assert.equal(attempts, 2);
     assert.equal(callsTo(mounted, "/configuration/save").length, 0);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+// --------------------------- Run token usage ---------------------------
+
+/** One prompt task whose detail view is opened directly from the inventory row. */
+const USAGE_TASK = {
+  projectId: "project-a",
+  projectName: "项目 A",
+  projectPath: "/tmp/project-a",
+  taskId: "usage",
+  definition: {
+    id: "usage",
+    name: "Usage",
+    type: "prompt",
+    enabled: true,
+    cron: "0 0 9 * * *",
+    timezone: "Asia/Shanghai",
+    allowConcurrent: false,
+    timeoutSeconds: 900,
+    cwd: "/tmp/project-a",
+    env: {},
+    agent: { provider: "codex", model: "default" },
+    args: [],
+    prompt: "p",
+    notify: false,
+  },
+  updatedAt: new Date().toISOString(),
+  nextRun: null,
+  activeRuns: [],
+  lastRun: null,
+};
+
+function usageRun(usage: unknown, id = "run-usage") {
+  const now = new Date().toISOString();
+  return {
+    id,
+    projectId: "project-a",
+    projectName: "项目 A",
+    taskId: "usage",
+    taskName: "Usage",
+    status: "success",
+    trigger: "manual",
+    scheduledAt: now,
+    startedAt: now,
+    endedAt: now,
+    exitCode: 0,
+    reason: null,
+    workerPid: null,
+    alertStatus: "none",
+    alertError: null,
+    alertAttempts: 0,
+    ...(usage === undefined ? {} : { usage }),
+  };
+}
+
+test("DOM: status bar shows per-run token totals with separators and provider semantics", async () => {
+  const mounted = await mountPlugin({
+    tasks: [USAGE_TASK],
+    runs: [
+      usageRun({
+        inputTokens: 1234567,
+        outputTokens: 8901,
+        cacheReadTokens: 4321,
+        cacheWriteTokens: null,
+      }),
+    ],
+  });
+  try {
+    const root = mounted.container;
+    await waitFor(() => Boolean(findButton(root, "Usage")), "任务列表");
+    button(root, "Usage").click();
+    await waitFor(
+      () => Boolean(byLabel(root, "本次运行 Token")),
+      "token 状态栏",
+    );
+    const tokens = byLabel(root, "本次运行 Token")!;
+    assert.equal(textOf(tokens).includes("输入 1,234,567"), true);
+    assert.equal(textOf(tokens).includes("输出 8,901"), true);
+    assert.equal(textOf(tokens).includes("缓存 4,321"), true);
+    // A missing cache-write metric is not shown as zero, and the partial sum is flagged.
+    assert.equal(textOf(tokens).includes("缓存 4,321*"), true);
+    const title = tokens.getAttribute("title") ?? "";
+    assert.equal(title.includes("Codex 的缓存 token 已包含在输入中"), true);
+    assert.equal(title.includes("DSH 的输入不含缓存读写"), true);
+    assert.equal(title.includes("不代表 0"), true);
+    // The tokens sit in the same status bar row as the run results and exit code.
+    const meta = root.querySelector(".cron-meta")!;
+    assert.equal(meta.contains(tokens), true);
+    assert.equal(textOf(meta).includes("退出码 0"), true);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: missing usage renders dashes instead of a fabricated zero", async () => {
+  const mounted = await mountPlugin({
+    tasks: [USAGE_TASK],
+    // A legacy run has no usage field at all; an empty aggregate must also stay unknown.
+    runs: [usageRun(undefined, "legacy"), usageRun(null, "empty")],
+  });
+  try {
+    const root = mounted.container;
+    await waitFor(() => Boolean(findButton(root, "Usage")), "任务列表");
+    button(root, "Usage").click();
+    await waitFor(
+      () => Boolean(byLabel(root, "本次运行 Token")),
+      "token 状态栏",
+    );
+    const tokens = textOf(byLabel(root, "本次运行 Token"));
+    assert.equal(tokens.includes("输入 —"), true);
+    assert.equal(tokens.includes("输出 —"), true);
+    assert.equal(tokens.includes("缓存 —"), true);
+    assert.equal(tokens.includes("0"), false);
   } finally {
     mounted.unmount();
   }

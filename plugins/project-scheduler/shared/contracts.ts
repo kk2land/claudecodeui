@@ -78,6 +78,19 @@ export type SchedulerTask = {
   prompt?: string;
   notify: boolean;
 };
+/**
+ * Provider-reported token totals for one scheduler run, summed across every agent invocation the
+ * run made (a prompt plus any script `AGENT_EXEC` calls). A metric is `null` when no invocation
+ * reported it, so unknown is never displayed as zero. Cache semantics differ per provider:
+ * Codex `cached_input_tokens` is a subset of `input_tokens`, while DSH `inputTokens` is uncached
+ * and cache read/write tokens are reported separately. The client explains that overlap.
+ */
+export type SchedulerTokenUsage = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+};
 /** A persisted execution or skipped occurrence. */
 export type SchedulerRun = {
   id: string;
@@ -101,6 +114,8 @@ export type SchedulerRun = {
   exitCode: number | null;
   reason: string | null;
   workerPid: number | null;
+  /** Absent on runs recorded before usage accounting, and on runs without any agent call. */
+  usage?: SchedulerTokenUsage | null;
   alertStatus: "none" | "pending" | "sent" | "failed";
   alertError: string | null;
   alertAttempts: number;

@@ -6,7 +6,13 @@ import spawn from "cross-spawn";
 import { runAgent } from "./agent.js";
 import { terminateTree } from "./process-tree.js";
 import { appendLog } from "./logs.js";
-import type { SchedulerTask } from "../shared/contracts.js";
+import {
+  USAGE_DIRECTORY_ENV,
+  readUsageDirectory,
+  sameUsage,
+  usageDirectory,
+} from "./usage.js";
+import type { SchedulerTask, SchedulerTokenUsage } from "../shared/contracts.js";
 
 let child: ChildProcess | undefined,
   killTimer: NodeJS.Timeout | undefined,
@@ -50,6 +56,8 @@ process.on(
     )
       return;
     const task = message.task;
+    let usageRoot: string | undefined;
+    let usage: SchedulerTokenUsage | null = null;
     try {
       if (stopping) throw new Error("运行在启动前已被取消");
       const env = { ...process.env, ...task.env };
@@ -75,6 +83,21 @@ process.on(
         { mode: 0o700 },
       );
       process.env.AGENT_EXEC = wrapper;
+      // Set after task.env so a task cannot redirect or suppress the run's usage accounting.
+      const usageRootPath = usageDirectory(message.directory);
+      usageRoot = usageRootPath;
+      fs.mkdirSync(usageRootPath, { recursive: true, mode: 0o700 });
+      process.env[USAGE_DIRECTORY_ENV] = usageRootPath;
+      usage = readUsageDirectory(usageRootPath);
+      let published = usage;
+      // The scheduler owns the run record; report each new snapshot so a running run shows usage
+      // and a failure/stop keeps whatever had already been observed.
+      const publishUsage = () => {
+        usage = readUsageDirectory(usageRootPath);
+        if (!usage || sameUsage(usage, published) || !process.connected) return;
+        published = usage;
+        process.send?.({ type: "usage", usage });
+      };
       const written = { stdout: 0, stderr: 0 };
       const projectOutput = (stream: "stdout" | "stderr", text: string) => {
         const buffer = Buffer.from(text),
@@ -100,6 +123,7 @@ process.on(
             appendLog(message.directory!, "events", Buffer.from(text));
           },
           child: onChild,
+          usage: publishUsage,
         });
       else {
         onChild(
@@ -138,6 +162,11 @@ process.on(
         });
       process.exitCode = 1;
     } finally {
+      // Re-read after every invocation so script AGENT_EXEC sidecars are included even when no
+      // usage callback fired, and send one final aggregate with the result.
+      if (usageRoot) usage = readUsageDirectory(usageRoot);
+      if (process.connected && usage)
+        process.send?.({ type: "usage", usage });
       await stopCompletion;
       clearTimeout(killTimer);
       if (process.connected) process.disconnect();

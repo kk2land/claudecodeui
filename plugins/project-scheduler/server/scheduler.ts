@@ -12,6 +12,12 @@ import {
 } from "./configuration-editor.js";
 import { appendLog, readLog } from "./logs.js";
 import { terminateTree } from "./process-tree.js";
+import {
+  normalizeUsage,
+  readUsageDirectory,
+  sameUsage,
+  usageDirectory,
+} from "./usage.js";
 import type { SchedulerStore } from "./store.js";
 import type {
   SchedulerConfigurationDocument,
@@ -91,6 +97,11 @@ export class ProjectScheduler {
     run.alertStatus = notify && this.store.settings().telegram.enabled
       ? "pending"
       : "none";
+    // Keep whatever usage sidecars the interrupted run had already flushed.
+    run.usage =
+      readUsageDirectory(
+        usageDirectory(path.join(this.store.directory, "runs", run.id)),
+      ) ?? run.usage ?? null;
     this.store.saveRun(run);
     this.onFinished();
   }
@@ -406,9 +417,18 @@ export class ProjectScheduler {
         code: number | null;
         success: boolean;
         reason?: string;
+        usage?: unknown;
       }) => {
         if (message.type === "child") item.commandPid = message.pid;
         if (message.type === "result") result = message;
+        if (message.type === "usage") {
+          // Persist only a validated aggregate snapshot; the worker owns sidecar summing.
+          const usage = normalizeUsage(message.usage);
+          if (usage && !sameUsage(usage, item.run.usage)) {
+            item.run.usage = usage;
+            this.store.saveRun(item.run);
+          }
+        }
       },
     );
     worker.once("error", (error) => {
@@ -460,6 +480,14 @@ export class ProjectScheduler {
         : item.stopped === "stopped"
           ? "用户或服务停止了本次运行"
           : (reason ?? (success ? null : "命令以非零状态退出"));
+    // Usage observed before a failure/stop is retained; the sidecar directory is the source of
+    // truth and the last IPC snapshot is the fallback when no sidecar was flushed.
+    item.run.usage =
+      readUsageDirectory(
+        usageDirectory(path.join(this.store.directory, "runs", item.run.id)),
+      ) ??
+      normalizeUsage(item.run.usage) ??
+      null;
     if (!success && !item.stopped) {
       const stderr = path.join(
         this.store.directory,
