@@ -25,7 +25,7 @@ function fixture(t: TestContext) {
   const scheduler = new ProjectScheduler(store, catalog);
   const config = (tasks: unknown[]) =>
     fs.writeFileSync(
-      path.join(project, ".cloudcli", "schedules.json"),
+      path.join(project, ".cloudcli", "project-schedules.json"),
       JSON.stringify({ version: 1, tasks }),
     );
   t.after(async () => {
@@ -287,7 +287,7 @@ test("same task ID in different projects has separate concurrency reservations",
   const entry = task("same", "setTimeout(()=>{},200)");
   f.config([entry]);
   fs.writeFileSync(
-    path.join(second, ".cloudcli/schedules.json"),
+    path.join(second, ".cloudcli/project-schedules.json"),
     JSON.stringify({ version: 1, tasks: [entry] }),
   );
   fs.writeFileSync(

@@ -29,7 +29,7 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   const script =
     'const r=require("child_process").spawnSync(process.env.AGENT_EXEC,["literal $HOME; quote \\" and\\n多行"],{encoding:"utf8"});process.stdout.write(r.stdout||"");process.stderr.write(r.stderr||"");process.exit(r.status??1)';
   fs.writeFileSync(
-    path.join(project, ".cloudcli/schedules.json"),
+    path.join(project, ".cloudcli/project-schedules.json"),
     JSON.stringify({
       version: 1,
       tasks: [

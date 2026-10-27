@@ -167,7 +167,7 @@ export class ProjectScheduler {
       };
       try {
         const root = fs.realpathSync(project.path);
-        const file = path.join(root, ".cloudcli", "schedules.json");
+        const file = path.join(root, ".cloudcli", "project-schedules.json");
         if (!fs.existsSync(file)) {
           result.status = "missing";
           results.push(result);

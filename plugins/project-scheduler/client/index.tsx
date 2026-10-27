@@ -40,6 +40,20 @@ const time = (value: string | null | undefined, zone?: string) =>
       })
     : "—";
 const key = (task: SchedulerTaskRow) => task.projectId + ":" + task.taskId;
+// Common IANA zones; offsets are shown only where the zone has no DST.
+const COMMON_TIMEZONES = [
+  { value: "Asia/Shanghai", label: "中国 · Asia/Shanghai（UTC+08）" },
+  { value: "Asia/Tokyo", label: "日本 · Asia/Tokyo（UTC+09）" },
+  { value: "Asia/Hong_Kong", label: "中国香港 · Asia/Hong_Kong" },
+  { value: "Asia/Singapore", label: "新加坡 · Asia/Singapore" },
+  { value: "Asia/Kolkata", label: "印度 · Asia/Kolkata" },
+  { value: "UTC", label: "协调世界时 · UTC" },
+  { value: "Europe/London", label: "英国 · Europe/London" },
+  { value: "Europe/Berlin", label: "德国 · Europe/Berlin" },
+  { value: "America/New_York", label: "美国东部 · America/New_York" },
+  { value: "America/Los_Angeles", label: "美国西部 · America/Los_Angeles" },
+  { value: "Australia/Sydney", label: "澳大利亚 · Australia/Sydney" },
+];
 function Badge({ run }: { run: SchedulerRun }) {
   return (
     <span className={"cron-badge cron-" + run.status}>
@@ -305,12 +319,12 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           </table>
           {!visible.length && (
             <div className="cron-empty">
-              尚未装载定时任务。请在项目中配置 .cloudcli/schedules.json
+              尚未装载定时任务。请在项目中配置 .cloudcli/project-schedules.json
               后点击“装载任务”。
             </div>
           )}
           <footer className="cron-footer">
-            <code>.cloudcli/schedules.json</code>
+            <code>.cloudcli/project-schedules.json</code>
             <span>默认禁止同一任务并发</span>
           </footer>
         </>
@@ -712,7 +726,7 @@ function ImportDialog({
         <header>
           <div>
             <h2>装载项目任务</h2>
-            <p>读取项目下的 .cloudcli/schedules.json</p>
+            <p>读取项目下的 .cloudcli/project-schedules.json</p>
           </div>
           <button aria-label="关闭装载面板" onClick={onClose}>
             <X size={16} />
@@ -936,12 +950,24 @@ function SettingsPanel({
         <div className="cron-form cron-form-grid">
           <label>
             默认时区
-            <input
+            <select
               value={draft.timezone}
               onChange={(event) =>
                 setDraft({ ...draft, timezone: event.target.value })
               }
-            />
+            >
+              {draft.timezone &&
+                !COMMON_TIMEZONES.some((zone) => zone.value === draft.timezone) && (
+                  <option value={draft.timezone}>
+                    {draft.timezone}（当前已保存）
+                  </option>
+                )}
+              {COMMON_TIMEZONES.map((zone) => (
+                <option key={zone.value} value={zone.value}>
+                  {zone.label}
+                </option>
+              ))}
+            </select>
           </label>
           <label>
             默认执行超时（秒，0 为不限）

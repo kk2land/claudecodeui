@@ -4,7 +4,7 @@
   "version": "0.1.0",
   "description": "项目秒级 cron、脚本与临时 Agent 任务、实时日志和 Telegram 告警",
   "author": "CloudCLI",
-  "icon": "Clock",
+  "icon": "icon.svg",
   "type": "module",
   "slot": "tab",
   "entry": "dist/client.js",

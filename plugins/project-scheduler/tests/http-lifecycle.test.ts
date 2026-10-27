@@ -24,7 +24,7 @@ test(
       }),
     );
     fs.writeFileSync(
-      path.join(project, ".cloudcli/schedules.json"),
+      path.join(project, ".cloudcli/project-schedules.json"),
       JSON.stringify({
         version: 1,
         tasks: [

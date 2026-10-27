@@ -35,7 +35,8 @@
   box-sizing: border-box;
 }
 .cron-plugin button,
-.cron-plugin input {
+.cron-plugin input,
+.cron-plugin select {
   font: inherit;
 }
 .cron-plugin button {
@@ -55,7 +56,8 @@
   cursor: not-allowed;
 }
 .cron-plugin button:focus-visible,
-.cron-plugin input:focus-visible {
+.cron-plugin input:focus-visible,
+.cron-plugin select:focus-visible {
   outline: 2px solid var(--cron-blue);
   outline-offset: 2px;
 }
@@ -384,7 +386,8 @@
   font-size: 12px;
   margin-bottom: 18px;
 }
-.cron-form input:not([type="checkbox"]) {
+.cron-form input:not([type="checkbox"]),
+.cron-form select {
   display: block;
   width: 100%;
   padding: 9px 11px;
@@ -546,7 +549,8 @@
     font-size: 11px;
     margin-bottom: 5px;
   }
-  .cron-form input:not([type="checkbox"]) {
+  .cron-form input:not([type="checkbox"]),
+  .cron-form select {
     font-size: 16px;
   }
   .cron-modal-backdrop {
