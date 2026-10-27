@@ -125,6 +125,31 @@ test(
       401,
     );
     await first.request("/load", "POST", { apply: true });
+    const configFile = path.join(project, ".cloudcli/project-schedules.json");
+    const originalConfig = fs.readFileSync(configFile, "utf8");
+    await first.request("/tasks/enabled", "PUT", { projectId: "p", taskId: "slow", enabled: false });
+    let slow = (await first.request("/tasks")).tasks.find((task: { taskId: string }) => task.taskId === "slow");
+    assert.equal(slow.definition.enabled, false);
+    assert.equal(slow.nextRun, null);
+    assert.equal(fs.readFileSync(configFile, "utf8"), originalConfig);
+    for (const body of [
+      { projectId: "p", taskId: "slow", enabled: "false" },
+      { projectId: "p", taskId: "slow" },
+      { projectId: "p", taskId: "unknown", enabled: true },
+      { projectId: "unknown", taskId: "slow", enabled: true },
+    ]) {
+      const response = await fetch("http://127.0.0.1:" + first.port + "/tasks/enabled", {
+        method: "PUT",
+        headers: { authorization: "Bearer private-test-token", "content-type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400);
+    }
+    slow = (await first.request("/tasks")).tasks.find((task: { taskId: string }) => task.taskId === "slow");
+    assert.equal(slow.definition.enabled, false);
+    await first.request("/load", "POST", { projectIds: ["p"], apply: true });
+    slow = (await first.request("/tasks")).tasks.find((task: { taskId: string }) => task.taskId === "slow");
+    assert.equal(slow.definition.enabled, true);
     const until = async <T>(
       read: () => Promise<T>,
       valid: (value: T) => boolean,

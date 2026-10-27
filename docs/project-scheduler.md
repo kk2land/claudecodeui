@@ -10,6 +10,10 @@
 每个项目先整体校验再原子提交；配置损坏或不存在不修改旧任务。装载不会中断当前运行。
 重启恢复已装载定义，不自动重读文件，不补跑停机期间的时间点。
 
+任务列表的「自动调度」开关仅更新插件数据库，不修改项目 JSON，重启后仍保留。
+关闭后停止后续自动运行，不中断正在执行的任务，仍可手动执行。
+再次装载该任务时，以 JSON 中的 `enabled` 为准覆盖开关状态（省略时为 `true`）。
+
     {
       "version": 1,
       "timezone": "Asia/Shanghai",
@@ -43,10 +47,14 @@ Cron 接受五或六段，六段首项为秒；时区使用 IANA 名称。cwd �
 macOS arm64 优先 node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex。
 不依赖全局 Codex。以 exec --ephemeral --json 启动，通过 stdin 传递提示词。
 DSH 使用宿主 CLOUDCLI_DSH_BIN（默认 dsh）、DSH_HOME 和 CLOUDCLI_DSH_PATCHES，
-追加临时 patch 选择模型并禁用 session-persistence-jsonl；不修改 profile，不恢复会话。
+追加临时 patch 选择模型并禁用 session-persistence-jsonl 与 session-checkpoint-policy；
+该策略依赖已禁用的会话持久化，禁用后不再产生 pending 告警。不修改 profile，不恢复会话。
 DSH headless 文本在步骤提交时产生，不承诺逐 token 显示。
 
 无人值守任务沿用 CLI 权限配置，需要审批时不自动授予额外权限。
+运行结果以进程退出码为准：正常退出 0 即成功，无论是否缺少 final 事件、事件 JSON 是否无效
+或 stderr 是否有告警；非 0 或没有退出码则失败，并保留事件与 stderr 作为诊断。spawn 失败、
+内部日志写入失败和超长事件主动终止仍算失败，超时和手动停止由调度器状态单独记录。
 Agent 会话不保存，调度日志仍保存；stderr 非空本身不代表失败。
 
 ## 生命周期与日志

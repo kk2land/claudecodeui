@@ -112,7 +112,7 @@ test("native binary resolution also supports unhoisted platform dependencies", (
   assert.ok(resolved.startsWith(codexRoot + path.sep));
 });
 
-test("a zero exit without a successful terminal event is not accepted as success", async (t) => {
+test("a zero exit succeeds without a terminal event and reports no failure reason", async (t) => {
   const directory = fixture(t);
   fakeCodex(
     directory,
@@ -124,8 +124,8 @@ test("a zero exit without a successful terminal event is not accepted as success
     directory,
   );
   assert.equal(result.code, 0);
-  assert.equal(result.success, false);
-  assert.match(result.reason!, /结束事件/);
+  assert.equal(result.success, true);
+  assert.equal(result.reason, undefined);
 });
 
 test("large incremental text is emitted exactly once when the final item repeats it", async (t) => {
@@ -166,6 +166,7 @@ test("DSH receives the last overlay disabling persistence and selecting the mode
   ) as { file: string; args: string[]; patch: unknown[] };
   assert.deepEqual(call.patch, [
     { id: "session-persistence-jsonl", disabled: true },
+    { id: "session-checkpoint-policy", disabled: true },
     {
       id: "agent-default-model",
       config: { provider: "magpie", model: "group-ds" },
@@ -175,10 +176,12 @@ test("DSH receives the last overlay disabling persistence and selecting the mode
     call.args.indexOf("/user/custom.patch.yml") <
       call.args.lastIndexOf("--patch"),
   );
+  // The temporary overlay is the last patch, so it wins over inherited user patches.
+  assert.deepEqual(call.args.slice(-4), ["--patch", call.file, "--json", "-"]);
   assert.equal(fs.existsSync(call.file), false);
 });
 
-test("DSH final error cannot be hidden by a normal process exit", async (t) => {
+test("DSH zero exit with an error final still succeeds", async (t) => {
   const directory = fixture(t),
     bin = path.join(directory, "dsh");
   fs.writeFileSync(
@@ -187,10 +190,70 @@ test("DSH final error cannot be hidden by a normal process exit", async (t) => {
     { mode: 0o700 },
   );
   environment(t, { CLOUDCLI_DSH_BIN: bin, CLOUDCLI_DSH_PATCHES: "[]" });
-  assert.equal(
-    (await execute({ provider: "dsh", model: "default" }, directory)).success,
-    false,
+  const result = await execute({ provider: "dsh", model: "default" }, directory);
+  assert.equal(result.code, 0);
+  assert.equal(result.success, true);
+  assert.equal(result.reason, undefined);
+});
+
+test("non-zero exits fail even after a successful terminal event", async (t) => {
+  const directory = fixture(t),
+    bin = path.join(directory, "dsh"),
+    codexRoot = path.join(directory, "codex-root");
+  fs.mkdirSync(codexRoot, { recursive: true });
+  fs.writeFileSync(
+    bin,
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"final",text:"done",reason:{kind:"completed"}}));process.exitCode=2});',
+    { mode: 0o700 },
   );
+  fakeCodex(
+    codexRoot,
+    'process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"turn.completed"}));process.exitCode=3});',
+  );
+  environment(t, {
+    CLOUDCLI_DSH_BIN: bin,
+    CLOUDCLI_DSH_PATCHES: "[]",
+    CLOUDCLI_HOST_ROOT: codexRoot,
+  });
+  const dsh = await execute({ provider: "dsh", model: "default" }, directory);
+  assert.equal(dsh.code, 2);
+  assert.equal(dsh.success, false);
+  const codex = await execute(
+    { provider: "codex", model: "default" },
+    directory,
+  );
+  assert.equal(codex.code, 3);
+  assert.equal(codex.success, false);
+});
+
+test("a zero exit ignores invalid JSON events and stderr warnings", async (t) => {
+  const directory = fixture(t),
+    bin = path.join(directory, "dsh");
+  fs.writeFileSync(
+    bin,
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.error("pending checkpoint warning");console.log("not json");console.log(JSON.stringify({type:"text",text:"answer"}))});',
+    { mode: 0o700 },
+  );
+  environment(t, { CLOUDCLI_DSH_BIN: bin, CLOUDCLI_DSH_PATCHES: "[]" });
+  const result = await execute({ provider: "dsh", model: "default" }, directory);
+  assert.equal(result.code, 0);
+  assert.equal(result.success, true);
+  assert.equal(result.reason, undefined);
+  assert.match(result.stderr, /pending checkpoint warning/);
+  assert.equal(result.stdout, "answer\n");
+});
+
+test("a spawn failure fails with the spawn error", async (t) => {
+  const directory = fixture(t);
+  environment(t, {
+    CLOUDCLI_DSH_BIN: path.join(directory, "missing-dsh"),
+    CLOUDCLI_DSH_PATCHES: "[]",
+  });
+  const result = await execute({ provider: "dsh", model: "default" }, directory);
+  // cross-spawn reports ENOENT as a negative close code rather than null.
+  assert.notEqual(result.code, 0);
+  assert.equal(result.success, false);
+  assert.ok(result.reason);
 });
 
 test("notification outbox retries only delivery and persists its terminal result", async (t) => {

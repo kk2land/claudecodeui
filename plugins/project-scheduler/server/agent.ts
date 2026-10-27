@@ -77,7 +77,11 @@ export function resolveCodexBinary(
   );
 }
 
-/** Used by both execution entrypoints to normalize streamed provider output and terminal results. */
+/**
+ * Used by both execution entrypoints to normalize streamed provider output and decide the run
+ * result from the process exit status. Events are output and failure diagnostics only; they must
+ * not turn a normal zero exit into a failure.
+ */
 export async function runAgent(
   agent: SchedulerAgent,
   prompt: string,
@@ -116,6 +120,8 @@ export async function runAgent(
         throw new Error("CLOUDCLI_DSH_PATCHES 必须是文件路径数组");
       const patch: unknown[] = [
         { id: "session-persistence-jsonl", disabled: true },
+        // The checkpoint policy requires sessionPersistence, which is disabled above.
+        { id: "session-checkpoint-policy", disabled: true },
       ];
       if (agent.model !== "default") {
         const slash = agent.model.indexOf("/");
@@ -151,10 +157,11 @@ export async function runAgent(
     output.child(child);
     const decoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
-    let buffer = "",
-      terminal = false,
-      failed = false,
-      reason: string | undefined,
+    // A spawn failure or an intentionally aborted oversized event must stay a failure even if the
+    // process happens to exit zero. Event errors are diagnostics for non-zero exits only.
+    let internalFault: string | undefined,
+      eventReason: string | undefined,
+      buffer = "",
       lastDshText = "";
     const printed = new Map<string, { length: number; digest: string }>();
     const digest = (text: string) =>
@@ -200,13 +207,10 @@ export async function runAgent(
             )
               output.stdout(event.item.aggregated_output + "\n");
           }
-          if (event.type === "turn.completed") terminal = true;
-          if (event.type === "turn.failed" || event.type === "error") {
-            failed = true;
-            reason = String(
+          if (event.type === "turn.failed" || event.type === "error")
+            eventReason = String(
               event.error?.message ?? event.message ?? "Codex 执行失败",
             );
-          }
         } else {
           if (event.type === "text" && typeof event.text === "string") {
             output.stdout(event.text + "\n");
@@ -219,33 +223,28 @@ export async function runAgent(
               "[" + event.type + "] " + JSON.stringify(event) + "\n",
             );
           if (event.type === "final") {
-            terminal = event.reason?.kind === "completed";
             if (typeof event.text === "string" && event.text !== lastDshText)
               output.stdout(
                 (lastDshText && event.text.startsWith(lastDshText)
                   ? event.text.slice(lastDshText.length)
                   : event.text) + "\n",
               );
-            if (!terminal) {
-              failed = true;
-              reason = String(event.reason?.kind ?? "DSH 缺少成功结束原因");
-            }
+            if (event.reason?.kind !== "completed")
+              eventReason = String(
+                event.reason?.kind ?? "DSH 缺少成功结束原因",
+              );
           }
-          if (event.type === "error") {
-            failed = true;
-            reason = String(event.message ?? "DSH 执行失败");
-          }
+          if (event.type === "error")
+            eventReason = String(event.message ?? "DSH 执行失败");
         }
       } catch {
-        failed = true;
-        reason = "Agent 输出了无效 JSON 事件";
+        eventReason = "Agent 输出了无效 JSON 事件";
       }
     };
     child.stdout?.on("data", (chunk: Buffer) => {
       buffer += decoder.write(chunk);
       if (buffer.length > 32 * 1024 * 1024) {
-        failed = true;
-        reason = "Agent 单条事件超过 32 MiB";
+        internalFault = "Agent 单条事件超过 32 MiB";
         buffer = "";
         child.kill("SIGTERM");
         return;
@@ -265,8 +264,7 @@ export async function runAgent(
     child.stdin?.end(prompt);
     const code = await new Promise<number | null>((resolve) => {
       child.once("error", (error) => {
-        failed = true;
-        reason = error.message;
+        internalFault = error.message;
       });
       child.once("close", (code) => resolve(code));
     });
@@ -274,10 +272,14 @@ export async function runAgent(
     if (tail) line(tail);
     const stderrTail = stderrDecoder.end();
     if (stderrTail) output.stderr(stderrTail);
+    // The exit status is authoritative: a normal zero exit succeeds even without a terminal
+    // event, while null or non-zero exits fail with the streamed event reason when available.
+    if (internalFault) return { code, success: false, reason: internalFault };
+    if (code === 0) return { code, success: true };
     return {
       code,
-      success: code === 0 && terminal && !failed,
-      reason: reason ?? (terminal ? undefined : "Agent 未输出成功结束事件"),
+      success: false,
+      reason: eventReason ?? "Agent 进程未以退出码 0 结束",
     };
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

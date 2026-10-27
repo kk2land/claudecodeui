@@ -22,7 +22,8 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   fs.writeFileSync(path.join(root, "package.json"), "{}");
   fs.writeFileSync(
     binary,
-    '#!/usr/bin/env node\nconst prompt=require("fs").readFileSync(0,"utf8");console.log(JSON.stringify({type:"item.completed",item:{id:"answer",type:"agent_message",text:process.argv.join("|")+"\\n"+prompt}}));console.log(JSON.stringify({type:"turn.completed"}));',
+    // No turn.completed event: AGENT_EXEC must still succeed on a normal zero exit.
+    '#!/usr/bin/env node\nconst prompt=require("fs").readFileSync(0,"utf8");console.log(JSON.stringify({type:"item.completed",item:{id:"answer",type:"agent_message",text:process.argv.join("|")+"\\n"+prompt}}));',
     { mode: 0o700 },
   );
   fs.mkdirSync(path.join(project, ".cloudcli"), { recursive: true });

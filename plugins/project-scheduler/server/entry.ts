@@ -78,6 +78,17 @@ app.post(
     };
   }),
 );
+app.put(
+  "/tasks/enabled",
+  route((req) => {
+    const { projectId, taskId, enabled } = req.body ?? {};
+    if (typeof projectId !== "string" || !projectId.trim() ||
+        typeof taskId !== "string" || !taskId.trim() || typeof enabled !== "boolean")
+      throw new Error("需要项目、任务 ID 和布尔类型的 enabled");
+    scheduler.setTaskEnabled(projectId, taskId, enabled);
+    return { success: true, enabled };
+  }),
+);
 app.post(
   "/run",
   route((req) => {

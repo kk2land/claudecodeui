@@ -125,6 +125,49 @@ test("stdout/stderr are captured separately and stderr does not imply failure", 
   assert.match(f.scheduler.log(run.id, "stderr", 0).text, /diagnostic/);
 });
 
+test("agent zero exit without a final event records success and no failure alert", async (t) => {
+  const f = fixture(t);
+  f.store.saveSettings({
+    ...f.store.settings(),
+    telegram: { enabled: true, botToken: "123:test", chatId: "1", proxy: "" },
+  });
+  const bin = path.join(f.root, "dsh");
+  fs.writeFileSync(
+    bin,
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"text",text:"answer"})));',
+    { mode: 0o700 },
+  );
+  const previous = process.env.CLOUDCLI_DSH_BIN,
+    previousPatches = process.env.CLOUDCLI_DSH_PATCHES;
+  process.env.CLOUDCLI_DSH_BIN = bin;
+  process.env.CLOUDCLI_DSH_PATCHES = "[]";
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLOUDCLI_DSH_BIN;
+    else process.env.CLOUDCLI_DSH_BIN = previous;
+    if (previousPatches === undefined) delete process.env.CLOUDCLI_DSH_PATCHES;
+    else process.env.CLOUDCLI_DSH_PATCHES = previousPatches;
+  });
+  f.config([
+    {
+      id: "agent",
+      type: "prompt",
+      cron: "0 0 0 1 1 *",
+      prompt: "hello",
+      agent: { provider: "dsh", model: "default" },
+    },
+  ]);
+  f.scheduler.load(undefined, false, true);
+  const run = f.scheduler.start("p1", "agent", "manual");
+  const done = await waitFor(
+    () => f.store.run(run.id),
+    (run) => Boolean(run?.endedAt),
+  );
+  assert.equal(done?.status, "success");
+  assert.equal(done?.exitCode, 0);
+  assert.equal(done?.alertStatus, "none");
+  assert.match(f.scheduler.log(run.id, "stdout", 0).text, /answer/);
+});
+
 test("timeout kills an execution and records a distinct terminal result", async (t) => {
   const f = fixture(t);
   f.config([task("hang", "setInterval(()=>{},1000)", { timeoutSeconds: 1 })]);
@@ -164,6 +207,60 @@ test("process groups are stopped, including grandchildren", async (t) => {
   const size = fs.statSync(heartbeat).size;
   await new Promise((resolve) => setTimeout(resolve, 250));
   assert.equal(fs.statSync(heartbeat).size, size);
+});
+
+test("automatic scheduling switches preserve JSON, active runs and project isolation; imports reset them", async (t) => {
+  const f = fixture(t);
+  f.config([task("toggle", "setTimeout(()=>{},5000)")]);
+  const configFile = path.join(f.project, ".cloudcli/project-schedules.json");
+  const original = fs.readFileSync(configFile, "utf8");
+  f.scheduler.load(undefined, false, true);
+  const definition = f.store.definitions()[0]!.definition;
+  f.store.importProject("p2", [definition], false);
+  const running = f.scheduler.start("p1", "toggle", "manual");
+  f.scheduler.setTaskEnabled("p1", "toggle", false);
+  assert.equal(fs.readFileSync(configFile, "utf8"), original);
+  assert.equal(f.scheduler.inventory()[0]!.definition.enabled, false);
+  assert.equal(f.scheduler.inventory()[0]!.nextRun, null);
+  assert.equal(f.store.run(running.id)?.status, "running");
+  assert.equal(f.store.definitions().find((row) => row.projectId === "p2")!.definition.enabled, true);
+  assert.throws(() => f.scheduler.start("p1", "toggle", "cron"), /已关闭/);
+  f.scheduler.stop(running.id);
+  await waitFor(() => f.store.run(running.id)?.endedAt, Boolean);
+  const manual = f.scheduler.start("p1", "toggle", "manual");
+  assert.equal(manual.status, "running");
+  f.scheduler.stop(manual.id);
+  await waitFor(() => f.store.run(manual.id)?.endedAt, Boolean);
+  f.scheduler.load(["p1"], false, true);
+  assert.equal(f.scheduler.inventory()[0]!.definition.enabled, true);
+  assert.ok(f.scheduler.inventory()[0]!.nextRun);
+  f.config([task("toggle", "", { enabled: false })]);
+  f.scheduler.load(["p1"], false, true);
+  f.scheduler.setTaskEnabled("p1", "toggle", true);
+  assert.equal(f.scheduler.inventory()[0]!.definition.enabled, true);
+  f.scheduler.load(["p1"], false, true);
+  assert.equal(f.scheduler.inventory()[0]!.definition.enabled, false);
+  assert.throws(() => f.scheduler.setTaskEnabled("unknown", "toggle", false), /项目不存在/);
+  assert.throws(() => f.scheduler.setTaskEnabled("p1", "unknown", false), /任务不存在/);
+});
+
+test("automatic scheduling switches persist across store restarts and preserve other task fields", (t) => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "cron-toggle-store-"));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  let store = new SchedulerStore(directory);
+  try {
+    const definition = parseTasks({ version: 1, tasks: [task("saved")] }, directory, defaultSettings())[0]!;
+    store.importProject("p", [definition], false);
+    store.setTaskEnabled("p", "saved", false);
+    store.close();
+    store = new SchedulerStore(directory);
+    const row = store.definitions()[0]!;
+    assert.deepEqual(row.definition, { ...definition, enabled: false });
+    store.setTaskEnabled("p", "saved", true);
+    assert.deepEqual(store.definitions()[0]!.definition, definition);
+  } finally {
+    store.close();
+  }
 });
 
 test("retention removes completed history but keeps the last result and active records", (t) => {

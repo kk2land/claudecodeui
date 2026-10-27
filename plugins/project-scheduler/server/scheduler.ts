@@ -207,6 +207,13 @@ export class ProjectScheduler {
     if (apply) this.refresh();
     return results;
   }
+  setTaskEnabled(projectId: string, taskId: string, enabled: boolean): void {
+    if (this.closing) throw new Error("调度器正在停止");
+    if (!this.projects().some((project) => project.id === projectId))
+      throw new Error("项目不存在或已归档");
+    this.store.setTaskEnabled(projectId, taskId, enabled);
+    this.refresh();
+  }
   start(
     projectId: string,
     taskId: string,
@@ -220,6 +227,8 @@ export class ProjectScheduler {
         (task) => task.projectId === projectId && task.taskId === taskId,
       )?.definition;
     if (!project || !task) throw new Error("项目或任务不存在，或项目已归档");
+    // A callback already queued before disabling must not start another automatic run.
+    if (trigger === "cron" && !task.enabled) throw new Error("任务自动调度已关闭");
     const now = new Date().toISOString();
     const run: SchedulerRun = {
       id: randomUUID(),

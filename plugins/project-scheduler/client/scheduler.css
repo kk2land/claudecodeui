@@ -397,6 +397,36 @@
   color: var(--cron-ink);
   margin-top: 7px;
 }
+.cron-plugin .cron-task-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 0;
+  border: 0;
+  background: transparent;
+  white-space: nowrap;
+}
+.cron-switch-track {
+  display: inline-flex;
+  align-items: center;
+  width: 30px;
+  height: 18px;
+  padding: 2px;
+  border-radius: 10px;
+  background: var(--cron-muted);
+}
+.cron-switch-track > span {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: white;
+}
+.cron-task-switch[aria-checked="true"] .cron-switch-track {
+  background: var(--cron-blue);
+}
+.cron-task-switch[aria-checked="true"] .cron-switch-track > span {
+  transform: translateX(12px);
+}
 .cron-form .cron-checkbox {
   display: flex;
   align-items: center;
@@ -537,6 +567,13 @@
   }
   .cron-table td:nth-child(2)::before {
     content: "执行计划";
+    display: block;
+    color: var(--cron-muted);
+    font-size: 11px;
+    margin-bottom: 5px;
+  }
+  .cron-table .cron-toggle-cell::before {
+    content: "自动调度";
     display: block;
     color: var(--cron-muted);
     font-size: 11px;

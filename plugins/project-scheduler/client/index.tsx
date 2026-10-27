@@ -76,6 +76,10 @@ function Scheduler({ host }: { host: SchedulerHost }) {
   const previousProject = useRef(host.context.project?.name);
   // Inventory is polled while the plugin is mounted; scheduling continues without this component.
   const [tasks, setTasks] = useState<SchedulerTaskRow[]>([]);
+  // Each task is locked while its saved automatic-scheduling state is changing.
+  const [pendingToggles, setPendingToggles] = useState<Set<string>>(new Set());
+  // Ignore poll responses captured before a switch update so they cannot undo its display.
+  const taskRevision = useRef(0);
   // The chosen scope only affects presentation and import defaults.
   const [scope, setScope] = useState<"current" | "all">("current");
   // Stable identity keeps an open detail view attached to its project across polling updates.
@@ -112,8 +116,9 @@ function Scheduler({ host }: { host: SchedulerHost }) {
     const poll = async () => {
       let delay = 5000;
       try {
+        const revision = taskRevision.current;
         const data = await api.tasks();
-        if (live) setTasks(data.tasks);
+        if (live && revision === taskRevision.current) setTasks(data.tasks);
         if (data.tasks.some((task) => task.activeRuns.length)) delay = 1000;
       } catch (error) {
         if (live) setMessage(String(error));
@@ -149,6 +154,25 @@ function Scheduler({ host }: { host: SchedulerHost }) {
       setTasks(data.tasks);
     } catch (error) {
       setMessage(String(error));
+    }
+  };
+  const toggleTask = async (task: SchedulerTaskRow) => {
+    const id = key(task);
+    setPendingToggles((previous) => new Set(previous).add(id));
+    taskRevision.current++;
+    try {
+      await api.setEnabled(task, !task.definition.enabled);
+      const revision = ++taskRevision.current;
+      const data = await api.tasks();
+      if (revision === taskRevision.current) setTasks(data.tasks);
+    } catch (error) {
+      setMessage(String(error));
+    } finally {
+      setPendingToggles((previous) => {
+        const next = new Set(previous);
+        next.delete(id);
+        return next;
+      });
     }
   };
   return (
@@ -248,6 +272,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                 <th>任务</th>
                 <th>执行计划 / 下次运行</th>
                 <th>执行方式</th>
+                <th>自动调度</th>
                 <th>运行状态</th>
               </tr>
             </thead>
@@ -290,6 +315,20 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                       </code>
                     </small>
                   </td>
+                  <td className="cron-toggle-cell">
+                    <button
+                      type="button"
+                      role="switch"
+                      className="cron-task-switch"
+                      aria-label={`${task.projectName} / ${task.definition.name} 自动调度`}
+                      aria-checked={task.definition.enabled}
+                      disabled={pendingToggles.has(key(task))}
+                      onClick={() => void toggleTask(task)}
+                    >
+                      <span className="cron-switch-track" aria-hidden="true"><span /></span>
+                      {task.definition.enabled ? "已开启" : "已关闭"}
+                    </button>
+                  </td>
                   <td>
                     {task.activeRuns.length ? (
                       <>
@@ -326,6 +365,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           <footer className="cron-footer">
             <code>.cloudcli/project-schedules.json</code>
             <span>默认禁止同一任务并发</span>
+            <span>开关仅控制后续自动调度，不中断运行；不修改 JSON，重新装载以 JSON 为准。</span>
           </footer>
         </>
       )}

@@ -103,6 +103,12 @@ export class SchedulerStore {
         );
     })();
   }
+  setTaskEnabled(projectId: string, taskId: string, enabled: boolean): void {
+    const result = this.db.prepare(
+      "UPDATE tasks SET definition=json_set(definition,'$.enabled',json(?)), updated_at=? WHERE project_id=? AND task_id=?",
+    ).run(JSON.stringify(enabled), new Date().toISOString(), projectId, taskId);
+    if (!result.changes) throw new Error("任务不存在");
+  }
   saveRun(run: SchedulerRun): void {
     this.db.transaction(() => {
       const previous = this.db

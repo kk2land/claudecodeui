@@ -43,6 +43,12 @@ export function schedulerApi(host: SchedulerHost) {
         removeMissing,
         apply,
       }),
+    setEnabled: (task: SchedulerTaskRow, enabled: boolean) =>
+      request<{ success: boolean; enabled: boolean }>("PUT", "/tasks/enabled", {
+        projectId: task.projectId,
+        taskId: task.taskId,
+        enabled,
+      }),
     run: (task: SchedulerTaskRow) =>
       request<{ run: SchedulerRun }>("POST", "/run", {
         projectId: task.projectId,
