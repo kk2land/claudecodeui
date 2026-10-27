@@ -57,6 +57,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.clearAllTimers();
   vi.useRealTimers();
 });
 
@@ -70,7 +71,7 @@ test('a draft is readable synchronously and reaches the server after the debounc
 
   await vi.advanceTimersByTimeAsync(1_500);
   assert.deepEqual(savedDrafts, [
-    { scope: 'session-a', text: 'half a thought', queuedMessages: [] },
+    { scope: 'session-a', text: 'half a thought' },
   ]);
 });
 
@@ -93,7 +94,7 @@ test('a chat with no session yet is scoped to its project', async () => {
   assert.equal(store.readDraftText('session-a'), '');
 });
 
-test('clearing a draft deletes it on the server instead of storing an empty one', async () => {
+test('clearing text leaves removal of an empty row to the server and preserves another tab\'s queue', async () => {
   const store = await loadStore();
   store.writeDraftText('session-a', 'typed');
   await vi.advanceTimersByTimeAsync(1_500);
@@ -102,8 +103,8 @@ test('clearing a draft deletes it on the server instead of storing an empty one'
   store.writeDraftText('session-a', '');
   await vi.advanceTimersByTimeAsync(1_500);
 
-  assert.deepEqual(savedDrafts, []);
-  assert.deepEqual(deletedScopes, ['session-a']);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '' }]);
+  assert.deepEqual(deletedScopes, []);
 });
 
 test('a draft written in one page load is readable synchronously in the next', async () => {
@@ -129,6 +130,7 @@ test('hydrate removes a mirrored queue after the server claims it', async () => 
   const store = await loadStore();
   store.writeQueuedMessage('session-a', { content: 'server-owned queue' });
   assert.equal(store.readQueuedMessage('session-a')?.content, 'server-owned queue');
+  await vi.advanceTimersByTimeAsync(0);
 
   serverDrafts = [];
   await store.hydrateChatDrafts();
@@ -424,4 +426,254 @@ test('a whole-queue write persists every entry rather than a single slot', async
     text: '',
     queuedMessages: [{ id: 'a', content: 'one' }, { id: 'b', content: 'two' }],
   });
+});
+
+test('typing saves only text and adopts the server queue after its head is dispatched', async () => {
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'a', content: 'A' }, { id: 'b', content: 'B' }] }];
+  const store = await loadStore();
+  await store.hydrateChatDrafts();
+  store.writeDraftText('session-a', 'still typing');
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'b', content: 'B' }] }];
+  await store.hydrateChatDrafts();
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ id }) => id), ['b']);
+  assert.equal(store.readDraftText('session-a'), 'still typing');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'still typing' }]);
+});
+
+test('an older hydrate cannot undo a queue edit saved while its response was in flight', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  let answer!: (response: Response) => void;
+  vi.spyOn(api.user, 'drafts').mockImplementationOnce(() => new Promise((resolve) => { answer = resolve; }));
+  const pending = store.hydrateChatDrafts();
+  store.writeQueuedMessage('session-a', { id: 'new', content: 'queued meanwhile' });
+  await store.persistQueuedMessage('session-a');
+  answer(new Response(JSON.stringify({ drafts: [{ scope: 'session-a', text: 'server draft', queuedMessages: [] }] }), { status: 200 }));
+  await pending;
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ id }) => id), ['new']);
+  assert.equal(store.readDraftText('session-a'), 'server draft');
+});
+
+test('a failed queue addition survives hydrate and typing retries its latest value', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const save = vi.spyOn(api.user, 'saveDraft').mockRejectedValueOnce(new Error('offline'));
+  const message = { id: 'queued-1', content: 'must be sent', attachments: [{ path: '/uploads/notes.txt' }] };
+  store.writeQueuedMessage('session-a', message);
+  await vi.advanceTimersByTimeAsync(0);
+  await store.hydrateChatDrafts();
+  assert.deepEqual(store.readQueuedMessages('session-a'), [message]);
+  store.writeDraftText('session-a', 'the next draft');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.equal(save.mock.calls.length, 2);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'the next draft', queuedMessages: [message] }]);
+  await store.hydrateChatDrafts();
+  assert.deepEqual(store.readQueuedMessages('session-a'), []);
+  store.writeDraftText('session-a', 'draft after dispatch');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts.at(-1), { scope: 'session-a', text: 'draft after dispatch' });
+});
+
+test('a failed cancellation stays cancelled locally and retries the empty queue', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'cancelled', content: 'do not send' }] }];
+  await store.hydrateChatDrafts();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(api.user, 'saveDraft').mockResolvedValueOnce(new Response('{}', { status: 503 }));
+  store.clearQueuedMessage('session-a', 'cancelled');
+  await vi.advanceTimersByTimeAsync(0);
+  await store.hydrateChatDrafts();
+  assert.deepEqual(store.readQueuedMessages('session-a'), []);
+  store.writeDraftText('session-a', 'keep this draft');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'keep this draft', queuedMessages: [] }]);
+});
+
+test('a transient queue failure retries without another keystroke', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const save = vi.spyOn(api.user, 'saveDraft').mockRejectedValueOnce(new Error('offline'));
+  store.writeQueuedMessage('session-a', { id: 'retry', content: 'send when online' });
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.equal(save.mock.calls.length, 2);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'retry', content: 'send when online' }] }]);
+});
+
+test('a text-only retry never carries a queue the server has dispatched', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'sent', content: 'already sent' }] }];
+  await store.hydrateChatDrafts();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const save = vi.spyOn(api.user, 'saveDraft').mockRejectedValueOnce(new Error('offline'));
+  store.writeDraftText('session-a', 'keep this draft');
+  await vi.advanceTimersByTimeAsync(1_000);
+  serverDrafts = [];
+  await store.hydrateChatDrafts();
+  assert.deepEqual(store.readQueuedMessages('session-a'), []);
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.equal(save.mock.calls.length, 2);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'keep this draft' }]);
+});
+
+test('retrying an older failed request uses the latest queue rather than its old snapshot', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  let rejectFirst!: (error: Error) => void;
+  const save = vi.spyOn(api.user, 'saveDraft').mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }));
+  store.writeQueuedMessage('session-a', { id: 'old', content: 'cancel this' });
+  await vi.advanceTimersByTimeAsync(0);
+  store.clearQueuedMessage('session-a', 'old');
+  const latest = { id: 'new', content: 'send this instead' };
+  store.writeQueuedMessage('session-a', latest);
+  rejectFirst(new Error('offline'));
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(save.mock.calls.at(-1)?.[1], { text: '', queuedMessages: [latest] });
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ id }) => id), ['new']);
+  assert.ok(save.mock.calls.slice(1).every(([, draft]) => !draft.queuedMessages?.some((entry) => (entry as { id?: string }).id === 'old')));
+});
+
+test('a newer queued save supersedes an older failure without replaying dispatched turns', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  let rejectFirst!: (error: Error) => void;
+  const save = vi.spyOn(api.user, 'saveDraft').mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }));
+  store.writeQueuedMessage('session-a', { id: 'first', content: 'first turn' });
+  await vi.advanceTimersByTimeAsync(0);
+  store.writeQueuedMessage('session-a', { id: 'second', content: 'second turn' });
+  rejectFirst(new Error('offline'));
+  await vi.advanceTimersByTimeAsync(0);
+  assert.equal(save.mock.calls.length, 2);
+  assert.deepEqual(savedDrafts[0]?.queuedMessages?.map((entry) => (entry as { id: string }).id), ['first', 'second']);
+  await store.hydrateChatDrafts();
+  assert.deepEqual(store.readQueuedMessages('session-a'), []);
+  await vi.advanceTimersByTimeAsync(5_000);
+  assert.equal(save.mock.calls.length, 2);
+});
+
+test('persistent network failures back off and sign-out cancels the retries', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const save = vi.spyOn(api.user, 'saveDraft').mockRejectedValue(new Error('offline'));
+  store.writeQueuedMessage('session-a', { id: 'private', content: 'account A only' });
+  await vi.advanceTimersByTimeAsync(30_000);
+  assert.ok(save.mock.calls.length > 2);
+  assert.ok(save.mock.calls.length < 10);
+  const attempts = save.mock.calls.length;
+  store.resetChatDrafts();
+  await vi.advanceTimersByTimeAsync(60_000);
+  assert.equal(save.mock.calls.length, attempts);
+});
+
+test('a former account\'s late queue failure cannot dirty the next account\'s draft', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  let rejectFirst!: (error: Error) => void;
+  const save = vi.spyOn(api.user, 'saveDraft').mockImplementationOnce(() => new Promise((_resolve, reject) => { rejectFirst = reject; }));
+  store.writeQueuedMessage('session-a', { id: 'private', content: 'account A only' });
+  await vi.advanceTimersByTimeAsync(0);
+  store.resetChatDrafts();
+  store.writeDraftText('session-a', 'account B draft');
+  await vi.advanceTimersByTimeAsync(1_500);
+  rejectFirst(new Error('offline after sign-out'));
+  await vi.advanceTimersByTimeAsync(60_000);
+  assert.equal(save.mock.calls.length, 2);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'account B draft' }]);
+});
+
+test('a non-retryable response retains the queue edit without a busy retry loop', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  const save = vi.spyOn(api.user, 'saveDraft').mockResolvedValueOnce(new Response('{}', { status: 409 }));
+  store.writeQueuedMessage('session-a', { id: 'held', content: 'keep my edit' });
+  await vi.advanceTimersByTimeAsync(60_000);
+  assert.equal(save.mock.calls.length, 1);
+  await store.hydrateChatDrafts();
+  assert.equal(store.readQueuedMessage('session-a')?.content, 'keep my edit');
+  store.resetChatDrafts();
+});
+
+test('an unsaved queue survives a page reload with its original ticket', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(api.user, 'saveDraft').mockRejectedValueOnce(new Error('offline'));
+  const message = { id: 'durable-ticket', content: 'survive the reload', attachments: [] };
+  store.writeQueuedMessage('session-a', message);
+  await vi.advanceTimersByTimeAsync(0);
+  vi.clearAllTimers();
+  const resumed = await loadStore();
+  await resumed.hydrateChatDrafts();
+  assert.deepEqual(resumed.readQueuedMessages('session-a'), [message]);
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [message] }]);
+});
+
+test('an unsaved cancellation survives reload even when the draft is empty', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'cancelled', content: 'do not send' }] }];
+  await store.hydrateChatDrafts();
+  vi.spyOn(console, 'error').mockImplementation(() => {});
+  vi.spyOn(api.user, 'saveDraft').mockRejectedValueOnce(new Error('offline'));
+  store.clearQueuedMessage('session-a', 'cancelled');
+  await vi.advanceTimersByTimeAsync(0);
+  vi.clearAllTimers();
+  const resumed = await loadStore();
+  await resumed.hydrateChatDrafts();
+  assert.deepEqual(resumed.readQueuedMessages('session-a'), []);
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [] }]);
+});
+
+test('a successfully saved mirror never replays a dispatched queue after reload', async () => {
+  const store = await loadStore();
+  store.writeQueuedMessage('session-a', { id: 'saved', content: 'send only once' });
+  await vi.advanceTimersByTimeAsync(0);
+  savedDrafts.length = 0;
+  vi.clearAllTimers();
+  const resumed = await loadStore();
+  await resumed.hydrateChatDrafts();
+  assert.deepEqual(resumed.readQueuedMessages('session-a'), []);
+  resumed.writeDraftText('session-a', 'next draft');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'next draft' }]);
+});
+
+test('a cancellation survives reload while its first save is still unanswered', async () => {
+  const store = await loadStore();
+  const { api } = await import('@/shared/api');
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'cancelled', content: 'do not send' }] }];
+  await store.hydrateChatDrafts();
+  vi.spyOn(api.user, 'saveDraft').mockImplementationOnce(() => new Promise(() => {}));
+  store.clearQueuedMessage('session-a', 'cancelled');
+  await vi.advanceTimersByTimeAsync(0);
+  vi.clearAllTimers();
+  const resumed = await loadStore();
+  await resumed.hydrateChatDrafts();
+  assert.deepEqual(resumed.readQueuedMessages('session-a'), []);
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [] }]);
+});
+
+test('clearing the last text survives reload before its debounce has sent a request', async () => {
+  const store = await loadStore();
+  serverDrafts = [{ scope: 'session-a', text: 'old draft', queuedMessages: [] }];
+  await store.hydrateChatDrafts();
+  store.writeDraftText('session-a', '');
+  vi.clearAllTimers();
+  const resumed = await loadStore();
+  await resumed.hydrateChatDrafts();
+  assert.equal(resumed.readDraftText('session-a'), '');
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '' }]);
+  assert.deepEqual(deletedScopes, []);
 });

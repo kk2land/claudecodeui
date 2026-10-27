@@ -14,6 +14,7 @@ export type UiPreferences = {
   showThinking: boolean;
   sendByCtrlEnter: boolean;
   sidebarVisible: boolean;
+  keepProjectsExpanded: boolean;
   voiceEnabled: boolean;
   /** Whether a finished Codex reply may ask for a native next-message suggestion. */
   showComposerPredictions: boolean;
@@ -30,6 +31,7 @@ const DEFAULTS: UiPreferences = {
   showThinking: true,
   sendByCtrlEnter: false,
   sidebarVisible: true,
+  keepProjectsExpanded: false,
   voiceEnabled: false,
   showComposerPredictions: true,
 };

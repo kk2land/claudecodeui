@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { SessionDraftRecord, QueuedSessionMessageRecord } from '@/shared/index.js';
+import type { SessionDraftRecord, QueuedSessionMessageRecord, QueuedChatMessage } from '@/shared/index.js';
 import { getConnection } from '@/modules/database/connection.js';
 import { AppError, MAX_QUEUED_MESSAGES, readQueuedMessages, serializeQueuedMessages } from '@/shared/index.js';
 
@@ -52,6 +52,42 @@ function toRecord(row: DraftRow): SessionDraftRecord {
 
 /** Draft routes and chat scheduling share these atomic queue operations. */
 export const sessionDraftsDb = {
+  /** User's debounced composer edits leave the dispatcher-owned queue untouched. */
+  saveDraftText(userId: number, scope: string, text: string): void {
+    const db = getConnection();
+    db.prepare(`INSERT INTO session_drafts (user_id, draft_scope, draft_text, updated_at)
+      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+      ON CONFLICT(user_id, draft_scope) DO UPDATE SET
+        draft_text = excluded.draft_text, updated_at = CURRENT_TIMESTAMP`).run(userId, scope, text);
+    sessionDraftsDb.deleteEmptyDraft(userId, scope);
+  },
+
+  /** User's append endpoint adds an independent FIFO turn, preserving each turn's options and ticket. */
+  appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage): { queuedMessage: QueuedChatMessage; appended: boolean } {
+    const db = getConnection();
+    return db.transaction(() => {
+      const existing = db.prepare('SELECT draft_text, queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
+        .get(userId, scope) as { draft_text: string; queued_message: string | null } | undefined;
+      const queue = readQueuedMessages(existing?.queued_message ?? null);
+      const queuedMessage = { ...message, id: randomUUID() };
+      sessionDraftsDb.saveDraft(userId, scope, {
+        text: existing?.draft_text ?? '',
+        queuedMessages: [...queue, queuedMessage],
+      });
+      return { queuedMessage, appended: queue.length > 0 };
+    })();
+  },
+
+  /** User's explicit cancellation clears the pending queue while retaining composer text and delivery guards. */
+  clearQueuedMessage(userId: number, scope: string): void {
+    const db = getConnection();
+    db.transaction(() => {
+      const existing = db.prepare('SELECT draft_text FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
+        .get(userId, scope) as { draft_text: string } | undefined;
+      sessionDraftsDb.saveDraft(userId, scope, { text: existing?.draft_text ?? '', queuedMessages: [] });
+    })();
+  },
+
   /**
    * Returns every draft the user has, newest first.
    *
@@ -188,11 +224,14 @@ export const sessionDraftsDb = {
           code: 'QUEUE_LIMIT_REACHED', statusCode: 409,
         });
       }
+      // A text-only save can remove the empty placeholder while the claim is
+      // in flight. Restore its row as well as its message, retaining any tail.
       db.prepare(
-        `UPDATE session_drafts
-         SET queued_message = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = ? AND draft_scope = ?`
-      ).run(serializeQueuedMessages(restored), candidate.userId, candidate.sessionId);
+        `INSERT INTO session_drafts (user_id, draft_scope, draft_text, queued_message, updated_at)
+         VALUES (?, ?, '', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(user_id, draft_scope) DO UPDATE SET
+           queued_message = excluded.queued_message, updated_at = CURRENT_TIMESTAMP`
+      ).run(candidate.userId, candidate.sessionId, serializeQueuedMessages(restored));
     })();
   },
 

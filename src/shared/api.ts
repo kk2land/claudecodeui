@@ -131,8 +131,9 @@ export async function readApiJson<T>(response: Response): Promise<T> {
  *
  * The non-throwing counterpart of readApiJson, used by the auth and onboarding
  * screens because they show their own localized message when the server gives
- * none, and by the plugins context for failed plugin list, install, update,
- * uninstall and toggle calls, which all answer with the structured envelope.
+ * none, by the plugins context for failed plugin list, install, update,
+ * uninstall and toggle calls, which all answer with the structured envelope,
+ * and by the chat drafts store to say why the server refused a queued message.
  */
 export function readApiErrorMessage(body: unknown): string | null {
   if (!body || typeof body !== 'object') {
@@ -423,6 +424,10 @@ export const api = {
       post(`/api/providers/${encodeURIComponent(provider)}/runtime`, { sessionId, control }),
     authStatus: (provider: string) =>
       get(`/api/providers/${encodeURIComponent(provider)}/auth/status`),
+    cliStatus: (provider: string) =>
+      get(`/api/providers/${encodeURIComponent(provider)}/cli`),
+    updateCli: (provider: string) =>
+      post(`/api/providers/${encodeURIComponent(provider)}/cli/update`),
     claudeSettingsPermissions: () => get('/api/providers/claude/settings-permissions'),
     // Codex account quota: `codexRateLimits` reads only the server's in-memory
     // cache (mounting the settings card must never start the app-server), while
@@ -546,6 +551,10 @@ export const api = {
     // accepted by the server for older clients.
     saveDraft: (scope: string, draft: { text: string; queuedMessages?: unknown[]; queuedMessage?: unknown }) =>
       put('/api/user/drafts', { scope, ...draft }),
+    // Appends an independent turn to the scope's FIFO queue on the server.
+    appendQueuedMessage: (scope: string, queuedMessage: unknown) =>
+      post('/api/user/drafts/queued-message', { scope, queuedMessage }),
+    clearQueuedMessage: (scope: string) => del('/api/user/drafts/queued-message', { scope }),
     deleteDraft: (scope: string) => del('/api/user/drafts', { scope }),
   },
 

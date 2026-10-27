@@ -190,6 +190,15 @@ const queuedDraftsEqual = (left: QueuedDraft[], right: QueuedDraft[]): boolean =
   return comparable(left).join('\u0000') === comparable(right).join('\u0000');
 };
 
+/** Server reconciliation retains browser files only for unchanged entries with the same ticket. */
+const reconcileQueuedDrafts = (previous: QueuedDraft[], saved: QueuedDraft[]): QueuedDraft[] => {
+  if (queuedDraftsEqual(previous, saved)) return previous;
+  return saved.map((draft) => {
+    const local = previous.find((entry) => entry.id === draft.id && queuedDraftsEqual([entry], [draft]));
+    return local ? { ...draft, attachments: local.attachments } : draft;
+  });
+};
+
 const getNotificationSessionSummary = (
   selectedSession: ProjectSession | null,
   fallbackInput: string,
@@ -1272,13 +1281,21 @@ export function useChatComposerState({
       const saved = restoreQueuedDrafts(sessionKey);
       if (!cancelled) {
         queuedDraftSessionRef.current = sessionKey;
-        setQueuedDrafts((previous) => (queuedDraftsEqual(previous, saved) ? previous : saved));
+        setQueuedDrafts((previous) => reconcileQueuedDrafts(previous, saved));
       }
     };
     const timer = setInterval(() => void reconcile(), 5_000);
+    const refreshOnFocus = () => { void reconcile(); };
+    const refreshWhenVisible = () => {
+      if (!document.hidden) void reconcile();
+    };
+    window.addEventListener('focus', refreshOnFocus);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
     return () => {
       cancelled = true;
       clearInterval(timer);
+      window.removeEventListener('focus', refreshOnFocus);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, [queuedDrafts.length, sessionKey]);
 
@@ -1406,7 +1423,7 @@ export function useChatComposerState({
     }
     const restore = () => {
       const saved = restoreQueuedDrafts(sessionKey);
-      setQueuedDrafts((previous) => (queuedDraftsEqual(previous, saved) ? previous : saved));
+      setQueuedDrafts((previous) => reconcileQueuedDrafts(previous, saved));
     };
     restore();
     return subscribeToChatDrafts(restore);

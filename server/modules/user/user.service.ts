@@ -1,4 +1,5 @@
 import { AppError, MAX_QUEUED_MESSAGES } from '@/shared/index.js';
+import type { QueuedChatMessage } from '@/shared/index.js';
 
 type GitConfig = {
   git_name: string | null;
@@ -30,6 +31,9 @@ type UserDependencies = {
   drafts: {
     getDrafts(userId: number): DraftRecord[];
     saveDraft(userId: number, scope: string, draft: { text: string; queuedMessages: unknown[] }): void;
+    saveDraftText(userId: number, scope: string, text: string): void;
+    appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage): { queuedMessage: QueuedChatMessage; appended: boolean } | null;
+    clearQueuedMessage(userId: number, scope: string): void;
     deleteDraft(userId: number, scope: string): void;
   };
   readSystemGitConfig(): Promise<GitConfig>;
@@ -110,6 +114,28 @@ const readDraftScope = (value: unknown): string => {
     });
   }
   return scope;
+};
+
+const isPlainObject = (value: unknown): value is Record<string, unknown> => (
+  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+);
+
+/** Reads the message the composer asks to queue; one with nothing to send is refused. */
+const readQueuedMessageInput = (value: unknown): QueuedChatMessage => {
+  const message = isPlainObject(value) ? value : {};
+  const content = typeof message.content === 'string' ? message.content : '';
+  const attachments = Array.isArray(message.attachments) ? message.attachments : [];
+  if (!content.trim() && attachments.length === 0) {
+    throw new AppError('A queued message needs text or attachments', {
+      code: 'INVALID_QUEUED_MESSAGE',
+      statusCode: 400,
+    });
+  }
+  return {
+    content,
+    ...(isPlainObject(message.options) ? { options: message.options } : {}),
+    attachments,
+  };
 };
 
 const readPreferenceUpdates = (body: unknown): Record<string, unknown> => {
@@ -229,10 +255,43 @@ export function createUserService(dependencies: UserDependencies) {
         });
       }
 
+      // The composer's debounced save sends only the text. Its copy of the
+      // queued message can be stale (already claimed by the dispatcher, or added
+      // to from another tab), so a save without one leaves the stored one alone.
+      if (payload.queuedMessages === undefined && payload.queuedMessage === undefined) {
+        dependencies.drafts.saveDraftText(userId, scope, text);
+        return { success: true };
+      }
+
       dependencies.drafts.saveDraft(userId, scope, {
         text,
         queuedMessages: readQueuedMessages(payload),
       });
+      return { success: true };
+    },
+
+    /**
+     * Queues a message behind the session's running turn. A message already
+     * waiting there is kept and this one is added as a separate FIFO turn.
+     * Each follow-up retains its own options and attachments; slash commands
+     * also stay separate so later text cannot become their arguments.
+     */
+    appendQueuedMessage(userId: number, scopeInput: unknown, queuedMessageInput: unknown) {
+      const scope = readDraftScope(scopeInput);
+      const message = readQueuedMessageInput(queuedMessageInput);
+      const result = dependencies.drafts.appendQueuedMessage(userId, scope, message);
+      if (!result) {
+        throw new AppError(
+          'A slash command runs as a turn of its own, so it cannot be combined with the queued message. '
+            + 'Send it after the queued message has gone.',
+          { code: 'QUEUED_MESSAGE_NOT_COMBINABLE', statusCode: 409 },
+        );
+      }
+      return { success: true, queuedMessage: result.queuedMessage, appended: result.appended };
+    },
+
+    clearQueuedMessage(userId: number, scopeInput: unknown) {
+      dependencies.drafts.clearQueuedMessage(userId, readDraftScope(scopeInput));
       return { success: true };
     },
 

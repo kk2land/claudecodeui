@@ -38,6 +38,7 @@ export type {
   ProviderRuntimeGateway,
   ProviderRuntimeWriter,
   ProviderSessionModel,
+  QueuedChatMessage,
   QueuedSessionMessageRecord,
   RealtimeClientConnection,
   SessionDraftRecord,

@@ -9,8 +9,8 @@ import type { QueuedDelivery, QueuedSendOptions } from '@/shared/types';
  * This is what lets a message half-typed on a laptop be finished on a phone —
  * the case the composer previously could not serve at all, because a draft only
  * existed on the machine it was typed on. As with the preference store, a
- * localStorage mirror is kept purely so a reload shows the draft on the first
- * paint instead of a blank composer that fills in a moment later.
+ * localStorage mirror restores the draft on the first paint and retains
+ * unsaved edits across reloads until the server confirms their persistence.
  *
  * A scope is a session id, or `project:<projectId>` for a chat that has not
  * been sent yet and so has no session. Drafts used to be keyed by project
@@ -49,6 +49,8 @@ const MIRROR_STORAGE_KEY = 'chat-drafts';
  * little latency for far fewer requests is the right side of the trade.
  */
 const SERVER_WRITE_DEBOUNCE_MS = 1_000;
+/** Bound automatic retry traffic during a prolonged outage. */
+const SERVER_WRITE_RETRY_MAX_MS = 30_000;
 
 const EMPTY_DRAFT: DraftRecord = { text: '', queuedMessages: [] };
 
@@ -64,7 +66,19 @@ const listeners = new Set<() => void>();
 
 let drafts = new Map<string, DraftRecord>();
 const pendingScopes = new Set<string>();
+// Debounced text edits remain local until their own save completes.
+const pendingTextScopes = new Set<string>();
+// Only explicit queue mutations may send a queue snapshot to the server.
+const pendingQueueScopes = new Set<string>();
+// Hydration must not replace queue changes newer than the snapshot it requested.
+const queueRevisions = new Map<string, number>();
+// Composer edits and completed text saves invalidate older hydration snapshots.
+const textRevisions = new Map<string, number>();
 let serverWriteTimer: ReturnType<typeof setTimeout> | null = null;
+// A transient failure retries even when the user has stopped typing.
+let serverRetryTimer: ReturnType<typeof setTimeout> | null = null;
+// Consecutive failures back off; a fully saved batch or sign-out resets the delay.
+let serverRetryDelayMs = SERVER_WRITE_DEBOUNCE_MS;
 
 const isRecord = (value: unknown): value is Record<string, unknown> => (
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
@@ -132,6 +146,11 @@ function readMirror(): Map<string, DraftRecord> {
         // A mirror written before the queue existed holds the legacy singleton.
         queuedMessages: normalizeQueuedMessages(value.queuedMessages ?? value.queuedMessage),
       });
+      // Persist intent as well as content: distinguish an unsaved edit from
+      // a cached queue the server may already have dispatched after a reload.
+      if (value.unsavedText === true) pendingTextScopes.add(scope);
+      if (value.unsavedQueue === true) pendingQueueScopes.add(scope);
+      if (value.unsavedText === true || value.unsavedQueue === true) pendingScopes.add(scope);
     }
     return restored;
   } catch {
@@ -141,10 +160,25 @@ function readMirror(): Map<string, DraftRecord> {
 
 function writeMirror(): void {
   try {
-    localStorage.setItem(MIRROR_STORAGE_KEY, JSON.stringify(Object.fromEntries(drafts)));
+    const scopes = new Set([
+      ...drafts.keys(), ...pendingScopes, ...pendingTextScopes, ...pendingQueueScopes, ...writingScopes.keys(),
+    ]);
+    const mirror = new Map<string, DraftRecord & { unsavedText?: boolean; unsavedQueue?: boolean }>();
+    for (const scope of scopes) {
+      const draft = drafts.get(scope) ?? EMPTY_DRAFT;
+      const unsavedText = pendingTextScopes.has(scope) || writingTextScopes.has(scope);
+      const unsavedQueue = pendingQueueScopes.has(scope) || writingQueueScopes.has(scope);
+      // An empty record carries an unsaved cancellation across reloads.
+      if (isEmptyDraft(draft) && !unsavedText && !unsavedQueue) continue;
+      mirror.set(scope, {
+        ...draft,
+        ...(unsavedText ? { unsavedText: true } : {}),
+        ...(unsavedQueue ? { unsavedQueue: true } : {}),
+      });
+    }
+    localStorage.setItem(MIRROR_STORAGE_KEY, JSON.stringify(Object.fromEntries(mirror)));
   } catch {
-    // A full localStorage costs the first-paint restore, not the draft: the
-    // server copy is authoritative and arrives on hydrate.
+    // Storage failures must not prevent in-memory edits or their server saves.
   }
 }
 
@@ -163,41 +197,103 @@ let writeChain: Promise<void> = Promise.resolve();
 let draftGeneration = 0;
 // Counts only writes belonging to the current signed-in account.
 const writingScopes = new Map<string, number>();
+// Concurrent saves protect unsent text independently from the server's queue.
+const writingTextScopes = new Map<string, number>();
+// Queue edits stay protected until every outstanding snapshot has settled.
+const writingQueueScopes = new Map<string, number>();
 function flushServerWrites(): Promise<void> {
+  if (serverWriteTimer !== null) clearTimeout(serverWriteTimer);
   serverWriteTimer = null;
+  if (serverRetryTimer !== null) clearTimeout(serverRetryTimer);
+  serverRetryTimer = null;
   const generation = draftGeneration;
-  const entries = [...pendingScopes].map((scope) => [scope, drafts.get(scope)] as const);
+  const entries = [...pendingScopes].map((scope) => ({
+    scope,
+    draft: drafts.get(scope),
+    textChanged: pendingTextScopes.has(scope),
+    queueChanged: pendingQueueScopes.has(scope),
+  }));
   pendingScopes.clear();
-  for (const [scope] of entries) writingScopes.set(scope, (writingScopes.get(scope) ?? 0) + 1);
+  pendingTextScopes.clear();
+  pendingQueueScopes.clear();
+  for (const { scope, textChanged, queueChanged } of entries) {
+    writingScopes.set(scope, (writingScopes.get(scope) ?? 0) + 1);
+    if (textChanged) writingTextScopes.set(scope, (writingTextScopes.get(scope) ?? 0) + 1);
+    if (queueChanged) writingQueueScopes.set(scope, (writingQueueScopes.get(scope) ?? 0) + 1);
+  }
   const result = writeChain.catch(() => {}).then(async () => {
     let failure: unknown;
-    for (const [scope, draft] of entries) {
+    let retryableFailure = false;
+    for (const { scope, draft, textChanged, queueChanged } of entries) {
       if (generation !== draftGeneration) throw new Error('Draft save cancelled after sign-out.');
+      let response: Response | undefined;
       try {
-        const response = !draft || isEmptyDraft(draft)
-          ? await api.user.deleteDraft(scope)
-          : await api.user.saveDraft(scope, { text: draft.text, queuedMessages: draft.queuedMessages });
+        // An empty text-only save must also leave another tab's queue alone.
+        response = await api.user.saveDraft(scope, {
+          text: draft?.text ?? '',
+          ...(queueChanged ? { queuedMessages: draft?.queuedMessages ?? [] } : {}),
+        });
         if (response && !response.ok) throw new Error(`Draft save failed (${response.status})`);
-      } catch (error) { failure ??= error; }
-      finally {
+        if (generation === draftGeneration) {
+          // A hydrate may have read before this write but answer after it.
+          if (queueChanged) queueRevisions.set(scope, (queueRevisions.get(scope) ?? 0) + 1);
+          if (textChanged) textRevisions.set(scope, (textRevisions.get(scope) ?? 0) + 1);
+        }
+      } catch (error) {
+        failure ??= error;
+        if (generation === draftGeneration) {
+          // Restore dirty markers, never the failed snapshot: a newer edit or
+          // cancellation may have replaced it while this request was running.
+          // Later serialized writes supersede this failure and own recovery if
+          // they fail too, so they must not be replayed after they succeed.
+          if (textChanged && (writingTextScopes.get(scope) ?? 0) === 1) pendingTextScopes.add(scope);
+          if (queueChanged && (writingQueueScopes.get(scope) ?? 0) === 1) pendingQueueScopes.add(scope);
+          if (pendingTextScopes.has(scope) || pendingQueueScopes.has(scope)) pendingScopes.add(scope);
+          // Only transient errors schedule retries; validation and conflict
+          // responses remain pending for a later edit or explicit save.
+          retryableFailure ||= !response || response.status === 408 || response.status === 429 || response.status >= 500;
+        }
+      } finally {
         if (generation === draftGeneration) {
           const remaining = (writingScopes.get(scope) ?? 1) - 1;
           if (remaining) writingScopes.set(scope, remaining);
           else writingScopes.delete(scope);
+          for (const [changed, scopes] of [[textChanged, writingTextScopes], [queueChanged, writingQueueScopes]] as const) {
+            if (!changed) continue;
+            const remainingWrites = (scopes.get(scope) ?? 1) - 1;
+            if (remainingWrites) scopes.set(scope, remainingWrites);
+            else scopes.delete(scope);
+          }
+          writeMirror();
         }
       }
     }
     if (generation !== draftGeneration) throw new Error('Draft save cancelled after sign-out.');
-    if (failure) throw failure;
+    if (failure) {
+      if (retryableFailure && pendingScopes.size > 0) scheduleServerRetry();
+      throw failure;
+    }
+    if (pendingScopes.size === 0 && writingScopes.size === 0) serverRetryDelayMs = SERVER_WRITE_DEBOUNCE_MS;
   });
   writeChain = result;
   void result.catch((error) => { if (generation === draftGeneration) console.error('Failed to save chat draft:', error); });
   return result;
 }
 
+/** Coalesces retries across scopes while flush reads their latest local state. */
+function scheduleServerRetry(): void {
+  if (serverRetryTimer !== null) return;
+  serverRetryTimer = setTimeout(() => {
+    serverRetryTimer = null;
+    void flushServerWrites();
+  }, serverRetryDelayMs);
+  serverRetryDelayMs = Math.min(serverRetryDelayMs * 2, SERVER_WRITE_RETRY_MAX_MS);
+}
+
 /** Chat's steer control awaits persistence before referring to a queued message id. */
 export async function persistQueuedMessage(scope: string): Promise<void> {
   pendingScopes.add(scope);
+  pendingQueueScopes.add(scope);
   await flushServerWrites();
 }
 
@@ -239,6 +335,14 @@ function updateDraft(scope: string, update: Partial<DraftRecord>): void {
   }
   drafts = nextDrafts;
 
+  if (update.text !== undefined) {
+    pendingTextScopes.add(scope);
+    textRevisions.set(scope, (textRevisions.get(scope) ?? 0) + 1);
+  }
+  if (update.queuedMessages !== undefined) {
+    pendingQueueScopes.add(scope);
+    queueRevisions.set(scope, (queueRevisions.get(scope) ?? 0) + 1);
+  }
   writeMirror();
   queueServerWrite(scope);
   notifyListeners();
@@ -347,6 +451,8 @@ export function subscribeToChatDrafts(listener: () => void): () => void {
  */
 export async function hydrateChatDrafts(): Promise<void> {
   const generation = draftGeneration;
+  const queueRevisionsAtRequest = new Map(queueRevisions);
+  const textRevisionsAtRequest = new Map(textRevisions);
   let serverDrafts: Array<{
     scope?: unknown;
     text?: unknown;
@@ -376,7 +482,7 @@ export async function hydrateChatDrafts(): Promise<void> {
   const merged = new Map<string, DraftRecord>();
   for (const draft of serverDrafts) {
     const scope = typeof draft.scope === 'string' ? draft.scope : '';
-    if (!scope || (pendingScopes.has(scope) || writingScopes.has(scope))) {
+    if (!scope) {
       continue;
     }
 
@@ -389,14 +495,32 @@ export async function hydrateChatDrafts(): Promise<void> {
     });
   }
 
-  // Local edits whose debounced write has not left the browser yet win over
-  // the server snapshot. Every other missing scope was deleted remotely and
-  // must also disappear from the mirror.
-  for (const scope of new Set([...pendingScopes, ...writingScopes.keys()])) {
-    const pending = drafts.get(scope);
-    if (pending) {
-      merged.set(scope, pending);
-    }
+  // Preserve only fields edited locally. Typing must not resurrect a turn the
+  // server dispatched, and an in-flight hydrate must not undo a queue edit.
+  const queueChangedDuringRequest = (scope: string) => (
+    (queueRevisions.get(scope) ?? 0) !== (queueRevisionsAtRequest.get(scope) ?? 0)
+  );
+  const textChangedDuringRequest = (scope: string) => (
+    (textRevisions.get(scope) ?? 0) !== (textRevisionsAtRequest.get(scope) ?? 0)
+  );
+  const localScopes = new Set([
+    ...pendingScopes,
+    ...writingScopes.keys(),
+    ...[...queueRevisions.keys()].filter(queueChangedDuringRequest),
+    ...[...textRevisions.keys()].filter(textChangedDuringRequest),
+  ]);
+  for (const scope of localScopes) {
+    const local = drafts.get(scope) ?? EMPTY_DRAFT;
+    const server = merged.get(scope) ?? EMPTY_DRAFT;
+    const next: DraftRecord = {
+      text: pendingTextScopes.has(scope) || writingTextScopes.has(scope) || textChangedDuringRequest(scope)
+        ? local.text : server.text,
+      queuedMessages: pendingQueueScopes.has(scope) || writingQueueScopes.has(scope) || queueChangedDuringRequest(scope)
+        ? local.queuedMessages : server.queuedMessages,
+      queuedDelivery: server.queuedDelivery,
+    };
+    if (isEmptyDraft(next)) merged.delete(scope);
+    else merged.set(scope, next);
   }
 
   drafts = merged;
@@ -409,12 +533,23 @@ export function resetChatDrafts(): void {
   draftGeneration++;
   writeChain = Promise.resolve();
   writingScopes.clear();
+  writingTextScopes.clear();
+  writingQueueScopes.clear();
   drafts = new Map();
   pendingScopes.clear();
+  pendingTextScopes.clear();
+  pendingQueueScopes.clear();
+  queueRevisions.clear();
+  textRevisions.clear();
   if (serverWriteTimer !== null) {
     clearTimeout(serverWriteTimer);
     serverWriteTimer = null;
   }
+  if (serverRetryTimer !== null) {
+    clearTimeout(serverRetryTimer);
+    serverRetryTimer = null;
+  }
+  serverRetryDelayMs = SERVER_WRITE_DEBOUNCE_MS;
   try {
     localStorage.removeItem(MIRROR_STORAGE_KEY);
   } catch {
@@ -427,4 +562,5 @@ export function resetChatDrafts(): void {
 // input value is a `useState` initializer that runs before any effect.
 if (typeof localStorage !== 'undefined') {
   drafts = readMirror();
+  if (pendingScopes.size > 0) scheduleServerRetry();
 }

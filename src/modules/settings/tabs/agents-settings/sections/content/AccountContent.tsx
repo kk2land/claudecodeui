@@ -1,6 +1,7 @@
 import { AlertTriangle, LogIn } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
+import ProviderCliVersion from '@/modules/settings/tabs/agents-settings/sections/content/ProviderCliVersion';
 import { Badge, Button, LLMProviderLogo } from '@/shared/ui';
 import { CodexRateLimitsCard } from '@/modules/settings/tabs/agents-settings/sections/content/CodexRateLimitsCard';
 import type { AgentProvider, ProviderAuthStatus, ProviderAuthSubscriptionOverride } from '@/shared/types';
@@ -168,6 +169,13 @@ export default function AccountContent({ agent, authStatus, onLogin, rateLimitsE
           {!authStatus.loading && authStatus.subscriptionOverride && (
             <SubscriptionOverrideNotice override={authStatus.subscriptionOverride} />
           )}
+          <ProviderCliVersion
+            key={agent}
+            agent={agent}
+            installedVersion={authStatus.installedVersion ?? null}
+            textClass={config.textClass}
+            subtextClass={config.subtextClass}
+          />
 
           {(authStatus.method !== 'api_key' || agent === 'dsh') && (
             <div className="border-t border-border/50 pt-4">

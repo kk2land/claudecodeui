@@ -9,7 +9,7 @@ import { providerRuntimeService } from '@/modules/providers/index.js';
 import type { ProviderRuntimeGateway } from '@/shared/index.js';
 import { dispatchDueScheduledMessages, dispatchQueuedMessages } from '@/modules/scheduled-messages/services/scheduled-message-dispatcher.service.js';
 import { scheduledMessagesService } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
-import { chatRunRegistry } from '@/modules/websocket/index.js';
+import { chatRunRegistry, connectedClients } from '@/modules/websocket/index.js';
 
 const SESSION_ID = 'scheduled-session';
 
@@ -27,6 +27,7 @@ async function withIsolatedDatabase(runTest: (userId: number) => void | Promise<
     await runTest(Number(user.id));
   } finally {
     chatRunRegistry.clearAll();
+    connectedClients.clear();
     closeConnection();
     if (previousDatabasePath === undefined) {
       delete process.env.DATABASE_PATH;
@@ -59,6 +60,27 @@ function createRuntime(
       return true;
     },
   } as never;
+}
+
+/** A chat socket that records what it is sent, standing in for an open browser tab. */
+class FakeConnection {
+  readyState = 1; // WS_OPEN_STATE
+  frames: Array<Record<string, unknown>> = [];
+
+  send(data: string): void {
+    this.frames.push(JSON.parse(data) as Record<string, unknown>);
+  }
+
+  /** The scheduled-message announcements among everything this socket received. */
+  announcements(): Array<Record<string, unknown>> {
+    return this.frames.filter((frame) => frame.kind === 'scheduled_messages_changed');
+  }
+}
+
+function openTab(): FakeConnection {
+  const connection = new FakeConnection();
+  connectedClients.add(connection as never);
+  return connection;
 }
 
 test('a message due in the past is sent on the next pass, not skipped', async () => {

@@ -111,7 +111,10 @@
   "runtime": {
     "settings": "{{provider}} runtime settings",
     "mode": "Runtime",
-    "modes": { "acp": "ACP", "headless": "headless" },
+    "modes": {
+      "acp": "ACP",
+      "headless": "headless"
+    },
     "loading": "Loading…",
     "stop": "Stop {{runtime}}",
     "processRunning": "Process running",
@@ -218,7 +221,8 @@
       "queue": "Enter to queue your next message",
       "queueNext": "Enter to queue another message",
       "updateQueued": "Enter to update queued message",
-      "queueFull": "Queue is full ({{count}}). Send or delete one first"
+      "queueFull": "Queue is full ({{count}}). Send or delete one first",
+      "appendQueued": "Enter to add to the queued message"
     },
     "clickToChangeMode": "Click to change permission mode (or press Tab in input)",
     "showAllCommands": "Show all commands",
@@ -233,7 +237,9 @@
       "position": "{{position}} of {{total}}",
       "positionHint": "Queue position",
       "edit": "Edit queued message",
-      "delete": "Delete queued message"
+      "delete": "Delete queued message",
+      "append": "Add to queued message",
+      "notCombinable": "Failed to queue message: A slash command runs as a turn of its own, so it cannot be combined with the queued message. Send it after the queued message has gone."
     }
   },
   "composer": {
@@ -243,6 +249,8 @@
     "loadingModels": "Loading models…",
     "modelMenu": "Select model and reasoning effort",
     "permissionHeading": "How should {{provider}} actions be approved?",
+    "permissionCycleHint": "Press Tab in the message box to switch modes",
+    "permissionTriggerLabel": "{{mode}}: {{heading}}",
     "editing": {
       "title": "Replacing an earlier message",
       "filesNotReverted": "files the agent already changed are not reverted",

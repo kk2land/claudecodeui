@@ -7,15 +7,24 @@ import { parse as parseYaml } from 'yaml';
 
 import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-configuration.provider.js';
 import type { IProviderAuth } from '@/shared/interfaces.js';
-import type { ProviderAuthStatus } from '@/shared/types.js';
-import { readObjectRecord } from '@/shared/utils.js';
+import type { CliVersionProbe, ProviderAuthStatus } from '@/shared/types.js';
+import { probeCliVersion, readObjectRecord } from '@/shared/utils.js';
 
 /** Reports executable availability and configured credentials without calling the model. */
 export class DshAuthProvider implements IProviderAuth {
   constructor(private readonly configuration: DshConfigurationProvider) {}
 
+  /** Provider CLI settings probe the configured executable without reading credentials. */
+  checkInstalled(): CliVersionProbe {
+    try {
+      return probeCliVersion(this.configuration.read().bin);
+    } catch {
+      return { installed: false, exitCode: null, version: null };
+    }
+  }
+
   async getStatus(): Promise<ProviderAuthStatus> {
-    const base: ProviderAuthStatus = { installed: false, provider: 'dsh', authenticated: false, email: null, method: 'api_key' };
+    const base: ProviderAuthStatus = { installed: false, installedVersion: null, provider: 'dsh', authenticated: false, email: null, method: 'api_key' };
     try {
       const config = this.configuration.read();
       const installed = await new Promise<boolean>((resolve) => {

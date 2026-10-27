@@ -61,7 +61,13 @@ export default function QueuedMessageCard({
                 : t('input.queue.waitingBehind', { defaultValue: 'Waiting behind the queued message above' })}
             </span>
           </div>
-          <p className="mt-0.5 line-clamp-2 break-words text-sm text-foreground/90">{content}</p>
+          {/* Keep the complete queued turn readable and scrollable from the keyboard. */}
+          <p
+            tabIndex={0}
+            className="mt-0.5 max-h-28 overflow-y-auto whitespace-pre-wrap break-words rounded-sm text-sm text-foreground/90 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          >
+            {content}
+          </p>
           {attachmentCount > 0 && (
             <p className="mt-0.5 text-xs text-muted-foreground">
               {attachmentCount} {attachmentCount === 1 ? 'file' : 'files'} attached
