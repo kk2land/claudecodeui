@@ -28,11 +28,14 @@ The DSH provider supports ACP and headless transports only. Do not add a DSH SDK
 
 ## Local manual testing
 
-Use this flow when a change needs to be verified in a real browser. Run the steps in order, from this repository:
+Use this flow when a change needs to be verified in a real browser:
 
-1. `/Users/agent/Projects/ops/init_claudecodeui.sh 1`
-2. `/Users/agent/Projects/ops/cloudcli.sh dev`
+1. Codex runs `npm run build` from this repository and checks that it succeeds.
+2. Codex notifies the user that the build is ready and asks them to start the test process on port 3000. The user runs, in order:
+   - `/Users/agent/Projects/ops/init_claudecodeui.sh 1`
+   - `/Users/agent/Projects/ops/cloudcli.sh dev`
+3. After the user confirms the process is running, Codex uses `$ego-browser` to open `http://localhost:3000` and verify the affected frontend functionality.
 
-Open `http://localhost:3000` for manual testing. The `dev` command serves the existing build output in `dist-server/server/modules/cli/cli.js` and runs in the foreground, so keep that terminal open for as long as you are testing; if you change code, rebuild so the served artifacts match the source.
+The user owns starting and restarting the test process; Codex must not run the startup commands automatically. The `dev` command serves the existing build output in `dist-server/server/modules/cli/cli.js` and runs in the foreground, so the user keeps that terminal open while testing. If code changes during verification, Codex rebuilds and notifies the user to restart the process before continuing browser verification.
 
 Credentials stay out of Git. The test username and password live in `.claude/local-testing.env` (untracked and gitignored) as `CLAUDECODEUI_TEST_USERNAME` and `CLAUDECODEUI_TEST_PASSWORD`; read them locally when you actually run a browser test. Never copy the password into tracked files or into this document.
