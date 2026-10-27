@@ -706,7 +706,7 @@ export default function ChatComposer({
                   <VoiceInputButton state={voiceState} onToggle={voiceToggle} errorMsg={voiceError} />
                 )}
 
-                <TokenUsageSummary usage={tokenBudget} onClick={onShowTokenUsage} />
+                <TokenUsageSummary provider={providerLabel.toLowerCase()} usage={tokenBudget} onClick={onShowTokenUsage} />
 
                 {composerPrediction?.available && (
                   <ComposerPredictionStatus

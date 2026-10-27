@@ -198,15 +198,15 @@ function findCodexTokenUsage(fileContent: string): TokenUsageResult | null {
       let inputTokens = 0;
       let outputTokens = 0;
       let totalTokens = 0;
-      if (tokenInfo.total_token_usage) {
-        inputTokens = readUsageNumber(tokenInfo.total_token_usage.input_tokens);
-        outputTokens = readUsageNumber(tokenInfo.total_token_usage.output_tokens);
-        totalTokens = readUsageNumber(tokenInfo.total_token_usage.total_tokens)
+      if (tokenInfo.last_token_usage) {
+        inputTokens = readUsageNumber(tokenInfo.last_token_usage.input_tokens);
+        outputTokens = readUsageNumber(tokenInfo.last_token_usage.output_tokens);
+        totalTokens = readUsageNumber(tokenInfo.last_token_usage.total_tokens)
           || inputTokens + outputTokens;
       }
       return {
         used: totalTokens,
-        total: readUsageNumber(tokenInfo.model_context_window) || 200_000,
+        total: readUsageNumber(tokenInfo.model_context_window) || undefined,
         inputTokens,
         outputTokens,
         breakdown: { input: inputTokens, output: outputTokens },
@@ -222,7 +222,6 @@ function findCodexTokenUsage(fileContent: string): TokenUsageResult | null {
 function emptyCodexTokenUsage(): TokenUsageResult {
   return {
     used: 0,
-    total: 200_000,
     inputTokens: 0,
     outputTokens: 0,
     breakdown: { input: 0, output: 0 },

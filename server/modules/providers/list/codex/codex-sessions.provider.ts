@@ -1318,9 +1318,9 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
     if (entry.type === 'event_msg') {
       if (payload.type === 'token_count' && payload.info) {
         const info = payload.info as AnyRecord;
-        if (info.total_token_usage) {
-          const usage = info.total_token_usage as AnyRecord;
-          tokenUsage = { used: usage.total_tokens || 0, total: info.model_context_window || 200000 };
+        if (info.last_token_usage) {
+          const usage = info.last_token_usage as AnyRecord;
+          tokenUsage = { used: usage.total_tokens || 0, total: info.model_context_window };
         }
         continue;
       }

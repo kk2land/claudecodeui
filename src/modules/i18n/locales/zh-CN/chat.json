@@ -1,4 +1,7 @@
 {
+  "misc": {
+    "contextRemaining": "剩余 {{percent}}%"
+  },
   "codeBlock": {
     "copy": "复制",
     "copied": "已复制",

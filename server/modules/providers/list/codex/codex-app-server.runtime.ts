@@ -702,6 +702,14 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.publish(session);
       return;
     }
+    if (frame.method === 'thread/tokenUsage/updated') {
+      const usage = p.tokenUsage ?? p.usage;
+      // Like Codex TUI, context occupancy uses the last request, not lifetime usage.
+      // This is a thread notification and can arrive after turn/completed.
+      if (usage?.last) (session.turn?.writer ?? session.writer).send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'status', text: 'token_budget',
+        tokenBudget: { used: usage.last.totalTokens, total: usage.modelContextWindow, inputTokens: usage.last.inputTokens, outputTokens: usage.last.outputTokens } }));
+      return;
+    }
     const turnId: string | undefined = p.turnId ?? p.turn?.id;
     if (frame.method === 'turn/started') {
       if (!turnId || session.completedTurns.has(turnId)) return;
@@ -723,12 +731,6 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (frame.method === 'turn/completed') { if (!turn.id && turnId) turn.id = turnId; this.complete(session, p.turn.status, p.turn.error?.message); return; }
     if (frame.method === 'error') {
       if (!p.willRetry) turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'error', content: p.error?.message ?? 'Codex error' }));
-      return;
-    }
-    if (frame.method === 'thread/tokenUsage/updated') {
-      const usage = p.tokenUsage ?? p.usage;
-      if (usage?.total) turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'status', text: 'token_budget',
-        tokenBudget: { used: usage.total.totalTokens, total: usage.modelContextWindow, inputTokens: usage.total.inputTokens, outputTokens: usage.total.outputTokens } }));
       return;
     }
     if (frame.method === 'turn/plan/updated') {

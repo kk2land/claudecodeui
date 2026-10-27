@@ -1039,3 +1039,21 @@ test('an explicit matching clientId claims the submission for its own item only'
   h.finish();
   await running;
 });
+
+test('context usage uses last request and accepts updates after completion', async () => {
+  const h = harness();
+  const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  const tokenUsage = {
+    total: { totalTokens: 900000, inputTokens: 800000, outputTokens: 100000 },
+    last: { totalTokens: 32000, inputTokens: 30000, outputTokens: 2000 },
+    modelContextWindow: 200000,
+  };
+  h.event('thread/tokenUsage/updated', { tokenUsage });
+  assert.deepEqual(h.events.find((event) => event.text === 'token_budget')?.tokenBudget,
+    { used: 32000, total: 200000, inputTokens: 30000, outputTokens: 2000 });
+  h.finish();
+  await running;
+  h.event('thread/tokenUsage/updated', { tokenUsage: { ...tokenUsage, last: { ...tokenUsage.last, totalTokens: 14000 } } });
+  assert.equal(h.events.filter((event) => event.text === 'token_budget').at(-1)?.tokenBudget.used, 14000);
+});

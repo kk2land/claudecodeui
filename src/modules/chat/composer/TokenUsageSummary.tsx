@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 type TokenUsageSummaryProps = {
   usage: Record<string, unknown> | null;
   onClick?: () => void;
+  provider?: string;
 };
 
 const formatTokenCount = (value: number) => {
@@ -36,7 +37,7 @@ const readUsageNumber = (value: unknown) => {
  * Rendered by chat's ChatComposer to show the session's context-window usage
  * and open the detailed token breakdown on click.
  */
-function TokenUsageSummary({ usage, onClick }: TokenUsageSummaryProps) {
+function TokenUsageSummary({ usage, onClick, provider }: TokenUsageSummaryProps) {
   const { t } = useTranslation();
   const breakdown =
     usage?.breakdown && typeof usage.breakdown === 'object'
@@ -46,11 +47,20 @@ function TokenUsageSummary({ usage, onClick }: TokenUsageSummaryProps) {
   const outputTokens = readUsageNumber(usage?.outputTokens ?? breakdown?.output);
   const usedTokens = readUsageNumber(usage?.used) || inputTokens + outputTokens;
 
+  const contextWindow = readUsageNumber(usage?.total);
+  // Codex TUI normalizes both counts by its fixed prompt/tool baseline.
+  const remainingPercent = provider === 'codex' && contextWindow > 0
+    ? contextWindow <= 12_000 ? 0 : Math.round(
+      Math.max(0, contextWindow - 12_000 - Math.max(0, usedTokens - 12_000))
+      / (contextWindow - 12_000) * 100,
+    )
+    : null;
+
   return (
     <button
       type="button"
       onClick={onClick}
-      className="inline-flex h-8 items-center gap-1.5 rounded-lg border border-border/70 bg-background/70 px-2 text-xs text-muted-foreground shadow-sm transition-colors hover:border-primary/25 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:gap-2 sm:px-2.5"
+      className="inline-flex h-8 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-lg border border-border/70 bg-background/70 px-2 text-xs text-muted-foreground shadow-sm transition-colors hover:border-primary/25 hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 sm:gap-2 sm:px-2.5"
       title={t('chat:misc.tokensUsed', { count: usedTokens })}
       aria-label={t('chat:misc.showTokenUsage')}
     >
@@ -58,9 +68,11 @@ function TokenUsageSummary({ usage, onClick }: TokenUsageSummaryProps) {
         <ActivityIcon className="h-3.5 w-3.5" />
       </span>
       <span className="font-medium text-foreground">{formatTokenCount(usedTokens)}</span>
-      <span className="hidden text-muted-foreground/70 sm:inline">
-        {t('chat:misc.tokensLabel', { count: usedTokens })}
-      </span>
+      {remainingPercent !== null && (
+        <span className="rounded-md bg-primary/10 px-1.5 py-0.5 font-semibold tabular-nums text-primary">
+          {t('chat:misc.contextRemaining', { percent: remainingPercent, defaultValue: '{{percent}}% left' })}
+        </span>
+      )}
     </button>
   );
 }

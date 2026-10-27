@@ -489,6 +489,7 @@
     "compacted": "Compacted",
     "compactionSummary": "full summary",
     "expandImage": "Expand {{name}}",
+    "contextRemaining": "{{percent}}% left",
     "tokensLabel_one": "token",
     "tokensLabel_other": "tokens",
     "escClosesModal": "Esc closes the modal.",
