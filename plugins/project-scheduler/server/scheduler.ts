@@ -71,7 +71,16 @@ export class ProjectScheduler {
     run.status = "interrupted";
     run.endedAt = new Date().toISOString();
     run.reason = "调度进程意外退出，本次执行未自动重试";
-    run.alertStatus = this.store.settings().telegram.enabled
+    // Recovery must use the run's original policy, even after reload or deletion.
+    let notify = false;
+    try {
+      const file = path.join(this.store.directory, "runs", run.id, "task.json");
+      const snapshot = JSON.parse(fs.readFileSync(file, "utf8")) as SchedulerTask;
+      notify = snapshot.notify === true;
+    } catch {
+      // Missing or damaged snapshots must not opt a task into notifications.
+    }
+    run.alertStatus = notify && this.store.settings().telegram.enabled
       ? "pending"
       : "none";
     this.store.saveRun(run);
@@ -352,6 +361,9 @@ export class ProjectScheduler {
     success: boolean,
     reason?: string,
   ): void {
+    // A worker may crash during its grace period; do not cancel the host fallback
+    // until the remaining command group has also received the forced stop.
+    if (item.stopped && item.commandPid) terminateTree(item.commandPid, true);
     clearTimeout(item.timer);
     clearTimeout(item.killTimer);
     this.active.delete(item.run.id);
@@ -406,7 +418,8 @@ export class ProjectScheduler {
       throw new Error("上次中断的进程尚未确认退出，当前禁止启动重叠任务");
     if (!preserveCause) item.stopped = "stopped";
     if (item.child.connected) item.child.send({ type: "stop" }, () => {});
-    if (item.commandPid) terminateTree(item.commandPid);
+    // Let the worker establish its cleanup barrier before signalling the command.
+    else if (item.commandPid) terminateTree(item.commandPid);
     item.killTimer ??= setTimeout(() => {
       if (item.commandPid) terminateTree(item.commandPid, true);
       item.child?.kill("SIGKILL");

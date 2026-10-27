@@ -11,13 +11,21 @@ import type { SchedulerTask } from "../shared/contracts.js";
 let child: ChildProcess | undefined,
   killTimer: NodeJS.Timeout | undefined,
   stopping = false;
+let stopCompletion: Promise<void> | undefined;
 function stop(): void {
   stopping = true;
   if (child?.pid) {
     terminateTree(child.pid);
-    killTimer ??= setTimeout(() => {
-      if (child?.pid) terminateTree(child.pid, true);
-    }, 1500);
+    // Keep the worker alive through escalation even if the direct child exits first.
+    stopCompletion ??= new Promise<void>((resolve) => {
+      killTimer = setTimeout(async () => {
+        try {
+          if (child?.pid) await terminateTree(child.pid, true);
+        } finally {
+          resolve();
+        }
+      }, 1500);
+    });
   }
 }
 process.on("disconnect", stop);
@@ -117,11 +125,9 @@ process.on(
           reason: errorMessage,
         };
       }
-      clearTimeout(killTimer);
       if (process.connected) process.send?.({ type: "result", ...result });
       process.exitCode = result.success ? 0 : 1;
     } catch (error) {
-      clearTimeout(killTimer);
       process.stderr.write(String(error) + "\n");
       if (process.connected)
         process.send?.({
@@ -132,6 +138,8 @@ process.on(
         });
       process.exitCode = 1;
     } finally {
+      await stopCompletion;
+      clearTimeout(killTimer);
       if (process.connected) process.disconnect();
     }
   },

@@ -347,3 +347,97 @@ test("log deletion failures leave history available for the next cleanup attempt
   assert.equal(f.store.runs().length, 1);
   assert.equal(f.store.prune(1).length, 1);
 });
+
+
+for (const action of ["stop", "timeout", "close"] as const) {
+  test(`${action} kills a TERM-resistant descendant before releasing the run`, {
+    skip: process.platform === "win32",
+  }, async (t) => {
+    const f = fixture(t);
+    const heartbeat = path.join(f.project, "resistant-heartbeat");
+    const pidFile = path.join(f.project, "resistant-pid");
+    const descendant = `const fs = require("fs");
+      process.on("SIGTERM", () => {});
+      fs.writeFileSync(${JSON.stringify(pidFile)}, String(process.pid));
+      setInterval(() => fs.appendFileSync(${JSON.stringify(heartbeat)}, "x"), 25);`;
+    let descendantPid: number | undefined;
+    t.after(() => {
+      if (descendantPid) {
+        try { process.kill(descendantPid, "SIGKILL"); } catch { /* already gone */ }
+      }
+    });
+    f.config([task("resistant", `require("child_process").spawn(process.execPath,
+      ["-e", ${JSON.stringify(descendant)}], {stdio: "ignore"});
+      setInterval(() => {}, 1000);`, { timeoutSeconds: action === "timeout" ? 2 : 0 })]);
+    f.scheduler.load(undefined, false, true);
+    const run = f.scheduler.start("p1", "resistant", "manual");
+    await waitFor(() => fs.existsSync(heartbeat), Boolean);
+    descendantPid = Number(fs.readFileSync(pidFile, "utf8"));
+    let closing: Promise<void> | undefined;
+    if (action === "stop") f.scheduler.stop(run.id);
+    else if (action === "close") closing = f.scheduler.close();
+    else await waitFor(() => Date.now() - Date.parse(run.startedAt) >= 2100, Boolean);
+    // The direct parent is gone, but its TERM-resistant child still holds the reservation.
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(f.store.run(run.id)?.status, "running");
+    if (action !== "close")
+      assert.equal(f.scheduler.start("p1", "resistant", "manual").status, "skipped_overlap");
+    await waitFor(() => f.store.run(run.id)?.endedAt, Boolean);
+    await closing;
+    assert.equal(f.store.run(run.id)?.status, action === "timeout" ? "timed_out" : "stopped");
+    const size = fs.statSync(heartbeat).size;
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    assert.equal(fs.statSync(heartbeat).size, size);
+  });
+}
+
+test("interrupted alerts honor the original run snapshot during recovery and maintenance", (t) => {
+  const f = fixture(t);
+  f.store.saveSettings({ ...f.store.settings(), telegram: {
+    enabled: true, botToken: "123:test", chatId: "1", proxy: "",
+  } });
+  f.config([task("changed", "")]);
+  f.scheduler.load(undefined, false, true);
+  const definition = f.store.definitions()[0]!.definition;
+  f.store.importProject("p1", [definition, {
+    ...definition, id: "disabled", notify: false,
+  }], true);
+  // Current definitions contradict snapshots, or are absent entirely.
+  for (const [index, entry] of [
+    { notify: false, taskId: "changed" },
+    { notify: true, taskId: "deleted" },
+    { notify: true, taskId: "disabled" },
+    { notify: undefined, taskId: "missing" },
+    { notify: "corrupt", taskId: "broken" },
+  ].entries()) {
+    const id = `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`;
+    const run: SchedulerRun = {
+      id, projectId: "p1", projectName: "test", taskId: entry.taskId,
+      taskName: entry.taskId, status: "running", trigger: "manual",
+      scheduledAt: new Date().toISOString(), startedAt: new Date().toISOString(),
+      endedAt: null, exitCode: null, reason: null, workerPid: index % 2 ? process.pid : null,
+      alertStatus: "none", alertError: null, alertAttempts: 0,
+    };
+    f.store.saveRun(run);
+    const directory = path.join(f.store.directory, "runs", id);
+    fs.mkdirSync(directory, { recursive: true });
+    if (entry.notify !== undefined)
+      fs.writeFileSync(path.join(directory, "task.json"), entry.notify === "corrupt"
+        ? "invalid json" : JSON.stringify({ ...definition, notify: entry.notify }));
+  }
+  f.scheduler.recover();
+  // Simulate recovered workers exiting without spawning unrelated real processes.
+  const kill = process.kill.bind(process);
+  t.mock.method(process, "kill", (pid: number, signal?: string | number) => {
+    if (pid === process.pid && signal === 0)
+      throw Object.assign(new Error("worker exited"), { code: "ESRCH" });
+    return kill(pid, signal);
+  });
+  f.scheduler.maintenance();
+  const runs = f.store.runs();
+  assert.equal(runs.length, 5);
+  for (const run of runs) {
+    assert.equal(run.status, "interrupted");
+    assert.equal(run.alertStatus, ["deleted", "disabled"].includes(run.taskId) ? "pending" : "none");
+  }
+});
