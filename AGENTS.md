@@ -1,17 +1,5 @@
 # Repository guidance
 
-## Disabled skills
-
-- A skill's disabled state takes precedence over any instruction in this file or other repository documents to use that skill, including `$codex-dsh`.
-- Never load or use a disabled skill. Do not search for another copy, read its `SKILL.md`, or run its bundled scripts to bypass the disabled state.
-- If a required skill is disabled, complete the task directly using the available tools and the applicable repository standards.
-
-## Codex and dsh responsibilities
-
-- Codex owns requirement analysis, solution design, task breakdown, review, and final acceptance.
-- dsh performs concrete execution, including implementation, file changes, and necessary validation, according to Codex's plan and constraints.
-- When `$codex-dsh` is enabled, Codex must use its workflow to delegate execution to dsh, review the actual changes and validation results, and return issues to dsh for rework before accepting the task. When it is disabled, Codex performs the execution directly.
-
 ## Backend code
 
 For every task that creates, modifies, refactors, or reviews backend code under `server/`, load and follow `$backend-module-standards` from `.agents/skills/backend-module-standards/SKILL.md`. Apply it only to backend code; do not impose those architecture rules on the frontend.

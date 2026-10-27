@@ -474,8 +474,8 @@ export default function ChatComposer({
         </div>
       )}
 
-      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
-      {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} providerLabel={providerLabel} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
+      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} hasQueuedDraft={hasQueuedDraft} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
+      {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} hasQueuedDraft={hasQueuedDraft} providerLabel={providerLabel} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
       <BackgroundSendDialog
         prompt={backgroundSendPrompt}
         onResolve={onResolveBackgroundSendPrompt}

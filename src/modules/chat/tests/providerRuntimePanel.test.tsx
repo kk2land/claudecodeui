@@ -19,7 +19,7 @@ function controls(patch: Partial<ProviderRuntimeState> = {}): ProviderRuntimeCon
 
 test('shows DSH transport selection, actual process details and a stop action', () => {
   const value = controls();
-  render(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" />);
+  render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
   expect(screen.queryByRole('combobox')).toBeNull();
   fireEvent.click(screen.getByRole('button', { name: 'DeepSeek Harness' }));
   expect(screen.getAllByRole('option').map((option) => option.textContent)).toEqual(['ACP', 'headless']);
@@ -34,7 +34,7 @@ test('shows DSH transport selection, actual process details and a stop action', 
 });
 
 test('headless has no ACP stop button and explains its approval limit', () => {
-  render(<ProviderRuntimePanel controls={controls({ runtime: 'headless', supportsPermissionRequests: false })} providerLabel="DeepSeek Harness" />);
+  render(<ProviderRuntimePanel hasQueuedDraft controls={controls({ runtime: 'headless', supportsPermissionRequests: false })} providerLabel="DeepSeek Harness" />);
   fireEvent.click(screen.getByRole('button', { name: 'DeepSeek Harness' }));
   expect(screen.queryByRole('button', { name: 'Stop ACP' })).toBeNull();
   expect(screen.getByText(/no interactive approval channel/)).toBeTruthy();
@@ -42,11 +42,11 @@ test('headless has no ACP stop button and explains its approval limit', () => {
 
 test('active turns prevent switching but allow stopping, while transitions lock conflicting actions', () => {
   const value = controls({ phase: 'running' });
-  const view = render(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" />);
+  const view = render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
   fireEvent.click(screen.getByRole('button', { name: 'DeepSeek Harness' }));
   expect((screen.getByRole('combobox') as HTMLSelectElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: 'Stop ACP' }) as HTMLButtonElement).disabled).toBe(false);
-  view.rerender(<ProviderRuntimePanel controls={controls({ phase: 'stopping', queueHeld: true })} providerLabel="DeepSeek Harness" />);
+  view.rerender(<ProviderRuntimePanel hasQueuedDraft controls={controls({ phase: 'stopping', queueHeld: true })} providerLabel="DeepSeek Harness" />);
   expect((screen.getByRole('button', { name: 'Stop ACP' }) as HTMLButtonElement).disabled).toBe(true);
   expect((screen.getByRole('button', { name: 'Resume queue' }) as HTMLButtonElement).disabled).toBe(true);
 });
@@ -54,8 +54,24 @@ test('active turns prevent switching but allow stopping, while transitions lock 
 test('paused queues can resume independently of process startup and errors stay visible', () => {
   const value = controls({ queueHeld: true });
   value.error = 'Stop could not be confirmed.';
-  render(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" />);
+  render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
   fireEvent.click(screen.getByRole('button', { name: 'Resume queue' }));
   expect(value.control).toHaveBeenCalledWith({ action: 'queue-resume' });
   expect(screen.getByRole('alert').textContent).toBe('Stop could not be confirmed.');
 });
+
+for (const mobile of [false, true]) {
+  test(`empty paused queues hide resume and queued messages restore it (${mobile ? 'mobile' : 'desktop'})`, () => {
+    const value = controls({ queueHeld: true });
+    const settingsContainer = mobile ? null : undefined;
+    const view = render(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" settingsContainer={settingsContainer} />);
+    expect(screen.queryByRole('button', { name: 'Resume queue' })).toBeNull();
+    if (mobile) expect(view.container.textContent).toBe('');
+    view.rerender(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" settingsContainer={settingsContainer} hasQueuedDraft />);
+    fireEvent.click(screen.getByRole('button', { name: 'Resume queue' }));
+    expect(value.control).toHaveBeenCalledWith({ action: 'queue-resume' });
+    view.rerender(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" settingsContainer={settingsContainer} hasQueuedDraft={false} />);
+    expect(screen.queryByRole('button', { name: 'Resume queue' })).toBeNull();
+    expect(value.state?.queueHeld).toBe(true);
+  });
+}

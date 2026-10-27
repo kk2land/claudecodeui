@@ -393,7 +393,9 @@ test('blocking questions and a held queue stay outside the sheet and keep their 
       }],
     }],
   });
-  render(<Harness codexControls={codex} />);
+  const view = render(<Harness codexControls={codex} />);
+  assert.equal(screen.queryByRole('button', { name: 'Resume queue' }), null);
+  view.rerender(<Harness codexControls={codex} overrides={{ queuedDraft: { content: '', attachments: [], uploadedAttachments: [{ name: 'file.txt' }] } }} />);
 
   // Both stay beside the input, not behind a sheet.
   assert.ok(await screen.findByText('Which format?'));

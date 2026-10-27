@@ -47,13 +47,15 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
  * null renders only the blocking notices/questions that must stay beside the
  * input; an element portals the settings into it.
  */
-export function CodexControlPanel({ controls, onExecutePlan, settingsContainer }: {
+export function CodexControlPanel({ controls, onExecutePlan, settingsContainer, hasQueuedDraft = false }: {
   controls: CodexControls;
   onExecutePlan(): void;
   settingsContainer?: Element | null;
+  hasQueuedDraft?: boolean;
 }) {
   const { t, i18n } = useTranslation('chat');
   const { state, error, pending } = controls;
+  const showResumeQueue = Boolean(state?.queueHeld && hasQueuedDraft);
   const runtimePanelId = useId();
   // Keep advanced runtime controls out of the toolbar until the user opens them.
   const [runtimeOpen, setRuntimeOpen] = useState(false);
@@ -79,7 +81,7 @@ export function CodexControlPanel({ controls, onExecutePlan, settingsContainer }
             {settingsContainer === undefined && <>
               {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
               {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
-              {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
+              {showResumeQueue && <button type="button" className={button} disabled={pending || state?.phase === 'stopping' || state?.phase === 'stopFailed'}
                 onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
             </>}
           </>}
@@ -153,11 +155,11 @@ export function CodexControlPanel({ controls, onExecutePlan, settingsContainer }
     </div>;
 
   const notices = <div className="min-w-0 space-y-2 text-sm">
-      {settingsContainer !== undefined && native && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || state?.queueHeld) && (
+      {settingsContainer !== undefined && native && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || showResumeQueue) && (
         <div className="flex flex-wrap items-center gap-2">
           {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
           {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}
-          {state?.queueHeld && <button type="button" className={button} disabled={pending || state.phase === 'stopping' || state.phase === 'stopFailed'}
+          {showResumeQueue && <button type="button" className={button} disabled={pending || state?.phase === 'stopping' || state?.phase === 'stopFailed'}
             onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
         </div>
       )}
@@ -169,7 +171,7 @@ export function CodexControlPanel({ controls, onExecutePlan, settingsContainer }
   // notices when one exists, so an idle composer grows no extra toolbar.
   const hasNotices = Boolean(
     (settingsContainer !== undefined && native
-      && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || state?.queueHeld))
+      && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || showResumeQueue))
       || error || state?.error || state?.questions.length,
   );
   if (settingsContainer === undefined) {
