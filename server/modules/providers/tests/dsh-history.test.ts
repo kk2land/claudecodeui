@@ -106,3 +106,32 @@ test('native reader rejects unknown versions and paths escaping the configured r
     await assert.rejects(store.find('../escape'), /invalid|must|path/i);
   } finally { await rm(root, { recursive: true, force: true }); }
 });
+
+test('native history excludes skill catalogs from messages, totals, and pagination', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-catalog-history-'));
+  try {
+    const directory = path.join(root, 'sessions', 'workspace', 'native-catalog');
+    await mkdir(directory, { recursive: true });
+    const catalog = (seq: number, update: boolean) => ({ type: 'user/message', seq, time: seq + 1, surfaceOp: 'append',
+      data: { id: `catalog-${seq}`, role: 'user', source: { kind: 'skill-catalog', form: 'catalog', ...(update ? { update: true } : {}), entries: [] }, content: [{ type: 'text', text: '<system-reminder>A skill is a reusable set of task-specific instructions.</system-reminder>' }] } });
+    const rows = [
+      { type: 'session', version: 4, id: 'native-catalog', createdAt: 1, cwd: root, isSeeded: false, delegationDepth: 0 },
+      { type: 'user/message', seq: 0, time: 1, surfaceOp: 'append', data: { id: 'human', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Hello.' }] } },
+      catalog(1, false),
+      catalog(2, true),
+      { type: 'user/message', seq: 3, time: 4, surfaceOp: 'append', data: { id: 'human-2', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Again.' }] } },
+    ];
+    await writeFile(path.join(directory, 'session.v4.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
+    const store = new DshSessionStore(new DshConfigurationProvider({ DSH_HOME: root }));
+    const sessions = new DshSessionsProvider(store, new DshEventsProvider());
+    const history = await sessions.fetchHistory('app-catalog', { providerSessionId: 'native-catalog' });
+    assert.deepEqual(history.messages.map((message) => message.content), ['Hello.', 'Again.']);
+    assert.equal(history.total, 2);
+    const latest = await sessions.fetchHistory('app-catalog', { providerSessionId: 'native-catalog', limit: 1 });
+    assert.deepEqual(latest.messages.map((message) => message.content), ['Again.']);
+    assert.equal(latest.total, 2);
+    assert.equal(latest.hasMore, true);
+    const older = await sessions.fetchHistory('app-catalog', { providerSessionId: 'native-catalog', limit: 1, offset: 1 });
+    assert.deepEqual(older.messages.map((message) => message.content), ['Hello.']);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});

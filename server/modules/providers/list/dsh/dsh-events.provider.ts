@@ -31,7 +31,11 @@ export class DshEventsProvider {
     if (type === 'text' || type === 'thinking') return event.text ? [make({ kind: type === 'thinking' ? 'thinking' : 'text', content: event.text })] : [];
     if (type === 'user/message' || type === 'assistant/message') {
       const message = type === 'user/message' ? data : data.message;
-      if (message?.source?.kind === 'runtime-context') return [];
+      // DSH injects provider-authored context as user/message surface entries.
+      // They are prompt scaffolding, not human turns, and must not appear in
+      // the transcript (or history counts/pagination). Identify them only by
+      // their source, never by reminder-looking text.
+      if (message?.source?.kind === 'runtime-context' || message?.source?.kind === 'skill-catalog') return [];
       return (message?.content ?? []).flatMap((block: AnyRecord, index: number) => {
         // Tool calls are surface blocks of the assistant message. The separate
         // tool/call lifecycle event is not part of the visible history fold.

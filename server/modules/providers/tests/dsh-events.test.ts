@@ -74,3 +74,27 @@ test('DSH ACP usage_update drops malformed or incomplete readings', () => {
     assert.deepEqual(events.normalize({ update }, 'app-1'), []);
   }
 });
+
+for (const { name, source } of [
+  { name: 'initial', source: { kind: 'skill-catalog', form: 'catalog', entries: [] } },
+  { name: 'updated', source: { kind: 'skill-catalog', form: 'catalog', update: true, entries: [] } },
+]) {
+  test(`DSH drops ${name} skill-catalog user messages without taking the prompt shape into account`, () => {
+    const text = '<system-reminder>\nA skill is a reusable set of task-specific instructions.\n\n<available_skills>\n- `demo`: Demo\n</available_skills>\n</system-reminder>';
+    const rows = events.normalize({ type: 'user/message', data: { role: 'user', source, content: [{ type: 'text', text }] } }, 'session-1');
+    assert.deepEqual(rows, []);
+  });
+}
+
+test('DSH preserves genuine user and assistant turns whose text resembles the skill catalog', () => {
+  const text = '<system-reminder>A skill is a reusable set of task-specific instructions.<available_skills></available_skills></system-reminder>';
+  const [user] = events.normalize({ type: 'user/message', data: { role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text }] } }, 'session-1');
+  assert.equal(user.role, 'user');
+  assert.equal(user.content, text);
+  const [assistant] = events.normalize({ type: 'assistant/message', data: { message: { role: 'assistant', source: { kind: 'model' }, content: [{ type: 'text', text }] } } }, 'session-1');
+  assert.equal(assistant.role, 'assistant');
+  assert.equal(assistant.content, text);
+  const [tool] = events.normalize({ type: 'tool/result', data: { message: { toolCallId: 'tool-1', content: [{ type: 'text', text }], isError: false } } }, 'session-1');
+  assert.equal(tool.kind, 'tool_result');
+  assert.equal(tool.content, text);
+});
