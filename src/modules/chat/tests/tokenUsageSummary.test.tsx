@@ -30,3 +30,30 @@ it('keeps other providers independent of the Codex baseline', () => {
   render(<TokenUsageSummary provider="claude" usage={{ used: 32000, total: 200000 }} />);
   expect(screen.queryByText(/% left/)).toBeNull();
 });
+
+it.each([
+  [100000, 1000000, 90],
+  [5906, 1000000, 99],
+  [0, 1000000, 100],
+  [1000000, 1000000, 0],
+  [2000000, 1000000, 0],
+  [-500, 1000000, 100],
+])('shows DSH remaining percentage for %i tokens in a %i window', (used, total, percent) => {
+  render(<TokenUsageSummary provider="dsh" usage={{ used, total }} />);
+  expect(screen.getByText(`${percent}% left`)).toBeTruthy();
+});
+
+it.each([
+  { used: 1000 },
+  { used: 1000, total: 0 },
+  { used: 1000, total: -5 },
+  { used: 1000, total: 'invalid' },
+])('hides the DSH percentage when capacity is unusable: %o', (usage) => {
+  render(<TokenUsageSummary provider="dsh" usage={usage} />);
+  expect(screen.queryByText(/% left/)).toBeNull();
+});
+
+it.each(['dsh', 'deepseek harness'])('shows DSH remaining percentage for provider label %s', (provider) => {
+  render(<TokenUsageSummary provider={provider} usage={{ used: 5906, total: 1000000 }} />);
+  expect(screen.getByText('99% left')).toBeTruthy();
+});
