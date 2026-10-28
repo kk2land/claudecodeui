@@ -7,7 +7,7 @@ import { Readable } from 'node:stream';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
 
-import { createFileTreeService } from '@/modules/file-tree/file-tree.service.js';
+import type { AppError as WorkspaceError } from '@/shared/utils.js';
 import type {
   FileTreeDirectoryEntry,
   FileTreeFileSystem,
@@ -15,9 +15,25 @@ import type {
   FileTreeServices,
   FileTreeStats,
 } from '@/shared/types.js';
-import { AppError, resolveReadOnlyRootPath, validateWorkspacePath } from '@/shared/utils.js';
 
 const testDirectory = path.dirname(fileURLToPath(import.meta.url));
+
+/** Load the real policy with a fixed root instead of inheriting a developer's WORKSPACES_ROOT. */
+async function loadWorkspaceModules() {
+  const previousWorkspaceRoot = process.env.WORKSPACES_ROOT;
+  process.env.WORKSPACES_ROOT = testDirectory;
+  try {
+    return await Promise.all([
+      import('@/modules/file-tree/file-tree.service.js'),
+      import('@/shared/utils.js'),
+    ]);
+  } finally {
+    if (previousWorkspaceRoot === undefined) delete process.env.WORKSPACES_ROOT;
+    else process.env.WORKSPACES_ROOT = previousWorkspaceRoot;
+  }
+}
+
+const [{ createFileTreeService }, { AppError, resolveReadOnlyRootPath, validateWorkspacePath }] = await loadWorkspaceModules();
 
 function createDirectoryEntry(name: string, directory: boolean): FileTreeDirectoryEntry {
   return {
@@ -460,14 +476,14 @@ test('the temp directory can be browsed and read, but never written to', async (
     const streamed = await service.openFile('project-1', outputPath);
     streamed.stream.destroy();
 
-    // Read-only means read-only: nothing may be created or changed there.
+    // Reads outside the configured workspace must not grant write access there.
     await assert.rejects(
       service.saveTextFile('project-1', outputPath, 'overwritten'),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     await assert.rejects(
       service.createWorkspaceFolder(path.join(temporaryDirectory, 'new-folder')),
-      (error: unknown) => (error as AppError).code === 'INVALID_WORKSPACE_PATH',
+      (error: unknown) => (error as WorkspaceError).code === 'INVALID_WORKSPACE_PATH',
     );
     await assert.rejects(
       service.createEntry({
@@ -476,11 +492,11 @@ test('the temp directory can be browsed and read, but never written to', async (
         type: 'file',
         name: 'planted.txt',
       }),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     await assert.rejects(
       service.renameEntry({ projectId: 'project-1', oldPath: outputPath, newName: 'renamed.output' }),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     const uploadedTemporaryPath = path.join(projectRoot, 'upload.tmp');
     await fsPromises.writeFile(uploadedTemporaryPath, 'upload', 'utf8');
@@ -492,11 +508,11 @@ test('the temp directory can be browsed and read, but never written to', async (
         requestedFileCount: 1,
         files: [{ originalName: 'upload.txt', temporaryPath: uploadedTemporaryPath, size: 6, mimeType: 'text/plain' }],
       }),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     await assert.rejects(
       service.deleteEntry({ projectId: 'project-1', targetPath: outputPath }),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     assert.deepEqual(await fsPromises.readdir(path.join(temporaryDirectory, 'tasks')), ['agent.output']);
     assert.equal(await fsPromises.readFile(outputPath, 'utf8'), 'what the agent found');
@@ -523,7 +539,7 @@ test('reading through a symlink out of the temp directory is still refused', asy
     const service = createRealFileSystemService(projectRoot);
     await assert.rejects(
       service.readTextFile('project-1', path.join(temporaryDirectory, 'escape', 'secret.txt')),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
   } finally {
     await fsPromises.rm(temporaryDirectory, { recursive: true, force: true });
@@ -557,18 +573,18 @@ test('a file in another folder of the workspace can be read, but never written t
 
     await assert.rejects(
       service.saveTextFile('project-1', reportPath, 'overwritten'),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     await assert.rejects(
       service.deleteEntry({ projectId: 'project-1', targetPath: reportPath }),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
     assert.equal(await fsPromises.readFile(reportPath, 'utf8'), 'what the run found');
 
     // A link inside the workspace does not open what lies outside it.
     await assert.rejects(
       service.readTextFile('project-1', path.join(workspaceRoot, 'escape', 'secret.txt')),
-      (error: unknown) => (error as AppError).code === 'PATH_OUTSIDE_PROJECT',
+      (error: unknown) => (error as WorkspaceError).code === 'PATH_OUTSIDE_PROJECT',
     );
   } finally {
     await fsPromises.rm(workspaceRoot, { recursive: true, force: true });

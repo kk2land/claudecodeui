@@ -317,7 +317,9 @@ test('a session detached by an edit reports no token usage of its own', { concur
       payload: {
         type: 'token_count',
         info: {
-          total_token_usage: { input_tokens: 100_000, output_tokens: 25_000, total_tokens: 125_000 },
+          // Context occupancy is the last request, not the session's cumulative bill.
+          last_token_usage: { input_tokens: 100_000, output_tokens: 25_000, total_tokens: 125_000 },
+          total_token_usage: { input_tokens: 300_000, output_tokens: 75_000, total_tokens: 375_000 },
           model_context_window: 200_000,
         },
       },

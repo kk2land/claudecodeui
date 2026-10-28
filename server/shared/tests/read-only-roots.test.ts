@@ -21,8 +21,11 @@ await mkdir(outsideDirectory);
 
 const previousHome = process.env.HOME;
 const previousUserProfile = process.env.USERPROFILE;
+const previousWorkspaceRoot = process.env.WORKSPACES_ROOT;
 process.env.HOME = fixtureHome;
 process.env.USERPROFILE = fixtureHome;
+// Containment must not depend on the developer's configured workspace root.
+process.env.WORKSPACES_ROOT = fixtureHome;
 
 const { resolvePathUnderRoots, resolveReadOnlyRootPath, validateWorkspacePath } = await import('@/shared/utils.js');
 
@@ -36,6 +39,11 @@ after(async () => {
     delete process.env.USERPROFILE;
   } else {
     process.env.USERPROFILE = previousUserProfile;
+  }
+  if (previousWorkspaceRoot === undefined) {
+    delete process.env.WORKSPACES_ROOT;
+  } else {
+    process.env.WORKSPACES_ROOT = previousWorkspaceRoot;
   }
   await rm(fixtureRoot, { recursive: true, force: true });
 });
@@ -80,12 +88,11 @@ test('a background agent output link resolves to its transcript under the Claude
   }
 });
 
-test('the temp directory stays read-only: it is still not a valid workspace location', async () => {
+test('a readable temp directory outside the workspace cannot become a workspace location', async () => {
   const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), 'read-only-root-'));
 
   try {
-    // Being browsable must not make it writable — the write policy is
-    // `validateWorkspacePath` and it does not consult the read-only roots.
+    // Being browsable must not bypass the independently configured workspace boundary.
     const validation = await validateWorkspacePath(temporaryDirectory);
     assert.equal(validation.valid, false);
   } finally {
