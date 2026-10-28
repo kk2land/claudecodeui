@@ -9,6 +9,7 @@ import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-confi
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js';
 import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
+import { createProviderTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
 import type { AnyRecord, DshRuntimeMode, DshRuntimeSettings, ProviderRuntimeContext } from '@/shared/types.js';
 import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 
@@ -62,6 +63,7 @@ if (process.argv.includes('headless')) {
       if(text==='wait') return;
       if(text==='broken') {process.stdout.write('not json\\n');return;}
       if(text==='permission') {permission='ask';output({id:permission,method:'session/request_permission',params:{sessionId:'native-acp',toolCall:{title:'bash',rawInput:{command:'pwd'}},options:[{kind:'allow_once',optionId:'once'},{kind:'allow_always',optionId:'always'},{kind:'reject_once',optionId:'reject'}]}});return;}
+      if(text==='usage') output({method:'session/update',params:{sessionId:'native-acp',update:{sessionUpdate:'usage_update',used:66408,size:1000000}}});
       complete();
     } else if(f.method==='session/cancel') {if(pending!==undefined)output({id:pending,result:{stopReason:'cancelled'}});pending=undefined;}
     else if(f.method==='session/close') setTimeout(()=>output({id:f.id,result:{}}),100);
@@ -443,5 +445,30 @@ test('stopping one ACP session leaves another session process and queue availabl
     assert.equal(f.runtime.isQueueBlocked('other'), false);
     await f.run('continue other session', { sessionId: 'other' });
     assert.equal(f.messages.at(-1)?.success, true);
+  } finally { await f.close(); }
+});
+
+test('ACP usage_update is scoped to its app session and cached for the token-usage refresh', { skip: process.platform === 'win32' }, async () => {
+  const f = await fixture();
+  try {
+    await f.run('usage', { sessionId: 'usage-a' });
+    const budgets = f.messages.filter((message) => message.text === 'token_budget');
+    assert.equal(budgets.length, 1);
+    assert.equal(budgets[0].sessionId, 'usage-a');
+    assert.deepEqual(budgets[0].tokenBudget, { used: 66_408, total: 1_000_000 });
+
+    const service = createProviderTokenUsageService({
+      getSessionById: (sessionId) => ({
+        session_id: sessionId, provider: 'dsh', provider_session_id: 'native-acp',
+        project_path: null, jsonl_path: null, custom_name: null, model: null, effort: null,
+        forked_from_session_id: null, isArchived: 0,
+        created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
+      }),
+    });
+    assert.deepEqual(await service.getSessionTokenUsage('usage-a'), {
+      used: 66_408,
+      total: 1_000_000,
+    });
+    assert.equal((await service.getSessionTokenUsage('usage-b')).unsupported, true);
   } finally { await f.close(); }
 });

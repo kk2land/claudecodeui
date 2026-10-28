@@ -9,6 +9,7 @@ import { DshProcess } from '@/modules/providers/list/dsh/dsh-process.provider.js
 import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js';
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 import { DshSessionSynchronizer } from '@/modules/providers/list/dsh/dsh-session-synchronizer.provider.js';
+import { rememberDshContextUsage } from '@/modules/providers/services/provider-token-usage.service.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { sessionRuntimeDb } from '@/modules/database/index.js';
 import type { IProviderRuntime } from '@/shared/interfaces.js';
@@ -186,7 +187,14 @@ export class DshRuntimeProvider implements IProviderRuntime {
       const child = await this.launch(owner);
       child.onFrame = (frame) => {
         if (frame.method === 'session/update' && frame.params?.sessionId === owner.nativeId && owner.busy && !owner.aborted) {
-          for (const message of this.events.normalize(frame.params, owner.id)) owner.writer.send(message);
+          for (const message of this.events.normalize(frame.params, owner.id)) {
+            // usage_update is the only authoritative DSH context reading; keep
+            // it for this app session so the token-usage refresh can reuse it.
+            if (message.kind === 'status' && message.text === 'token_budget' && message.tokenBudget) {
+              rememberDshContextUsage(owner.id, message.tokenBudget as { used: number; total: number });
+            }
+            owner.writer.send(message);
+          }
         }
       };
       child.onRequest = async (method, params) => {

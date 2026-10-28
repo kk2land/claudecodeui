@@ -8,6 +8,7 @@ import Database from 'better-sqlite3';
 
 import {
   createProviderTokenUsageService,
+  rememberDshContextUsage,
   summarizeClaudeTokenUsage,
 } from '@/modules/providers/services/provider-token-usage.service.js';
 import { AppError } from '@/shared/utils.js';
@@ -171,6 +172,39 @@ test('Cursor returns an explicit unsupported token usage result', async () => {
   });
 
   const result = await service.getSessionTokenUsage('app-session');
+
+  assert.equal(result.unsupported, true);
+  assert.equal(result.used, 0);
+  assert.equal(result.total, 0);
+});
+
+test('DSH returns only the cached authoritative context reading, scoped per session', async () => {
+  const service = createProviderTokenUsageService({
+    getSessionById: (sessionId) => createSessionRow({ session_id: sessionId, provider: 'dsh' }),
+  });
+
+  rememberDshContextUsage('dsh-usage-scoped', { used: 66_408, total: 1_000_000 });
+  assert.deepEqual(await service.getSessionTokenUsage('dsh-usage-scoped'), {
+    used: 66_408,
+    total: 1_000_000,
+  });
+
+  // Another session, malformed readings, and unknown sessions never inherit it.
+  assert.equal((await service.getSessionTokenUsage('dsh-usage-other')).unsupported, true);
+  rememberDshContextUsage('dsh-usage-scoped', { used: -1, total: 1_000_000 });
+  rememberDshContextUsage('dsh-usage-scoped', { used: 10, total: 0 });
+  assert.deepEqual(await service.getSessionTokenUsage('dsh-usage-scoped'), {
+    used: 66_408,
+    total: 1_000_000,
+  });
+});
+
+test('DSH without a live usage_update reports unsupported', async () => {
+  const service = createProviderTokenUsageService({
+    getSessionById: () => createSessionRow({ session_id: 'dsh-unsupported', provider: 'dsh' }),
+  });
+
+  const result = await service.getSessionTokenUsage('dsh-unsupported');
 
   assert.equal(result.unsupported, true);
   assert.equal(result.used, 0);

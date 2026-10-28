@@ -130,7 +130,8 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // ACP supports prompts; the per-session runtime snapshot reports whether they are currently available.
     supportsPermissionRequests: true,
     runtimeManagement: { modes: ['acp', 'headless'], stoppableModes: ['acp'] },
-    supportsTokenUsage: false,
+    // ACP's session/update usage_update carries authoritative context occupancy.
+    supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
     supportsMessageEditing: false,

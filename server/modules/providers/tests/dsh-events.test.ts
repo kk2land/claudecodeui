@@ -47,3 +47,30 @@ for (const { name, event, content, isError } of [
     assert.equal(result.isError, isError);
   });
 }
+
+test('DSH ACP usage_update becomes the authoritative context token budget', () => {
+  const [message] = events.normalize({
+    sessionId: 'native-1',
+    update: { sessionUpdate: 'usage_update', used: 66_408, size: 1_000_000 },
+  }, 'app-1');
+
+  assert.equal(message.kind, 'status');
+  assert.equal(message.text, 'token_budget');
+  assert.equal(message.provider, 'dsh');
+  assert.equal(message.sessionId, 'app-1');
+  assert.deepEqual(message.tokenBudget, { used: 66_408, total: 1_000_000 });
+});
+
+test('DSH ACP usage_update drops malformed or incomplete readings', () => {
+  for (const update of [
+    { sessionUpdate: 'usage_update', used: -1, size: 1_000 },
+    { sessionUpdate: 'usage_update', used: 1.5, size: 1_000 },
+    { sessionUpdate: 'usage_update', used: '10', size: 1_000 },
+    { sessionUpdate: 'usage_update', used: 10, size: 0 },
+    { sessionUpdate: 'usage_update', used: 10, size: -5 },
+    { sessionUpdate: 'usage_update', used: 10 },
+    { sessionUpdate: 'usage_update', size: 1_000 },
+  ]) {
+    assert.deepEqual(events.normalize({ update }, 'app-1'), []);
+  }
+});

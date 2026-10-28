@@ -977,13 +977,19 @@ export function useChatSessionState({
       setTokenBudget(null);
       return;
     }
+    const sessionProvider = selectedSession.provider ?? selectedSession.__provider;
     const fetchInitialTokenUsage = async () => {
       try {
         // The provider module resolves storage and provider details from the session id.
         const response = await api.providers.sessionTokenUsage(selectedSession.id);
         if (response.ok) {
           const payload = await response.json();
-          setTokenBudget(payload.data ?? null);
+          const data = payload.data as { unsupported?: unknown } | null | undefined;
+          // DSH's endpoint only knows readings pushed during a live ACP turn.
+          // When no next turn has happened yet, preserve the live counter
+          // already in state instead of replacing it with an empty answer.
+          if (sessionProvider === 'dsh' && data?.unsupported === true) return;
+          setTokenBudget(data ?? null);
         } else {
           setTokenBudget(null);
         }

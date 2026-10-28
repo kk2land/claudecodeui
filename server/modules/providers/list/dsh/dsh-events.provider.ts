@@ -4,6 +4,11 @@ import type { AnyRecord, NormalizedMessage } from '@/shared/types.js';
 import { createNormalizedMessage, readObjectRecord } from '@/shared/utils.js';
 import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 
+/** DSH reports token counts as non-negative integers; anything else is malformed. */
+function readTokenCount(value: unknown): number | null {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
 /** Normalizes ACP updates, headless events, and decoded native DSH history. */
 export class DshEventsProvider {
   normalize(raw: unknown, sessionId: string | null): NormalizedMessage[] {
@@ -57,6 +62,15 @@ export class DshEventsProvider {
         // Standalone tool_result rows use flat fields; nested toolResult is for tool_use snapshots.
         ...(resultOnly ? { content: resultText, isError: event.status === 'failed' || event.status === 'error' || data.message?.isError === true } : {}),
       })];
+    }
+    if (type === 'usage_update') {
+      // ACP's authoritative context reading: `used` is DSH's token-meter total
+      // and `size` is the routed model's context window. Headless does not
+      // emit this session update.
+      const used = readTokenCount(event.used);
+      const total = readTokenCount(event.size);
+      if (used === null || total === null || total <= 0) return [];
+      return [make({ kind: 'status', text: 'token_budget', tokenBudget: { used, total } })];
     }
     if (type === 'error') return [make({ kind: 'error', content: event.message ?? event.error ?? 'DSH failed.' })];
     if (type === 'status' && event.phase === 'step_end') return [make({ kind: 'stream_end' })];

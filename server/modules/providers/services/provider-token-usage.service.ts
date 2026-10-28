@@ -33,12 +33,14 @@ type ProviderTokenUsageServiceDependencies = {
 type TokenUsageResult = {
   used: number;
   total?: number;
-  inputTokens: number;
-  outputTokens: number;
+  // DSH reports only context occupancy, not an input/output split, so these
+  // stay optional instead of publishing zeroes as if they were measured.
+  inputTokens?: number;
+  outputTokens?: number;
   cacheReadTokens?: number;
   cacheCreationTokens?: number;
   cacheTokens?: number;
-  breakdown: {
+  breakdown?: {
     input: number;
     output: number;
   };
@@ -142,6 +144,57 @@ export function rememberClaudeContextWindow(providerSessionId: string, contextWi
  */
 export function getReportedClaudeContextWindow(providerSessionId: string | null | undefined): number | undefined {
   return providerSessionId ? reportedClaudeContextWindows.get(providerSessionId) : undefined;
+}
+
+/**
+ * Newest live DSH context reading per app session id.
+ *
+ * DSH pushes `usage_update` only during an ACP turn, and its token-usage
+ * endpoint has no on-disk usage store of its own to read. Keeping the pushed
+ * reading lets the endpoint answer the composer's session-open refresh without
+ * replacing the live counter with an unsupported empty result. The cache is
+ * process memory: after a restart it stays empty until the next live update.
+ * Bounded like the Claude window cache.
+ */
+const dshContextUsageBySession = new Map<string, { used: number; total: number }>();
+
+/** Cap only; the map holds one reading per app session. */
+const MAX_DSH_CONTEXT_USAGE_SESSIONS = 1000;
+
+/**
+ * Used by the DSH runtime to record one session's live context reading.
+ * Malformed readings are ignored so a partial event never replaces an
+ * authoritative one.
+ */
+export function rememberDshContextUsage(
+  sessionId: string,
+  usage: { used: number; total: number },
+): void {
+  const { used, total } = usage;
+  if (
+    !sessionId
+    || !Number.isSafeInteger(used)
+    || used < 0
+    || !Number.isSafeInteger(total)
+    || total <= 0
+  ) {
+    return;
+  }
+
+  // Re-insert so the most recently updated sessions are the last evicted.
+  dshContextUsageBySession.delete(sessionId);
+  dshContextUsageBySession.set(sessionId, { used, total });
+  if (dshContextUsageBySession.size > MAX_DSH_CONTEXT_USAGE_SESSIONS) {
+    const oldestSessionId = dshContextUsageBySession.keys().next().value;
+    if (oldestSessionId !== undefined) {
+      dshContextUsageBySession.delete(oldestSessionId);
+    }
+  }
+}
+
+/** This service's DSH lookup; undefined means no authoritative reading exists yet. */
+function getDshContextUsage(sessionId: string): { used: number; total: number } | undefined {
+  return dshContextUsageBySession.get(sessionId);
 }
 
 function readUsageNumber(value: unknown): number {
@@ -435,7 +488,7 @@ export function createProviderTokenUsageService(
 
       const providerSessionId = session.provider_session_id || sessionId;
 
-      if (session.provider === 'cursor' || session.provider === 'dsh') {
+      if (session.provider === 'cursor') {
         return {
           used: 0,
           total: 0,
@@ -443,8 +496,21 @@ export function createProviderTokenUsageService(
           outputTokens: 0,
           breakdown: { input: 0, output: 0 },
           unsupported: true,
-          message: `Token usage tracking not available for ${session.provider} sessions`,
+          message: 'Token usage tracking not available for cursor sessions',
         };
+      }
+
+      if (session.provider === 'dsh') {
+        // The runtime caches under the app session id this endpoint receives.
+        const usage = getDshContextUsage(sessionId);
+        return usage
+          ? { used: usage.used, total: usage.total }
+          : {
+              used: 0,
+              total: 0,
+              unsupported: true,
+              message: 'Token usage tracking not available for dsh sessions',
+            };
       }
 
       if (session.provider === 'opencode') {

@@ -20,10 +20,11 @@ const CURATED_CATALOGS: Record<LLMProvider, ProviderModelsDefinition> = {
   dsh: { DEFAULT: 'default', OPTIONS: [{ value: 'default', label: 'Profile default' }] },
 };
 
-test('DSH advertises image attachments for both supported transports', () => {
+test('DSH advertises live ACP context usage alongside both supported transports', () => {
   const capabilities = providerCapabilitiesService.getProviderCapabilities('dsh');
   assert.equal(capabilities.supportsImages, true);
   assert.equal(capabilities.supportsFiles, true);
+  assert.equal(capabilities.supportsTokenUsage, true);
   assert.deepEqual(capabilities.runtimeManagement?.modes, ['acp', 'headless']);
 });
 
