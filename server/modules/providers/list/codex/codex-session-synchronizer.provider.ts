@@ -16,7 +16,20 @@ type ParsedSession = {
   sessionId: string;
   projectPath: string;
   sessionName?: string;
+  sessionSource: string;
 };
+
+/**
+ * Reads the Codex runtime that wrote a transcript from its first metadata row.
+ *
+ * Older transcripts and non-SDK writers may not declare a source; those are
+ * recorded as "unknown" so the row stays visible and is not re-read forever.
+ * Sub-agent object sources never reach here — their transcripts are skipped.
+ */
+function normalizeSessionSource(payload: Record<string, unknown> | undefined): string {
+  const source = payload?.source;
+  return typeof source === 'string' && source.trim() ? source.trim() : 'unknown';
+}
 
 /**
  * Session indexer for Codex transcript artifacts.
@@ -60,9 +73,25 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
         parsed.sessionName,
         timestamps.createdAt,
         timestamps.updatedAt,
-        filePath
+        filePath,
+        parsed.sessionSource
       );
       processed += 1;
+    }
+
+    // Existing rows indexed before the source column existed are older than
+    // the scan cursor, so the scan above cannot find them. Read only each
+    // transcript's first metadata row once and store the origin; the update
+    // touches only that column.
+    for (const row of sessionsDb.getCodexSessionsMissingSource()) {
+      const source = await extractFirstValidJsonlData(row.jsonl_path, (rawData) => {
+        const payload = (rawData as Record<string, unknown>).payload as Record<string, unknown> | undefined;
+        if (typeof payload?.id !== 'string' || typeof payload?.cwd !== 'string') {
+          return null;
+        }
+        return { sessionSource: normalizeSessionSource(payload) };
+      });
+      sessionsDb.setSessionSource(row.session_id, source?.sessionSource ?? 'unknown');
     }
 
     return processed;
@@ -90,7 +119,8 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
       parsed.sessionName,
       timestamps.createdAt,
       timestamps.updatedAt,
-      filePath
+      filePath,
+      parsed.sessionSource
     );
   }
 
@@ -115,6 +145,7 @@ export class CodexSessionSynchronizer implements IProviderSessionSynchronizer {
         sessionId,
         projectPath,
         isSubagent: payload ? this.isSubagentSessionMeta(payload) : false,
+        sessionSource: normalizeSessionSource(payload),
       };
     });
 

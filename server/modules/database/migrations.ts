@@ -433,6 +433,19 @@ const addForkedFromSessionIdColumn = (db: Database): void => {
 };
 
 /**
+ * Adds the transcript origin column that lets session lists hide exec-origin
+ * Codex conversations while the app-server runtime is the default.
+ *
+ * Existing rows stay NULL on purpose: the Codex synchronizer backfills them
+ * from each transcript's first metadata row on its next scan. This additive
+ * migration never touches names, archive flags, or provider id mappings.
+ */
+const addSessionSourceColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'session_source', 'TEXT');
+};
+
+/**
  * Adds the `model` column that records which model each session runs with.
  *
  * Left NULL for pre-existing rows on purpose: the model resolver falls back to
@@ -605,6 +618,7 @@ export const runMigrations = (db: Database) => {
     addSessionModelColumn(db);
     addSessionEffortColumn(db);
     addForkedFromSessionIdColumn(db);
+    addSessionSourceColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
 

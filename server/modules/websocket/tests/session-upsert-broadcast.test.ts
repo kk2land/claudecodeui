@@ -164,3 +164,45 @@ test('retained GPT Web records are not broadcast into the sidebar', async () => 
     assert.ok(sessionsDb.getSessionById('legacy-web'));
   });
 });
+
+test('exec-origin Codex sessions are not broadcast while the app-server runtime owns the list', async () => {
+  const previousRuntime = process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+  delete process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+  try {
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createSession('codex-sdk', 'codex', '/workspace/demo', 'SDK', undefined, undefined, '/tmp/sdk.jsonl', 'exec');
+      sessionsDb.createSession('codex-native', 'codex', '/workspace/demo', 'Native', undefined, undefined, '/tmp/native.jsonl', 'vscode');
+      const connection = new FakeConnection();
+      connectedClients.add(connection as never);
+
+      await broadcastSessionUpsertedBatch(['codex-sdk', 'codex-native']);
+      await broadcastSessionUpserted('codex-sdk');
+
+      assert.deepEqual(connection.frames.map((frame) => frame.sessionId), ['codex-native']);
+      // The hidden row itself is still available for resume/history/delete.
+      assert.equal(sessionsDb.getSessionById('codex-sdk')?.session_source, 'exec');
+    });
+  } finally {
+    if (previousRuntime === undefined) delete process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+    else process.env.CLOUDCLI_CODEX_RUNTIME_MODE = previousRuntime;
+  }
+});
+
+test('explicit SDK runtime broadcasts exec sessions again', async () => {
+  const previousRuntime = process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+  process.env.CLOUDCLI_CODEX_RUNTIME_MODE = 'sdk';
+  try {
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createSession('codex-sdk', 'codex', '/workspace/demo', 'SDK', undefined, undefined, '/tmp/sdk.jsonl', 'exec');
+      const connection = new FakeConnection();
+      connectedClients.add(connection as never);
+
+      await broadcastSessionUpserted('codex-sdk');
+
+      assert.deepEqual(connection.frames.map((frame) => frame.sessionId), ['codex-sdk']);
+    });
+  } finally {
+    if (previousRuntime === undefined) delete process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+    else process.env.CLOUDCLI_CODEX_RUNTIME_MODE = previousRuntime;
+  }
+});
