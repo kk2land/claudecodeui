@@ -39,7 +39,8 @@ export default function QueuedMessageCard({
   const state = controls?.state;
   const delivery = controls?.delivery;
   const locked = Boolean(controls?.pending || ['steering', 'unknown'].includes(delivery?.status ?? ''));
-  const canSteer = Boolean(isHead && canSteerMode && state?.turnId && state.phase === 'running' && !locked);
+  const modelRequired = state?.runtime === 'app-server' && state.modelSelection?.model === null;
+  const canSteer = Boolean(isHead && canSteerMode && state?.turnId && state.phase === 'running' && !locked && !modelRequired);
   const showSteer = isHead && state?.runtime === 'app-server';
 
   return (
@@ -57,7 +58,7 @@ export default function QueuedMessageCard({
             )}
             <span className="normal-case text-muted-foreground/60">
               · {isHead
-                ? t(locked ? 'codex.confirming' : delivery?.status === 'held' || state?.queueHeld ? 'codex.queueHeld' : 'input.queue.willSend', { defaultValue: 'Will send when this finishes' })
+                ? t(modelRequired ? 'codex.queueNeedsModel' : locked ? 'codex.confirming' : delivery?.status === 'held' || state?.queueHeld ? 'codex.queueHeld' : 'input.queue.willSend', { defaultValue: 'Will send when this finishes' })
                 : t('input.queue.waitingBehind', { defaultValue: 'Waiting behind the queued message above' })}
             </span>
           </div>
@@ -120,7 +121,7 @@ export default function QueuedMessageCard({
           </div>
         </details>
       )}
-      {delivery?.status === 'held' && <button type="button" className="mt-1 text-xs text-primary" disabled={locked} onClick={() => void controls?.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
+      {delivery?.status === 'held' && <button type="button" className="mt-1 text-xs text-primary" disabled={locked || modelRequired} onClick={() => void controls?.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
     </div>
   );
 }

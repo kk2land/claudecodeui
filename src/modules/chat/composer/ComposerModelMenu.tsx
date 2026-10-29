@@ -25,6 +25,8 @@ type ComposerModelMenuProps = {
   modelOptions: ProviderModelOption[];
   onSelectModel: (model: string) => void;
   modelsLoading: boolean;
+  /** Refresh the active model catalog when the picker opens. */
+  onOpen?(): void;
 };
 
 /**
@@ -39,9 +41,12 @@ function ComposerModelMenu({
   modelOptions,
   onSelectModel,
   modelsLoading,
+  onOpen,
 }: ComposerModelMenuProps) {
   const { t } = useTranslation('chat');
+  // Opening the anchored picker leaves the surrounding composer draft intact.
   const [isOpen, setIsOpen] = useState(false);
+  // The existing model list expands independently of reasoning choices.
   const [isModelSectionOpen, setIsModelSectionOpen] = useState(false);
   const close = useCallback(() => setIsOpen(false), []);
   const { triggerRef, menuRef, anchor, updateAnchor } = useComposerMenuAnchor(isOpen, close);
@@ -65,10 +70,10 @@ function ComposerModelMenu({
     () => modelOptions.find((option) => option.value === model) ?? null,
     [model, modelOptions],
   );
-  const modelLabel = selectedModelOption?.label || model;
+  const modelLabel = selectedModelOption?.label || model || t('composer.selectServiceModel');
 
   const hasEffortSection = resolvedEffortOptions.length > 0;
-  const hasModelSection = modelOptions.length > 0 || modelsLoading;
+  const hasModelSection = modelOptions.length > 0 || modelsLoading || !model;
   if (!hasEffortSection && !hasModelSection) {
     return null;
   }
@@ -85,6 +90,7 @@ function ComposerModelMenu({
         type="button"
         onClick={() => {
           updateAnchor();
+          if (!isOpen) onOpen?.();
           setIsOpen((current) => !current);
         }}
         className="flex h-8 max-w-20 shrink-0 items-center gap-1 rounded-lg border border-border/60 bg-muted/40 px-2 text-xs font-medium text-foreground transition-colors hover:bg-muted sm:max-w-56"
@@ -148,6 +154,9 @@ function ComposerModelMenu({
                       {t('composer.loadingModels', { defaultValue: 'Loading models…' })}
                     </p>
                   )}
+                  {modelOptions.length === 0 && !modelsLoading && <p className="px-2.5 py-1.5 text-sm text-muted-foreground">
+                    {t('mobileComposer.noModels', { defaultValue: 'No models available' })}
+                  </p>}
                   {modelOptions.map((option) => (
                     <ComposerMenuItem
                       key={option.value}

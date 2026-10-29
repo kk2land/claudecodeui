@@ -3,8 +3,9 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Square, Settings2 } from 'lucide-react';
 
-import type { CodexControls, CodexUserInputRequest } from '@/shared/types';
+import type { CodexControls, CodexModelProviderControls, CodexUserInputRequest } from '@/shared/types';
 import { cn } from '@/shared/utils';
+import { CodexModelProviderSettings } from '@/modules/chat/composer/CodexModelProviderSettings';
 
 function NativeQuestion({ request, controls }: { request: CodexUserInputRequest; controls: CodexControls }) {
   const { t } = useTranslation('chat');
@@ -39,7 +40,7 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
 }
 
 /**
- * ChatComposer displays native Plan, Goal, runtime selection and request_user_input controls here.
+ * ChatComposer displays native Plan, Goal, runtime/model-service settings and request_user_input controls here.
  *
  * `settingsContainer` lets the mobile composer move routine settings into its
  * bottom sheet while this component stays mounted, so local objective/budget
@@ -47,11 +48,14 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
  * null renders only the blocking notices/questions that must stay beside the
  * input; an element portals the settings into it.
  */
-export function CodexControlPanel({ controls, onExecutePlan, settingsContainer, hasQueuedDraft = false }: {
+export function CodexControlPanel({ controls, modelProviders, onExecutePlan, settingsContainer, hasQueuedDraft = false, hasRunningTasks = false }: {
   controls: CodexControls;
+  modelProviders?: CodexModelProviderControls;
   onExecutePlan(): void;
   settingsContainer?: Element | null;
   hasQueuedDraft?: boolean;
+  /** Includes composer activity such as background tasks that outlive a native turn. */
+  hasRunningTasks?: boolean;
 }) {
   const { t, i18n } = useTranslation('chat');
   const { state, error, pending } = controls;
@@ -87,7 +91,13 @@ export function CodexControlPanel({ controls, onExecutePlan, settingsContainer, 
           </>}
         </div>
         <button type="button" className={`${button} gap-1.5`} aria-expanded={runtimeOpen}
-          aria-controls={runtimePanelId} onClick={() => setRuntimeOpen((open) => !open)}>
+          aria-controls={runtimePanelId} onClick={() => {
+            if (!runtimeOpen && native && modelProviders) {
+              void modelProviders.refresh().catch(() => {});
+              if (modelProviders.available) void modelProviders.loadModels(modelProviders.modelProvider).catch(() => {});
+            }
+            setRuntimeOpen((open) => !open);
+          }}>
           <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
           Codex
           <ChevronDown className={`h-3.5 w-3.5 transition-transform ${runtimeOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
@@ -110,6 +120,7 @@ export function CodexControlPanel({ controls, onExecutePlan, settingsContainer, 
             {t('codex.stopAppServer')}
           </button>
         </div>
+        {native && modelProviders?.available && <CodexModelProviderSettings controls={modelProviders} blocked={busy || hasRunningTasks || hasQueuedDraft} />}
         {state?.diagnostics && <div className="mt-3 min-w-0 border-t border-border/60 pt-3 text-xs text-muted-foreground">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">

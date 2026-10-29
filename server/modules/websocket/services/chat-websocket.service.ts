@@ -203,8 +203,15 @@ async function dispatchRun(
   dependencies: ChatWebSocketDependencies,
   extraRuntimeOptions: AnyRecord = {},
   beforeRun?: (run: NonNullable<ReturnType<typeof chatRunRegistry.startRun>>) => void | Promise<void>,
+  onTurnStarting?: () => void,
 ): Promise<{ started: boolean; error: string | null }> {
   const provider = session.provider as LLMProvider;
+  const codexSettings = provider === 'codex' ? sessionRuntimeDb.get(sessionId) : null;
+  if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection?.model === null) {
+    const error = 'Choose a model before sending a prompt.';
+    if (ws) sendProtocolError(ws, 'CODEX_MODEL_REQUIRED', error, sessionId);
+    return { started: false, error };
+  }
 
   const state = dependencies.runtime.getState?.(provider, sessionId);
   if (state?.runtime === 'app-server' && (state.goal?.status === 'active' || ['stopping', 'stopFailed'].includes(state.phase))) {
@@ -231,7 +238,15 @@ async function dispatchRun(
     return { started: false, error: 'A run is already in progress for this session.' };
   }
 
-  const clientOptions = (data.options ?? {}) as AnyRecord;
+  const clientOptions: AnyRecord = { ...(data.options ?? {}) };
+  if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection) {
+    // Queue entries retain their old options. The session's confirmed choice
+    // owns every not-yet-started turn, so stale options cannot overwrite it.
+    clientOptions.model = codexSettings.modelSelection.model;
+    // A session allocated by the model picker has no saved effort until its
+    // first prompt; retain the composer's current choice in that case.
+    clientOptions.effort = session.effort || clientOptions.effort || 'default';
+  }
   const command = typeof data.content === 'string' ? data.content : '';
 
   // Record what this turn runs with so reopening the session later restores the
@@ -274,6 +289,17 @@ async function dispatchRun(
   };
 
   let failure: string | null = null;
+  let turnStarting = false;
+  const markTurnStarting = () => {
+    if (turnStarting) return;
+    turnStarting = true;
+    onTurnStarting?.();
+  };
+  // This callback is supplied by the server, never by chat.send JSON. Native
+  // Codex reports it after resume; other runtimes start delivery at run().
+  const waitsForCodexSetup = codexSettings?.runtime === 'app-server' && Boolean(codexSettings.modelSelection);
+  delete runtimeOptions.onTurnStarting;
+  if (waitsForCodexSetup) runtimeOptions.onTurnStarting = markTurnStarting;
   try {
     // Runs only now that the session is reserved, because an edit rewinds the
     // conversation here and a rewind for a run that was never admitted cannot
@@ -281,6 +307,7 @@ async function dispatchRun(
     // run instead of leaving the session processing forever.
     await beforeRun?.(run);
     await sessionsService.initializeSessionName(sessionId, command);
+    if (!waitsForCodexSetup) markTurnStarting();
     await dependencies.runtime.run(provider, command, runtimeOptions, run.writer);
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
@@ -294,7 +321,7 @@ async function dispatchRun(
     chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 });
   }
 
-  return { started: true, error: failure };
+  return { started: failure ? turnStarting : true, error: failure };
 }
 
 /**
@@ -618,6 +645,8 @@ export async function runDetachedChatTurn(
      * land mid-run, so the timer outranks whatever is running.
      */
     interruptActiveRun?: boolean;
+    /** Queue receipts are accepted only once the runtime can deliver input. */
+    onTurnStarting?: () => void;
   },
   dependencies: ChatWebSocketDependencies,
 ): Promise<{ started: boolean; error: string | null }> {
@@ -629,6 +658,13 @@ export async function runDetachedChatTurn(
   const provider = session.provider as LLMProvider;
   if (!dependencies.runtime.hasRuntime(provider)) {
     return { started: false, error: `Provider "${provider}" is not available.` };
+  }
+
+  // A due message must not interrupt the current turn when its next model is
+  // empty. Queued entries also return to their existing position without delivery.
+  const codexSettings = provider === 'codex' ? sessionRuntimeDb.get(input.sessionId) : null;
+  if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection?.model === null) {
+    return { started: false, error: 'Choose a model before sending a prompt.' };
   }
 
   const activeRun = chatRunRegistry.getRun(input.sessionId);
@@ -654,6 +690,9 @@ export async function runDetachedChatTurn(
     session,
     { sessionId: input.sessionId, content: input.content, options: input.options ?? {} },
     dependencies,
+    {},
+    undefined,
+    input.onTurnStarting,
   );
 }
 

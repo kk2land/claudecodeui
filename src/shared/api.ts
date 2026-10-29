@@ -434,6 +434,9 @@ export const api = {
     // `refreshCodexRateLimits` is the explicit manual refresh RPC.
     codexRateLimits: () => get('/api/providers/codex/rate-limits'),
     refreshCodexRateLimits: () => post('/api/providers/codex/rate-limits/refresh'),
+    codexModelProviders: () => get('/api/providers/codex/model-providers'),
+    codexModelProviderModels: (modelProvider: string) =>
+      get(`/api/providers/codex/model-providers/${encodeURIComponent(modelProvider)}/models`),
 
     models: (provider: string) => get(`/api/providers/${provider}/models`),
     createModel: (provider: string, input: unknown) =>

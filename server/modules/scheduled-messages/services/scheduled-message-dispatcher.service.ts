@@ -72,18 +72,16 @@ async function sendClaimedQueuedMessageHead(
       userId: candidate.userId,
       content: message.content,
       options: { ...message.options, attachments: message.attachments },
+      onTurnStarting: () => sessionDraftsDb.confirmQueuedMessageDispatch(candidate),
     },
     { runtime },
   );
 
-  // Detached dispatch reserves its run synchronously, but settles after the
-  // provider finishes. Release the pending slot as soon as this run starts:
-  // the running turn must not count toward the three waiting messages.
+  // Reservation alone does not prove delivery: Codex may still be changing
+  // model providers. The callback frees the slot immediately before input is
+  // sent, while a failed resume leaves the dispatch receipt restorable.
   const admittedRun = chatRunRegistry.getRun(candidate.sessionId);
   const admitted = Boolean(admittedRun && admittedRun !== previousRun);
-  if (admitted) {
-    sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
-  }
 
   try {
     const result = await dispatch;

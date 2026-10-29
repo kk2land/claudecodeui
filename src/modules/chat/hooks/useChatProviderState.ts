@@ -590,6 +590,17 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     };
   }, [selectedSessionId, selectedSessionProvider]);
 
+  /** Adopts a confirmed native model without changing defaults or losing the session's loaded effort. */
+  const syncSessionModel = useCallback((targetProvider: LLMProvider, sessionId: string, model: string) => {
+    if (selectedSessionKeyRef.current !== getSessionSelectionKey(targetProvider, sessionId)
+      || sessionSelection?.provider !== targetProvider || sessionSelection.sessionId !== sessionId
+      || sessionSelection.model === model) return;
+    sessionSelectionLoadRequestIdRef.current += 1;
+    sessionModelMutationIdRef.current += 1;
+    setSessionSelection((current) => current?.provider === targetProvider && current.sessionId === sessionId
+      ? { ...current, model } : current);
+  }, [sessionSelection]);
+
   /**
    * Applies a model choice.
    *
@@ -885,6 +896,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
     providerModelsLoading,
     providerModelActions,
     selectProviderModel,
+    syncSessionModel,
     selectProviderEffort,
     resolvePermissionModeForProvider,
     supportsMessageEditing,

@@ -4,6 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import { resetUserPreferences, writeUserPreference } from '@/shared/userSettings';
+import type { ProjectSession } from '@/shared/types';
 
 /**
  * The four per-provider default models used to be four useState slots with four
@@ -111,6 +112,30 @@ test('choosing a model persists it under that provider’s key only', async () =
     'setting one provider must not disturb another',
   );
   assert.equal(localStorage.getItem('claude-model'), null);
+});
+
+test('a native session model acknowledgement updates reasoning metadata without changing new-chat defaults', async () => {
+  const { api } = await import('@/shared/api');
+  vi.spyOn(api.providers, 'models').mockImplementation((provider) => okJson({ success: true, data: provider === 'codex' ? { models: {
+    DEFAULT: 'base-model', OPTIONS: [
+      { value: 'base-model', label: 'Base', effort: { values: [{ value: 'low' }] } },
+      { value: 'next-model', label: 'Next', effort: { values: [{ value: 'ultra' }] } },
+    ],
+  } } : null }) as Promise<Response>);
+  vi.spyOn(api.providers, 'sessionActiveModel').mockImplementation(() => okJson({ success: true, data: { model: 'base-model', effort: 'low', source: 'session' } }) as Promise<Response>);
+  localStorage.setItem('codex-model', 'base-model');
+  const { useChatProviderState } = await import('@/modules/chat/hooks/useChatProviderState');
+  const { result } = renderHook(() => useChatProviderState({ selectedSession: { id: 'native-selection', __provider: 'codex' } as ProjectSession, selectedProject: null }));
+  await waitFor(() => assert.equal(result.current.currentProviderModel, 'base-model'));
+  await waitFor(() => assert.equal(result.current.providerModelsLoading, false));
+  act(() => { result.current.syncSessionModel('codex', 'native-selection', 'next-model'); });
+  assert.equal(result.current.currentProviderModel, 'next-model');
+  assert.deepEqual(result.current.currentProviderEffortOptions.map((option) => option.value), ['ultra']);
+  await act(async () => { await result.current.selectProviderEffort('codex', 'ultra', 'native-selection'); });
+  assert.equal(result.current.currentProviderEffort, 'ultra');
+  assert.equal(localStorage.getItem('codex-model'), 'base-model');
+  act(() => { result.current.syncSessionModel('codex', 'another-session', 'base-model'); });
+  assert.equal(result.current.currentProviderModel, 'next-model');
 });
 
 test('setting the same model twice keeps the record identity stable', async () => {

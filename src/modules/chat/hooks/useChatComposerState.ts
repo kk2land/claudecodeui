@@ -931,6 +931,11 @@ export function useChatComposerState({
         }
       }
 
+      if (codexControls?.state?.runtime === 'app-server' && codexControls.state.modelSelection?.model === null) {
+        addMessage({ type: 'error', content: t('codex.modelRequired'), timestamp: new Date() });
+        return;
+      }
+
       // A turn is already in flight: stash this message instead of sending it.
       // Upload attached files now so the queued record contains durable image
       // descriptors that can be sent even if another session is open later.

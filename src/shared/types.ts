@@ -2050,7 +2050,34 @@ export type CodexComposerPrediction = {
   error?: string;
 };
 
-/** Authoritative control snapshot sent to every subscriber, including between goal turns. */
+/** Session-local Codex route; a null model blocks new prompts until the user chooses one. */
+export type CodexModelSelection = { modelProvider: string; model: string | null };
+
+/** Safe model-provider directory; the backend never returns endpoint credentials. */
+export type CodexModelProviders = {
+  defaultProvider: string;
+  hasCustomProviders: boolean;
+  providers: Array<{ id: string; name: string }>;
+};
+
+/** Codex settings manage session-scoped service choices; the composer uses the selected model catalog. */
+export type CodexModelProviderControls = {
+  available: boolean;
+  providers: CodexModelProviders['providers'];
+  modelProvider: string;
+  selection?: CodexModelSelection;
+  activeSelection?: CodexModelSelection;
+  model: string;
+  modelOptions: ProviderModelOption[] | null;
+  loading: boolean;
+  pending: boolean;
+  error: string | null;
+  refresh(): Promise<void>;
+  loadModels(modelProvider: string): Promise<string[]>;
+  select(modelProvider: string, model: string | null): Promise<void>;
+};
+
+/** Server-owned native session snapshot, including next-turn and active model selections. */
 export type CodexSessionState = {
   /** Process details are exposed only in the advanced Codex controls. */
   diagnostics?: {
@@ -2065,6 +2092,8 @@ export type CodexSessionState = {
   };
   runtime: 'app-server' | 'sdk';
   mode: 'default' | 'plan';
+  modelSelection?: CodexModelSelection;
+  activeModelSelection?: CodexModelSelection;
   queueHeld?: boolean;
   turnId: string | null;
   phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
@@ -2083,6 +2112,7 @@ export type CodexControlAction =
   | { action: 'stop-app-server' }
   | { action: 'mode'; mode: ('default' | 'plan') }
   | { action: 'runtime'; runtime: ('app-server' | 'sdk') }
+  | { action: 'model-provider'; modelProvider: string; model: string | null }
   | { action: 'goal'; operation: 'get' | 'set' | 'pause' | 'resume' | 'clear'; objective?: string; tokenBudget?: number }
   | { action: 'steer'; expectedTurnId: string; requestId: string; content: string; attachments: unknown[] }
   | { action: 'answer'; requestId: string; answers: Record<string, { answers: string[] }> };

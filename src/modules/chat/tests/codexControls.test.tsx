@@ -146,6 +146,18 @@ test('ordinary busy input stays queued and retains its identity across store upd
   expect(codex.control).not.toHaveBeenCalled(); expect(codex.steer).not.toHaveBeenCalled();
 });
 
+for (const running of [false, true]) {
+  test(`an empty model rejects ${running ? 'queueing' : 'sending'} and preserves the typed prompt`, async () => {
+    const codex = controls({ modelSelection: { modelProvider: 'beta', model: null } });
+    const h = composer(codex, running);
+    await h.submit('keep this unsent prompt');
+    expect(h.send).not.toHaveBeenCalled();
+    expect(h.result.current.input).toBe('keep this unsent prompt');
+    expect(h.result.current.queuedDraft).toBeNull();
+    expect(h.add).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', content: 'Choose a model below before sending prompts or running queued messages.' }));
+  });
+}
+
 test('a multiline Plan task queued behind background work keeps its mode and durable identity', async () => {
   const h = composer(controls({ phase: 'idle', turnId: null }), false, new Map([
     ['codex-session', { statusText: null, canInterrupt: false, startedAt: 1, background: true, tasks: [] }],

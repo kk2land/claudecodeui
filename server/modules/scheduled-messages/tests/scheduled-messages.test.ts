@@ -103,6 +103,70 @@ test('a message due in the past is sent on the next pass, not skipped', async ()
   });
 });
 
+test('Codex queued input uses the latest session model and remains queued if provider setup fails', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-provider-queue';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp', 'Provider queue');
+    sessionRuntimeDb.update(sessionId, { modelSelection: { modelProvider: 'beta', model: 'new-model' } });
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [
+      { id: 'head', content: 'first pending', options: { model: 'old-model' } },
+      { id: 'tail', content: 'second pending', options: { model: 'old-model' } },
+    ] });
+    let failSetup = true;
+    const received: string[] = [];
+    const runtime: ProviderRuntimeGateway = {
+      hasRuntime: () => true, hasBackgroundWork: () => false, abort: async () => true,
+      stopBackgroundTask: async () => false, resolveToolApproval: () => {}, getPendingApprovalsForSession: () => [],
+      isQueueBlocked: (id) => sessionRuntimeDb.get(id).queueHeld,
+      async run(_provider, command, options) {
+        assert.equal(options.model, 'new-model');
+        assert.equal(sessionsDb.getSessionById(sessionId)?.model, 'new-model', 'the stale queue model must not overwrite the session');
+        if (failSetup) {
+          sessionRuntimeDb.update(sessionId, { queueHeld: true });
+          throw new Error('provider resume rejected before input');
+        }
+        options.onTurnStarting();
+        received.push(command);
+      },
+    };
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0].queuedMessages.map((message) => (message as { id: string }).id), ['head', 'tail']);
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.deepEqual(received, []);
+    failSetup = false;
+    sessionRuntimeDb.update(sessionId, { queueHeld: false });
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, ['first pending']);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0].queuedMessages.map((message) => (message as { id: string }).id), ['tail']);
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, ['first pending', 'second pending']);
+  });
+});
+
+test('empty Codex models keep every queued message intact and only dispatch after an explicit model choice', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-empty-model';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp');
+    sessionRuntimeDb.update(sessionId, { modelSelection: { modelProvider: 'beta', model: null } });
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [
+      { id: 'first', content: 'first queued', options: { model: 'stale-model' } },
+      { id: 'second', content: 'second queued', options: { model: 'stale-model' } },
+    ] });
+    const before = sessionDraftsDb.getDrafts(userId);
+    const runs: RunCall[] = [];
+    const runtime: ProviderRuntimeGateway = createRuntime(runs);
+    runtime.isQueueBlocked = providerRuntimeService.isQueueBlocked;
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId), before);
+    assert.equal(runs.length, 0);
+    sessionRuntimeDb.update(sessionId, { modelSelection: { modelProvider: 'beta', model: 'chosen-model' } });
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.equal(runs[0].options.model, 'chosen-model');
+    assert.equal(runs[0].command, 'first queued');
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0].queuedMessages.map((message) => (message as { id: string }).id), ['second']);
+  });
+});
+
 test('a queued message is sent by the server without a browser connection', async () => {
   await withIsolatedDatabase(async (userId) => {
     sessionDraftsDb.saveDraft(userId, SESSION_ID, {

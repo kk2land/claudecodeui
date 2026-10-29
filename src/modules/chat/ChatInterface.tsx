@@ -11,6 +11,7 @@ import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessi
 import { api } from '@/shared/api';
 import type {
   ChatMessage,
+  LLMProvider,
   Project,
   ProjectSession,
   SessionEstablishedContext,
@@ -21,6 +22,7 @@ import { useScheduledMessages } from '@/modules/chat/composer/useScheduledMessag
 import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useCodexControls } from '@/modules/chat/hooks/useCodexControls';
+import { useCodexModelProviders } from '@/modules/chat/hooks/useCodexModelProviders';
 import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
@@ -128,6 +130,7 @@ function ChatInterface({
     providerModelsLoading,
     providerModelActions,
     selectProviderModel,
+    syncSessionModel,
     selectProviderEffort,
     resolvePermissionModeForProvider,
     supportsMessageEditing,
@@ -205,6 +208,28 @@ function ChatInterface({
     project: selectedProject, newSessionTrigger, onSessionEstablished: handleSessionEstablished,
   });
 
+  const codexModelProviders = useCodexModelProviders({
+    enabled: provider === 'codex' && codexControls.state?.runtime !== 'sdk',
+    controls: codexControls, model: currentProviderModel,
+    knownModels: providerModelCatalog.codex?.OPTIONS ?? currentProviderModelOptions,
+  });
+  const composerModel = codexModelProviders.selection ? codexModelProviders.model : currentProviderModel;
+  const composerModelOptions = codexModelProviders.available ? codexModelProviders.modelOptions ?? [] : currentProviderModelOptions;
+  // Service catalogs contain ids only; retain the existing reasoning metadata
+  // and Codex fallback choices instead of interpreting missing metadata as no support.
+  const composerEffortOptions = composerModel ? currentProviderEffortOptions : [];
+  const composerSessionId = selectedSession?.id || currentSessionId;
+  const { available: codexModelProvidersAvailable, selection: codexModelSelection, select: selectCodexModel, modelProvider: codexModelProvider } = codexModelProviders;
+  const confirmedCodexModel = codexModelSelection?.model;
+  useEffect(() => {
+    if (!composerSessionId || !confirmedCodexModel || confirmedCodexModel === currentProviderModel) return;
+    let active = true;
+    // Keep the shared model/effort controller in sync with the native control
+    // acknowledgement; otherwise reasoning choices would still use the old model.
+    queueMicrotask(() => { if (active) syncSessionModel('codex', composerSessionId, confirmedCodexModel); });
+    return () => { active = false; };
+  }, [composerSessionId, confirmedCodexModel, currentProviderModel, syncSessionModel]);
+
   const {
     input,
     setInput,
@@ -267,7 +292,7 @@ function ChatInterface({
     provider,
     permissionMode,
     cyclePermissionMode,
-    currentProviderModel,
+    currentProviderModel: composerModel,
     currentProviderEffort,
     isLoading: isProcessing,
     codexControls: provider === 'codex' ? codexControls : undefined,
@@ -422,12 +447,12 @@ function ChatInterface({
     const scheduled = await scheduleMessage({
       content,
       scheduledFor,
-      options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
+      options: { model: composerModel, effort: currentProviderEffort, permissionMode },
     });
     if (scheduled) {
       setInput('');
     }
-  }, [currentProviderEffort, currentProviderModel, input, permissionMode, scheduleMessage, setInput]);
+  }, [currentProviderEffort, composerModel, input, permissionMode, scheduleMessage, setInput]);
 
   const permissionContextValue = useMemo(() => ({
     pendingPermissionRequests,
@@ -442,23 +467,31 @@ function ChatInterface({
   // Lets a workflow card fetch its agents' timelines for this session.
   const transcriptSessionValue = useMemo(() => ({ sessionId: currentSessionId }), [currentSessionId]);
 
-  // A composer pick becomes the default for new chats and, when a session is
-  // open, is recorded against that session so reopening it restores this model.
+  // The first remote model pick also needs session controls: they allocate a
+  // new session before saving it, so the built-in default cannot replace it.
+  const selectSessionModel = useCallback(async (targetProvider: LLMProvider, model: string, sessionId?: string | null) => {
+    if (targetProvider === 'codex' && (codexModelProvidersAvailable || codexModelSelection) && sessionId === composerSessionId) {
+      await selectCodexModel(codexModelProvider, model);
+      return { scope: 'session' as const, model };
+    }
+    return selectProviderModel(targetProvider, model, sessionId);
+  }, [codexModelProvidersAvailable, codexModelSelection, selectCodexModel, codexModelProvider, composerSessionId, selectProviderModel]);
+
   const handleSelectComposerModel = useCallback(async (model: string) => {
     try {
-      await selectProviderModel(provider, model, currentSessionId || selectedSession?.id || null);
+      await selectSessionModel(provider, model, composerSessionId);
     } catch (error) {
       console.error('Error changing the active session model:', error);
     }
-  }, [currentSessionId, provider, selectProviderModel, selectedSession?.id]);
+  }, [composerSessionId, provider, selectSessionModel]);
 
   const handleSelectComposerEffort = useCallback(async (effort: string) => {
     try {
-      await selectProviderEffort(provider, effort, currentSessionId || selectedSession?.id || null);
+      await selectProviderEffort(provider, effort, composerSessionId);
     } catch (error) {
       console.error('Error changing the active session reasoning effort:', error);
     }
-  }, [currentSessionId, provider, selectProviderEffort, selectedSession?.id]);
+  }, [composerSessionId, provider, selectProviderEffort]);
 
   // Mirrors ChatComposer's own visibility check so the message pane can
   // reserve space for floating status tabs. Codex's status is inside the input
@@ -585,12 +618,12 @@ function ChatInterface({
           onSelectPermissionMode={selectPermissionMode}
           providerLabel={selectedProviderLabel}
           effort={currentProviderEffort}
-          availableEffortOptions={currentProviderEffortOptions}
+          availableEffortOptions={composerEffortOptions}
           onSelectEffort={handleSelectComposerEffort}
-          model={currentProviderModel}
-          availableModelOptions={currentProviderModelOptions}
+          model={composerModel}
+          availableModelOptions={composerModelOptions}
           onSelectModel={handleSelectComposerModel}
-          modelsLoading={providerModelsLoading}
+          modelsLoading={providerModelsLoading || codexModelProviders.available && codexModelProviders.loading}
           tokenBudget={tokenBudget}
           onShowTokenUsage={showCostModal}
           isEditingSentMessage={Boolean(editingAnchorId)}
@@ -605,6 +638,7 @@ function ChatInterface({
           onSubmit={handleSubmit}
           isDragActive={isDragActive}
           codexControls={provider === 'codex' ? codexControls : undefined}
+          codexModelProviders={provider === 'codex' && codexControls.state?.runtime !== 'sdk' ? codexModelProviders : undefined}
           runtimeControls={runtimeControls.available ? runtimeControls : undefined}
           onExecutePlan={() => handleVoiceTranscript(t('codex.implementPrompt'), false)}
           queuedDrafts={queuedDrafts}
@@ -663,9 +697,9 @@ function ChatInterface({
         hiddenModelProviders={hiddenModelProviders}
         providerModelActions={providerModelActions}
         activeProvider={provider}
-        activeProviderModel={currentProviderModel}
+        activeProviderModel={composerModel}
         currentSessionId={currentSessionId || selectedSession?.id || null}
-        onSelectProviderModel={selectProviderModel}
+        onSelectProviderModel={selectSessionModel}
       />
     </PermissionContext.Provider>
   );

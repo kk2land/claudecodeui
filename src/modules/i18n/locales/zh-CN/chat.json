@@ -153,6 +153,9 @@
     "resumeQueue": "恢复排队",
     "runtime": "运行方式",
     "runtimeSettings": "Codex 运行设置",
+    "modelRequired": "请先在下方选择模型，再发送提示词或执行排队消息。",
+    "queueNeedsModel": "等待选择模型",
+    "serviceSwitchBlocked": "当前任务结束且消息队列为空后，才能切换模型服务。",
     "launcherPath": "启动程序路径",
     "stopAppServer": "停止 app-server",
     "goal": "目标",
@@ -351,6 +354,12 @@
     "answeredBy": "由 {{model}} 回答"
   },
   "composer": {
+    "modelService": "模型服务",
+    "selectServiceModel": "选择模型",
+    "applyingService": "正在应用选择…",
+    "serviceSessionScope": "仅当前会话 · 下轮生效",
+    "serviceNextTurn": "下轮使用：{{provider}} · {{model}}",
+    "serviceCurrentSelection": "当前使用：{{provider}} · {{model}}",
     "permissionHeading": "如何批准 {{provider}} 的操作？",
     "permissionCycleHint": "在输入框中按 Tab 切换模式",
     "permissionTriggerLabel": "{{mode}}：{{heading}}",

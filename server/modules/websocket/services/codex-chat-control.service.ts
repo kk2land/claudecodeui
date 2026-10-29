@@ -43,6 +43,12 @@ function parseControl(raw: AnyRecord): CodexControlAction {
     case 'runtime':
       if (raw.runtime === 'sdk' || raw.runtime === 'app-server') return { action: 'runtime', runtime: raw.runtime };
       break;
+    case 'model-provider':
+      if (typeof raw.modelProvider === 'string' && raw.modelProvider.trim()
+        && (raw.model === null || typeof raw.model === 'string' && raw.model.trim())) {
+        return { action: 'model-provider', modelProvider: raw.modelProvider.trim(), model: raw.model === null ? null : raw.model.trim() };
+      }
+      break;
     case 'goal':
       if (['get', 'set', 'pause', 'resume', 'clear'].includes(raw.operation)
         && (raw.objective === undefined || typeof raw.objective === 'string')
@@ -101,6 +107,18 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
       } else {
         action = parseControl(raw);
       }
+      if (action.action === 'model-provider') {
+        const state = runtime.getState?.('codex', sessionId);
+        const currentProvider = state?.modelSelection?.modelProvider ?? state?.activeModelSelection?.modelProvider;
+        if (action.modelProvider !== currentProvider && (chatRunRegistry.isProcessing(sessionId)
+          || runtime.hasBackgroundWork(sessionId) || state?.goal?.status === 'active'
+          || ['starting', 'running', 'stopping', 'stopFailed'].includes(state?.phase ?? '')
+          || sessionDraftsDb.hasQueuedMessages(sessionId))) {
+          throw new AppError('Finish running tasks and empty the message queue before switching model services.', {
+            code: 'CODEX_MODEL_PROVIDER_BUSY', statusCode: 409,
+          });
+        }
+      }
       const run = chatRunRegistry.getRun(sessionId) ?? chatRunRegistry.startRun({ appSessionId: sessionId, provider: 'codex',
         providerSessionId: session.provider_session_id, connection, userId, passive: true })!;
       run.writer.updateWebSocket(connection);
@@ -113,7 +131,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     // Only an explicit RPC rejection proves non-delivery; disconnects and timeouts remain held.
-    const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL'].includes(error.code));
+    const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL', 'CODEX_MODEL_REQUIRED'].includes(error.code));
     const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;
     return { ...response, ok: delivery === 'accepted', error: delivery === 'accepted' ? undefined : message, delivery,
       codexState: sessionId ? runtime.getState?.('codex', sessionId) : undefined };

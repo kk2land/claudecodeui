@@ -163,6 +163,9 @@
     "resumeQueue": "Resume queue",
     "runtime": "Runtime",
     "runtimeSettings": "Codex runtime settings",
+    "modelRequired": "Choose a model below before sending prompts or running queued messages.",
+    "queueNeedsModel": "Waiting for a model selection",
+    "serviceSwitchBlocked": "Finish running tasks and empty the message queue before switching model services.",
     "launcherPath": "Launcher path",
     "stopAppServer": "Stop app-server",
     "goal": "Goal",
@@ -243,6 +246,12 @@
     }
   },
   "composer": {
+    "modelService": "Model service",
+    "selectServiceModel": "Select a model",
+    "applyingService": "Applying selection…",
+    "serviceSessionScope": "Only this conversation · Takes effect next turn",
+    "serviceNextTurn": "Next turn: {{provider}} · {{model}}",
+    "serviceCurrentSelection": "Currently using: {{provider}} · {{model}}",
     "reasoning": "Reasoning",
     "model": "Model",
     "effortDefault": "Default",

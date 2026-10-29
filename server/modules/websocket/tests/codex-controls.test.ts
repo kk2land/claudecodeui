@@ -42,6 +42,99 @@ async function harness(runTest: (h: {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const queued = { id: 'message-1', content: 'guide this', attachments: [{ path: '/etc/passwd' }] };
 
+test('model-provider controls validate and forward the current session selection', async () => {
+  await harness(async (h) => {
+    h.state.phase = 'idle'; h.state.turnId = null;
+    h.send({ action: 'model-provider', modelProvider: ' beta ', model: ' new-model ' });
+    await settle();
+    assert.deepEqual(h.calls[0].action, { action: 'model-provider', modelProvider: 'beta', model: 'new-model' });
+    assert.equal(h.calls[0].sid, h.sessionId);
+    h.send({ action: 'model-provider', modelProvider: 'beta', model: null }, 'empty-model');
+    await settle();
+    assert.deepEqual(h.calls[1].action, { action: 'model-provider', modelProvider: 'beta', model: null });
+    h.send({ action: 'model-provider', modelProvider: 'beta', model: '' }, 'invalid-selection');
+    await settle();
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.frames.at(-1)?.ok, false);
+  });
+});
+
+for (const blocker of ['running', 'background', 'queued'] as const) {
+  test(`service switching is rejected with ${blocker} work even when the client bypasses disabled controls`, async () => {
+    await harness(async (h) => {
+      h.state.phase = blocker === 'running' ? 'running' : 'idle';
+      h.state.turnId = blocker === 'running' ? 't1' : null;
+      h.state.activeModelSelection = { modelProvider: 'alpha', model: 'first-model' };
+      h.runtime.hasBackgroundWork = () => blocker === 'background';
+      if (blocker === 'queued') {
+        sessionDraftsDb.saveDraft(h.userId, h.sessionId, { queuedMessages: [{ id: 'waiting', content: 'keep queued' }] });
+        sessionRuntimeDb.update(h.sessionId, { queueHeld: true });
+      }
+      const before = sessionDraftsDb.getDrafts(h.userId);
+      h.send({ action: 'model-provider', modelProvider: 'beta', model: 'next-model' });
+      await settle();
+      assert.equal(h.frames.at(-1)?.ok, false);
+      assert.match(h.frames.at(-1)?.error, /Finish running tasks and empty the message queue/);
+      assert.equal(h.calls.length, 0);
+      assert.deepEqual(sessionDraftsDb.getDrafts(h.userId), before);
+      // The restriction is service-specific; the existing model picker still
+      // supports changing the next model within the current service.
+      h.send({ action: 'model-provider', modelProvider: 'alpha', model: 'another-model' }, 'same-service');
+      await settle();
+      assert.equal(h.frames.at(-1)?.ok, true);
+      assert.equal(h.calls.length, 1);
+    });
+  });
+}
+
+test('an empty model refuses direct and scheduled prompts without dispatching or interrupting work', async () => {
+  await harness(async (h) => {
+    h.state.phase = 'idle'; h.state.turnId = null;
+    sessionRuntimeDb.update(h.sessionId, { modelSelection: { modelProvider: 'beta', model: null } });
+    h.socket.emit('message', JSON.stringify({ type: 'chat.send', sessionId: h.sessionId, content: 'blocked', options: { model: 'old-model' } }));
+    await settle();
+    assert.equal(h.calls.length, 0);
+    assert.ok(h.frames.some((frame) => frame.code === 'CODEX_MODEL_REQUIRED'));
+    assert.equal(sessionsDb.getSessionById(h.sessionId)?.model, null);
+    let aborted = false;
+    h.runtime.abort = async () => { aborted = true; return true; };
+    const active = chatRunRegistry.startRun({ appSessionId: h.sessionId, provider: 'codex', providerSessionId: null, connection: null, userId: h.userId })!;
+    const result = await runDetachedChatTurn({ sessionId: h.sessionId, userId: h.userId, content: 'due message', interruptActiveRun: true }, { runtime: h.runtime });
+    assert.equal(result.started, false);
+    assert.match(result.error!, /Choose a model/);
+    assert.equal(aborted, false);
+    assert.equal(active.status, 'running');
+    assert.equal(h.calls.length, 0);
+  });
+});
+
+for (const savedEffort of [null, 'low']) {
+  test(`a selected Codex service preserves reasoning effort with saved effort ${savedEffort}`, async () => {
+    await harness(async (h) => {
+      h.state.phase = 'idle'; h.state.turnId = null;
+      sessionRuntimeDb.update(h.sessionId, { runtime: 'app-server', modelSelection: { modelProvider: 'beta', model: 'remote-model' } });
+      if (savedEffort) sessionsDb.setSessionEffort(h.sessionId, savedEffort);
+      let receivedEffort: unknown;
+      h.runtime.run = async (_provider, _content, options) => {
+        receivedEffort = options.effort;
+        options.onTurnStarting?.();
+      };
+
+      const result = await runDetachedChatTurn({
+        sessionId: h.sessionId, userId: h.userId, content: 'test effort',
+        options: { model: 'remote-model', effort: 'high' },
+      }, { runtime: h.runtime });
+
+      assert.equal(result.started, true);
+      // New sessions keep the composer's choice; existing sessions retain
+      // their confirmed effort even when a queued entry still carries high.
+      const expected = savedEffort ?? 'high';
+      assert.equal(receivedEffort, expected);
+      assert.equal(sessionsDb.getSessionById(h.sessionId)?.effort, expected);
+    });
+  });
+}
+
 test('the first prompt names a session allocated for plan controls and broadcasts its title', async () => {
   await harness(async (h) => {
     sessionsDb.updateSessionCustomName(h.sessionId, 'Untitled Session');

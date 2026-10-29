@@ -14,6 +14,47 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+test('the first remote model selection allocates a session and survives navigation to it', async () => {
+  const listeners = new Set<(event: ServerEvent) => void>();
+  subscribe.mockImplementation((listener: (event: ServerEvent) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  });
+  vi.spyOn(api.providers, 'capabilities').mockResolvedValue(Response.json({ success: true, data: { providers: [] } }));
+  vi.spyOn(api.user, 'drafts').mockImplementation(async () => Response.json({ drafts: [] }));
+  const create = vi.spyOn(api.providers, 'createSession').mockResolvedValue(Response.json({
+    success: true, data: { sessionId: 'remote-model-session' },
+  }));
+  const modelSelection = { modelProvider: 'gateway', model: 'gateway/new-model' };
+  const state: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [], modelSelection,
+  };
+  const send = vi.fn((message) => queueMicrotask(() => {
+    for (const listener of listeners) listener({ kind: 'control_result', sessionId: message.sessionId,
+      requestId: message.requestId, ok: true, codexState: state } as ServerEvent);
+  }));
+  const established = vi.fn();
+  const project = { projectId: 'project', fullPath: '/project' } as Project;
+  const hook = renderHook(({ sessionId }: { sessionId: string | null }) => useCodexControls({
+    enabled: true, sessionId, project, options: { model: 'builtin-model' },
+    sendMessage: send, onSessionEstablished: established,
+  }), { initialProps: { sessionId: null as string | null } });
+
+  await act(async () => { await hook.result.current.control({ action: 'model-provider', ...modelSelection }); });
+  expect(create).toHaveBeenCalledExactlyOnceWith({ provider: 'codex', projectPath: '/project', initialMessage: '' });
+  expect(established).toHaveBeenCalledWith('remote-model-session', expect.objectContaining({ provider: 'codex', project }));
+  expect(send).toHaveBeenCalledWith(expect.objectContaining({
+    sessionId: 'remote-model-session', control: { action: 'model-provider', ...modelSelection },
+  }));
+
+  hook.rerender({ sessionId: 'remote-model-session' });
+  await waitFor(() => {
+    expect(hook.result.current.state?.modelSelection).toEqual(modelSelection);
+    expect(hook.result.current.pending).toBe(false);
+  });
+  expect(create).toHaveBeenCalledTimes(1);
+});
+
 test('restores controls and assigns a persisted steer ID without native randomUUID', async () => {
   localStorage.clear();
   resetChatDrafts();

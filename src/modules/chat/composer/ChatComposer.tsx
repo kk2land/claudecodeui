@@ -18,7 +18,7 @@ import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { DEFAULT_EFFORT_VALUE, MAX_QUEUED_MESSAGES } from '@/shared/constants';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
-import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, CodexModelProviderControls, ComposerPredictionControls, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -83,6 +83,7 @@ type ChatComposerProps = {
   /** Head of `queuedDrafts`; retained for single-message callers and tests. */
   queuedDraft?: QueuedDraft | null;
   codexControls?: CodexControls;
+  codexModelProviders?: CodexModelProviderControls;
   runtimeControls?: ProviderRuntimeControls;
   onExecutePlan?: () => void;
   backgroundSendPrompt: BackgroundSendPrompt | null;
@@ -172,6 +173,7 @@ export default function ChatComposer({
   queuedDraft,
   queuedDrafts,
   codexControls,
+  codexModelProviders,
   runtimeControls,
   onExecutePlan,
   backgroundSendPrompt,
@@ -362,11 +364,12 @@ export default function ChatComposer({
   const pendingDrafts = queuedDrafts ?? (queuedDraft ? [queuedDraft] : []);
   const hasQueuedDraft = pendingDrafts.length > 0;
   const queueFull = pendingDrafts.length >= MAX_QUEUED_MESSAGES;
+  const modelRequired = codexControls?.state?.runtime === 'app-server' && codexControls.state.modelSelection?.model === null;
   // A full queue still routes a submit through the queue action: the hook
   // rejects it visibly and keeps the text. Falling through to `onAbortSession`
   // would stop the running turn instead of refusing the fourth message.
-  const canQueueDraft = isLoading && Boolean(input.trim() || attachedFiles.length > 0);
-  const submitHint = queueFull && isLoading
+  const canQueueDraft = !modelRequired && isLoading && Boolean(input.trim() || attachedFiles.length > 0);
+  const submitHint = modelRequired ? t('codex.modelRequired') : queueFull && isLoading
     ? t('input.hintText.queueFull', {
       count: MAX_QUEUED_MESSAGES,
       defaultValue: 'Queue is full ({{count}}). Send or delete one first',
@@ -400,13 +403,20 @@ export default function ChatComposer({
     : composerSuggestionHint ?? placeholder;
 
   const selectedModelOption = availableModelOptions.find((option) => option.value === model);
-  const modelLabel = selectedModelOption?.label || model;
+  const modelLabel = selectedModelOption?.label || model || t('composer.selectServiceModel');
   const effortLabel = effort === DEFAULT_EFFORT_VALUE
     ? t('mobileComposer.effortDefault', { defaultValue: 'Default' })
     : effort;
   const mobileConfigLabel = modelLabel
     || (availableEffortOptions.length > 0 ? effortLabel : t('mobileComposer.modelSettings', { defaultValue: 'Model & runtime' }));
   const showMobileEffort = availableEffortOptions.length > 0 && effort !== DEFAULT_EFFORT_VALUE;
+  const openMobileSettings = () => {
+    if (codexModelProviders) {
+      void codexModelProviders.refresh().catch(() => {});
+      if (codexModelProviders.available) void codexModelProviders.loadModels(codexModelProviders.modelProvider).catch(() => {});
+    }
+    setMobileSheet('settings');
+  };
 
   // One submit control for desktop and mobile: desktop renders it in the
   // historical right cluster, the mobile capsule/dock in the same footer slot.
@@ -428,7 +438,7 @@ export default function ChatComposer({
               : undefined
       }
       disabled={
-        isLoading
+        !isLoading && modelRequired ? true : isLoading
           ? false
           : isRecording
             ? false
@@ -489,7 +499,7 @@ export default function ChatComposer({
         </div>
       )}
 
-      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} hasQueuedDraft={hasQueuedDraft} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
+      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} modelProviders={codexModelProviders} hasQueuedDraft={hasQueuedDraft} hasRunningTasks={isLoading || Boolean(activity)} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
       {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} hasQueuedDraft={hasQueuedDraft} providerLabel={providerLabel} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
       <BackgroundSendDialog
         prompt={backgroundSendPrompt}
@@ -757,11 +767,12 @@ export default function ChatComposer({
             {!isMobile && (
               <>
                 <ScheduleMessagePopover
-                  disabled={!input.trim()}
+                  disabled={!input.trim() || modelRequired}
                   onSchedule={onScheduleMessage}
                 />
 
                 <ComposerModelMenu
+                  key={codexControls?.sessionId ?? 'new'}
                   effort={effort}
                   effortOptions={availableEffortOptions}
                   onSelectEffort={onSelectEffort}
@@ -769,6 +780,9 @@ export default function ChatComposer({
                   modelOptions={availableModelOptions}
                   onSelectModel={onSelectModel}
                   modelsLoading={modelsLoading}
+                  onOpen={codexModelProviders?.available
+                    ? () => { void codexModelProviders.loadModels(codexModelProviders.modelProvider).catch(() => {}); }
+                    : undefined}
                 />
 
                 <ComposerPermissionMenu
@@ -783,7 +797,7 @@ export default function ChatComposer({
             {isMobile && !mobileCompact && (
               <button
                 type="button"
-                onClick={() => setMobileSheet('settings')}
+                onClick={openMobileSettings}
                 // Same focus-preserving rule as +, since this button only exists
                 // while the expanded composer is mounted.
                 onPointerDown={(event) => event.preventDefault()}
@@ -823,7 +837,7 @@ export default function ChatComposer({
               <MobileSheetAction
                 icon={<SlidersHorizontalIcon />}
                 label={t('mobileComposer.settings', { defaultValue: 'Chat settings' })}
-                onClick={() => setMobileSheet('settings')}
+                onClick={openMobileSettings}
               />
               <MobileSheetAction
                 icon={<PaperclipIcon />}
@@ -875,7 +889,7 @@ export default function ChatComposer({
                   {t('schedule.trigger')}
                 </span>
                 <ScheduleMessagePopover
-                  disabled={!input.trim()}
+                  disabled={!input.trim() || modelRequired}
                   onSchedule={(scheduledFor) => { close(); onScheduleMessage(scheduledFor); }}
                   inline
                 />
@@ -909,7 +923,7 @@ export default function ChatComposer({
                   )}
                   {availableModelOptions.length > 0
                     && !availableModelOptions.some((option) => option.value === model) && (
-                      <option value={model}>{modelLabel}</option>
+                      <option value={model} disabled={!model}>{modelLabel}</option>
                     )}
                   {availableModelOptions.map((option) => (
                     <option key={option.value} value={option.value}>{option.label || option.value}</option>

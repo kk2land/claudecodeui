@@ -157,6 +157,18 @@ afterEach(() => {
   resetChatDrafts();
 });
 
+test('an empty Codex model disables Send but leaves the model picker available', async () => {
+  const codex = controls();
+  codex.state!.modelSelection = { modelProvider: 'beta', model: null };
+  render(<Harness codexControls={codex} overrides={{ model: '', availableModelOptions: [{ value: 'beta-model', label: 'Beta model' }] }} />);
+  const textarea = await findTextarea();
+  await act(async () => { fireEvent.change(textarea, { target: { value: 'wait for a model' } }); });
+  assert.equal((screen.getByRole('button', { name: 'Send' }) as HTMLButtonElement).disabled, true);
+  assert.equal(screen.getByRole('button', { name: 'Select model and reasoning effort' }).textContent, 'Select a model');
+  await act(async () => { fireEvent.keyDown(textarea, { key: 'Enter' }); });
+  assert.equal(textarea.value, 'wait for a model');
+});
+
 test('the real composer paints the suggestion as the textarea placeholder and Tab makes it an editable draft', async () => {
   const submit = vi.fn((event: Event) => event.preventDefault());
   render(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'ready', text: 'Explain the failing test.' })} />);
