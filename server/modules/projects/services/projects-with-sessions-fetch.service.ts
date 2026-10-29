@@ -129,7 +129,9 @@ function mapSessionRowToSummary(row: SessionRepositoryRow): SessionSummary {
 
 function readProjectSessionsIncludingArchived(projectPath: string): ProjectSessionsPageResult {
   const providers = new Set<string>(sessionsService.listProviderIds());
-  const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath)
+  // This is the archived-project view, so hidden exec-origin Codex rows must not
+  // surface here; permanent project deletion still reads every row separately.
+  const rows = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath, { visibleOnly: true })
     .filter((row) => providers.has(row.provider));
 
   return {

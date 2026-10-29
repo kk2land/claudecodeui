@@ -10,6 +10,8 @@ type SessionRow = {
   provider_session_id: string | null;
   project_path: string | null;
   jsonl_path: string | null;
+  /** Provider-native transcript origin; NULL until it has been read from disk. */
+  session_source: string | null;
   custom_name: string | null;
   /** Model this session runs with; NULL until the app records one for it. */
   model: string | null;
@@ -28,11 +30,34 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, session_source, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
 
 // Keep retired GPT Web rows available by id and for explicit project deletion,
 // while excluding them from UI pages, search, and transcript pruning.
 const VISIBLE_SESSION_PROVIDER_SQL = "provider <> 'gptweb'";
+
+/** Codex's SDK runtime writes `session_meta.payload.source`, and SDK runs stamp it "exec". */
+const CODEX_EXEC_SESSION_SOURCE = 'exec';
+
+/**
+ * SQL predicate for the rows a user may see in any conversation list.
+ *
+ * Codex transcripts whose source is "exec" — whether from the SDK or a manual
+ * `codex exec` — belong to a runtime the default app-server mode does not
+ * expose, so they are hidden unless the process runs with
+ * `CLOUDCLI_CODEX_RUNTIME_MODE=sdk`. Unknown sources — including rows not yet
+ * backfilled (NULL) — stay visible, as do all non-Codex providers. Kept next
+ * to the list queries so every page, count, and search candidate applies it
+ * before paging.
+ */
+function visibleSessionsSql(): string {
+  const execVisibility = process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk'
+    ? ''
+    : ` AND NOT (sessions.provider = 'codex'
+        AND COALESCE(sessions.session_source, '') = '${CODEX_EXEC_SESSION_SOURCE}')`;
+
+  return `sessions.provider <> 'gptweb'${execVisibility}`;
+}
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
 
@@ -93,7 +118,8 @@ export const sessionsDb = {
     customName?: string,
     createdAt?: string,
     updatedAt?: string,
-    jsonlPath?: string | null
+    jsonlPath?: string | null,
+    sessionSource?: string | null
   ): string {
     const db = getConnection();
     const createdAtValue = normalizeTimestamp(createdAt);
@@ -119,6 +145,7 @@ export const sessionsDb = {
            updated_at = COALESCE(?, CURRENT_TIMESTAMP),
            project_path = ?,
            jsonl_path = ?,
+           session_source = COALESCE(?, session_source),
            isArchived = CASE WHEN ? IS NULL OR julianday(?) > julianday(updated_at) THEN 0 ELSE isArchived END,
            custom_name = CASE
              WHEN session_id <> provider_session_id AND custom_name IS NOT NULL THEN custom_name
@@ -130,6 +157,7 @@ export const sessionsDb = {
         updatedAtValue,
         normalizedProjectPath,
         jsonlPath ?? null,
+        sessionSource ?? null,
         updatedAtValue,
         updatedAtValue,
         customName ?? null,
@@ -149,14 +177,15 @@ export const sessionsDb = {
     // keyed by the provider-native id for both columns. The ON CONFLICT path
     // covers legacy rows that predate the provider_session_id mapping.
     db.prepare(
-      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, isArchived, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
+      `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, session_source, isArchived, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, 0, COALESCE(?, CURRENT_TIMESTAMP), COALESCE(?, CURRENT_TIMESTAMP))
        ON CONFLICT(session_id) DO UPDATE SET
          provider = excluded.provider,
          provider_session_id = excluded.provider_session_id,
          updated_at = excluded.updated_at,
          project_path = excluded.project_path,
          jsonl_path = excluded.jsonl_path,
+         session_source = COALESCE(excluded.session_source, sessions.session_source),
          isArchived = CASE WHEN ? IS NULL OR julianday(excluded.updated_at) > julianday(sessions.updated_at) THEN 0 ELSE sessions.isArchived END,
          custom_name = CASE
            WHEN sessions.session_id <> sessions.provider_session_id AND sessions.custom_name IS NOT NULL
@@ -170,6 +199,7 @@ export const sessionsDb = {
       customName ?? null,
       normalizedProjectPath,
       jsonlPath ?? null,
+      sessionSource ?? null,
       createdAtValue,
       updatedAtValue,
       updatedAtValue
@@ -284,10 +314,11 @@ export const sessionsDb = {
           `UPDATE sessions SET
              provider_session_id = ?,
              jsonl_path = COALESCE(jsonl_path, ?),
+             session_source = COALESCE(?, session_source),
              custom_name = COALESCE(custom_name, ?),
              updated_at = CURRENT_TIMESTAMP
            WHERE session_id = ?`
-        ).run(providerSessionId, duplicate.jsonl_path, duplicate.custom_name, sessionId);
+        ).run(providerSessionId, duplicate.jsonl_path, duplicate.session_source, duplicate.custom_name, sessionId);
         return;
       }
 
@@ -329,6 +360,7 @@ export const sessionsDb = {
         `UPDATE sessions SET
            provider_session_id = ?,
            jsonl_path = ?,
+           session_source = NULL,
            updated_at = CURRENT_TIMESTAMP
          WHERE session_id = ?`
       ).run(input.providerSessionId, input.jsonlPath, sessionId);
@@ -348,6 +380,7 @@ export const sessionsDb = {
       `UPDATE sessions SET
          provider_session_id = NULL,
          jsonl_path = NULL,
+         session_source = NULL,
          updated_at = CURRENT_TIMESTAMP
        WHERE session_id = ?`
     ).run(sessionId);
@@ -462,6 +495,62 @@ export const sessionsDb = {
     ).run(customName, sessionId);
   },
 
+  /**
+   * Records the provider-native origin read from a transcript's first
+   * metadata row. The synchronizer writes `unknown` when a transcript never
+   * declared one, so the row is not re-read on every scan.
+   */
+  setSessionSource(sessionId: string, sessionSource: string): void {
+    const db = getConnection();
+    db.prepare(
+      `UPDATE sessions
+       SET session_source = ?
+       WHERE session_id = ?`
+    ).run(sessionSource, sessionId);
+  },
+
+  /**
+   * Lists Codex rows whose transcript origin has never been read.
+   *
+   * Used by the synchronizer to backfill rows indexed before the source
+   * column existed. The scan cursor cannot find them — the files are older
+   * than the cursor — so this deliberately ignores it and the synchronizer
+   * reads each file's metadata only once.
+   */
+  getCodexSessionsMissingSource(): Array<{ session_id: string; jsonl_path: string }> {
+    const db = getConnection();
+    return db
+      .prepare(
+        `SELECT session_id, jsonl_path
+         FROM sessions
+         WHERE provider = 'codex'
+           AND session_source IS NULL
+           AND jsonl_path IS NOT NULL AND jsonl_path <> ''`
+      )
+      .all() as Array<{ session_id: string; jsonl_path: string }>;
+  },
+
+  /**
+   * True when a session row belongs in user-facing lists.
+   *
+   * Mirrors `visibleSessionsSql` for callers that already hold a row — the
+   * realtime upsert broadcaster — so a watcher-rediscovered SDK transcript can
+   * never re-enter the sidebar while the app-server runtime owns the list.
+   * Archived state and retaining access by id are separate concerns.
+   */
+  isSessionVisibleToUser(
+    row: Pick<SessionRow, 'provider' | 'session_source'>
+  ): boolean {
+    if (row.provider === 'gptweb') {
+      return false;
+    }
+    return !(
+      row.provider === 'codex'
+      && row.session_source === CODEX_EXEC_SESSION_SOURCE
+      && process.env.CLOUDCLI_CODEX_RUNTIME_MODE !== 'sdk'
+    );
+  },
+
   getSessionById(sessionId: string): SessionRow | null {
     const db = getConnection();
     const row = db
@@ -542,7 +631,7 @@ export const sessionsDb = {
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}`
+         WHERE isArchived = 0 AND ${visibleSessionsSql()}`
       )
       .all() as SessionRow[];
 
@@ -561,7 +650,7 @@ export const sessionsDb = {
     const db = getConnection();
     const visibilityClause = `
       sessions.isArchived = 0
-      AND sessions.${VISIBLE_SESSION_PROVIDER_SQL}
+      AND ${visibleSessionsSql()}
       AND (projects.isArchived IS NULL OR projects.isArchived = 0)
     `;
     const rows = db
@@ -600,7 +689,7 @@ export const sessionsDb = {
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE isArchived = 1 AND ${VISIBLE_SESSION_PROVIDER_SQL}
+         WHERE isArchived = 1 AND ${visibleSessionsSql()}
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC`
       )
       .all() as SessionRow[];
@@ -616,7 +705,7 @@ export const sessionsDb = {
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}`
+           AND isArchived = 0 AND ${visibleSessionsSql()}`
       )
       .all(normalizedProjectPath) as SessionRow[];
 
@@ -624,17 +713,25 @@ export const sessionsDb = {
   },
 
   /**
-   * Permanent project deletion must see every session row for the path,
-   * including archived ones, so their transcript files can be cleaned up.
+   * Reads every session row for a path, archived or not.
+   *
+   * Permanent project deletion calls this without options because it must
+   * clean up transcripts for hidden rows too. The archived-project view passes
+   * `visibleOnly` so exec-origin Codex rows stay out of that list without
+   * weakening the deletion path's complete read.
    */
-  getSessionsByProjectPathIncludingArchived(projectPath: string): SessionRow[] {
+  getSessionsByProjectPathIncludingArchived(
+    projectPath: string,
+    options: { visibleOnly?: boolean } = {}
+  ): SessionRow[] {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
+    const visibilityFilter = options.visibleOnly ? ` AND ${visibleSessionsSql()}` : '';
     const rows = db
       .prepare(
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
-         WHERE project_path = ?`
+         WHERE project_path = ?${visibilityFilter}`
       )
       .all(normalizedProjectPath) as SessionRow[];
 
@@ -649,7 +746,7 @@ export const sessionsDb = {
         `SELECT ${SESSION_ROW_COLUMNS}
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}
+           AND isArchived = 0 AND ${visibleSessionsSql()}
          ORDER BY datetime(COALESCE(updated_at, created_at)) DESC, session_id DESC
          LIMIT ? OFFSET ?`
       )
@@ -666,7 +763,7 @@ export const sessionsDb = {
         `SELECT COUNT(*) AS count
          FROM sessions
          WHERE project_path = ?
-           AND isArchived = 0 AND ${VISIBLE_SESSION_PROVIDER_SQL}`
+           AND isArchived = 0 AND ${visibleSessionsSql()}`
       )
       .get(normalizedProjectPath) as { count: number } | undefined;
 

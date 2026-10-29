@@ -133,6 +133,10 @@ CREATE TABLE IF NOT EXISTS sessions (
     custom_name TEXT,
     project_path TEXT,
     jsonl_path TEXT,
+    -- Provider-native origin recorded from the transcript's metadata (Codex
+    -- session_meta.payload.source: exec/vscode/cli, or unknown for transcripts
+    -- that never declared one). NULL means the origin has not been read yet.
+    session_source TEXT,
     -- Model and reasoning effort this session runs with. Written when the user
     -- changes either selection and on every send, so reopening a session
     -- restores its exact runtime configuration instead of provider defaults.
