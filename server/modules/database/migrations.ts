@@ -498,6 +498,8 @@ const migrateCodexSessionControls = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'session_drafts', columns, 'queue_request_id', 'TEXT');
   addColumnToTableIfNotExists(db, 'session_drafts', columns, 'queue_error', 'TEXT');
   db.exec(SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL);
+  addColumnToTableIfNotExists(db, 'session_runtime_settings',
+    getTableInfo(db, 'session_runtime_settings').map((column) => column.name), 'model_provider', 'TEXT');
   db.exec(QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL);
   db.exec(`
     UPDATE queued_steer_receipts SET status = 'unknown' WHERE status = 'steering';

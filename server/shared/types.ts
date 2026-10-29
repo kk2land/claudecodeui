@@ -782,6 +782,14 @@ export type CodexComposerPrediction = {
   error?: string;
 };
 
+/**
+ * One session's Codex inference route. The provider is a Codex config id, not
+ * an application provider. Persisted selections apply to the next turn;
+ * active selections describe the thread that is currently loaded. A null
+ * selected model requires an explicit choice before any new prompt can run.
+ */
+export type CodexModelSelection = { modelProvider: string; model: string | null };
+
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Resolved launcher and CLI identity; reading this never starts a process. */
@@ -797,6 +805,10 @@ export type CodexSessionState = {
   };
   runtime: CodexRuntimeMode;
   mode: CodexCollaborationMode;
+  /** Explicit selection for this session's next turn, including already queued input. */
+  modelSelection?: CodexModelSelection;
+  /** Actual loaded thread configuration; absent until start/resume succeeds. */
+  activeModelSelection?: CodexModelSelection;
   queueHeld?: boolean;
   turnId: string | null;
   phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
@@ -818,6 +830,7 @@ export type CodexControlAction =
   | { action: 'stop-app-server' }
   | { action: 'mode'; mode: CodexCollaborationMode }
   | { action: 'runtime'; runtime: CodexRuntimeMode }
+  | { action: 'model-provider'; modelProvider: string; model: string | null }
   | { action: 'goal'; operation: 'get' | 'set' | 'pause' | 'resume' | 'clear'; objective?: string; tokenBudget?: number }
   | { action: 'steer'; expectedTurnId: string; requestId: string; content: string; attachments: unknown[] }
   | { action: 'answer'; requestId: string; answers: Record<string, { answers: string[] }> };
@@ -827,6 +840,8 @@ export type SessionRuntimeSettings = {
   runtime: CodexRuntimeMode;
   mode: CodexCollaborationMode;
   queueHeld: boolean;
+  /** Optional per-session override; absence preserves Codex's configured default. */
+  modelSelection?: CodexModelSelection;
 };
 
 /** Bidirectional app-server frame after JSON parsing. RPC ids are strings or numbers. */

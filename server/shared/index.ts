@@ -12,6 +12,7 @@ export type {
   CodexComposerPrediction,
   CodexComposerPredictionReason,
   CodexControlAction,
+  CodexModelSelection,
   CodexPredictionConfigResult,
   CodexPredictionConfiguration,
   CodexGoal,

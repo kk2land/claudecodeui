@@ -20,20 +20,31 @@ export const sessionRuntimeDb = {
       .run(sessionId, settings.runtime, Number(settings.queueHeld));
   },
   get(sessionId: string): SessionRuntimeSettings {
-    const row = getConnection().prepare('SELECT runtime, mode, queue_held FROM session_runtime_settings WHERE session_id = ?')
-      .get(sessionId) as { runtime: string; mode: string; queue_held: number } | undefined;
+    const row = getConnection().prepare(`SELECT settings.runtime, settings.mode, settings.queue_held,
+      settings.model_provider, sessions.model FROM session_runtime_settings AS settings
+      LEFT JOIN sessions ON sessions.session_id = settings.session_id WHERE settings.session_id = ?`)
+      .get(sessionId) as { runtime: string; mode: string; queue_held: number; model_provider: string | null; model: string | null } | undefined;
     return {
       runtime: row?.runtime === 'sdk' || (!row && process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk') ? 'sdk' : 'app-server',
       mode: row?.mode === 'plan' ? 'plan' : 'default',
       queueHeld: Boolean(row?.queue_held),
+      ...(row?.model_provider ? { modelSelection: { modelProvider: row.model_provider, model: row.model } } : {}),
     };
   },
   update(sessionId: string, patch: Partial<SessionRuntimeSettings>): SessionRuntimeSettings {
     const settings = { ...this.get(sessionId), ...patch };
-    getConnection().prepare(`INSERT INTO session_runtime_settings(session_id, runtime, mode, queue_held)
-      VALUES (?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
-      runtime = excluded.runtime, mode = excluded.mode, queue_held = excluded.queue_held`)
-      .run(sessionId, settings.runtime, settings.mode, Number(settings.queueHeld));
+    const db = getConnection();
+    // The existing session model column remains the model's single source of
+    // truth. Commit it together with the provider so reconnects never see half a choice.
+    db.transaction(() => {
+      db.prepare(`INSERT INTO session_runtime_settings(session_id, runtime, mode, queue_held, model_provider)
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
+        runtime = excluded.runtime, mode = excluded.mode, queue_held = excluded.queue_held,
+        model_provider = excluded.model_provider`)
+        .run(sessionId, settings.runtime, settings.mode, Number(settings.queueHeld), settings.modelSelection?.modelProvider ?? null);
+      if (patch.modelSelection) db.prepare('UPDATE sessions SET model = ? WHERE session_id = ?')
+        .run(patch.modelSelection.model, sessionId);
+    })();
     return settings;
   },
   /** Providers holds all native Codex queues before stopping their shared process, including unloaded sessions. */

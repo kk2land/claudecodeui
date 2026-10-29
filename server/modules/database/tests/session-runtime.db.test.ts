@@ -1,7 +1,46 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { closeConnection, getConnection, initializeDatabase, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { runMigrations } from '@/modules/database/migrations.js';
+
+test('model-provider migration preserves runtime settings and persists only the chosen session', async () => {
+  const { mkdtemp, rm } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const directory = await mkdtemp(join(tmpdir(), 'codex-model-selection-'));
+  const previous = process.env.DATABASE_PATH;
+  closeConnection(); process.env.DATABASE_PATH = join(directory, 'auth.db');
+  try {
+    await initializeDatabase();
+    sessionsDb.createAppSession('selected', 'codex', directory);
+    sessionsDb.createAppSession('untouched', 'codex', directory);
+    sessionRuntimeDb.update('selected', { mode: 'plan', queueHeld: true });
+    getConnection().exec('ALTER TABLE session_runtime_settings DROP COLUMN model_provider');
+    runMigrations(getConnection());
+    const before = sessionRuntimeDb.get('selected');
+    assert.equal(before.mode, 'plan');
+    assert.equal(before.queueHeld, true);
+    assert.equal(before.modelSelection, undefined);
+    sessionRuntimeDb.update('selected', { modelSelection: { modelProvider: 'gateway', model: 'remote-model' } });
+    assert.equal(sessionsDb.getSessionById('selected')?.model, 'remote-model');
+    closeConnection(); await initializeDatabase();
+    assert.deepEqual(sessionRuntimeDb.get('selected'), { ...before, modelSelection: { modelProvider: 'gateway', model: 'remote-model' } });
+    assert.equal(sessionRuntimeDb.get('untouched').modelSelection, undefined);
+    sessionRuntimeDb.holdCodexAppServerQueues();
+    assert.deepEqual(sessionRuntimeDb.get('selected').modelSelection, { modelProvider: 'gateway', model: 'remote-model' });
+    sessionsDb.setSessionModel('selected', 'another-model');
+    assert.equal(sessionRuntimeDb.get('selected').modelSelection?.model, 'another-model');
+    sessionRuntimeDb.update('selected', { modelSelection: { modelProvider: 'next-service', model: null } });
+    closeConnection(); await initializeDatabase();
+    assert.deepEqual(sessionRuntimeDb.get('selected').modelSelection, { modelProvider: 'next-service', model: null });
+    assert.equal(sessionsDb.getSessionById('selected')?.model, null);
+  } finally {
+    closeConnection();
+    if (previous === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previous;
+    await rm(directory, { recursive: true, force: true });
+  }
+});
 
 test('process stop persists holds for every native Codex queue while preserving messages, modes and other runtimes', async () => {
   const previousDatabase = process.env.DATABASE_PATH;

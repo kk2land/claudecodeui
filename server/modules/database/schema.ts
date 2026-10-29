@@ -244,6 +244,7 @@ CREATE TABLE IF NOT EXISTS session_runtime_settings (
     session_id TEXT PRIMARY KEY,
     runtime TEXT NOT NULL DEFAULT 'app-server',
     mode TEXT NOT NULL DEFAULT 'default',
+    model_provider TEXT,
     queue_held INTEGER NOT NULL DEFAULT 0
 );
 `;

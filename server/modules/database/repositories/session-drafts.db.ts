@@ -109,6 +109,12 @@ export const sessionDraftsDb = {
     return rows.map(toRecord);
   },
 
+  /** WebSocket service changes require every user's queue for this session to be empty, including held messages. */
+  hasQueuedMessages(sessionId: string): boolean {
+    return Boolean(getConnection().prepare(`SELECT 1 FROM session_drafts
+      WHERE draft_scope = ? AND queued_message IS NOT NULL LIMIT 1`).get(sessionId));
+  },
+
   /**
    * Lists dispatchable queued turns, one per scope: only the queue head is a
    * dispatch candidate, so a later entry can never overtake it.
