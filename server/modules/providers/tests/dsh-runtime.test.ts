@@ -460,7 +460,7 @@ test('ACP usage_update is scoped to its app session and cached for the token-usa
     const service = createProviderTokenUsageService({
       getSessionById: (sessionId) => ({
         session_id: sessionId, provider: 'dsh', provider_session_id: 'native-acp',
-        project_path: null, jsonl_path: null, custom_name: null, model: null, effort: null,
+        project_path: null, jsonl_path: null, session_source: null, custom_name: null, model: null, effort: null,
         forked_from_session_id: null, isArchived: 0,
         created_at: '2026-01-01T00:00:00.000Z', updated_at: '2026-01-01T00:00:00.000Z',
       }),
