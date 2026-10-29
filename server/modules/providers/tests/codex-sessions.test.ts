@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { appendFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -7,6 +7,7 @@ import test from 'node:test';
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { CodexSessionsProvider, parseCodexExecScript, readCodexMemoryCitations } from '@/modules/providers/list/codex/codex-sessions.provider.js';
+import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app-server.events.js';
 
 const patchHomeDir = (nextHomeDir: string) => {
   const original = os.homedir;
@@ -63,6 +64,60 @@ const writeCodexTranscript = async (
   await writeFile(filePath, `${lines.join('\n')}\n`, 'utf8');
   return filePath;
 };
+
+test('Codex history keeps native reasoning and reply identities across refreshes', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-reply-history-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath);
+  const restoreHomeDir = patchHomeDir(tempRoot);
+  try {
+    const nativeId = 'native-replies';
+    const transcriptPath = await writeCodexTranscript(tempRoot, nativeId, workspacePath);
+    const entries: Array<{ type: string; payload: Record<string, unknown> }> = [0, 1].flatMap((index) => {
+      const turnId = `turn-${index}`;
+      return [
+        { type: 'event_msg', payload: { type: 'task_started', turn_id: turnId } },
+        { type: 'turn_context', payload: { turn_id: turnId } },
+        { type: 'event_msg', payload: { type: 'user_message', message: `prompt-${index}`, client_id: `send-${index}` } },
+        { type: 'response_item', payload: { type: 'reasoning', id: `reason-${index}`, summary: [{ type: 'summary_text', text: 'Checking the answer.' }] } },
+        { type: 'response_item', payload: { type: 'message', id: `answer-${index}`, role: 'assistant', content: [{ type: 'output_text', text: `reply-${index}` }] } },
+        { type: 'event_msg', payload: { type: 'task_complete', turn_id: turnId } },
+      ];
+    });
+    entries.push(
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'legacy-turn' } },
+      // Older rows without native ids must remain readable.
+      { type: 'response_item', payload: { type: 'message', role: 'assistant', content: [{ type: 'output_text', text: 'Older reply' }] } },
+    );
+    await appendFile(transcriptPath, entries.map((entry, index) => JSON.stringify({
+      timestamp: new Date(Date.UTC(2026, 9, 29, 12, 0, index)).toISOString(), ...entry,
+    })).join('\n') + '\n');
+
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createAppSession('app-replies', 'codex', workspacePath);
+      sessionsDb.assignProviderSessionId('app-replies', nativeId);
+      await new CodexSessionSynchronizer().synchronize();
+      const provider = new CodexSessionsProvider();
+      for (let pass = 0; pass < 2; pass++) {
+        const history = await provider.fetchHistory('app-replies');
+        const thinking = history.messages.filter((message) => message.kind === 'thinking');
+        const replies = history.messages.filter((message) => message.kind === 'text' && message.role === 'assistant');
+        assert.equal(thinking.length, 2, 'identical reasoning in separate turns remains separate');
+        assert.equal(replies.length, 3);
+        thinking.forEach((message, index) => {
+          const [liveThinking] = normalizeAppServerItem({ type: 'reasoning', id: `reason-${index}`, summary: ['Checking the answer.'] }, 'app-replies', `turn-${index}`);
+          const [liveReply] = normalizeAppServerItem({ type: 'agentMessage', id: `answer-${index}`, text: `reply-${index}` }, 'app-replies', `turn-${index}`);
+          assert.equal(message.id, liveThinking.id, 'history must replace the live reasoning row');
+          assert.equal(replies[index].id, liveReply.id, 'history must replace the live reply row');
+        });
+        assert.equal(replies[2].content, 'Older reply');
+      }
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
 
 test('Codex synchronizer preserves the title assigned when CloudCLI creates a session', { concurrency: false }, async () => {
   const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-session-sync-app-'));

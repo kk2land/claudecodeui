@@ -1455,6 +1455,11 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
     }
 
     // ── response_item ──────────────────────────────────────────────────────
+    // Match app-server snapshots so a history refresh replaces the live row
+    // instead of appending another reasoning block or assistant reply.
+    const itemId = readNonEmptyString(payload.id);
+    const turnId = turns.getCurrentTurnId();
+    const responseId = itemId && turnId ? `codex:${turnId}:${itemId}` : itemId;
     if (payload.type === 'message' && payload.role === 'assistant') {
       const cited = readCodexMemoryCitations(extractCodexTextContent(payload.content));
       const textContent = cited.text;
@@ -1479,6 +1484,7 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
 
       messages.push({
         type: 'assistant',
+        uuid: responseId,
         timestamp,
         message: { role: 'assistant', content: textContent },
         memoryCitations: cited.memoryCitations,
@@ -1493,6 +1499,7 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
       if (summaryText.trim()) {
         messages.push({
           type: 'thinking',
+          uuid: responseId,
           timestamp,
           message: { role: 'assistant', content: summaryText },
         });
