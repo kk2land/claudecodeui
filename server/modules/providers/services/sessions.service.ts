@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { projectsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { listBusyClaudeCliSessions } from '@/modules/providers/services/claude-cli-liveness.service.js';
@@ -376,6 +376,7 @@ export const sessionsService = {
 
     const sessionName = options.title?.trim()
       || `${source.custom_name?.trim() || 'Session'} (fork)`;
+    const codexSettings = provider === 'codex' ? sessionRuntimeDb.get(sessionId) : undefined;
 
     const forked = await fork.forkSession({
       providerSessionId: source.provider_session_id,
@@ -399,6 +400,11 @@ export const sessionsService = {
       model: source.model,
       effort: source.effort,
     });
+    if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection) {
+      // Keep the service/model pair for future resumes, without copying the
+      // parent's queue hold or collaboration mode into an independent branch.
+      sessionRuntimeDb.update(forkSessionId, { runtime: 'app-server', modelSelection: codexSettings.modelSelection });
+    }
 
     await broadcastSessionUpserted(forkSessionId);
 

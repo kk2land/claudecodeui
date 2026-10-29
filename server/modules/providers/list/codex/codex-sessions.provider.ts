@@ -3,7 +3,7 @@ import fsp from 'node:fs/promises';
 import path from 'node:path';
 import readline from 'node:readline';
 
-import { sessionsDb } from '@/modules/database/index.js';
+import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
 import type {
@@ -1971,10 +1971,12 @@ export class CodexSessionsProvider implements IProviderSessions {
       return;
     }
 
+    const settings = sessionRuntimeDb.get(sessionId);
     const fork = await codexAppServer.forkThread({
       threadId: supersededThreadId,
       lastTurnId: keepThroughId,
       cwd: session.project_path ?? '',
+      ...(settings.runtime === 'app-server' && settings.modelSelection ? { modelSelection: settings.modelSelection } : {}),
     });
 
     sessionsDb.markProviderSessionSuperseded({

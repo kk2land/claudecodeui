@@ -7,6 +7,7 @@ import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app
 import { CodexComposerPredictions } from '@/modules/providers/list/codex/codex-composer-predictions.provider.js';
 import { CodexPredictionConfigProvider } from '@/modules/providers/list/codex/codex-prediction-config.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
+import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import { appendFilesInputTag, normalizeAttachmentDescriptors, isImageAttachmentDescriptor } from '@/shared/image-attachments.js';
 import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEnabled } from '@/shared/index.js';
 import type {
@@ -14,6 +15,7 @@ import type {
   CodexComposerPredictionReason,
   CodexControlAction,
   CodexGoal,
+  CodexModelSelection,
   CodexRpcClient,
   CodexRpcFrame,
   CodexSessionState,
@@ -167,6 +169,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private readonly providerEligible: (provider: string | null) => boolean;
   private readonly random: () => number;
   private readonly readCliVersion: () => string | null;
+  private readonly modelProviders: Pick<typeof codexModelProviderService, 'models'>;
   // Incremented on every app-server exit and turned invalid by close(). A
   // prediction run captures it up front so its cleanup can never address a
   // replacement process with the old thread ids.
@@ -192,6 +195,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       random?: () => number;
       /** Test-only CLI identity; production reads the running launcher's version. */
       cliVersion?: () => string | null;
+      /** Configured model directory, injectable so protocol tests never use real credentials. */
+      modelProviders?: Pick<typeof codexModelProviderService, 'models'>;
     } = {},
   ) {
     this.configProvider = options.configProvider ?? new CodexPredictionConfigProvider();
@@ -200,6 +205,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.providerEligible = options.providerEligible ?? ((provider) => provider === 'openai');
     this.random = options.random ?? Math.random;
     this.readCliVersion = options.cliVersion ?? (() => this.client.status?.cliVersion ?? null);
+    this.modelProviders = options.modelProviders ?? codexModelProviderService;
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
       client.onRequest((frame) => this.onRequest(frame)),
@@ -235,8 +241,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   getState(sessionId: string): CodexSessionState {
     const session = this.sessions.get(sessionId);
     const predictionSupported = this.predictionSupported();
-    if (session) return { ...session.state, diagnostics: this.client.status, predictionSupported, queueHeld: this.settings.get(sessionId).queueHeld, goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions], ...(session.state.prediction ? { prediction: { ...session.state.prediction } } : {}) };
     const settings = this.settings.get(sessionId);
+    if (session) return { ...session.state, ...settings, diagnostics: this.client.status, predictionSupported,
+      ...(session.modelProvider && session.model ? { activeModelSelection: { modelProvider: session.modelProvider, model: session.model } } : {}),
+      goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions], ...(session.state.prediction ? { prediction: { ...session.state.prediction } } : {}) };
     const failure = this.failures.get(sessionId);
     if (failure) return { ...failure.state, ...settings, predictionSupported, diagnostics: this.client.status };
     return { ...settings, diagnostics: this.client.status, predictionSupported, phase: 'idle', turnId: null, goal: null, questions: [] };
@@ -254,7 +262,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     }
   }
 
-  private async ensure(sessionId: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<NativeSession> {
+  private async ensure(sessionId: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext,
+    selection = this.settings.get(sessionId).modelSelection): Promise<NativeSession> {
     let session = this.sessions.get(sessionId);
     const providerId = context.resolveProviderSessionId(sessionId);
     if (session && session.threadId && session.threadId !== providerId) {
@@ -280,7 +289,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     const target = session;
     this.publish(target);
     target.setup = (async () => {
-      target.model = await context.resolveResumeModel(sessionId, options.model) ?? '';
+      target.model = selection?.model ?? await context.resolveResumeModel(sessionId, options.model) ?? '';
       this.assertLiveSession(target);
       if (target.stopRequested && !providerId) return;
       const permission = this.permissionOptions(options);
@@ -289,6 +298,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         // cannot migrate existing threads. Resume reads their history separately.
         ...(providerId ? { threadId: providerId, excludeTurns: true } : { historyMode: 'legacy' }),
         cwd: options.cwd ?? options.projectPath,
+        ...(selection ? { modelProvider: selection.modelProvider } : {}),
         ...(target.model ? { model: target.model } : {}), ...permission,
       });
       this.assertLiveSession(target);
@@ -296,6 +306,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       target.threadId = result.thread.id;
       target.model = result.model || result.thread.model || target.model;
       target.modelProvider = typeof result.modelProvider === 'string' ? result.modelProvider : null;
+      if (selection && target.modelProvider !== selection.modelProvider) {
+        throw new Error('Codex did not apply the selected model provider. No message was sent.');
+      }
       writer.setSessionId?.(target.threadId!);
       if (!providerId) writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'session_created', newSessionId: target.threadId! }));
       const { goal } = isCodexGoalEnabled()
@@ -355,6 +368,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     } };
   }
 
+  /** Ordinary turns and goal activation resolve the saved model while preserving the requested effort. */
+  private async configureModel(session: NativeSession, context: ProviderRuntimeContext, selection?: CodexModelSelection): Promise<void> {
+    session.model = selection?.model ?? await context.resolveResumeModel(session.id, session.options.model) ?? session.model;
+  }
+
   private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null, composerPredictions = false): NativeTurn {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
@@ -373,14 +391,33 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<void> {
     const sessionId = options.sessionId ?? randomUUID();
     const stopVersion = this.stopVersions.get(sessionId) ?? 0;
+    // A confirmed provider/model choice is one snapshot for this turn. Changes
+    // made while setup or inference is running belong to the following turn.
+    await this.controls.get(sessionId)?.catch(() => {});
+    const selection = this.settings.get(sessionId).modelSelection;
+    if (selection?.model === null) throw new AppError('Choose a model before sending a prompt.', {
+      code: 'CODEX_MODEL_REQUIRED', statusCode: 409,
+    });
     let session: NativeSession;
     try {
-      session = await this.ensure(sessionId, options, writer, context);
+      const loaded = this.sessions.get(sessionId);
+      if (selection && loaded?.modelProvider !== selection.modelProvider) {
+        await this.releaseSession(sessionId, context.resolveProviderSessionId(sessionId));
+      }
+      session = await this.ensure(sessionId, options, writer, context, selection);
     } catch (error) {
       if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0) && error instanceof AppError
         && ['CODEX_APP_SERVER_STOPPED', 'CODEX_APP_SERVER_SESSION_CLOSED'].includes(error.code)) {
         writer.send(createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }));
         return;
+      }
+      if (selection && stopVersion === (this.stopVersions.get(sessionId) ?? 0)) {
+        this.settings.update(sessionId, { queueHeld: true });
+        const state: CodexSessionState = { ...this.getState(sessionId), phase: 'failed', error: error instanceof Error ? error.message : String(error) };
+        const loaded = this.sessions.get(sessionId);
+        if (loaded) Object.assign(loaded.state, { phase: state.phase, error: state.error });
+        this.failures.set(sessionId, { state, writer });
+        writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'status', text: 'codex_control', codexState: state }));
       }
       throw error;
     }
@@ -399,7 +436,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       session.state.mode = options.collaborationMode;
       this.settings.update(sessionId, { mode: options.collaborationMode });
     }
-    session.model = await context.resolveResumeModel(sessionId, options.model) ?? session.model;
+    await this.configureModel(session, context, selection);
     if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
       writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
@@ -413,6 +450,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       const clientUserMessageId: string = options.clientMessageId ?? randomUUID();
       const input = buildInput(command, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
       turn.submittedInput = { clientId: clientUserMessageId, input };
+      // Queue dispatch keeps its receipt reserved until input can actually be
+      // delivered. A failed provider resume must leave that message queued.
+      options.onTurnStarting?.();
       const result = await this.client.request('turn/start', {
         threadId: session.threadId,
         input,
@@ -625,8 +665,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
    * configuration load.
    */
   private predictionsEligible(session: NativeSession): boolean {
+    const selected = this.settings.get(session.id).modelSelection;
     return session.state.mode !== 'plan'
       && session.state.goal?.status !== 'active'
+      && (!selected || selected.modelProvider === session.modelProvider && selected.model === session.model)
       && this.providerEligible(session.modelProvider);
   }
 
@@ -925,12 +967,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   }
 
   async control(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<CodexSessionState> {
-    if (action.action !== 'goal' && action.action !== 'mode') return this.applyControl(sessionId, action, options, writer, context);
+    if (action.action !== 'goal' && action.action !== 'mode' && action.action !== 'model-provider') return this.applyControl(sessionId, action, options, writer, context);
     const version = this.stopVersions.get(sessionId) ?? 0;
     const previous = this.controls.get(sessionId);
     const operation = (async () => {
       await previous?.catch(() => {});
-      if (version !== (this.stopVersions.get(sessionId) ?? 0) && (action.action === 'mode' || ['set', 'resume'].includes(action.operation))) {
+      if (version !== (this.stopVersions.get(sessionId) ?? 0) && (action.action === 'mode' || action.action === 'goal' && ['set', 'resume'].includes(action.operation))) {
         throw new Error('This control was cancelled by Stop.');
       }
       return this.applyControl(sessionId, action, options, writer, context, version);
@@ -975,6 +1017,34 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   private async applyControl(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext, stopVersion?: number): Promise<CodexSessionState> {
     if (action.action === 'state') return this.getState(sessionId);
+    if (action.action === 'model-provider') {
+      const currentProvider = this.settings.get(sessionId).modelSelection?.modelProvider ?? this.sessions.get(sessionId)?.modelProvider;
+      if (action.modelProvider !== currentProvider && this.hasNativeWork(sessionId)) {
+        throw new AppError('Finish running tasks before switching model services.', { code: 'CODEX_MODEL_PROVIDER_BUSY', statusCode: 409 });
+      }
+      const catalog = await this.modelProviders.models(action.modelProvider);
+      // Keep a shared model, otherwise require a new choice in the composer.
+      // Never substitute the service's first model or the CLI default.
+      const modelSelection: CodexModelSelection = { modelProvider: action.modelProvider,
+        model: action.model !== null && catalog.models.includes(action.model) ? action.model : null };
+      this.settings.update(sessionId, { modelSelection });
+      const existing = this.sessions.get(sessionId);
+      if (existing) {
+        this.clearPrediction(existing);
+        this.publish(existing);
+      } else writer.send(createNormalizedMessage({ provider: 'codex', sessionId, kind: 'status', text: 'codex_control', codexState: this.getState(sessionId) }));
+      return this.getState(sessionId);
+    }
+    const selected = this.settings.get(sessionId).modelSelection;
+    const loaded = this.sessions.get(sessionId);
+    if (selected?.model === null) {
+      // Reconnect must keep the empty choice instead of resuming with a CLI
+      // default. Existing work can still be paused/cleared on its loaded thread.
+      if (action.action === 'goal' && action.operation === 'get') return this.getState(sessionId);
+      if (action.action === 'steer' || action.action === 'goal' && (!loaded || ['set', 'resume'].includes(action.operation))) {
+        throw new AppError('Choose a model before sending a prompt.', { code: 'CODEX_MODEL_REQUIRED', statusCode: 409 });
+      }
+    }
     // Keep read/pause/clear available for reconciling goals saved before disablement.
     if (action.action === 'goal' && ['set', 'resume'].includes(action.operation) && !isCodexGoalEnabled()) {
       throw new AppError('Codex Goals are disabled. Set CLOUDCLI_CODEX_GOAL_ENABLED=true to enable them.', {
@@ -1021,6 +1091,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       return this.getState(sessionId);
     }
     if (action.operation === 'get' && !context.resolveProviderSessionId(sessionId) && !this.sessions.has(sessionId)) return this.getState(sessionId);
+    if (['set', 'resume'].includes(action.operation) && selected && loaded?.modelProvider !== selected.modelProvider) {
+      if (this.hasNativeWork(sessionId)) throw new AppError('Pause the current goal before applying the selected model provider.', {
+        code: 'CODEX_RUNTIME_BUSY', statusCode: 409,
+      });
+      await this.unloadSession(sessionId, context.resolveProviderSessionId(sessionId));
+    }
     const session = await this.ensure(sessionId, options, writer, context);
     this.assertLiveSession(session);
     if (action.operation === 'get') {
@@ -1055,7 +1131,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (!session.turn || session.turn.terminal) session.state.phase = 'starting';
       this.publish(session);
       session.goalMutation = (async () => {
-        session.model = await context.resolveResumeModel(sessionId, options.model) ?? session.model;
+        await this.configureModel(session, context, selected);
         if (session.stopRequested) throw new Error('This goal action was cancelled by Stop.');
         await this.client.request('thread/settings/update', { threadId: session.threadId,
           collaborationMode: this.collaboration(session), ...this.turnPermissions(session.options) });
@@ -1162,16 +1238,24 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       .map((session) => ({ sessionId: session.id, startedAt: session.startedAt, statusText: session.state.phase === 'stopFailed' ? 'Stop not confirmed' : session.state.phase === 'stopping' ? 'Stopping…' : undefined }));
   }
 
+  private hasNativeWork(sessionId?: string): boolean {
+    return [...this.sessions.values()].some((s) => (!sessionId || s.id === sessionId) && Boolean(s.setup || s.stop || s.goalMutation || ['stopping', 'stopFailed'].includes(s.state.phase) || (s.turn && !s.turn.terminal) || s.state.goal?.status === 'active'))
+      || [...this.requests.values()].some((request) => !sessionId || request.session.id === sessionId);
+  }
+
   /** The router checks session activity before switching runtimes. */
   isBusy(sessionId?: string): boolean {
-    return [...this.sessions.values()].some((s) => (!sessionId || s.id === sessionId) && Boolean(s.setup || s.stop || s.goalMutation || ['stopping', 'stopFailed'].includes(s.state.phase) || (s.turn && !s.turn.terminal) || s.state.goal?.status === 'active'))
-      || [...this.requests.values()].some((request) => !sessionId || request.session.id === sessionId)
-      || (sessionId ? this.controls.has(sessionId) : this.controls.size > 0);
+    return this.hasNativeWork(sessionId) || (sessionId ? this.controls.has(sessionId) : this.controls.size > 0);
   }
 
   /** The router releases the native writer/cache before allowing the SDK to append to its rollout. */
   async releaseSession(sessionId: string, providerThreadId: string | null): Promise<void> {
     if (this.isBusy(sessionId)) throw new Error('Stop this session before changing its runtime.');
+    await this.unloadSession(sessionId, providerThreadId);
+  }
+
+  /** Run/runtime handoff and serialized goal activation both resume only after native closure. */
+  private async unloadSession(sessionId: string, providerThreadId: string | null): Promise<void> {
     const session = this.sessions.get(sessionId);
     const threadId = session?.threadId ?? providerThreadId;
     const queueHeld = this.settings.get(sessionId).queueHeld;

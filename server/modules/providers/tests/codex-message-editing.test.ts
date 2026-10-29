@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
@@ -202,8 +202,10 @@ test('the edit anchor resolves to the turn before the one being replaced', { con
   });
 });
 
-test('rewinding a Codex session moves it onto the branch and retires the old thread', { concurrency: false }, async () => {
+test('rewinding a Codex session keeps its model service while moving onto the branch and retiring the old thread', { concurrency: false }, async () => {
   await withIndexedSession(THREE_TURNS, async ({ sessionId, homeDir, workspacePath }) => {
+    const modelSelection = { modelProvider: 'beta', model: 'gateway/new-model' };
+    sessionRuntimeDb.update(sessionId, { runtime: 'app-server', modelSelection });
     const forkPath = path.join(homeDir, '.codex', 'sessions', '2026', '07', '08', 'rollout-thread-2.jsonl');
     await mkdir(path.dirname(forkPath), { recursive: true });
     await writeFile(forkPath, `${JSON.stringify({ type: 'session_meta', payload: { id: 'thread-2', cwd: workspacePath } })}\n`, 'utf8');
@@ -221,7 +223,8 @@ test('rewinding a Codex session moves it onto the branch and retires the old thr
       codexAppServer.forkThread = realForkThread;
     }
 
-    assert.deepEqual(forkCalls, [{ threadId: 'thread-1', lastTurnId: 'turn-b', cwd: workspacePath }]);
+    assert.deepEqual(forkCalls, [{ threadId: 'thread-1', lastTurnId: 'turn-b', cwd: workspacePath, modelSelection }]);
+    assert.deepEqual(sessionRuntimeDb.get(sessionId).modelSelection, modelSelection);
 
     const session = sessionsDb.getSessionById(sessionId);
     assert.equal(session?.provider_session_id, 'thread-2');

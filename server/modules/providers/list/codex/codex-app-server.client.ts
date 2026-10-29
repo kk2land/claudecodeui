@@ -2,6 +2,7 @@ import { stat } from 'node:fs/promises';
 
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { AppError } from '@/shared/index.js';
+import type { CodexModelSelection } from '@/shared/index.js';
 
 /** Session branching uses the runtime-owned persistent transport. */
 export const codexAppServer = {
@@ -21,12 +22,17 @@ export const codexAppServer = {
     threadId: string;
     lastTurnId?: string;
     cwd: string;
+    modelSelection?: CodexModelSelection;
   }): Promise<{ threadId: string; path: string }> {
 
     const result = await codexAppServerTransport.request('thread/fork', {
       threadId: input.threadId,
       ...(input.lastTurnId ? { lastTurnId: input.lastTurnId } : {}),
       ...(input.cwd ? { cwd: input.cwd } : {}),
+      // A native fork loads immediately and otherwise uses config defaults,
+      // even when its parent was resumed with a different model provider.
+      ...(input.modelSelection ? { modelProvider: input.modelSelection.modelProvider,
+        ...(input.modelSelection.model ? { model: input.modelSelection.model } : {}) } : {}),
     }) as { thread?: { id?: unknown; path?: unknown } } | undefined;
 
     const threadId = typeof result?.thread?.id === 'string' ? result.thread.id : '';

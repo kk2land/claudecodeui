@@ -12,6 +12,7 @@ import { sessionConversationsSearchService } from '@/modules/providers/services/
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { providerRuntimeManagementService } from '@/modules/providers/services/provider-runtime-management.service.js';
 import { codexRateLimitsService } from '@/modules/providers/list/codex/codex-rate-limits.service.js';
+import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type {
   CustomProviderModelEffort,
   CustomProviderModelInput,
@@ -664,6 +665,16 @@ router.get(
     res.json(createApiSuccessResponse(status));
   }),
 );
+
+/** Codex's model picker reads configured inference services without exposing their credentials. */
+router.get('/codex/model-providers', asyncHandler(async (_req: Request, res: Response) => {
+  res.json(createApiSuccessResponse(await codexModelProviderService.list()));
+}));
+
+router.get('/codex/model-providers/:modelProvider/models', asyncHandler(async (req: Request, res: Response) => {
+  const modelProvider = readPathParam(req.params.modelProvider, 'modelProvider').trim();
+  res.json(createApiSuccessResponse(await codexModelProviderService.models(modelProvider)));
+}));
 
 /** Returns only the in-memory Codex quota cache; it never starts or contacts the app-server. */
 router.get(

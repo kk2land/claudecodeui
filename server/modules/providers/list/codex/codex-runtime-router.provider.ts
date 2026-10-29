@@ -46,6 +46,7 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
         return native.run(command, options, writer, context);
       }
       sdkSessions.add(options.sessionId);
+      options.onTurnStarting?.();
       try { return await sdk.run(command, options, writer, context); }
       finally { sdkSessions.delete(options.sessionId); }
     },
@@ -61,6 +62,7 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
       // The gateway asks every provider, so keep this process-wide gate Codex-only.
       if ((stopping || isStopping()) && settings.get(sessionId).runtime === 'app-server' && isCodexSession(sessionId)) return true;
       return Boolean(state.queueHeld || state.goal?.status === 'active'
+        || state.runtime === 'app-server' && state.modelSelection?.model === null
         || ['starting', 'running', 'stopping', 'stopFailed'].includes(state.phase));
     },
     async control(sessionId, action, options, writer, context) {

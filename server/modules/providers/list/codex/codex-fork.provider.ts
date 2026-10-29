@@ -1,3 +1,4 @@
+import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
 import type { IProviderFork } from '@/shared/interfaces.js';
 
@@ -23,6 +24,8 @@ export class CodexForkProvider implements IProviderFork {
     upToAnchorId?: string;
     title?: string;
   }): Promise<{ providerSessionId: string; jsonlPath: string }> {
+    const source = sessionsDb.getSessionByProviderSessionId(input.providerSessionId, 'codex');
+    const settings = source ? sessionRuntimeDb.get(source.session_id) : undefined;
     // `title` is deliberately not forwarded. The sidebar name lives in this
     // app's own session row, and naming the thread inside Codex would mean a
     // second call that could fail after the fork already succeeded.
@@ -30,6 +33,7 @@ export class CodexForkProvider implements IProviderFork {
       threadId: input.providerSessionId,
       lastTurnId: input.upToAnchorId,
       cwd: input.projectPath,
+      ...(settings?.runtime === 'app-server' && settings.modelSelection ? { modelSelection: settings.modelSelection } : {}),
     });
 
     // The path is the one the server reported and already confirmed on disk,
