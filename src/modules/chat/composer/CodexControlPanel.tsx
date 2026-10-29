@@ -40,7 +40,7 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
 }
 
 /**
- * ChatComposer displays native Plan, Goal, runtime/model-service settings and request_user_input controls here.
+ * ChatComposer displays native Plan, Goal, model-service settings and request_user_input controls here.
  *
  * `settingsContainer` lets the mobile composer move routine settings into its
  * bottom sheet while this component stays mounted, so local objective/budget
@@ -105,16 +105,8 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
       </div>
       {runtimeOpen && <section id={runtimePanelId} aria-label={t('codex.runtimeSettings')}
         className="min-w-0 rounded-xl border border-border bg-muted/20 p-3">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-end sm:justify-between">
-          <label className="flex min-w-0 flex-col gap-1.5 text-xs font-medium sm:w-56">
-            <span>{t('codex.runtime')}</span>
-            <select disabled={pending || busy} value={state?.runtime ?? 'app-server'}
-              className="h-9 w-full min-w-0 rounded-lg border border-input bg-background pl-3 pr-10 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40"
-              onChange={(event) => void controls.control({ action: 'runtime', runtime: event.target.value as 'sdk' | 'app-server' }).catch(() => {})}>
-              <option value="app-server">app-server</option><option value="sdk">SDK</option>
-            </select>
-          </label>
-          <button type="button" className={cn(button, 'h-9 gap-2 self-start px-3 sm:self-auto')}
+        <div className="flex flex-wrap items-center gap-2">
+          <button type="button" className={cn(button, 'h-9 gap-2 px-3')}
             disabled={pending || !state?.diagnostics?.running} onClick={() => void controls.control({ action: 'stop-app-server' }).catch(() => {})}>
             <Square className="h-3.5 w-3.5" aria-hidden="true" />
             {t('codex.stopAppServer')}

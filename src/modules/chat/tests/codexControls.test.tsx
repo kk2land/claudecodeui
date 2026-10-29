@@ -73,6 +73,7 @@ test('the process stop button works during a turn and disables once the process 
   const codex = controls({ diagnostics });
   const view = render(<CodexControlPanel controls={codex} onExecutePlan={() => {}} />);
   fireEvent.click(screen.getByRole('button', { name: 'Codex' }));
+  expect(screen.queryByRole('combobox', { name: 'Runtime' })).toBeNull();
   expect(screen.queryByRole('button', { name: 'Restart app-server' })).toBeNull();
   const button = screen.getByRole('button', { name: 'Stop app-server' }) as HTMLButtonElement;
   expect(button.disabled).toBe(false);
