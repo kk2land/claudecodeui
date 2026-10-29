@@ -22,6 +22,7 @@ import type {
   ProviderSkillCreateInput,
   ProviderSkillSetEnabledInput,
   ProviderRuntimeAction,
+  SessionForkOptions,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
@@ -361,12 +362,12 @@ const parseProvider = (value: unknown): LLMProvider => {
   });
 };
 
-/** Both fields are optional: an empty body forks the whole conversation. */
-const parseSessionForkPayload = (payload: unknown): { upToAnchorId?: string; title?: string } => {
+/** Optional additions preserve native forking for existing empty-body clients. */
+const parseSessionForkPayload = (payload: unknown): SessionForkOptions => {
   if (payload === undefined || payload === null) {
     return {};
   }
-  if (typeof payload !== 'object') {
+  if (typeof payload !== 'object' || Array.isArray(payload)) {
     throw new AppError('Request body must be an object.', {
       code: 'INVALID_REQUEST_BODY',
       statusCode: 400,
@@ -374,10 +375,23 @@ const parseSessionForkPayload = (payload: unknown): { upToAnchorId?: string; tit
   }
 
   const body = payload as Record<string, unknown>;
+  for (const key of ['targetProvider', 'model', 'effort', 'upToAnchorId', 'upToMessageId', 'title', 'contextMode']) {
+    if (body[key] !== undefined && (typeof body[key] !== 'string' || !(body[key] as string).trim())) {
+      throw new AppError(`${key} must be a non-empty string.`, { code: 'INVALID_FORK_OPTIONS', statusCode: 400 });
+    }
+  }
+  if (body.contextMode !== undefined && body.contextMode !== 'full' && body.contextMode !== 'compact') {
+    throw new AppError('contextMode must be full or compact.', { code: 'INVALID_FORK_OPTIONS', statusCode: 400 });
+  }
   const upToAnchorId = typeof body.upToAnchorId === 'string' ? body.upToAnchorId.trim() : '';
   const title = typeof body.title === 'string' ? body.title.trim() : '';
 
   return {
+    ...(typeof body.targetProvider === 'string' ? { targetProvider: parseProvider(body.targetProvider) } : {}),
+    ...(typeof body.model === 'string' ? { model: body.model.trim() } : {}),
+    ...(typeof body.effort === 'string' ? { effort: body.effort.trim() } : {}),
+    ...(typeof body.upToMessageId === 'string' ? { upToMessageId: body.upToMessageId.trim() } : {}),
+    ...(body.contextMode === 'full' || body.contextMode === 'compact' ? { contextMode: body.contextMode } : {}),
     ...(upToAnchorId ? { upToAnchorId } : {}),
     ...(title ? { title } : {}),
   };

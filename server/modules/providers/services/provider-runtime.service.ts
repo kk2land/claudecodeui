@@ -1,6 +1,7 @@
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
+import { sessionTransferService } from '@/modules/providers/services/session-transfer.service.js';
 import type {
   AnyRecord,
   CodexControlAction,
@@ -63,14 +64,17 @@ export function createProviderRuntimeService(
     },
   });
 
-  const run = (
+  const run = async (
     providerName: LLMProvider,
     command: string,
     options: AnyRecord,
     writer: ProviderRuntimeWriter,
   ): Promise<unknown> => {
     const provider = dependencies.resolveProvider(providerName);
-    return provider.runtime.run(command, options, writer, createRuntimeContext(provider));
+    const transfer = typeof options.sessionId === 'string'
+      ? await sessionTransferService.prepareRun(options.sessionId, command, options, writer)
+      : null;
+    return provider.runtime.run(transfer?.command ?? command, options, transfer?.writer ?? writer, createRuntimeContext(provider));
   };
 
   return {
@@ -85,9 +89,10 @@ export function createProviderRuntimeService(
     },
 
     async control(providerName: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter) {
+      sessionTransferService.assertControlAllowed(sessionId, action);
       const provider = dependencies.resolveProvider(providerName);
       if (!provider.runtime.control) throw new Error('This provider does not support runtime controls.');
-      return provider.runtime.control(sessionId, action, options, writer, createRuntimeContext(provider));
+      return provider.runtime.control(sessionId, action, options, sessionTransferService.wrapWriter(sessionId, writer), createRuntimeContext(provider));
     },
 
     async close(): Promise<void> {

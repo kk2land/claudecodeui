@@ -49,6 +49,7 @@ const COPY_HIDDEN_TOOL_NAMES = new Set(['Bash', 'Edit', 'Write', 'ApplyPatch']);
  */
 const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, onEditMessage, onForkFromMessage }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
+  const messageProvider = message.inheritedFrom?.provider ?? provider;
   const isGrouped = prevMessage && prevMessage.type === message.type &&
     ((prevMessage.type === 'assistant') ||
       (prevMessage.type === 'user') ||
@@ -59,11 +60,11 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
   const formattedMessageContent = useMemo(
     () => {
       const content = formatUsageLimitText(String(message.content || ''));
-      return provider === 'codex' && message.type === 'assistant' && !message.isThinking
+      return messageProvider === 'codex' && message.type === 'assistant' && !message.isThinking
         ? stripProposedPlanEnvelope(content)
         : content;
     },
-    [message.content, message.isThinking, message.type, provider]
+    [message.content, message.isThinking, message.type, messageProvider]
   );
   const assistantCopyContent = message.isToolUse
     ? String(message.displayText || message.content || '')
@@ -92,6 +93,17 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
   }
 
   return (
+    <>
+    {message.inheritedFrom && message.inheritedFrom.provider !== prevMessage?.inheritedFrom?.provider && (
+      <div className="my-3 border-y border-border/60 py-2 text-center text-xs text-muted-foreground">
+        {t('fork.inherited', { provider: message.inheritedFrom.provider })}
+      </div>
+    )}
+    {!message.inheritedFrom && prevMessage?.inheritedFrom && (
+      <div className="my-3 border-y border-border/60 py-2 text-center text-xs text-muted-foreground">
+        {t('fork.continued', { provider })}
+      </div>
+    )}
     <div
       ref={messageRef}
       data-message-timestamp={message.timestamp || undefined}
@@ -132,7 +144,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                       <PencilIcon className="h-3.5 w-3.5" />
                     </button>
                   )}
-                  {onForkFromMessage && message.transcriptAnchorId && (
+                  {onForkFromMessage && (message.transcriptAnchorId || message.historyMessageId) && (
                     <button
                       type="button"
                       onClick={() => onForkFromMessage(message)}
@@ -429,6 +441,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
         </div>
       )}
     </div>
+    </>
   );
 });
 

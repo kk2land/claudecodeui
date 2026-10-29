@@ -127,7 +127,7 @@ export const FILE_STATUS_GROUPS: GitStatusGroupEntry[] = [
 
 //----------------- MCP SERVER CAPABILITIES ------------
 
-/** Display name for each provider that can host MCP servers, used in headings and buttons. */
+/** Provider display names used by MCP management and the session-fork chooser. */
 export const MCP_PROVIDER_NAMES: Record<McpProvider, string> = {
   claude: 'Claude',
   cursor: 'Cursor',

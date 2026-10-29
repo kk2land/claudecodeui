@@ -5,7 +5,7 @@ import {
 } from '@/shared/authToken';
 import { IS_PLATFORM } from '@/shared/utils';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
-import type { ProviderRuntimeAction } from '@/shared/types';
+import type { ProviderRuntimeAction, SessionForkOptions } from '@/shared/types';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -285,7 +285,7 @@ export const api = {
   restoreSession: (sessionId: string) => post(`/api/providers/sessions/${sessionId}/restore`),
   // Creates an independent session holding this one's conversation up to
   // `upToAnchorId` (all of it when omitted). The source is left untouched.
-  forkSession: (sessionId: string, body: { upToAnchorId?: string; title?: string } = {}) =>
+  forkSession: (sessionId: string, body: SessionForkOptions = {}) =>
     post(`/api/providers/sessions/${encodeURIComponent(sessionId)}/fork`, body),
   renameSession: (sessionId: string, summary: string) =>
     put(`/api/providers/sessions/${sessionId}`, { summary }),

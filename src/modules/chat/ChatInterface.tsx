@@ -1,20 +1,21 @@
-import React, { useCallback, useEffect, useMemo, useRef } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { ArrowDownIcon } from 'lucide-react';
 
 import { useTasksSettings } from '@/modules/task-master';
 import { usePaletteOpsRegister } from '@/modules/command-palette';
+import { SessionForkDialog } from '@/modules/session-fork';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import PermissionContext from '@/modules/chat/context/PermissionContext';
 import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspaceContext';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
-import { api } from '@/shared/api';
 import type {
   ChatMessage,
   Project,
   ProjectSession,
   SessionEstablishedContext,
   SessionNavigationOptions,
+  SessionForkSource,
 } from '@/shared/types';
 import { useChatProviderState } from '@/modules/chat/hooks/useChatProviderState';
 import { useScheduledMessages } from '@/modules/chat/composer/useScheduledMessages';
@@ -390,23 +391,16 @@ function ChatInterface({
    * Branches the conversation into a new session that ends at this message,
    * then opens it. The session being viewed is left exactly as it was.
    */
-  const handleForkFromMessage = useCallback(async (message: ChatMessage) => {
+  // A message-level fork keeps its cut point while the user chooses a provider/model.
+  const [forkSource, setForkSource] = useState<SessionForkSource | null>(null);
+  const handleForkFromMessage = useCallback((message: ChatMessage) => {
     const anchorId = message.transcriptAnchorId;
     const sourceSessionId = selectedSession?.id;
-    if (!anchorId || !sourceSessionId) return;
-
-    try {
-      const response = await api.forkSession(sourceSessionId, { upToAnchorId: anchorId });
-      const payload = await response.json();
-      const forkedSessionId = payload?.data?.sessionId;
-      if (!response.ok || typeof forkedSessionId !== 'string') {
-        throw new Error(payload?.message || `HTTP ${response.status}`);
-      }
-      onNavigateToSession?.(forkedSessionId);
-    } catch (error) {
-      console.error('Error forking session:', error);
-    }
-  }, [onNavigateToSession, selectedSession?.id]);
+    if ((!anchorId && !message.historyMessageId) || !sourceSessionId) return;
+    setForkSource({ sessionId: sourceSessionId, provider,
+      ...(anchorId ? { upToAnchorId: anchorId } : {}),
+      ...(message.historyMessageId ? { upToMessageId: message.historyMessageId } : {}) });
+  }, [provider, selectedSession?.id]);
 
   const { scheduledMessages, schedule: scheduleMessage, cancel: cancelScheduledMessage } =
     useScheduledMessages(currentSessionId || selectedSession?.id || null, subscribe);
@@ -492,6 +486,12 @@ function ChatInterface({
 
   return (
     <PermissionContext.Provider value={permissionContextValue}>
+      {forkSource && <SessionForkDialog
+        key={forkSource.sessionId}
+        source={forkSource}
+        onClose={() => setForkSource(null)}
+        onForked={(result) => onNavigateToSession?.(result.sessionId)}
+      />}
       <div className="flex h-full min-h-0 flex-col">
         <MarkdownWorkspaceContext.Provider value={markdownWorkspaceValue}>
           <TranscriptSessionContext.Provider value={transcriptSessionValue}>
@@ -552,7 +552,7 @@ function ChatInterface({
               // offered when the session is idle — a half-truncated transcript with
               // a live stream writing into it is not recoverable.
               onEditMessage={supportsMessageEditing && !isProcessing ? beginEditMessage : undefined}
-              onForkFromMessage={supportsSessionForking ? handleForkFromMessage : undefined}
+              onForkFromMessage={supportsSessionForking && !isProcessing ? handleForkFromMessage : undefined}
               onLoadFullTranscript={loadFullTranscript}
             />
           </TranscriptSessionContext.Provider>

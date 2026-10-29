@@ -380,6 +380,8 @@ export function normalizedToChatMessages(messages: NormalizedMessage[]): ChatMes
 
     const convertedStart = converted.length;
     const sharedMetadata = {
+      historyMessageId: !msg.isOptimistic && !msg.isStreaming ? msg.id : undefined,
+      inheritedFrom: msg.inheritedFrom,
       displayText: msg.displayText,
       commandName: msg.commandName,
       commandMessage: msg.commandMessage,

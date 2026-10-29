@@ -1,4 +1,28 @@
 {
+  "fork": {
+    "title": "Fork 對話",
+    "description": "在同一專案中建立獨立對話繼續交流，保留原對話。",
+    "fromMessage": "從選定位置建立獨立對話，專案檔案維持目前狀態。",
+    "provider": "目標 Provider",
+    "model": "模型",
+    "inheritModel": "繼承目前模型及推理強度",
+    "effort": "推理強度",
+    "defaultEffort": "模型預設",
+    "context": "歷史上下文",
+    "full": "完整對話",
+    "compact": "精簡上下文",
+    "contextHelp": "跨 Provider 時，歷史上下文隨首次訊息載入。舊工具操作與權限不會重新執行，附件保留為參照。",
+    "compactHelp": "保留開頭對話與最近 20 筆記錄，縮短長文字與工具輸出。仍可檢視完整歷史。",
+    "loading": "正在載入 Provider 與模型…",
+    "unavailable": "無法使用",
+    "installTarget": "請選擇已安裝的 Provider，無法使用時可檢查 Provider 設定。",
+    "loadError": "無法載入 Fork 選項，請關閉後重新開啟重試。",
+    "createError": "無法 Fork 此對話。",
+    "create": "建立 Fork",
+    "cancel": "取消",
+    "inherited": "繼承自 {{provider}} 的歷史 · 唯讀",
+    "continued": "使用 {{provider}} 繼續交流"
+  },
   "codeBlock": {
     "copy": "複製",
     "copied": "已複製",

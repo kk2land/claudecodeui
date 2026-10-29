@@ -12,6 +12,7 @@ import type { LLMProvider, LoadingProgress, MCPServerStatus, Project, ProjectSes
 import SidebarCollapsed from '@/modules/sidebar/SidebarCollapsed';
 import SidebarContent from '@/modules/sidebar/SidebarContent';
 import SidebarModals from '@/modules/sidebar/SidebarModals';
+import { SessionForkDialog } from '@/modules/session-fork';
 
 type SidebarProps = {
   projects: Project[];
@@ -140,6 +141,9 @@ function Sidebar({
     refreshProjects,
     updateSessionSummary,
     forkSession,
+    forkSource,
+    closeForkDialog,
+    completeFork,
     collapseSidebar: handleCollapseSidebar,
     expandSidebar: handleExpandSidebar,
     setShowNewProject,
@@ -239,6 +243,12 @@ function Sidebar({
 
   return (
     <>
+        {forkSource && <SessionForkDialog
+          key={forkSource.id}
+          source={{ sessionId: forkSource.id, provider: forkSource.__provider }}
+          onClose={closeForkDialog}
+          onForked={completeFork}
+        />}
         <SidebarModals
           projects={projects}
         showSettings={showSettings}

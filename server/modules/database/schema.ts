@@ -159,6 +159,19 @@ CREATE TABLE IF NOT EXISTS scan_state (
 );
 `;
 
+/** Database initialization and migrations preserve portable forks separately from provider-native transcripts. */
+export const SESSION_TRANSFERS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS session_transfers (
+    session_id TEXT PRIMARY KEY NOT NULL REFERENCES sessions(session_id) ON DELETE CASCADE,
+    source_session_id TEXT NOT NULL,
+    source_provider TEXT NOT NULL,
+    messages_json TEXT NOT NULL,
+    context TEXT NOT NULL,
+    context_mode TEXT NOT NULL CHECK (context_mode IN ('full', 'compact')),
+    applied INTEGER NOT NULL DEFAULT 0
+);
+`;
+
 export const APP_CONFIG_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS app_config (
     key TEXT PRIMARY KEY,
@@ -322,6 +335,7 @@ ${PROJECTS_TABLE_SCHEMA_SQL}
 -- Creating them here can fail on upgraded installs where projects lacks those columns.
 
 ${SESSIONS_TABLE_SCHEMA_SQL}
+${SESSION_TRANSFERS_TABLE_SCHEMA_SQL}
 CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id);
 -- NOTE: This index is created in migrations after sessions is rebuilt to include project_path.
 -- Creating it here can fail on upgraded installs where the legacy sessions table has no project_path.

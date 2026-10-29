@@ -20,7 +20,7 @@ import type {
   ProviderRuntimeGateway,
   ProviderRuntimeWriter,
 } from '@/shared/index.js';
-import { parseIncomingJsonObject } from '@/shared/index.js';
+import { createNormalizedMessage, parseIncomingJsonObject } from '@/shared/index.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -285,6 +285,7 @@ async function dispatchRun(
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
     console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
+    run.writer.send(createNormalizedMessage({ kind: 'error', provider, sessionId, content: failure }));
   } finally {
     // Safety net: a runtime that crashed (or resolved) without emitting its
     // terminal `complete` would otherwise leave the session stuck in

@@ -66,6 +66,6 @@ export function useProviderCapabilities(): Partial<Record<LLMProvider, ProviderC
 export function useSessionForkingProviders(): Set<LLMProvider> {
   const capabilities = useProviderCapabilities();
   return useMemo(() => new Set(Object.values(capabilities)
-    .filter((row) => row?.supportsSessionForking)
+    .filter((row) => row?.supportsSessionForking || row?.supportsSessionTransfer)
     .map((row) => row.provider)), [capabilities]);
 }

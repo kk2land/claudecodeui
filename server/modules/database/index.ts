@@ -19,6 +19,8 @@ export type {
   SessionDraftRecord,
 } from '@/shared/types.js';
 export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
+// sessionTransfersDb: Providers persist independent inherited history and bootstrap acknowledgements here.
+export { sessionTransfersDb } from '@/modules/database/repositories/session-transfers.db.js';
 export { sessionRuntimeDb } from '@/modules/database/repositories/session-runtime.db.js';
 export { userDb } from '@/modules/database/repositories/users.js';
 // userPreferencesDb: used by the User module to persist the settings that used to live in browser localStorage.

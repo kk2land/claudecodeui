@@ -68,6 +68,31 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  */
 export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
 
+//----------------- SESSION CONTEXT TRANSFER ------------
+/** Providers routes and session orchestration share this additive fork payload. Native anchors retain their provider semantics; message ids address portable history snapshots. */
+export type SessionForkOptions = {
+  targetProvider?: LLMProvider;
+  model?: string;
+  effort?: string;
+  upToAnchorId?: string;
+  upToMessageId?: string;
+  title?: string;
+  contextMode?: 'full' | 'compact';
+};
+
+/** Immutable app-owned history and bootstrap state shared by the Database and Providers modules. Only the target session owns this row; source deletion must never cascade to it. */
+export type SessionTransferRecord = {
+  sessionId: string;
+  sourceSessionId: string;
+  sourceProvider: LLMProvider;
+  messages: NormalizedMessage[];
+  context: string;
+  contextMode: 'full' | 'compact';
+  applied: boolean;
+};
+
+// ---------------------------
+
 //----------------- DEEPSEEK HARNESS ------------
 /** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
 export type DshRuntimeMode = 'acp' | 'headless';
@@ -371,6 +396,8 @@ export type CompactionInfo = {
 
 export type NormalizedMessage = {
   id: string;
+  /** Read-only provenance on an inherited history row. Never reuse its original native anchor in the target provider. */
+  inheritedFrom?: { sessionId: string; provider: LLMProvider };
   /**
    * The provider's own identifier for the transcript row this message came
    * from, when the provider has stable per-row identity (today: Claude's

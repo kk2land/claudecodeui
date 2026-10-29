@@ -4,7 +4,7 @@ import type { TFunction } from 'i18next';
 import { api } from '@/shared/api';
 import { subscribeToUserPreferences } from '@/shared/userSettings';
 import { usePaletteOps } from '@/modules/command-palette';
-import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
+import type { ArchivedProjectListItem, ArchivedSessionListItem, ConversationProjectResult, ConversationSearchResults, LLMProvider, Project, ProjectSession, ProjectSortOrder, RecentConversationListItem, SearchProgress, ActiveSidebarRename, PendingSidebarDeletion, SessionTitleSearchResult, SessionWithProvider, SessionForkResult, SidebarSearchMode, SidebarSessionSelection } from '@/shared/types';
 import {
   filterProjects,
   getAllSessions,
@@ -1264,29 +1264,18 @@ export function useSidebarController({
    * The new row arrives over the websocket as a `session_upserted`, so nothing
    * is refetched here — the sidebar already has it by the time this navigates.
    */
-  const forkSession = useCallback(
-    async (session: SessionWithProvider) => {
-      try {
-        const response = await api.forkSession(session.id);
-        const payload = await response.json();
-        const forkedSessionId = payload?.data?.sessionId;
-        if (!response.ok || typeof forkedSessionId !== 'string') {
-          throw new Error(payload?.message || `HTTP ${response.status}`);
-        }
-
-        onSessionSelect({
-          id: forkedSessionId,
-          summary: payload.data.sessionName,
-          __provider: session.__provider,
-          __projectId: session.__projectId,
-        } as ProjectSession);
-      } catch (error) {
-        console.error('[Sidebar] Error forking session:', error);
-        alert(t('messages.forkSessionError'));
-      }
-    },
-    [onSessionSelect, t],
-  );
+  // Retain the originating project while the shared dialog chooses a target provider.
+  const [forkSource, setForkSource] = useState<SessionWithProvider | null>(null);
+  const forkSession = useCallback((session: SessionWithProvider) => setForkSource(session), []);
+  const closeForkDialog = useCallback(() => setForkSource(null), []);
+  const completeFork = useCallback((result: SessionForkResult) => {
+    onSessionSelect({
+      id: result.sessionId,
+      summary: result.sessionName,
+      __provider: result.provider,
+      __projectId: forkSource?.__projectId,
+    } as ProjectSession);
+  }, [forkSource?.__projectId, onSessionSelect]);
 
   const collapseSidebar = useCallback(() => {
     setSidebarVisible(false);
@@ -1333,6 +1322,9 @@ export function useSidebarController({
     toggleProject,
     handleSessionClick,
     forkSession,
+    forkSource,
+    closeForkDialog,
+    completeFork,
     toggleStarProject,
     isProjectStarred,
     getProjectSessions,

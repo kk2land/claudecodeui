@@ -61,6 +61,8 @@ type ProviderCapabilities = {
    * Whether a session's transcript can be branched into an independent one.
    */
   supportsSessionForking: boolean;
+  /** Application-owned history snapshots and prompt bootstrap; distinct from native transcript branching. */
+  supportsSessionTransfer?: boolean;
 };
 
 /**
@@ -171,6 +173,7 @@ export const providerCapabilitiesService = {
       .toLowerCase().split(/[,\s]+/);
     return {
       ...capabilities,
+      supportsSessionTransfer: true,
       hiddenFromModelPicker: hiddenProviders.includes(provider),
       ...(capabilities.nativeControls ? {
         nativeControls: { ...capabilities.nativeControls, goal: isCodexGoalEnabled() },

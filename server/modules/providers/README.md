@@ -384,6 +384,42 @@ alongside the implementation.
 
 
 
+## Session forks and provider transfers
+
+`supportsSessionForking` continues to mean provider-native transcript branching
+(Claude and Codex). `supportsSessionTransfer` advertises the application-owned
+portable path, available to all current providers through normalized history and
+their ordinary prompt runtime. These are separate capabilities.
+
+`sessionsService.forkSessionById` retains native forking for existing clients.
+The optional target provider/model/effort and portable message cut route through
+`sessionTransferService` when switching providers, explicitly compacting context,
+or branching a previously transferred session. `sessionTransfersDb` atomically
+creates an app session and an independent immutable history snapshot. Native
+ids and transcript paths remain empty until the target starts. Source deletion
+does not delete the snapshot; deleting the target cleans it up.
+
+`providerRuntimeService` supplies the bootstrap on the first input, strips it
+from realtime echoes and control snapshots, and persists its acknowledgement.
+An interrupted unacknowledged attempt checks native history before retrying.
+Accepted inputs are not resent while native transcripts are flushing. Editing
+the first native input resets the bootstrap so context survives the rewind.
+History fetches join the inherited snapshot and sanitized target history before
+pagination. Inherited rows have namespaced ids and tool ids, no native edit
+anchor, and read-only provenance; a subsequent fork can still address their
+portable message ids.
+
+Full context is bounded by `CLOUDCLI_TRANSFER_CONTEXT_TOKENS` (default 32000,
+estimated as UTF-8 bytes divided by three). This is an application transfer
+budget, not a claim about any model's tokenizer or context window. Compact
+context explicitly keeps the opening four and final twenty non-thinking rows,
+shortens long content, and reports omissions. It does not generate a semantic
+summary. The display snapshot stays complete, with a 16 MiB storage limit.
+Images and files remain references; permissions, running tools/tasks, native
+goals and model-specific state are never replayed as actions. Native goals are
+blocked until the target has received its context. Project files stay at their
+current state in the shared working directory.
+
 ## DeepSeek Harness (`dsh`)
 
 The DSH adapter lives in `list/dsh/` and supports only ACP and headless execution. It owns its subprocesses, converts native/ACP/headless events through one normalizer, and reads native versioned/compressed logs through the pinned official format catalog. Capabilities intentionally omit unsupported native controls. CloudCLI-owned MCP declarations are passed to ACP sessions or mounted by a temporary headless overlay; they do not rewrite native profile files. See [implementation and configuration](../../../docs/deepseek-harness-provider-plan.md).

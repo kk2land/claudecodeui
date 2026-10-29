@@ -11,6 +11,9 @@ export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode' | 'dsh';
 export type ProviderCapabilityRow = {
   provider: LLMProvider;
   supportsSessionForking?: boolean;
+  /** App-owned context migration, separate from native provider forking. */
+  supportsSessionTransfer?: boolean;
+  hiddenFromModelPicker?: boolean;
   /** `predictions` only says the integration can ask for a native suggestion; it is never an eligibility claim. */
   nativeControls?: { goal?: boolean; predictions?: boolean };
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
@@ -33,6 +36,36 @@ export type ProviderModelOption = {
     }[];
   };
 };
+
+//----------------- SESSION FORKING ------------
+/** Chat and sidebar pass the same source descriptor to the session-fork dialog. */
+export type SessionForkSource = {
+  sessionId: string;
+  provider: LLMProvider;
+  upToAnchorId?: string;
+  upToMessageId?: string;
+};
+
+/** Additive fork request used by the API helper and provider-selection dialog. */
+export type SessionForkOptions = {
+  targetProvider?: LLMProvider;
+  model?: string;
+  effort?: string;
+  upToAnchorId?: string;
+  upToMessageId?: string;
+  title?: string;
+  contextMode?: 'full' | 'compact';
+};
+
+/** The server's authoritative target provider must drive navigation after a fork. */
+export type SessionForkResult = {
+  sessionId: string;
+  provider: LLMProvider;
+  sessionName: string;
+  projectPath: string;
+};
+
+// ---------------------------
 
 /**
  * The full model catalog for one provider: every option plus the value used when the user has not chosen one.
@@ -372,6 +405,10 @@ export type SubagentInfo = {
 /** One rendered entry in a chat transcript — user turn, assistant turn, tool call and result, local command output, or subagent container — and the shape the chat message list and message components consume. */
 export type ChatMessage = {
   type: string;
+  /** Stable normalized history id for portable fork cut points, even without native anchors. */
+  historyMessageId?: string;
+  /** Imported rows retain their source provider and remain read-only in the target transcript. */
+  inheritedFrom?: { sessionId: string; provider: LLMProvider };
   content?: string;
   displayText?: string;
   timestamp: string | number | Date;
@@ -507,6 +544,8 @@ type QuestionOption = {
 
 /** A provider-agnostic transcript event as normalized by the backend adapters, with all kind-specific fields kept flat; it is the shape the session store holds and that chat converts into ChatMessage for rendering, so treat it as the wire contract rather than a view model. */
 export type NormalizedMessage = {
+  /** Provenance of an immutable inherited row; never a native anchor of the current session. */
+  inheritedFrom?: { sessionId: string; provider: LLMProvider };
   /** Native item snapshots update in place until completion. */
   isStreaming?: boolean;
   /**

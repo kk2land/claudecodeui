@@ -2,17 +2,20 @@ import { randomUUID } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { projectsDb, sessionsDb, sessionTransfersDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { listBusyClaudeCliSessions } from '@/modules/providers/services/claude-cli-liveness.service.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
+import { sessionTransferService } from '@/modules/providers/services/session-transfer.service.js';
+import { providerModelsService } from '@/modules/providers/services/provider-models.service.js';
 import type {
   BackgroundTaskSummary,
   FetchHistoryOptions,
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  SessionForkOptions,
   WorkflowAgentActivity,
 } from '@/shared/index.js';
 import { AppError, sliceTailPage } from '@/shared/index.js';
@@ -346,7 +349,7 @@ export const sessionsService = {
    */
   async forkSessionById(
     sessionId: string,
-    options: { upToAnchorId?: string; title?: string } = {},
+    options: SessionForkOptions = {},
   ): Promise<CreateAppSessionResult> {
     const source = sessionsDb.getSessionById(sessionId);
     if (!source) {
@@ -358,6 +361,21 @@ export const sessionsService = {
 
     const provider = source.provider as LLMProvider;
     const fork = providerRegistry.resolveProvider(provider).fork;
+    if (chatRunRegistry.getRun(sessionId)?.status === 'running') {
+      throw new AppError('Wait for the current run to finish before forking.', { code: 'FORK_SOURCE_BUSY', statusCode: 409 });
+    }
+    const targetProvider = options.targetProvider ?? provider;
+    // Migrated sessions branch through the portable path again: their inherited
+    // prefix is not part of the target provider's native transcript.
+    if (targetProvider !== provider || sessionTransfersDb.has(sessionId)
+      || !fork && options.targetProvider !== undefined
+      || options.contextMode === 'compact'
+      || options.upToMessageId && !options.upToAnchorId) {
+      const history = await sessionsService.fetchHistory(sessionId, { limit: null, offset: 0 });
+      const result = await sessionTransferService.create(source, history.messages, options);
+      await broadcastSessionUpserted(result.sessionId);
+      return result;
+    }
     if (!fork) {
       throw new AppError(`Sessions cannot be forked for provider "${provider}".`, {
         code: 'FORK_NOT_SUPPORTED',
@@ -376,6 +394,19 @@ export const sessionsService = {
 
     const sessionName = options.title?.trim()
       || `${source.custom_name?.trim() || 'Session'} (fork)`;
+
+    let model = source.model;
+    let effort = source.effort;
+    if (options.model || options.effort) {
+      const catalog = await providerModelsService.getProviderModels(provider);
+      model = options.model || model || catalog.DEFAULT;
+      const selected = catalog.OPTIONS.find((entry) => entry.value === model);
+      if (!selected) throw new AppError('Choose a model from the provider catalog.', { code: 'INVALID_TRANSFER_MODEL', statusCode: 400 });
+      effort = options.effort || (options.model && options.model !== source.model ? selected.effort?.default ?? null : effort);
+      if (effort && !selected.effort?.values.some((entry) => entry.value === effort)) {
+        throw new AppError('The selected model does not support this reasoning effort.', { code: 'INVALID_TRANSFER_EFFORT', statusCode: 400 });
+      }
+    }
 
     const forked = await fork.forkSession({
       providerSessionId: source.provider_session_id,
@@ -396,8 +427,8 @@ export const sessionsService = {
       forkedFromSessionId: sessionId,
       // A fork that silently dropped to the catalog default would answer
       // differently from the conversation it was branched from.
-      model: source.model,
-      effort: source.effort,
+      model,
+      effort,
     });
 
     await broadcastSessionUpserted(forkSessionId);
@@ -507,6 +538,7 @@ export const sessionsService = {
 
     const sessions = providerRegistry.resolveProvider(session.provider as LLMProvider).sessions;
     await sessions.rewindSession?.(sessionId, keepThroughId);
+    if (keepThroughId === null && sessionTransfersDb.has(sessionId)) sessionTransfersDb.setApplied(sessionId, false);
   },
 
   async fetchHistory(
@@ -519,6 +551,20 @@ export const sessionsService = {
         code: 'SESSION_NOT_FOUND',
         statusCode: 404,
       });
+    }
+
+    const transfer = sessionTransfersDb.get(sessionId);
+    if (transfer) {
+      const native = session.provider_session_id
+        ? await providerRegistry.resolveProvider(session.provider as LLMProvider).sessions.fetchHistory(sessionId, {
+          providerSessionId: session.provider_session_id, projectPath: session.project_path ?? '', limit: null, offset: 0,
+        })
+        : { messages: [] };
+      const messages = sessionTransferService.history(transfer, native.messages);
+      const offset = Math.max(0, options.offset ?? 0);
+      const limit = options.limit ?? null;
+      const { page, hasMore } = sliceTailPage(messages, limit, offset);
+      return { messages: page.map((message) => ({ ...message, sessionId })), total: messages.length, hasMore, offset, limit };
     }
 
     // App-created sessions that never produced a provider transcript yet

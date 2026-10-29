@@ -71,6 +71,7 @@ type ProviderCapabilities = {
   supportsEffort?: boolean;
   supportsMessageEditing?: boolean;
   supportsSessionForking?: boolean;
+  supportsSessionTransfer?: boolean;
 };
 
 type ProviderCapabilitiesApiResponse = {
@@ -504,7 +505,7 @@ export function useChatProviderState({ selectedSession, selectedProject: _select
    * runtime would reject it.
    */
   const supportsMessageEditing = Boolean(providerCapabilities?.[provider]?.supportsMessageEditing);
-  const supportsSessionForking = Boolean(providerCapabilities?.[provider]?.supportsSessionForking);
+  const supportsSessionForking = Boolean(providerCapabilities?.[provider]?.supportsSessionForking || providerCapabilities?.[provider]?.supportsSessionTransfer);
 
   const resolvePermissionModeForProvider = useCallback((
     targetProvider: LLMProvider,

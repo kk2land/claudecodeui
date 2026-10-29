@@ -1,4 +1,28 @@
 {
+  "fork": {
+    "title": "Fork conversation",
+    "description": "Continue in an independent session in the same project. The original conversation is preserved.",
+    "fromMessage": "Create an independent session from the selected point. Files stay at their current state in the shared project.",
+    "provider": "Target provider",
+    "model": "Model",
+    "inheritModel": "Keep current model and reasoning effort",
+    "effort": "Reasoning effort",
+    "defaultEffort": "Model default",
+    "context": "History context",
+    "full": "Full conversation",
+    "compact": "Compact context",
+    "contextHelp": "When transferring providers, history is loaded with your first message. Old tool actions and permissions are not replayed. Attachments remain references.",
+    "compactHelp": "Keep the opening exchanges and 20 most recent records, with shortened long text and tool output. The complete history remains available to view.",
+    "loading": "Loading providers and models…",
+    "unavailable": "Unavailable",
+    "installTarget": "Select an installed provider. Check the provider settings if it is unavailable.",
+    "loadError": "Could not load fork options. Close and reopen to retry.",
+    "createError": "Could not fork this conversation.",
+    "create": "Create fork",
+    "cancel": "Cancel",
+    "inherited": "History inherited from {{provider}} · read only",
+    "continued": "Continue with {{provider}}"
+  },
   "codeBlock": {
     "copy": "Copy",
     "copied": "Copied",

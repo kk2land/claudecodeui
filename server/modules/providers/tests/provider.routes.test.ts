@@ -84,6 +84,17 @@ test('hidden providers remain usable through session and model APIs', async () =
   }
 });
 
+test('fork route rejects malformed transfer options before running a provider', async () => {
+  await withProviderServer(async (baseUrl) => {
+    for (const body of [[], { targetProvider: 'unknown' }, { model: 123 }, { effort: '' }, { contextMode: 'summary' }, { upToMessageId: false }]) {
+      const response = await fetch(`${baseUrl}/api/providers/sessions/source/fork`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+      });
+      assert.equal(response.status, 400, JSON.stringify(body));
+    }
+  });
+});
+
 test('removed GPT Web provider is absent from capabilities and rejected by provider APIs', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     const response = await fetch(`${baseUrl}/api/providers/capabilities`);

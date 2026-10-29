@@ -1,4 +1,28 @@
 {
+  "fork": {
+    "title": "Fork 会话",
+    "description": "在同一项目中创建独立会话继续交流，原会话保留。",
+    "fromMessage": "从选定位置创建独立会话，项目文件保持当前状态。",
+    "provider": "目标 Provider",
+    "model": "模型",
+    "inheritModel": "继承当前模型和推理强度",
+    "effort": "推理强度",
+    "defaultEffort": "模型默认",
+    "context": "历史上下文",
+    "full": "完整对话",
+    "compact": "精简上下文",
+    "contextHelp": "跨 Provider 时，历史上下文随首次消息载入。旧工具操作和权限不重新执行，附件保留为引用。",
+    "compactHelp": "保留开头对话和最近 20 条记录，缩短长文本和工具输出。完整历史仍可查看。",
+    "loading": "正在加载 Provider 和模型…",
+    "unavailable": "不可用",
+    "installTarget": "请选择已安装的 Provider，不可用时可检查 Provider 设置。",
+    "loadError": "无法加载 Fork 选项，请关闭后重新打开重试。",
+    "createError": "无法 Fork 此会话。",
+    "create": "创建 Fork",
+    "cancel": "取消",
+    "inherited": "继承自 {{provider}} 的历史 · 只读",
+    "continued": "使用 {{provider}} 继续交流"
+  },
   "misc": {
     "contextRemaining": "剩余 {{percent}}%"
   },
