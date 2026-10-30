@@ -2033,3 +2033,30 @@ export type QueuedSessionMessageRecord = {
 };
 
 // ---------------------------
+
+//----------------- WORKER PLUGIN CONTRACTS ------------
+/**
+ * Host-facing contracts shared with the bundled Worker plugin: the Codex bridge, owner and
+ * notification records used by the IPC/outbox adapters, and the IPC request/response/event
+ * envelopes. UI-only DTOs stay in the plugin contract until a host consumer needs them. No
+ * Worker runtime code is imported here; the source of truth remains
+ * `plugins/worker/shared/contracts.ts`.
+ */
+export type {
+  CodexWorkerBridge,
+  CodexWorkerPrepareSessionInput,
+  WorkerChangedEventValue,
+  WorkerError,
+  WorkerIpcAction,
+  WorkerIpcChannel,
+  WorkerIpcErrorResponse,
+  WorkerIpcEvent,
+  WorkerIpcRequest,
+  WorkerIpcRequestPayloads,
+  WorkerIpcResponse,
+  WorkerIpcResponseValues,
+  WorkerIpcSuccessResponse,
+  WorkerNotification,
+  WorkerNotificationDelivery,
+  WorkerOwner,
+} from '../../plugins/worker/shared/contracts.js';

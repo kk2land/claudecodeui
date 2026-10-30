@@ -47,6 +47,22 @@ export type {
   SubagentActivity,
   SubagentInfo,
   WorkflowAgentActivity,
+  CodexWorkerBridge,
+  CodexWorkerPrepareSessionInput,
+  WorkerChangedEventValue,
+  WorkerError,
+  WorkerIpcAction,
+  WorkerIpcChannel,
+  WorkerIpcErrorResponse,
+  WorkerIpcEvent,
+  WorkerIpcRequest,
+  WorkerIpcRequestPayloads,
+  WorkerIpcResponse,
+  WorkerIpcResponseValues,
+  WorkerIpcSuccessResponse,
+  WorkerNotification,
+  WorkerNotificationDelivery,
+  WorkerOwner,
 } from './types.js';
 
 export type {
