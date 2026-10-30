@@ -692,9 +692,11 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   assert.equal(normalized.softReminderSeconds, 42);
   assert.equal(normalized.softReminderSteps, 7);
   assert.equal(normalized.hardTimeoutSeconds, 90);
+  assert.equal(normalized.retentionDays, 1);
 
   const saved = service.updateSettings({
     concurrency: { dsh: 6, pi: 1 },
+    retentionDays: 7,
     defaultWorkerType: "pi",
     defaults: {
       dsh: { model: "dsh-model", effort: "high" },
@@ -708,6 +710,18 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   });
   assert.equal(saved.softReminderSeconds, 42);
   assert.equal(saved.hardTimeoutSeconds, 90);
+  assert.equal(saved.retentionDays, 7);
+
+  for (const retentionDays of [0, -1, 1.5, null, "2", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => service.updateSettings({
+        concurrency: { dsh: 9, pi: 9 },
+        retentionDays,
+      } as never),
+      /retentionDays 必须是正整数/,
+    );
+    assert.deepEqual(service.settings(), saved);
+  }
 
   // An invalid field rejects the whole update: counts and defaults stay at the saved values.
   assert.throws(
@@ -740,6 +754,7 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   const updated = service.updateSettings({ concurrency: { dsh: 2, pi: 4 } });
   assert.equal(updated.defaultWorkerType, "pi");
   assert.deepEqual(updated.defaults, saved.defaults);
+  assert.equal(updated.retentionDays, 7);
 });
 
 test("omitted type uses configured defaults ahead of Pi environment, and replay ignores later changes", async (t) => {

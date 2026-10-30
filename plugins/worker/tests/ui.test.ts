@@ -224,6 +224,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
       softReminderSeconds: 600,
       softReminderSteps: 20,
       hardTimeoutSeconds: null,
+      retentionDays: 1,
     },
     notifications: [],
     ...overrides,
@@ -293,6 +294,7 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
           softReminderSeconds: 600,
           softReminderSteps: 20,
           hardTimeoutSeconds: null,
+          retentionDays: 7,
         };
       if (pathAndQuery === "/recover" || pathAndQuery === "/cleanup")
         return { ok: true };
@@ -479,7 +481,7 @@ test("DOM: per-worker cancel sends only that worker id", async () => {
   }
 });
 
-test("DOM: settings load and save type, model, reasoning, and concurrency fields", async () => {
+test("DOM: settings load, validate and save defaults, concurrency and retention", async () => {
   const mounted = await mountPlugin();
   try {
     await waitFor(() => {
@@ -490,6 +492,21 @@ test("DOM: settings load and save type, model, reasoning, and concurrency fields
     await waitFor(() => Boolean(byLabel(mounted.container, "DSH 并发")), "设置面板");
     const dsh = byLabel(mounted.container, "DSH 并发") as HTMLInputElement;
     const pi = byLabel(mounted.container, "Pi 并发") as HTMLInputElement;
+    const retentionDays = byLabel(
+      mounted.container,
+      "日志和运行记录保留天数",
+    ) as HTMLInputElement;
+    assert.equal(retentionDays.value, "1");
+    for (const invalid of ["0", "-1", "1.5", ""]) {
+      await typeInto(retentionDays, invalid);
+      await waitFor(
+        () => textOf(mounted.container).includes("保留天数必须是大于 0 的整数"),
+        "非法保留天数提示",
+      );
+      assert.equal(button(mounted.container, "保存设置").disabled, true);
+    }
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+    await typeInto(retentionDays, "7");
     const defaultType = byLabel(
       mounted.container,
       "默认 Worker 类型",
@@ -539,6 +556,7 @@ test("DOM: settings load and save type, model, reasoning, and concurrency fields
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存请求");
     assert.deepEqual(callsTo(mounted, "/settings")[0]!.body, {
       concurrency: { dsh: 4, pi: 2 },
+      retentionDays: 7,
       defaultWorkerType: "pi",
       defaults: {
         dsh: { model: "dsh-default", effort: "high" },
@@ -548,6 +566,7 @@ test("DOM: settings load and save type, model, reasoning, and concurrency fields
     await waitFor(() => defaultType.value === "pi", "保存后回填默认类型");
     assert.equal(piModel.value, "pi-default");
     assert.equal(dshEffort.value, "high");
+    assert.equal(retentionDays.value, "7");
 
     // Whitespace-only reasoning is saved as null, same as DSH.
     await typeInto(piEffort, "   ");
@@ -556,6 +575,7 @@ test("DOM: settings load and save type, model, reasoning, and concurrency fields
     await waitFor(() => callsTo(mounted, "/settings").length === 2, "空白 reasoning 保存");
     assert.deepEqual(callsTo(mounted, "/settings")[1]!.body, {
       concurrency: { dsh: 4, pi: 2 },
+      retentionDays: 7,
       defaultWorkerType: "pi",
       defaults: {
         dsh: { model: "dsh-default", effort: "high" },

@@ -321,6 +321,8 @@ export type WorkerSettings = {
   defaultWorkerType: WorkerType;
   /** Model and effort defaults for each type; initially null for both types. */
   defaults: WorkerDefaults;
+  /** Days to retain finished runs and their logs, measured from finishedAt; initially 1. */
+  retentionDays: number;
   softReminderSeconds: number;
   softReminderSteps: number;
   hardTimeoutSeconds: number | null;
@@ -328,14 +330,15 @@ export type WorkerSettings = {
 
 /**
  * Editable subset accepted by `PUT /settings`; reminder and timeout values stay server-owned.
- * `defaultWorkerType` and `defaults` are optional so older concurrency-only clients preserve the
- * fields they do not send. A supplied `defaults` must contain the full dsh/pi map; blank or null
- * model/effort values clear that configured default.
+ * Default selection and retention fields are optional so older concurrency-only clients preserve
+ * the fields they do not send. A supplied `defaults` must contain the full dsh/pi map; blank or
+ * null model/effort values clear that configured default. `retentionDays` must be a positive integer.
  */
 export type WorkerSettingsInput = {
   concurrency: Record<WorkerType, number>;
   defaultWorkerType?: WorkerType;
   defaults?: WorkerDefaults;
+  retentionDays?: number;
 };
 
 /** Worker counts keyed by every lifecycle status; absent keys are zero only in serialized data. */

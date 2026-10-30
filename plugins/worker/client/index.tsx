@@ -728,17 +728,20 @@ function SettingsView({
   );
   const [piModel, setPiModel] = useState(settings.defaults.pi.model ?? "");
   const [piEffort, setPiEffort] = useState(settings.defaults.pi.effort ?? "");
+  const [retentionDays, setRetentionDays] = useState(String(settings.retentionDays));
   const [busy, setBusy] = useState(false);
   const validNumber = (value: string) => {
     const parsed = Number(value);
-    return Number.isInteger(parsed) && parsed > 0;
+    return Number.isSafeInteger(parsed) && parsed > 0;
   };
   const dshModelValue = dshModel.trim();
-  const valid = validNumber(dsh) && validNumber(pi) && (!dshEffort.trim() || !!dshModelValue);
+  const valid = validNumber(dsh) && validNumber(pi) && validNumber(retentionDays) &&
+    (!dshEffort.trim() || !!dshModelValue);
   const save = async () => {
     if (!valid) return;
     const body: WorkerSettingsInput = {
       concurrency: { dsh: Number(dsh), pi: Number(pi) },
+      retentionDays: Number(retentionDays),
       defaultWorkerType: defaultType,
       defaults: {
         dsh: {
@@ -762,6 +765,7 @@ function SettingsView({
       setDshEffort(value.defaults.dsh.effort ?? "");
       setPiModel(value.defaults.pi.model ?? "");
       setPiEffort(value.defaults.pi.effort ?? "");
+      setRetentionDays(String(value.retentionDays));
     } catch (error) {
       onError(String(error));
     } finally {
@@ -864,6 +868,21 @@ function SettingsView({
             />
           </label>
         </fieldset>
+        <label className="worker-form-wide">
+          日志和运行记录保留天数
+          <input
+            type="number"
+            min="1"
+            step="1"
+            aria-label="日志和运行记录保留天数"
+            value={retentionDays}
+            onChange={(event) => setRetentionDays(event.target.value)}
+          />
+          <small>
+            默认 1 天，从每次运行结束起计算，到期自动删除日志和运行记录。
+            运行中或状态未知的任务、原生会话和工作目录保留。
+          </small>
+        </label>
         <p>
           并发为正整数，按类型独立计算；启动中、运行中、停止中和状态未知的 run 都占用额度；
           超过额度的请求按 FIFO 排队。模型或 reasoning 留空表示沿用执行器现有配置。
@@ -878,7 +897,9 @@ function SettingsView({
           <p className="worker-error" role="alert">
             {!validNumber(dsh) || !validNumber(pi)
               ? "并发必须是大于 0 的整数。"
-              : "DSH reasoning 需要同时配置 DSH 默认模型。"}
+              : !validNumber(retentionDays)
+                ? "保留天数必须是大于 0 的整数。"
+                : "DSH reasoning 需要同时配置 DSH 默认模型。"}
           </p>
         ) : null}
         <button
@@ -1134,7 +1155,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
             setSnapshot((current) =>
               current ? { ...current, settings: value } : current,
             );
-            setMessage("并发设置已保存");
+            setMessage("Worker 设置已保存");
           }}
           onError={setError}
         />

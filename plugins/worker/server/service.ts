@@ -110,6 +110,7 @@ export class WorkerService {
   private readonly prompts = new Map<string, string>();
   private readonly pendingAdmissions = new Set<string>();
   private readonly reminderTimer: NodeJS.Timeout;
+  private readonly retentionTimer: NodeJS.Timeout;
   private dispatching = false;
   private closing = false;
   private recovering = false;
@@ -122,6 +123,8 @@ export class WorkerService {
     this.now = options.now ?? Date.now;
     this.reminderTimer = setInterval(() => this.checkReminders(), 1000);
     this.reminderTimer.unref?.();
+    this.retentionTimer = setInterval(() => this.pruneHistory(), 60_000);
+    this.retentionTimer.unref?.();
   }
 
   //------------------ OWNERS AND SETTINGS ----------------
@@ -201,6 +204,11 @@ export class WorkerService {
         "INVALID_SETTINGS",
         "defaultWorkerType 必须是 dsh 或 pi",
       );
+    if (
+      input.retentionDays !== undefined &&
+      (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 1)
+    )
+      throw new WorkerFailure("INVALID_SETTINGS", "retentionDays 必须是正整数");
     const current = this.store.settings();
     // Validate the complete candidate before mutating or saving anything, so an invalid field
     // never partially persists.
@@ -212,8 +220,10 @@ export class WorkerService {
         input.defaults === undefined
           ? current.defaults
           : this.validateDefaults(input.defaults),
+      retentionDays: input.retentionDays ?? current.retentionDays,
     };
     this.store.saveSettings(settings);
+    this.pruneHistory();
     void this.dispatch();
     return settings;
   }
@@ -721,8 +731,8 @@ export class WorkerService {
     const prompt = this.prompts.get(run.id) ?? "";
     if (!prompt) throw new WorkerFailure("PROMPT_MISSING", "运行 prompt 已丢失");
     fs.writeFileSync(path.join(runDirectory, "prompt.md"), prompt, { mode: 0o600 });
-    const previousRuns = this.store.runs(worker.id).filter((item) => item.id !== run.id);
-    const previous = previousRuns.length ? previousRuns[previousRuns.length - 1]! : null;
+    // Admission snapshots the native identity so queued resumes survive history expiration.
+    const previous = run.nativeSessionId ? run : null;
     const executable = this.executable(worker.type);
     // Strip plugin control tokens before they can reach the spec file or the CLI environment.
     const safeEnvironment = this.guardianEnvironment(this.environment);
@@ -1638,12 +1648,37 @@ export class WorkerService {
     } finally {
       this.recovering = false;
     }
+    this.pruneHistory();
+  }
+
+  private pruneHistory(): void {
+    try {
+      const cutoff = this.now() - this.store.settings().retentionDays * 86_400_000;
+      for (const run of this.store.expiredRuns(cutoff)) {
+        const worker = this.store.worker(run.workerId)!;
+        const directory = this.runDirectory(worker.id, run.id);
+        fs.rmSync(directory, { recursive: true, force: true });
+        this.store.deleteRun(run);
+        if (!this.store.worker(worker.id))
+          fs.rmSync(path.dirname(directory), { recursive: true, force: true });
+        this.send({
+          channel: "cloudcli-workers",
+          kind: "event",
+          event: "changed",
+          value: { ownerId: worker.ownerId, workerIds: [worker.id] },
+        });
+      }
+    } catch (error) {
+      // Keep failed deletions eligible for the next sweep without breaking the plugin timer/API.
+      process.stderr.write("worker history cleanup failed: " + String(error) + "\n");
+    }
   }
 
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
     clearInterval(this.reminderTimer);
+    clearInterval(this.retentionTimer);
     let failure: unknown;
     try {
       await this.closeAll("插件进程退出");

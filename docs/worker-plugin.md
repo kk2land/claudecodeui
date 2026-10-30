@@ -70,17 +70,18 @@ Worker 设置可指定新的 worker 启动请求省略类型时使用的默认�
         "dsh": { "model": null, "effort": null },
         "pi": { "model": null, "effort": null }
       },
+      "retentionDays": 1,
       "softReminderSeconds": 600,
       "softReminderSteps": 20,
       "hardTimeoutSeconds": null
     }
 
-`PUT /settings` 仍要求 `concurrency` 为两个正整数。`defaultWorkerType` 和 `defaults` 可省略：旧客户端仅提交
-并发时，已保存的默认类型和模型/effort 保持不变。提供 `defaults` 时必须同时包含 `dsh` 与 `pi` 两个对象；
+`PUT /settings` 仍要求 `concurrency` 为两个正整数。`defaultWorkerType`、`defaults` 和 `retentionDays` 可省略：旧客户端仅提交
+并发时，已保存的默认类型、模型/effort 和保留天数保持不变。`retentionDays` 必须是正整数。提供 `defaults` 时必须同时包含 `dsh` 与 `pi` 两个对象；
 `model`/`effort` 为字符串或 `null`，空白字符串按清除处理。非法类型、错误的值类型、缺失的类型对象、非正
 整数并发、无效 Pi thinking 级别，或 DSH effort 没有同时配置模型，都会让整次更新失败且不保存任何字段。
-旧版仅含并发、提醒与超时的设置 JSON 在读取时补齐 `defaultWorkerType: "dsh"` 和全为 `null` 的
-`defaults`，原有并发、提醒与超时保持不变；已有 worker/run 记录不会被重写。
+旧设置 JSON 在读取时补齐缺少的 `defaultWorkerType: "dsh"`、全为 `null` 的 `defaults` 和
+`retentionDays: 1`，原有字段保持不变。
 
 新 worker 启动请求的参数优先级为：请求中显式给出的非空值 > 所选类型的插件默认值 > 现有后端环境回退（仅 Pi：
 `CODEX_PI_MODEL`、`CODEX_PI_THINKING`）> 原生 CLI 自身默认。省略 `type` 时选择
@@ -170,6 +171,13 @@ CLI 与进程组已停止，再通过 UI 或 `worker_recover` 提交说明与 `c
 
 `worker_cleanup` 只清理插件创建、工作区干净且已经停止的 worktree；保留分支、会话与日志，不清理 `existing`
 目录或用户手工创建的 worktree。
+
+Worker 设置中的“日志和运行记录保留天数”同时控制日志和运行记录，默认 1 天，按每次运行的结束时间计算，
+1 天为 24 小时。插件启动恢复完成后、保存设置后立即检查，运行期间每分钟检查一次。仅删除到期的
+`completed`、`failed`、`cancelled`、`interrupted` 运行及其日志、退出证据、关联通知和请求去重记录；
+排队、启动、运行、停止中及状态未知的运行不会被删除。同一 worker 仍有运行记录时保留 worker，否则删除
+worker 记录。原生会话、分支和工作目录不会被自动删除；记录到期删除后无法再通过该 worker ID 续接或清理 worktree。
+已经入队的续接使用该 run 在接受时保存的原生会话信息，旧运行记录到期不会改变其会话身份。
 
 ## 数据与边界
 

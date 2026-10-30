@@ -18,6 +18,7 @@ export const DEFAULT_SETTINGS: WorkerSettings = {
     dsh: { model: null, effort: null },
     pi: { model: null, effort: null },
   },
+  retentionDays: 1,
   softReminderSeconds: 600,
   softReminderSteps: 20,
   hardTimeoutSeconds: null,
@@ -313,6 +314,31 @@ export class WorkerStore {
 
   private record(worker: WorkerRecord): WorkerRecord {
     return { ...worker, latestRun: this.latestRun(worker.id) };
+  }
+
+  expiredRuns(before: number): WorkerRun[] {
+    const rows = this.db
+      .prepare(
+        "SELECT body FROM runs WHERE status IN ('completed','failed','cancelled','interrupted')",
+      )
+      .all() as RunRow[];
+    return rows
+      .map((row) => JSON.parse(row.body) as WorkerRun)
+      .filter((run) => run.finishedAt !== null && Date.parse(run.finishedAt) <= before);
+  }
+
+  /** Deletes expired history together with references, retaining workers with any remaining run. */
+  deleteRun(run: WorkerRun): void {
+    this.transaction(() => {
+      this.db.prepare("DELETE FROM notifications WHERE run_id=?").run(run.id);
+      this.db.prepare("DELETE FROM requests WHERE run_id=?").run(run.id);
+      this.db.prepare("DELETE FROM runs WHERE id=?").run(run.id);
+      this.db
+        .prepare(
+          "DELETE FROM workers WHERE id=? AND NOT EXISTS (SELECT 1 FROM runs WHERE worker_id=?)",
+        )
+        .run(run.workerId, run.workerId);
+    });
   }
 
   /** Runs ordered by admission; `queued` rows are the FIFO selection source. */
