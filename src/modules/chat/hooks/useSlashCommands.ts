@@ -55,9 +55,10 @@ const filterSlashCommands = (
   const commandPrefix = normalizedQuery.startsWith('/')
     ? normalizedQuery
     : `/${normalizedQuery}`;
-  const namePrefixMatches = commands.filter((command) =>
-    command.name.toLowerCase().startsWith(commandPrefix),
-  );
+  const namePrefixMatches = commands.filter((command) => {
+    const name = command.displayName ? `/${command.displayName}` : command.name;
+    return name.toLowerCase().startsWith(commandPrefix);
+  });
 
   // Namespaced commands should behave like path completion. Once a provider
   // namespace is typed, only exact command-prefix matches should stay visible.
@@ -66,7 +67,7 @@ const filterSlashCommands = (
   }
 
   const nameSubstringMatches = commands.filter((command) =>
-    command.name.toLowerCase().includes(normalizedQuery),
+    (command.displayName ?? command.name).toLowerCase().includes(normalizedQuery),
   );
   if (nameSubstringMatches.length > 0) {
     return nameSubstringMatches;

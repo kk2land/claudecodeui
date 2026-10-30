@@ -844,6 +844,8 @@ export type ComposerMenuAnchor = {
 /** One selectable slash command — built-in, user-defined or skill-backed — as listed in the chat composer's command menu and executed when the user picks it. */
 export type SlashCommand = {
   name: string;
+  /** Readable label when the invocation in `name` is a full instruction, as with DSH skills. */
+  displayName?: string;
   description?: string;
   namespace?: string;
   path?: string;

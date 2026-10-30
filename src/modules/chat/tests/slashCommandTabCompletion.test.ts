@@ -176,3 +176,51 @@ describe('slash command menu keyboard selection', () => {
     assert.deepEqual(setInputCalls, []);
   });
 });
+
+it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their instruction on %s', async (selection) => {
+  const instruction = 'Use the skill at /home/triage/.agents/skills/task-tools/SKILL.md';
+  listSkills.mockResolvedValue(jsonResponse({
+    data: {
+      skills: [{
+        name: 'cloudcli-project-schedules',
+        command: instruction,
+        scope: 'user',
+        description: 'Manage scheduled tasks',
+      }],
+    },
+  }));
+  const setInput = vi.fn();
+  const onExecuteCommand = vi.fn();
+  const input = '/cloudcli-project';
+  const textarea = document.createElement('textarea');
+  document.body.appendChild(textarea);
+  textarea.value = input;
+  textarea.setSelectionRange(input.length, input.length);
+  const { result } = renderHook(() => useSlashCommands({
+    selectedProject: project,
+    provider: 'dsh',
+    input,
+    setInput,
+    textareaRef: { current: textarea },
+    onExecuteCommand,
+  }));
+
+  act(() => result.current.handleCommandInputChange(input, input.length));
+  await waitFor(() => {
+    assert.equal(result.current.filteredCommands.length, 1);
+    assert.equal(result.current.filteredCommands[0].displayName, 'cloudcli-project-schedules');
+  });
+  act(() => {
+    if (selection === 'click') {
+      result.current.handleCommandSelect(result.current.filteredCommands[0], 0, false);
+    } else {
+      result.current.handleCommandMenuKeyDown(keyEvent(selection).event);
+    }
+  });
+
+  assert.equal(setInput.mock.calls[0][0], `${instruction} `);
+  assert.equal(onExecuteCommand.mock.calls.length, 0);
+  assert.equal(result.current.showCommandMenu, false);
+  textarea.value = `${instruction} `;
+  await waitFor(() => assert.equal(textarea.selectionStart, `${instruction} `.length));
+});

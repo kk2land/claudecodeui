@@ -28,7 +28,7 @@ const groupKeyFor = (command: SlashCommand): CommandGroupKey => {
 };
 
 const matchesQuery = (command: SlashCommand, normalizedQuery: string): boolean => (
-  command.name.toLowerCase().includes(normalizedQuery)
+  (command.displayName ?? command.name).toLowerCase().includes(normalizedQuery)
   || (command.description?.toLowerCase().includes(normalizedQuery) ?? false)
 );
 
@@ -91,10 +91,10 @@ export default function QuickSettingsCommandsTab({
             key={`${group.key}-${index}-${command.name}`}
             type="button"
             onClick={() => onInsertCommand(command)}
-            title={t('quickSettings.commands.insertTitle', { command: command.name })}
+            title={t('quickSettings.commands.insertTitle', { command: command.displayName ?? command.name })}
             className="flex w-full flex-col items-start rounded-md px-2 py-1.5 text-left transition-colors hover:bg-accent"
           >
-            <span className="font-mono text-sm text-foreground">{command.name}</span>
+            <span className="font-mono text-sm text-foreground">{command.displayName ?? command.name}</span>
             {command.description && (
               <span className="line-clamp-2 text-xs text-muted-foreground">{command.description}</span>
             )}

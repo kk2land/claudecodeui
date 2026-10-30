@@ -15,6 +15,7 @@ import {
 
 type CommandMenuCommand = {
   name: string;
+  displayName?: string;
   description?: string;
   namespace?: string;
   path?: string;
@@ -296,9 +297,9 @@ export default function CommandMenu({
                   <div className={`flex min-w-0 items-center gap-2 ${command.description ? 'mb-1' : 'mb-0'}`}>
                     <span
                       className="min-w-0 truncate font-mono text-[13px] font-semibold text-foreground"
-                      title={command.name}
+                      title={command.displayName ?? command.name}
                     >
-                      {command.name}
+                      {command.displayName ?? command.name}
                     </span>
                     {command.metadata?.type && (
                       <span className="command-metadata-badge shrink-0 rounded border border-border bg-muted px-1.5 py-0.5 text-[10px] font-medium text-muted-foreground shadow-sm">
