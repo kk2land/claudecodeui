@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -46,7 +47,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
   private pending = new Map<string | number, PendingRequest>();
   private notifications = new Set<(frame: CodexRpcFrame) => void>();
   private requests = new Set<(frame: CodexRpcFrame) => Promise<unknown>>();
-  private exits = new Set<(error: Error) => void>();
+  private exits = new Set<(error: Error, appServerInstanceId?: string) => void>();
   private stderr = '';
   private closed = false;
   private stopping: Promise<void> | null = null;
@@ -54,6 +55,9 @@ export class CodexAppServerTransport implements CodexRpcClient {
   private stopTarget: ChildProcessWithoutNullStreams | null = null;
   private launcherPath: string | null = null;
   private cliVersion: string | null = null;
+  // Stable for one child generation, reserved before spawn so thread config can
+  // name the instance it belongs to. Cleared when that child exits.
+  private connectionInstanceId: string | null = null;
 
   constructor(private readonly options: {
     spawn?: () => ChildProcessWithoutNullStreams;
@@ -160,6 +164,16 @@ export class CodexAppServerTransport implements CodexRpcClient {
     return Boolean(this.stopping || this.stopTarget);
   }
 
+  /** The runtime reserves this before requesting thread config from the Worker bridge. */
+  get instanceId(): string | null {
+    return this.connectionInstanceId;
+  }
+
+  /** Reuses the reserved id so `prepareSession` and the spawned child name one generation. */
+  ensureInstanceId(): string {
+    return this.connectionInstanceId ??= randomUUID();
+  }
+
   private ensureReady(): Promise<void> {
     if (this.closed) return Promise.reject(new Error('Codex app-server is shutting down.'));
     if (this.isStopping) return Promise.reject(new AppError('Codex app-server is stopping.', { code: 'CODEX_APP_SERVER_STOPPING', statusCode: 409 }));
@@ -171,6 +185,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
   }
 
   private async start(): Promise<void> {
+    this.ensureInstanceId();
     const require = createRequire(import.meta.url);
     let child: ChildProcessWithoutNullStreams;
     if (this.options.spawn) {
@@ -215,12 +230,16 @@ export class CodexAppServerTransport implements CodexRpcClient {
       if (this.stopTarget === child) this.stopTarget = null;
       this.startedAt = null;
       this.ready = null;
+      // Capture the generation before clearing it so exit consumers close only
+      // the workers that belonged to this exact process.
+      const instanceId = this.connectionInstanceId;
+      this.connectionInstanceId = null;
       for (const entry of this.pending.values()) {
         clearTimeout(entry.timer);
         entry.reject(error);
       }
       this.pending.clear();
-      for (const listener of this.exits) listener(error);
+      for (const listener of this.exits) listener(error, instanceId ?? undefined);
     };
     child.on('error', fail);
     child.on('exit', (code, signal) => fail(this.stopTarget === child

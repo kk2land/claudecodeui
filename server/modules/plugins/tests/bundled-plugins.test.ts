@@ -11,6 +11,7 @@ import {
   bundledPluginHeaders,
   getBundledPlugin,
   getBundledPluginDirectory,
+  getBundledPlugins,
 } from "../bundled-plugins.service.js";
 import { createPluginsService } from "../plugins.service.js";
 
@@ -18,8 +19,18 @@ test("bundled metadata is public but launch context and project allowlist are pr
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-cron-"));
   const previousDatabase = process.env.DATABASE_PATH,
     previousCodex = process.env.CODEX_HOME;
+  const sentinelNames = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "OPENROUTER_API_KEY",
+    "CUSTOM_NATIVE_PROVIDER_TOKEN",
+    "AWS_SECRET_ACCESS_KEY",
+  ] as const;
+  const previousSentinels = new Map(sentinelNames.map((name) => [name, process.env[name]]));
   process.env.DATABASE_PATH = path.join(directory, "auth.db");
   process.env.CODEX_HOME = path.join(directory, "codex");
+  for (const name of sentinelNames) process.env[name] = `sentinel-${name.toLowerCase()}`;
   t.mock.method(projectsDb, "getProjectPaths", () => [
     {
       project_id: "p",
@@ -34,10 +45,17 @@ test("bundled metadata is public but launch context and project allowlist are pr
     else process.env.DATABASE_PATH = previousDatabase;
     if (previousCodex === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodex;
+    for (const [name, value] of previousSentinels) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
     fs.rmSync(directory, { recursive: true, force: true });
   });
   const manifest = getBundledPlugin();
   assert.equal(manifest?.name, "project-scheduler");
+  const bundled = getBundledPlugins();
+  assert.deepEqual(bundled.map((plugin) => plugin.name), ["project-scheduler", "worker"]);
+  assert.equal(bundled[1].dirName, "worker");
   assert.equal(manifest?.builtin, true);
   assert.equal(JSON.stringify(manifest).includes("TOKEN"), false);
   assert.ok(
@@ -59,6 +77,19 @@ test("bundled metadata is public but launch context and project allowlist are pr
     bundledPluginHeaders("project-scheduler").authorization,
     "Bearer " + env.CLOUDCLI_PLUGIN_TOKEN,
   );
+  const worker = bundledPluginEnvironment("worker");
+  assert.equal(worker.CODEX_HOME, process.env.CODEX_HOME);
+  for (const name of sentinelNames) {
+    assert.equal(worker[name], process.env[name]);
+    // The scheduler keeps its existing minimal allowlist; arbitrary plugins
+    // receive no host environment at all.
+    assert.equal(env[name], undefined);
+  }
+  assert.ok(worker.CLOUDCLI_PLUGIN_TOKEN);
+  assert.notEqual(worker.CLOUDCLI_PLUGIN_TOKEN, process.env.ANTHROPIC_API_KEY);
+  assert.ok(worker.CLOUDCLI_PLUGIN_DATA_DIR?.includes("/plugins/worker/"));
+  assert.notEqual(worker.CLOUDCLI_PLUGIN_TOKEN, env.CLOUDCLI_PLUGIN_TOKEN);
+  assert.equal(fs.existsSync(worker.CLOUDCLI_PLUGIN_DATA_DIR!), true);
   assert.deepEqual(bundledPluginEnvironment("unrelated"), {});
   assert.deepEqual(bundledPluginHeaders("unrelated"), {});
   process.env.DATABASE_PATH = path.join(directory, "second-auth.db");

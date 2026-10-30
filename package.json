@@ -48,10 +48,10 @@
     "build:server": "tsc -p server/tsconfig.json && tsc-alias -p server/tsconfig.json",
     "postbuild:server": "node scripts/promote-dist-server.mjs",
     "preview": "vite preview",
-    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p plugins/project-scheduler/tsconfig.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && tsc --noEmit -p server/tsconfig.json && tsc --noEmit -p plugins/project-scheduler/tsconfig.json && tsc --noEmit -p plugins/worker/tsconfig.json",
     "test": "tsx --tsconfig server/tsconfig.json --test \"server/**/*.test.ts\" \"server/**/*.test.js\"",
     "test:client": "vitest run",
-    "lint": "oxlint src/ server/ plugins/project-scheduler/",
+    "lint": "oxlint src/ server/ plugins/project-scheduler/ plugins/worker/",
     "lint:server": "oxlint server/",
     "lint:client": "oxlint src/",
     "lint:fix": "oxlint src/ server/ --fix",
@@ -63,7 +63,8 @@
     "update:platform": "./update-platform.sh",
     "build:plugins": "node scripts/build-builtin-plugins.mjs",
     "preserver:dev": "npm run build:plugins",
-    "test:cron": "npm run build:plugins && node --import tsx --test plugins/project-scheduler/tests/*.test.ts"
+    "test:cron": "npm run build:plugins && node --import tsx --test plugins/project-scheduler/tests/*.test.ts",
+    "test:workers": "npm run build:plugins && node --import tsx --test plugins/worker/tests/*.test.ts"
   },
   "build": {
     "appId": "ai.cloudcli.desktop",
@@ -157,6 +158,7 @@
     "@deepseek-ai/dsh-session": "0.2.1-rc.2",
     "@deepseek-ai/dsh-session-format-catalog": "0.2.1-rc.2",
     "@iarna/toml": "^2.2.5",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/rest": "^22.0.0",
     "@openai/codex": "0.163.0",
     "@openai/codex-sdk": "^0.156.0",
@@ -211,7 +213,8 @@
     "tailwind-merge": "^3.3.1",
     "web-push": "^3.6.7",
     "ws": "^8.14.2",
-    "yaml": "2.9.0"
+    "yaml": "2.9.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.5.0",

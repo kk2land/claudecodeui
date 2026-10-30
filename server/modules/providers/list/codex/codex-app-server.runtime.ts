@@ -20,6 +20,7 @@ import type {
   CodexRpcFrame,
   CodexSessionState,
   CodexUserInputRequest,
+  CodexWorkerBridge,
   IProviderRuntime,
   NormalizedMessage,
   ProviderPermissionDecision,
@@ -180,6 +181,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   // prediction run captures it up front so its cleanup can never address a
   // replacement process with the old thread ids.
   private connectionEpoch = 1;
+  // Injected by the server composition root; providers must not import workers.
+  private workerBridge: CodexWorkerBridge | null = null;
+  private readonly fallbackInstanceId = randomUUID();
 
   constructor(
     private readonly client: CodexRpcClient = codexAppServerTransport,
@@ -215,11 +219,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
       client.onRequest((frame) => this.onRequest(frame)),
-      client.onExit((error) => {
+      client.onExit((error, appServerInstanceId) => {
         // A new process may serve a later request; anything already in flight
         // belongs to the dead generation and must never be replayed against it.
         this.connectionEpoch += 1;
         const stopped = error instanceof AppError && error.code === 'CODEX_APP_SERVER_STOPPED';
+        // Close the workers that belonged to this exited process. The callback
+        // only reaches the plugin IPC; it never spawns a replacement app-server.
+        void this.workerBridge?.closeAppServer(
+          appServerInstanceId ?? this.fallbackInstanceId,
+          stopped ? 'Codex app-server stopped.' : 'Codex app-server exited.',
+        ).catch(() => {});
         for (const exited of this.stopExitWaiters) exited();
         for (const closed of this.threadClosures.values()) closed();
         for (const session of this.sessions.values()) {
@@ -242,6 +252,39 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         this.sessions.clear();
       }),
     ];
+  }
+
+  /** The composition root installs the Worker bridge; native runtimes never import workers. */
+  setWorkerBridge(bridge: CodexWorkerBridge | null): void {
+    this.workerBridge = bridge;
+  }
+
+  private appServerInstanceId(): string {
+    return this.client.ensureInstanceId?.() ?? this.client.instanceId ?? this.fallbackInstanceId;
+  }
+
+  /**
+   * Registers the temporary Worker MCP thread config. A missing or disabled
+   * plugin returns null so Codex keeps working without Worker tools; the user's
+   * global Codex config and skill directories are never modified.
+   */
+  private async prepareWorkerConfig(
+    sessionId: string,
+    options: AnyRecord,
+    writer: ProviderRuntimeWriter,
+  ): Promise<Record<string, unknown> | null> {
+    if (!this.workerBridge) return null;
+    try {
+      return await this.workerBridge.prepareSession({
+        sessionId,
+        projectPath: String(options.projectPath ?? options.cwd ?? ''),
+        userId: writer.userId ?? null,
+        appServerInstanceId: this.appServerInstanceId(),
+      });
+    } catch {
+      // Worker registration is optional; a bridge failure must not block Codex.
+      return null;
+    }
   }
 
   getState(sessionId: string): CodexSessionState {
@@ -303,6 +346,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.assertLiveSession(target);
       if (target.stopRequested && !providerId) return;
       const permission = this.permissionOptions(options);
+      // The Worker owner/token is registered once per loaded thread. The
+      // returned map is a temporary thread config override, never config.toml.
+      const workerConfig = await this.prepareWorkerConfig(sessionId, options, writer);
+      this.assertLiveSession(target);
+      if (target.stopRequested && !providerId) return;
       const result = await this.client.request(providerId ? 'thread/resume' : 'thread/start', {
         // Select readable history for new threads; this creation-only setting
         // cannot migrate existing threads. Resume reads their history separately.
@@ -310,6 +358,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         cwd: options.cwd ?? options.projectPath,
         ...(requestedModelProvider ? { modelProvider: requestedModelProvider } : {}),
         ...(target.model ? { model: target.model } : {}), ...permission,
+        ...(workerConfig ? { config: workerConfig } : {}),
       });
       this.assertLiveSession(target);
       if (!result.thread?.id) throw new Error('Codex did not return a thread id.');
@@ -437,9 +486,21 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
     }
+    const workerWakeup = options.workerWakeup === true;
+    // An automatic Worker wake-up may continue only an active, unpaused owner;
+    // it must never clear a Stop or a held queue.
+    if (workerWakeup && (session.stopRequested || this.settings.get(sessionId).queueHeld)) {
+      throw new AppError('The session stopped or is holding its queue.', {
+        code: 'CODEX_WORKER_WAKE_STOPPED', statusCode: 409,
+      });
+    }
     if (session.stopRequested) {
-      if (session.state.phase !== 'idle') throw new Error('The previous Codex stop has not been confirmed.');
+      if (session.stop || session.state.phase !== 'idle') throw new Error('The previous Codex stop has not been confirmed.');
       session.stopRequested = false;
+    }
+    // Only an explicit user turn after confirmed cleanup re-activates Worker delivery.
+    if (!workerWakeup && options.userTurn === true) {
+      await this.workerBridge?.activateSession(sessionId).catch(() => {});
     }
     if (session.turn && !session.turn.terminal) throw new Error('Codex already has an active turn.');
     if (options.collaborationMode === 'plan' || options.collaborationMode === 'default') {
@@ -901,16 +962,21 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   async abort(sessionId: string, invalidateControls = true): Promise<boolean> {
     if (invalidateControls) this.stopVersions.set(sessionId, (this.stopVersions.get(sessionId) ?? 0) + 1);
+    // Start both independent cleanups immediately. Worker cleanup must never
+    // delay setting native Stop intent or interrupting the native turn.
+    const workerCleanup = this.workerBridge
+      ? this.workerBridge.stopSession(sessionId, 'session-stop').catch(() => false)
+      : Promise.resolve(true);
     const session = this.sessions.get(sessionId);
-    if (!session) return false;
-    if (session.stop) return session.stop;
+    if (!session) return await workerCleanup;
+    if (session.stop) return (await session.stop) && (await workerCleanup);
     // Stop hides any suggestion immediately, before the native turn confirms.
     this.clearPrediction(session);
     session.stopRequested = true;
     session.state.phase = 'stopping';
     this.settings.update(sessionId, { queueHeld: true });
     this.publish(session);
-    session.stop = (async () => {
+    const nativeStop = (async () => {
       const deadline = Date.now() + this.stopTimeoutMs;
       // Process exit settles parent/child waits and invalidates their remaining cleanup RPCs.
       let processExited = false;
@@ -996,9 +1062,6 @@ export class CodexAppServerRuntime implements IProviderRuntime {
           if (session.threadId) await request('thread/backgroundTerminals/clean', { threadId: session.threadId });
         } while (session.turn && !session.turn.terminal);
         this.cancelRequests(session);
-        session.state.phase = 'idle';
-        session.state.error = undefined;
-        this.publish(session);
         return true;
       } catch (error) {
         // Exit already published the terminal state. Old stops must not overwrite a replacement session.
@@ -1009,9 +1072,31 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         return false;
       } finally {
         this.stopExitWaiters.delete(onExit);
-        session.stop = null;
       }
     })();
+    // One Stop is confirmed only when both native interruption and Worker
+    // cleanup finish. Join both without short-circuiting, and keep the shared
+    // promise alive until the slower cleanup settles.
+    let combined!: Promise<boolean>;
+    combined = (async () => {
+      const [nativeStopped, workersStopped] = await Promise.all([nativeStop, workerCleanup]);
+      // Keep Stop visible while either cleanup is pending. A process exit may
+      // already have discarded this session, so never publish over its replacement.
+      if (this.sessions.get(sessionId) === session) {
+        if (!workersStopped) {
+          session.state.phase = 'stopFailed';
+          session.state.error = 'Worker cleanup was not confirmed. Retry the stop before sending another turn.';
+          this.publish(session);
+        } else if (nativeStopped) {
+          session.state.phase = 'idle';
+          session.state.error = undefined;
+          this.publish(session);
+        }
+      }
+      if (session.stop === combined) session.stop = null;
+      return nativeStopped && workersStopped;
+    })();
+    session.stop = combined;
     return session.stop;
   }
 
@@ -1309,7 +1394,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     const threadId = session?.threadId ?? providerThreadId;
     const queueHeld = this.settings.get(sessionId).queueHeld;
     const stopVersion = this.stopVersions.get(sessionId) ?? 0;
-    if (session && !await this.abort(sessionId, false)) throw new Error('Could not stop the previous Codex runtime.');
+    // Even without a cached native session, a runtime handoff must stop the
+    // Worker owner; it must still perform the existing thread/unsubscribe
+    // history handoff when a provider thread id is known.
+    if (!session) {
+      if (!await this.abort(sessionId, false)) throw new Error('Could not stop the previous Worker cleanup.');
+    } else if (!await this.abort(sessionId, false)) throw new Error('Could not stop the previous Codex runtime.');
     if (!threadId) return;
     if (session) this.assertLiveSession(session);
     if (session) { session.state.phase = 'stopping'; this.publish(session); }

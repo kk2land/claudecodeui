@@ -153,6 +153,9 @@ export class CodexComposerPredictions {
         ephemeral: true,
         excludeTurns: true,
         threadSource: 'composer_predictions',
+        // A prediction fork is detached from the user's Worker ownership and
+        // must never inherit or expose the Worker MCP server.
+        config: { 'mcp_servers.cloudcli_workers.enabled': false },
       });
       // The fork promise is observed for its full lifetime: whatever thread it
       // finally names is recorded and, if this run has been cancelled, cleaned

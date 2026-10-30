@@ -1,3 +1,6 @@
+import type { CodexWorkerBridge } from '@/shared/index.js';
+import { codexAppServerRuntime } from './list/codex/codex-app-server.runtime.js';
+
 export { sessionSynchronizerService } from './services/session-synchronizer.service.js';
 export { providerSkillsService } from './services/skills.service.js';
 export { providerMcpService } from './services/mcp.service.js';
@@ -17,3 +20,10 @@ export { codexRateLimitsService } from './list/codex/codex-rate-limits.service.j
 
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
+
+
+// setCodexWorkerBridge: used by the server composition root to inject Worker
+// lifecycle callbacks without providers importing the workers module.
+export function setCodexWorkerBridge(bridge: CodexWorkerBridge | null): void {
+  codexAppServerRuntime.setWorkerBridge(bridge);
+}

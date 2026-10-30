@@ -85,7 +85,7 @@ const generate = (executor: CodexComposerPredictions, overrides: Partial<Paramet
     ...overrides,
   });
 
-test('fork uses only the prediction parameters with no model/cwd/config overrides', async () => {
+test('fork uses only the prediction parameters and disables the Worker MCP', async () => {
   const h = harness();
   const result = generate(h.executor);
   const fork = h.calls.find((c) => c.method === 'thread/fork')!;
@@ -95,6 +95,7 @@ test('fork uses only the prediction parameters with no model/cwd/config override
     ephemeral: true,
     excludeTurns: true,
     threadSource: 'composer_predictions',
+    config: { 'mcp_servers.cloudcli_workers.enabled': false },
   });
   h.resolve('thread/fork', 1, { thread: { id: 'fork-1' } });
   await tick();

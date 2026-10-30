@@ -1,6 +1,8 @@
 import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
 
+import type { CodexWorkerBridge, WorkerIpcRequest } from '../../plugins/worker/shared/contracts.js';
+
 //----------------- HTTP RESPONSE SHAPES ------------
 /**
  * Canonical success envelope used by backend APIs that return a structured payload.
@@ -856,10 +858,18 @@ export type CodexRpcFrame = {
 /** Injectable transport contract used by the native runtime and scripted protocol tests. */
 export type CodexRpcClient = {
   readonly status?: NonNullable<CodexSessionState['diagnostics']>;
+  /**
+   * Identity of the current app-server connection generation. The Worker bridge
+   * uses it to close exactly the workers that belonged to the process that
+   * exited; null/absent clients fall back to a runtime-owned stable id.
+   */
+  readonly instanceId?: string | null;
+  /** Reserves or returns the instance id before the lazy child is spawned. */
+  ensureInstanceId?(): string;
   request<T = AnyRecord>(method: string, params?: unknown): Promise<T>;
   onNotification(listener: (frame: CodexRpcFrame) => void): () => void;
   onRequest(listener: (frame: CodexRpcFrame) => Promise<unknown>): () => void;
-  onExit(listener: (error: Error) => void): () => void;
+  onExit(listener: (error: Error, appServerInstanceId?: string) => void): () => void;
 };
 // ---------------------------
 
@@ -2033,3 +2043,101 @@ export type QueuedSessionMessageRecord = {
 };
 
 // ---------------------------
+
+//----------------- WORKER PLUGIN CONTRACTS ------------
+/**
+ * Host-facing contracts shared with the bundled Worker plugin: the Codex bridge, owner and
+ * notification records used by the IPC/outbox adapters, and the IPC request/response/event
+ * envelopes. UI-only DTOs stay in the plugin contract until a host consumer needs them. No
+ * Worker runtime code is imported here; the source of truth remains
+ * `plugins/worker/shared/contracts.ts`.
+ */
+export type {
+  CodexWorkerBridge,
+  CodexWorkerPrepareSessionInput,
+  WorkerChangedEventValue,
+  WorkerError,
+  WorkerIpcAction,
+  WorkerIpcChannel,
+  WorkerIpcErrorResponse,
+  WorkerIpcEvent,
+  WorkerIpcRequest,
+  WorkerIpcRequestPayloads,
+  WorkerIpcResponse,
+  WorkerIpcResponseValues,
+  WorkerIpcSuccessResponse,
+  WorkerNotification,
+  WorkerNotificationDelivery,
+  WorkerOwner,
+} from '../../plugins/worker/shared/contracts.js';
+
+// ---------------------------
+
+//----------------- WORKER HOST BRIDGE ------------
+/** One claimed worker result merged into the single parent wake-up turn. */
+export type WorkerWakeResult = {
+  workerId: string;
+  runId: string;
+  status: string;
+  summary: string;
+};
+
+/**
+ * Trusted metadata attached to an automatic parent-session wake-up. `batchId`
+ * is the plugin outbox batch that produced the turn; `results` preserves every
+ * claimed result so the prompt and runtime metadata cannot disagree.
+ */
+export type WorkerWakeSource = {
+  batchId: string;
+  results: WorkerWakeResult[];
+};
+
+/**
+ * Input of the detached turn dispatcher used by the Worker host bridge. Owner
+ * fields are server-assigned; `finalGuard` is consulted immediately before the
+ * native `turn/start`, after all asynchronous model preparation.
+ */
+export type WorkerWakeTurnInput = {
+  sessionId: string;
+  userId: string | number | null;
+  content: string;
+  workerSource: WorkerWakeSource;
+  finalGuard(): boolean;
+};
+
+/** Protected UI stop filters that synchronously fence Worker delivery. */
+export type WorkerCancelFenceInput = {
+  all?: boolean;
+  parentSessionId?: string;
+  projectId?: string;
+  pause?: boolean;
+};
+
+/**
+ * Transport surface between the Worker host bridge and the bundled plugin
+ * subprocess. Tests inject a fixture with the same shape; production composes
+ * it with the plugins module's child IPC adapters.
+ */
+export type WorkerIpcTransport = {
+  isRunning(): boolean;
+  /** Starts the enabled bundled plugin when necessary and resolves false when unavailable. */
+  ensureReady(): Promise<boolean>;
+  send(message: WorkerIpcRequest): boolean;
+  onMessage(listener: (message: unknown) => void): () => void;
+  onExit(listener: () => void): () => void;
+  onReady(listener: () => void): () => void;
+};
+
+/**
+ * Public host service consumed by the Worker MCP proxy, the UI cancel fence and
+ * the server composition root. Execution and persistence stay in the plugin;
+ * only owner fencing, notification scheduling and lifecycle forwarding live here.
+ */
+export type WorkerHostService = {
+  bridge: CodexWorkerBridge;
+  fenceCancel(input: WorkerCancelFenceInput): number;
+  initialize(): void;
+  restoreOwners(): Promise<void>;
+  shutdown(): Promise<void>;
+  isReady(): boolean;
+};
