@@ -18,12 +18,21 @@
 
 宿主不会自动注入、复制或安装这个 skill，也不会修改用户的 Codex 全局配置。目标已存在时保留它，
 部署时核对并手动处理旧链接或目录。MCP 连接由 app-server 的线程配置临时注入，预测线程不启用
-Worker MCP。若 skill 或 MCP 不可用，父会话应报告阻塞，而不是绕到 shell 直接调用原生 runner。
+Worker MCP。若 skill 未启用，或当前会话的 Worker MCP 未启用、未连接、缺少所需工具，Codex 应跳过
+该 skill 并用普通工具直接完成原任务，不要以「请连接 MCP 后重试」为前提报告阻塞。只有已进入 Worker
+委派流程后的持续调用失败才报告具体阻塞；任何情况下都不要绕到 shell、`dsh`/`pi` 或复制 runner
+启动/管理 worker。
 
 ## 使用
 
-父会话先通过 `worker_context` 获取真实父会话、项目和可用状态，再调用 `worker_start`。每次启动都必须
-显式选择工作区：
+先判断是否值得委派：简单问答、代码定位、少量明确的文案、配置或代码修改由 Codex 直接处理，无需调用
+`worker_context`。工作量较大、可独立交接的实现、排查或验证，在预期收益超过启动、交接与 review 成本时
+再交给 Worker；简单改动无需强行拆分，也不按文件数或代码行数机械决定。用户明确要求 Worker 执行时
+遵从其选择；讨论或修改 skill 本身不算要求派发。查看、续接或取消已有 Worker 仍使用对应 MCP 流程。
+Review 发现少量局部、修法明确的问题时，Codex 可直接修复并验证；主要实现返工通过原 Worker 续接。
+
+决定委派且满足 skill/MCP 启用条件后，先调用一次 `worker_context` 确认真实父会话、项目和可用状态；
+同一轮内复用，仅范围变化或需要刷新时再查。每次 `worker_start` 都必须显式选择工作区：
 
 - `worktree`：插件创建隔离 worktree，并在接受请求时解析 Git 基线（默认 `HEAD`）。源目录脏默认拒绝；
   只有明确传 `allowDirtySource: true` 才放行。
@@ -37,6 +46,9 @@ Worker MCP。若 skill 或 MCP 不可用，父会话应报告阻塞，而不是�
 说成验收完成；终态由 outbox 自动通知，届时再检查实际 diff 与测试。`worker_wait` 仍保留给用户明确要求
 等待或必要的短检查；`worker_cancel` 取消，`worker_resume` 用原 worker 继续并保留 cwd、home 与原生会话
 身份，但创建新的 runId，可显式覆盖模型/effort。
+
+查询或验收时，按需用 `worker_list` 定位、`worker_get` 读取目标结果；已有响应足够就复用，通知 ID 批量
+`worker_ack`。证据不足时再增量读取相关日志；局部检查通过后，仅有新改动、失败或未决问题时重跑。
 
 父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。页面只读状态并执行取消、暂停、恢复、清理和
