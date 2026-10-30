@@ -12,6 +12,7 @@ vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ sub
 afterEach(() => {
   resetChatDrafts();
   vi.unstubAllGlobals();
+  vi.useRealTimers();
 });
 
 test('the first remote model selection allocates a session and survives navigation to it', async () => {
@@ -266,10 +267,11 @@ async function setupStopAlerts() {
   const state: CodexSessionState = {
     runtime: 'app-server', mode: 'default', phase: 'running', turnId: 'turn-1', goal: null, questions: [],
   };
-  const sendMessage = vi.fn((message) => queueMicrotask(() => {
+  const respond = (message: { sessionId: string; requestId: string }, ok = true, error?: string) => {
     for (const listener of listeners) listener({ kind: 'control_result', sessionId: message.sessionId,
-      requestId: message.requestId, ok: true, codexState: state } as ServerEvent);
-  }));
+      requestId: message.requestId, ok, ...(ok ? {} : { error }), codexState: state } as ServerEvent);
+  };
+  const sendMessage = vi.fn((message) => queueMicrotask(() => respond(message)));
   const hook = renderHook(() => useCodexControls({
     enabled: true, sessionId: 'session-stop', project: null, options: {}, sendMessage, onSessionEstablished: () => {},
   }));
@@ -280,7 +282,7 @@ async function setupStopAlerts() {
   const emit = (event: ServerEvent) => act(() => {
     for (const listener of listeners) listener({ sessionId: 'session-stop', ...event } as ServerEvent);
   });
-  return { hook, emit };
+  return { hook, emit, sendMessage, respond };
 }
 
 test('an uncertain stop alert clears only after a clean native idle snapshot', async () => {
@@ -326,4 +328,97 @@ test('unconfirmed stop and unrelated control failures survive non-idle or dirty 
   emit({ kind: 'status', text: 'codex_control', codexState: { ...stopFailed, phase: 'idle', error: undefined } });
   expect(hook.result.current.error).toBe('Model switch failed');
 
+});
+
+test('a timed-out control clears on a late success for the same session only', async () => {
+  const { hook, sendMessage, respond } = await setupStopAlerts();
+  sendMessage.mockImplementation(() => {});
+  sendMessage.mockClear();
+  vi.useFakeTimers();
+  let outcome!: Promise<unknown>;
+  act(() => { outcome = hook.result.current.control({ action: 'mode', mode: 'plan' }).catch((error) => error); });
+  await act(async () => { await Promise.resolve(); });
+  const request = sendMessage.mock.calls.at(-1)![0];
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(hook.result.current.error).toBe('Confirmation pending. Reconnect to check the saved state.');
+  expect(hook.result.current.pending).toBe(false);
+
+  // Another session's receipt must not retire this session's timeout alert.
+  act(() => { respond({ sessionId: 'session-other', requestId: request.requestId }, true); });
+  expect(hook.result.current.error).toBe('Confirmation pending. Reconnect to check the saved state.');
+
+  act(() => { respond({ sessionId: 'session-stop', requestId: request.requestId }, true); });
+  expect(hook.result.current.error).toBeNull();
+  expect(await outcome).toBeInstanceOf(Error);
+  hook.unmount();
+  vi.useRealTimers();
+});
+
+test('a timed-out control is replaced by a late failure for the same session', async () => {
+  const { hook, sendMessage, respond } = await setupStopAlerts();
+  sendMessage.mockImplementation(() => {});
+  sendMessage.mockClear();
+  vi.useFakeTimers();
+  let outcome!: Promise<unknown>;
+  act(() => { outcome = hook.result.current.control({ action: 'mode', mode: 'plan' }).catch((error) => error); });
+  await act(async () => { await Promise.resolve(); });
+  const request = sendMessage.mock.calls.at(-1)![0];
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(hook.result.current.error).toBe('Confirmation pending. Reconnect to check the saved state.');
+
+  act(() => { respond({ sessionId: 'session-stop', requestId: request.requestId }, false, 'Model switch failed'); });
+  expect(hook.result.current.error).toBe('Model switch failed');
+  expect(hook.result.current.pending).toBe(false);
+  expect(await outcome).toBeInstanceOf(Error);
+  hook.unmount();
+  vi.useRealTimers();
+});
+
+test('a later reconnect refresh supersedes an unanswered automatic sync', async () => {
+  const { hook, emit, sendMessage, respond } = await setupStopAlerts();
+  sendMessage.mockClear();
+  vi.useFakeTimers();
+  // The first reconnect's state receipt is lost, leaving its automatic sync pending.
+  sendMessage.mockImplementation(() => {});
+  act(() => { emit({ kind: 'websocket_reconnected' }); });
+  await act(async () => { await Promise.resolve(); });
+  expect(sendMessage).toHaveBeenCalledTimes(1);
+  expect(hook.result.current.pending).toBe(true);
+
+  // A second reconnect reconciles successfully; the first deadline must stay silent.
+  sendMessage.mockImplementation((message) => { queueMicrotask(() => respond(message)); });
+  act(() => { emit({ kind: 'websocket_reconnected' }); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(hook.result.current.pending).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(hook.result.current.error).toBeNull();
+  expect(hook.result.current.pending).toBe(false);
+  hook.unmount();
+  vi.useRealTimers();
+});
+
+test('an unconfirmed user control is not cleared by a successful automatic refresh', async () => {
+  const { hook, emit, sendMessage, respond } = await setupStopAlerts();
+  sendMessage.mockClear();
+  vi.useFakeTimers();
+  sendMessage.mockImplementation(() => {});
+  let outcome!: Promise<unknown>;
+  act(() => { outcome = hook.result.current.control({ action: 'mode', mode: 'plan' }).catch((error) => error); });
+  await act(async () => { await Promise.resolve(); });
+  expect(hook.result.current.pending).toBe(true);
+
+  sendMessage.mockImplementation((message) => { queueMicrotask(() => respond(message)); });
+  act(() => { emit({ kind: 'websocket_reconnected' }); });
+  await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+  expect(hook.result.current.error).toBeNull();
+  expect(hook.result.current.pending).toBe(true);
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(hook.result.current.error).toBe('Confirmation pending. Reconnect to check the saved state.');
+  expect(hook.result.current.pending).toBe(false);
+  expect(await outcome).toBeInstanceOf(Error);
+  hook.unmount();
+  vi.useRealTimers();
 });

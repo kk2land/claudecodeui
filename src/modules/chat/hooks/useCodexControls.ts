@@ -49,7 +49,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     creation.current = null;
     return () => { creation.current = null; };
   }, [allocationScope]);
-  const pending = useRef(new Map<string, { sessionId: string; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>());
+  const pending = useRef(new Map<string, { sessionId: string; synchronize: boolean; resolve(): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>());
   const optionsRef = useRef(options);
   useEffect(() => { optionsRef.current = options; }, [options]);
 
@@ -95,7 +95,19 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     pending.current.clear();
   }, []);
 
-  const send = useCallback(async (sid: string, action: unknown) => {
+  const send = useCallback(async (sid: string, action: unknown, synchronize = false) => {
+    // A new automatic state -> goal/get refresh supersedes an earlier one that
+    // never got its receipt. Only these read-only reconciliation calls may be
+    // dropped: a user mutation keeps waiting for its own receipt, because a
+    // successful snapshot cannot prove that mutation was applied.
+    if (synchronize) {
+      for (const [oldRequestId, entry] of pending.current) {
+        if (entry.sessionId !== sid || !entry.synchronize) continue;
+        clearTimeout(entry.timer);
+        pending.current.delete(oldRequestId);
+        entry.reject(new Error('Session state refresh was superseded.'));
+      }
+    }
     const requestId = createUuid();
     setErrors((old) => ({ ...old, [sid]: null }));
     setPendingSessions((old) => new Set([...old, sid]));
@@ -108,7 +120,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
         void hydrateChatDrafts();
         reject(new Error(error));
       }, 40_000);
-      pending.current.set(requestId, { sessionId: sid, resolve, reject, timer });
+      pending.current.set(requestId, { sessionId: sid, synchronize, resolve, reject, timer });
       sendMessage({ type: 'chat.control', sessionId: sid, requestId, control: action, options: optionsRef.current });
     });
   }, [sendMessage]);
@@ -149,7 +161,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     if (!enabled || !sessionId || event.kind !== 'websocket_reconnected') return;
     // goal/get also reconciles persisted steer receipts. The server skips native
     // Goal RPCs when disabled, but history recovery must always remain available.
-    void send(sessionId, { action: 'state' }).then(() => send(sessionId, { action: 'goal', operation: 'get' }))
+    void send(sessionId, { action: 'state' }, true).then(() => send(sessionId, { action: 'goal', operation: 'get' }, true))
       .then(() => hydrateChatDrafts()).catch(() => {});
   }), [enabled, sessionId, send, subscribe]);
 
@@ -173,8 +185,8 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     // Restore persisted receipts after subscription, independently of the Goal UI.
     queueMicrotask(() => {
       if (!active) return;
-      void send(sessionId, { action: 'state' }).then(() => {
-        if (active) return send(sessionId, { action: 'goal', operation: 'get' });
+      void send(sessionId, { action: 'state' }, true).then(() => {
+        if (active) return send(sessionId, { action: 'goal', operation: 'get' }, true);
       }).catch(() => {});
     });
     return () => { active = false; };
