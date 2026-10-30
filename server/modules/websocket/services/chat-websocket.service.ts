@@ -19,8 +19,9 @@ import type {
   LLMProvider,
   ProviderRuntimeGateway,
   ProviderRuntimeWriter,
+  WorkerWakeSource,
 } from '@/shared/index.js';
-import { parseIncomingJsonObject } from '@/shared/index.js';
+import { AppError, parseIncomingJsonObject } from '@/shared/index.js';
 
 /**
  * Trust boundary for client-supplied image attachments: chat.send options come
@@ -239,6 +240,12 @@ async function dispatchRun(
   }
 
   const clientOptions: AnyRecord = { ...(data.options ?? {}) };
+  // Server-owned wake-up markers are never accepted from chat.send/edit JSON.
+  // Only the detached dispatcher below re-adds them after a trusted check.
+  delete clientOptions.workerWakeup;
+  delete clientOptions.workerSource;
+  delete clientOptions.workerFinalGuard;
+  delete clientOptions.userTurn;
   if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection) {
     // Queue entries retain their old options. The session's confirmed choice
     // owns every not-yet-started turn, so stale options cannot overwrite it.
@@ -275,6 +282,10 @@ async function dispatchRun(
   // Brand-new sessions have no provider id yet, so the runtime starts fresh
   // and announces one, which the gateway writer captures and maps back to the
   // app session id.
+  const workerWakeup = extraRuntimeOptions.workerWakeup === true;
+  const workerFinalGuard = typeof extraRuntimeOptions.workerFinalGuard === 'function'
+    ? extraRuntimeOptions.workerFinalGuard as () => boolean
+    : undefined;
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
     ...extraRuntimeOptions,
@@ -287,6 +298,10 @@ async function dispatchRun(
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
   };
+  // Only an interactive socket turn may activate a paused Worker owner. A
+  // detached/automatic wake-up never counts as an explicit user turn.
+  runtimeOptions.userTurn = Boolean(ws);
+  delete runtimeOptions.workerFinalGuard;
 
   let failure: string | null = null;
   let turnStarting = false;
@@ -299,7 +314,18 @@ async function dispatchRun(
   // Codex reports it after resume; other runtimes start delivery at run().
   const waitsForCodexSetup = codexSettings?.runtime === 'app-server' && Boolean(codexSettings.modelSelection);
   delete runtimeOptions.onTurnStarting;
-  if (waitsForCodexSetup) runtimeOptions.onTurnStarting = markTurnStarting;
+  if (workerWakeup) {
+    // A Worker wake-up always defers the guard until the native runtime is
+    // immediately before turn/start, even when no model is selected yet.
+    runtimeOptions.onTurnStarting = () => {
+      if (workerFinalGuard && !workerFinalGuard()) {
+        throw new AppError('The Worker owner stopped or lost authority.', {
+          code: 'WORKER_WAKE_STOPPED', statusCode: 409,
+        });
+      }
+      markTurnStarting();
+    };
+  } else if (waitsForCodexSetup) runtimeOptions.onTurnStarting = markTurnStarting;
   try {
     // Runs only now that the session is reserved, because an edit rewinds the
     // conversation here and a rewind for a run that was never admitted cannot
@@ -307,7 +333,7 @@ async function dispatchRun(
     // run instead of leaving the session processing forever.
     await beforeRun?.(run);
     await sessionsService.initializeSessionName(sessionId, command);
-    if (!waitsForCodexSetup) markTurnStarting();
+    if (!waitsForCodexSetup && !workerWakeup) markTurnStarting();
     await dependencies.runtime.run(provider, command, runtimeOptions, run.writer);
   } catch (error) {
     failure = error instanceof Error ? error.message : String(error);
@@ -647,6 +673,13 @@ export async function runDetachedChatTurn(
     interruptActiveRun?: boolean;
     /** Queue receipts are accepted only once the runtime can deliver input. */
     onTurnStarting?: () => void;
+    /**
+     * Set only by the Worker host bridge after it has claimed an outbox result.
+     * These markers are trusted server metadata and never come from chat JSON.
+     */
+    workerSource?: WorkerWakeSource;
+    /** Trusted final gate consulted immediately before native turn/start. */
+    finalGuard?: () => boolean;
   },
   dependencies: ChatWebSocketDependencies,
 ): Promise<{ started: boolean; error: string | null }> {
@@ -666,9 +699,17 @@ export async function runDetachedChatTurn(
   if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection?.model === null) {
     return { started: false, error: 'Choose a model before sending a prompt.' };
   }
+  // A Worker wake-up only continues an already admitted session. Stop and a
+  // held queue must keep it out even if it raced the claim.
+  if (input.workerSource && codexSettings?.queueHeld) {
+    return { started: false, error: 'The session stopped or is holding its queue.' };
+  }
 
   const activeRun = chatRunRegistry.getRun(input.sessionId);
   const nativeState = dependencies.runtime.getState?.(provider, input.sessionId);
+  if (input.workerSource && (nativeState?.queueHeld || ['stopping', 'stopFailed'].includes(nativeState?.phase ?? ''))) {
+    return { started: false, error: 'The session is stopping or holding its queue.' };
+  }
   if (activeRun?.status === 'running' || nativeState?.goal?.status === 'active' || ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '')) {
     if (!input.interruptActiveRun) {
       return { started: false, error: 'A run was already in progress for this session.' };
@@ -690,7 +731,9 @@ export async function runDetachedChatTurn(
     session,
     { sessionId: input.sessionId, content: input.content, options: input.options ?? {} },
     dependencies,
-    {},
+    input.workerSource
+      ? { workerWakeup: true, workerSource: input.workerSource, workerFinalGuard: input.finalGuard }
+      : {},
     undefined,
     input.onTurnStarting,
   );

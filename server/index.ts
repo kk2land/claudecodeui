@@ -15,6 +15,7 @@ import {
     codexRateLimitsService,
     initializeSessionsWatcher,
     providerRuntimeService,
+    setCodexWorkerBridge,
 } from '@/modules/providers/index.js';
 import { broadcastCodexRateLimits, chatRunRegistry, createWebSocketServer } from '@/modules/websocket/index.js';
 
@@ -41,6 +42,7 @@ import {
     startEnabledPluginServers,
     stopAllPlugins,
 } from './modules/plugins/index.js';
+import { createWorkerModule } from './modules/workers/index.js';
 import providerRoutes from './modules/providers/provider.routes.js';
 import { voiceRoutes } from './modules/voice/index.js';
 import {
@@ -84,6 +86,15 @@ console.log('SERVER_PORT from env:', process.env.SERVER_PORT);
 
 const app = express();
 const server = http.createServer(app);
+const SERVER_PORT = Number.parseInt(process.env.SERVER_PORT || '3001', 10);
+const HOST = process.env.HOST || '0.0.0.0';
+const DISPLAY_HOST = getConnectableHost(HOST);
+const VITE_PORT = process.env.VITE_PORT || 5173;
+const LOCAL_SERVER_MARKER_PATH = path.join(os.homedir(), '.cloudcli', 'local-server.json');
+const workerModule = createWorkerModule({ serverPort: SERVER_PORT });
+// Providers receive Worker lifecycle callbacks through composition only; they
+// never runtime-import the workers module.
+setCodexWorkerBridge(workerModule.host.bridge);
 const queryClaude = providerRuntimeService.getRunner('claude');
 const queryCursor = providerRuntimeService.getRunner('cursor');
 const queryCodex = providerRuntimeService.getRunner('codex');
@@ -157,6 +168,10 @@ app.get('/health', (req, res) => {
     });
 });
 
+// Worker MCP bridge: mounted before JWT/API-key auth because the plugin verifies
+// the owner bearer token itself. Never starts the plugin for an anonymous call.
+app.use('/api/worker-mcp', workerModule.mcpRouter);
+
 // Optional API key validation (if configured)
 app.use('/api', validateApiKey);
 
@@ -193,6 +208,10 @@ app.use('/api/notifications', authenticateToken, notificationRoutes);
 
 // User API Routes (protected)
 app.use('/api/user', authenticateToken, userRoutes);
+
+// Worker control fence: synchronously pauses the real host owner before the
+// generic plugin RPC proxy forwards the same UI cancel to the child service.
+app.use('/api/plugins/worker/rpc', authenticateToken, workerModule.controlRouter);
 
 // Plugins API Routes (protected)
 app.use('/api/plugins', authenticateToken, pluginsRoutes);
@@ -287,12 +306,6 @@ app.use((err: unknown, req: Request, res: Response, next: NextFunction) => {
   });
 });
 
-const SERVER_PORT = Number.parseInt(process.env.SERVER_PORT || '3001', 10);
-const HOST = process.env.HOST || '0.0.0.0';
-const DISPLAY_HOST = getConnectableHost(HOST);
-const VITE_PORT = process.env.VITE_PORT || 5173;
-const LOCAL_SERVER_MARKER_PATH = path.join(os.homedir(), '.cloudcli', 'local-server.json');
-
 function getErrorCode(error: unknown): string | undefined {
     if (typeof error !== 'object' || error === null || !('code' in error)) {
         return undefined;
@@ -383,6 +396,7 @@ async function startServer() {
             initializeScheduledMessageDispatcher(providerRuntimeService);
 
             // Start server-side plugin processes for enabled plugins
+            workerModule.initialize();
             startEnabledPluginServers().catch(err => {
                 console.error('[Plugins] Error during startup:', err.message);
             });
@@ -392,6 +406,9 @@ async function startServer() {
         closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            // Seal Worker delivery and let the plugin confirm child cleanup before
+            // the provider process and the plugin server are stopped.
+            await workerModule.shutdown().catch((error) => console.error('[Workers] Shutdown failed', error));
             await providerRuntimeService.close().catch((error) => console.error("[Providers] Shutdown failed", error));
             try {
                 await browserUseService.stopAllSessions();

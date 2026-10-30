@@ -178,6 +178,8 @@ test('a completed opted-in turn forks and runs a prediction turn, publishing the
   const fork = h.predictions('thread/fork')[0];
   assert.deepEqual(fork.params, {
     threadId: 'native-thread', experimentalPredictionMode: true, ephemeral: true, excludeTurns: true, threadSource: 'composer_predictions',
+    // A detached prediction fork must not inherit the Worker MCP server.
+    config: { 'mcp_servers.cloudcli_workers.enabled': false },
   });
   // Resolve the fork, which allows the prediction turn/start to be issued.
   h.resolve('thread/fork', 1, { thread: { id: 'fork-1' } });

@@ -63,6 +63,12 @@ export type {
   WorkerNotification,
   WorkerNotificationDelivery,
   WorkerOwner,
+  WorkerCancelFenceInput,
+  WorkerHostService,
+  WorkerIpcTransport,
+  WorkerWakeResult,
+  WorkerWakeSource,
+  WorkerWakeTurnInput,
 } from './types.js';
 
 export type {

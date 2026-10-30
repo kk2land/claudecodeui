@@ -5,7 +5,7 @@ import path from 'path';
 import spawn from 'cross-spawn';
 
 import { scanPlugins, getPluginsConfig, getPluginDir } from './plugin-registry.service.js';
-import { bundledPluginEnvironment, syncBundledPluginContext } from './bundled-plugins.service.js';
+import { bundledPluginEnvironment, isBundledPlugin, syncBundledPluginContext } from './bundled-plugins.service.js';
 
 // Map<pluginName, { process, port }>
 const runningPlugins = new Map();
@@ -13,7 +13,59 @@ const runningPlugins = new Map();
 const startingPlugins = new Map();
 const restartTimers = new Map();
 const stoppedPlugins = new Set();
+// Host consumers (the Worker bridge) attach to a bundled plugin's IPC channel.
+const messageListeners = new Map();
+const exitListeners = new Map();
+const readyListeners = new Map();
 let shuttingDown = false;
+
+function listenersFor(map, name) {
+  let listeners = map.get(name);
+  if (!listeners) {
+    listeners = new Set();
+    map.set(name, listeners);
+  }
+  return listeners;
+}
+
+/** Used by the Worker host bridge to send the fixed `cloudcli-workers` IPC envelopes. */
+export function sendPluginMessage(name, message) {
+  const entry = runningPlugins.get(name);
+  if (!entry?.process?.connected) return false;
+  try {
+    entry.process.send(message);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Used by the Worker host bridge to receive request/response and event envelopes. */
+export function onPluginMessage(name, listener) {
+  const listeners = listenersFor(messageListeners, name);
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Used by the Worker host bridge to settle in-flight IPC requests when a plugin exits. */
+export function onPluginExit(name, listener) {
+  const listeners = listenersFor(exitListeners, name);
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+/** Used by the Worker host bridge to re-register owners after a managed builtin restarts. */
+export function onPluginReady(name, listener) {
+  const listeners = listenersFor(readyListeners, name);
+  listeners.add(listener);
+  return () => listeners.delete(listener);
+}
+
+function notify(map, name, ...args) {
+  for (const listener of map.get(name) ?? []) {
+    try { listener(...args); } catch (error) { console.error(`[Plugins] "${name}" listener failed:`, error); }
+  }
+}
 
 /**
  * Build the environment handed to a plugin server subprocess.
@@ -90,6 +142,9 @@ export function startPluginServer(name, pluginDir, serverEntry) {
       }
     }, 10000);
 
+    pluginProcess.on('message', (message) => {
+      notify(messageListeners, name, message);
+    });
     pluginProcess.stdout.on('data', (data) => {
       if (resolved) return;
       stdout += data.toString();
@@ -111,10 +166,14 @@ export function startPluginServer(name, pluginDir, serverEntry) {
             pluginProcess.on('exit', () => {
               clearInterval(contextTimer);
               if (runningPlugins.get(name)?.process === pluginProcess) runningPlugins.delete(name);
-              if (name === 'project-scheduler' && !runningPlugins.has(name)) scheduleRestart(name, pluginDir, serverEntry);
+              notify(exitListeners, name);
+              // Every managed builtin restarts with the same bounded backoff. A
+              // disabled or explicitly stopped plugin stays down.
+              if (isBundledPlugin(name) && !runningPlugins.has(name)) scheduleRestart(name, pluginDir, serverEntry);
             });
 
             console.log(`[Plugins] Server started for "${name}" on port ${msg.port}`);
+            notify(readyListeners, name, msg.port);
             resolve(msg.port);
           }
         } catch {
@@ -140,6 +199,7 @@ export function startPluginServer(name, pluginDir, serverEntry) {
       if (runningPlugins.get(name)?.process === pluginProcess) runningPlugins.delete(name);
       if (!resolved) {
         resolved = true;
+        notify(exitListeners, name);
         reject(new Error(`Plugin server exited with code ${code} before reporting ready`));
       }
     });
@@ -225,6 +285,33 @@ function scheduleRestart(name, directory, entry, delay = 1000) {
   }, delay);
   timer.unref();
   restartTimers.set(name, timer);
+}
+
+/** Used by the Worker bridge and MCP proxy to honor the user's plugin enable switch. */
+export function isPluginEnabled(name) {
+  return getPluginsConfig()[name]?.enabled !== false;
+}
+
+/**
+ * Ensure an enabled plugin's server is ready, starting it once when needed.
+ * Used by the Worker bridge before registering an owner; the MCP proxy never
+ * calls it, so an unauthenticated request cannot start a plugin.
+ */
+export async function ensurePluginServer(name) {
+  if (shuttingDown) return null;
+  const config = getPluginsConfig();
+  if (config[name]?.enabled === false) return null;
+  const plugin = scanPlugins().find((candidate) => candidate.name === name);
+  if (!plugin?.server) return null;
+  if (runningPlugins.has(name)) return runningPlugins.get(name).port;
+  const directory = getPluginDir(name);
+  if (!directory) return null;
+  try {
+    return await startPluginServer(name, directory, plugin.server);
+  } catch (error) {
+    console.error(`[Plugins] Could not start "${name}":`, error.message);
+    return null;
+  }
 }
 
 /**
