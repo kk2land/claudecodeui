@@ -509,9 +509,11 @@ test("DOM: settings load and save type, model, reasoning, and concurrency fields
     const piEffort = byLabel(
       mounted.container,
       "Pi 默认 reasoning",
-    ) as HTMLSelectElement;
+    ) as HTMLInputElement;
     assert.equal(defaultType.value, "dsh");
     assert.equal(dshModel.value, "");
+    assert.equal(piEffort.tagName, "INPUT");
+    assert.equal(piEffort.type, "text");
     assert.equal(piEffort.value, "");
 
     await typeInto(dsh, "0");
@@ -546,6 +548,20 @@ test("DOM: settings load and save type, model, reasoning, and concurrency fields
     await waitFor(() => defaultType.value === "pi", "保存后回填默认类型");
     assert.equal(piModel.value, "pi-default");
     assert.equal(dshEffort.value, "high");
+
+    // Whitespace-only reasoning is saved as null, same as DSH.
+    await typeInto(piEffort, "   ");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "空白 reasoning 可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 2, "空白 reasoning 保存");
+    assert.deepEqual(callsTo(mounted, "/settings")[1]!.body, {
+      concurrency: { dsh: 4, pi: 2 },
+      defaultWorkerType: "pi",
+      defaults: {
+        dsh: { model: "dsh-default", effort: "high" },
+        pi: { model: "pi-default", effort: null },
+      },
+    });
   } finally {
     mounted.unmount();
   }
