@@ -31,11 +31,13 @@ The DSH provider supports ACP and headless transports only. Do not add a DSH SDK
 Use this flow when a change needs to be verified in a real browser:
 
 1. Codex runs `npm run build` from this repository and checks that it succeeds.
-2. Codex notifies the user that the build is ready and asks them to start the test process on port 3000. The user runs, in order:
+2. Codex runs these commands directly, in order, without asking the user to run them or confirm:
    - `/Users/agent/Projects/ops/init_claudecodeui.sh 1`
    - `/Users/agent/Projects/ops/cloudcli.sh dev`
-3. After the user confirms the process is running, Codex uses `$ego-browser` to open `http://localhost:3000` and verify the affected frontend functionality.
+3. Codex confirms `http://localhost:3000` is ready and checks `/Users/agent/workspaces/tap/dev/cloudcli.log` for startup and plugin errors, then uses `$ego-browser` to open `http://localhost:3000` and verify the affected frontend functionality.
 
-The user owns starting and restarting the test process; Codex must not run the startup commands automatically. The `dev` command serves the existing build output in `dist-server/server/modules/cli/cli.js` and runs in the foreground, so the user keeps that terminal open while testing. If code changes during verification, Codex rebuilds and notifies the user to restart the process before continuing browser verification.
+The `dev` command serves the existing build output in `dist-server/server/modules/cli/cli.js` using the home directory `/Users/agent/workspaces/tap/dev`, and starts it in the background with `nohup ... >$HOME/cloudcli.log 2>&1 &`. Run the startup commands in a persistent terminal session and keep that session open during testing; a short-lived execution can return successfully without leaving the background server running. If code changes during verification, Codex rebuilds, reruns both commands in order, confirms readiness, and then continues browser verification.
+
+Codex can stop the service directly with `/Users/agent/Projects/ops/cloudcli.sh dev stop`. The `stop` command only waits for the running service to shut down; it does not restart it.
 
 Credentials stay out of Git. The test username and password live in `.claude/local-testing.env` (untracked and gitignored) as `CLAUDECODEUI_TEST_USERNAME` and `CLAUDECODEUI_TEST_PASSWORD`; read them locally when you actually run a browser test. Never copy the password into tracked files or into this document.
