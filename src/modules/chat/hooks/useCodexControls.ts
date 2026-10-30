@@ -7,6 +7,9 @@ import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities'
 import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDelivery, readQueuedMessage, readQueuedMessages, subscribeToChatDrafts, writeDraftText, writeQueuedMessages } from '@/shared/chatDrafts';
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
+/** Retained control failure; the code is kept only to retire an uncertain Stop on native idle. */
+type CodexControlError = { message: string; code?: string };
+
 type Args = {
   enabled: boolean;
   sessionId: string | null;
@@ -27,8 +30,9 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   const predictionsImplemented = capabilities.codex?.nativeControls?.predictions === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
-  // A control failure belongs to the action, independently of the model's running state.
-  const [errors, setErrors] = useState<Record<string, string | null>>({});
+  // A control failure keeps its source so a native idle snapshot can retire only
+  // the uncertain Stop alert, never an unrelated model/Goal/steer failure.
+  const [errors, setErrors] = useState<Record<string, CodexControlError | null>>({});
   // Outstanding commands disable conflicting controls while keeping the transcript live.
   const [pendingSessions, setPendingSessions] = useState<Set<string>>(new Set());
   // Delivery is read directly from the durable draft store to avoid a stale local copy.
@@ -54,8 +58,25 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
     if (!sid) return;
     if (event.codexState) setSnapshots((old) => ({ ...old, [sid]: event.codexState as CodexSessionState }));
     if (event.provider === 'codex' && event.role === 'user' && event.clientMessageId) void hydrateChatDrafts();
-    if (event.kind !== 'control_result') return;
-    setErrors((old) => ({ ...old, [sid]: event.ok ? null : String(event.error ?? 'Control failed') }));
+    const nativeState = event.codexState as CodexSessionState | undefined;
+    // Only a clean native idle snapshot proves the previous Stop settled.
+    const confirmedIdle = nativeState?.runtime === 'app-server' && nativeState.phase === 'idle' && !nativeState.error;
+    if (event.kind !== 'control_result') {
+      // Text/status/completion events can carry the recovery snapshot; they never
+      // write a control error, so only the uncertain Stop alert may be retired.
+      if (confirmedIdle) setErrors((old) => old[sid]?.code === 'STOP_NOT_CONFIRMED' ? { ...old, [sid]: null } : old);
+      return;
+    }
+    // The same response can report a failed Stop and an already-recovered idle
+    // snapshot. Decide inside one update so the stale failure is not written back.
+    setErrors((old) => {
+      const failure = event.ok ? null : {
+        message: String(event.error ?? 'Control failed'),
+        ...(typeof event.code === 'string' && event.code ? { code: event.code } : {}),
+      };
+      if (failure?.code === 'STOP_NOT_CONFIRMED' && confirmedIdle) return { ...old, [sid]: null };
+      return { ...old, [sid]: failure };
+    });
     const entry = pending.current.get(String(event.requestId));
     if (entry && entry.sessionId === sid) {
       clearTimeout(entry.timer);
@@ -83,7 +104,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
         pending.current.delete(requestId);
         setPendingSessions(new Set([...pending.current.values()].map((item) => item.sessionId)));
         const error = 'Confirmation pending. Reconnect to check the saved state.';
-        setErrors((old) => ({ ...old, [sid]: error }));
+        setErrors((old) => ({ ...old, [sid]: { message: error } }));
         void hydrateChatDrafts();
         reject(new Error(error));
       }, 40_000);
@@ -141,7 +162,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
       if (action.action === 'goal') setVisibleGoals((old) => new Set([...old, sid]));
       await send(sid, action);
     } catch (error) {
-      setErrors((old) => ({ ...old, [sid]: error instanceof Error ? error.message : String(error) }));
+      setErrors((old) => ({ ...old, [sid]: { message: error instanceof Error ? error.message : String(error) } }));
       throw error;
     }
   }, [enabled, sessionId, ensureSession, send, goalsEnabled]);
@@ -177,7 +198,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
       await send(sessionId, { action: 'steer', messageId: message.id, expectedTurnId: state.turnId });
       await hydrateChatDrafts();
     } catch (error) {
-      setErrors((old) => ({ ...old, [sessionId]: error instanceof Error ? error.message : String(error) }));
+      setErrors((old) => ({ ...old, [sessionId]: { message: error instanceof Error ? error.message : String(error) } }));
       throw error;
     }
   }, [sessionId, snapshots, send]);
@@ -194,6 +215,6 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   // offering a toggle that could never produce a suggestion.
   const predictionsUnsupported = predictionsImplemented && nativeRuntime
     && Boolean(sessionId) && sessionSnapshot?.predictionSupported === false;
-  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? ''] ?? null,
+  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? '']?.message ?? null,
     pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

@@ -180,7 +180,19 @@ test('a delayed stop for a previous execution cannot interrupt its replacement',
     await settle();
     assert.equal(aborts, 0);
     assert.equal(h.frames.at(-1)?.ok, false);
+    assert.equal(h.frames.at(-1)?.code, undefined);
     assert.equal(chatRunRegistry.isProcessing(h.sessionId), true);
+  });
+});
+
+test('a confirmed stop response carries no failure code', async () => {
+  await harness(async (h) => {
+    h.runtime.abort = async () => true;
+    const run = chatRunRegistry.startRun({ appSessionId: h.sessionId, provider: 'codex', providerSessionId: null, connection: null, userId: h.userId })!;
+    h.socket.emit('message', JSON.stringify({ type: 'chat.abort', sessionId: h.sessionId, requestId: 'stop-ok' })); await settle();
+    assert.equal(h.frames.at(-1)?.ok, true);
+    assert.equal(h.frames.at(-1)?.code, undefined);
+    assert.equal(run.status, 'completed');
   });
 });
 
@@ -282,6 +294,8 @@ test('failed stop never completes the run and scheduled interruption cannot star
     const run = chatRunRegistry.startRun({ appSessionId: h.sessionId, provider: 'codex', providerSessionId: null, connection: null, userId: h.userId })!;
     h.socket.emit('message', JSON.stringify({ type: 'chat.abort', sessionId: h.sessionId })); await settle();
     assert.equal(run.status, 'running'); assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, true);
+    assert.equal(h.frames.at(-1)?.ok, false);
+    assert.equal(h.frames.at(-1)?.code, 'STOP_NOT_CONFIRMED');
     assert.ok(!h.frames.some((frame) => frame.kind === 'complete'));
     const result = await runDetachedChatTurn({ sessionId: h.sessionId, userId: h.userId, content: 'scheduled', interruptActiveRun: true }, { runtime: h.runtime });
     assert.equal(result.started, false); assert.equal(h.calls.length, 0);

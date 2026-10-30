@@ -463,6 +463,7 @@ async function handleChatAbort(
   if (success && run) chatRunRegistry.completeRunIfCurrent(run, { exitCode: 0, aborted: true });
   sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId,
     ok: success, error: success ? undefined : 'Stop has not been confirmed. Retry to check the running task.',
+    ...(success ? {} : { code: 'STOP_NOT_CONFIRMED' }),
     codexState: dependencies.runtime.getState?.(provider, sessionId) });
 }
 

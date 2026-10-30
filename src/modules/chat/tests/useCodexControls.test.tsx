@@ -254,3 +254,76 @@ test('returning to Codex allocates a fresh session and a stale response cannot c
   expect(established).toHaveBeenCalledTimes(1);
   expect(send.mock.calls.map(([message]) => message.sessionId)).toEqual(['current-session']);
 });
+
+async function setupStopAlerts() {
+  const listeners = new Set<(event: ServerEvent) => void>();
+  subscribe.mockImplementation((listener: (event: ServerEvent) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  });
+  vi.spyOn(api.providers, 'capabilities').mockResolvedValue(Response.json({ success: true, data: { providers: [] } }));
+  vi.spyOn(api.user, 'drafts').mockImplementation(async () => Response.json({ drafts: [] }));
+  const state: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'running', turnId: 'turn-1', goal: null, questions: [],
+  };
+  const sendMessage = vi.fn((message) => queueMicrotask(() => {
+    for (const listener of listeners) listener({ kind: 'control_result', sessionId: message.sessionId,
+      requestId: message.requestId, ok: true, codexState: state } as ServerEvent);
+  }));
+  const hook = renderHook(() => useCodexControls({
+    enabled: true, sessionId: 'session-stop', project: null, options: {}, sendMessage, onSessionEstablished: () => {},
+  }));
+  await waitFor(() => {
+    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(hook.result.current.pending).toBe(false);
+  });
+  const emit = (event: ServerEvent) => act(() => {
+    for (const listener of listeners) listener({ sessionId: 'session-stop', ...event } as ServerEvent);
+  });
+  return { hook, emit };
+}
+
+test('an uncertain stop alert clears only after a clean native idle snapshot', async () => {
+  const { hook, emit } = await setupStopAlerts();
+  const stopFailed: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'stopFailed', turnId: 'turn-1', error: 'old', goal: null, questions: [],
+  };
+  emit({ kind: 'control_result', requestId: 'stop-1', ok: false, error: 'Stop has not been confirmed.', code: 'STOP_NOT_CONFIRMED', codexState: stopFailed });
+  expect(hook.result.current.error).toBe('Stop has not been confirmed.');
+  emit({ kind: 'status', text: 'codex_control', codexState: { ...stopFailed, phase: 'stopping' } });
+  expect(hook.result.current.error).toBe('Stop has not been confirmed.');
+  emit({ kind: 'complete', stopping: true });
+  expect(hook.result.current.error).toBe('Stop has not been confirmed.');
+  // Another session's clean idle must not retire this session's Stop alert.
+  emit({ sessionId: 'session-other', kind: 'status', text: 'codex_control', codexState: { ...stopFailed, phase: 'idle', error: undefined } });
+  expect(hook.result.current.error).toBe('Stop has not been confirmed.');
+  emit({ kind: 'status', text: 'codex_control', codexState: { ...stopFailed, phase: 'idle', error: undefined } });
+  expect(hook.result.current.error).toBeNull();
+});
+
+test('a failure response already carrying recovered idle does not rewrite the stop alert', async () => {
+  const { hook, emit } = await setupStopAlerts();
+  const idle: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, error: undefined, goal: null, questions: [],
+  };
+  emit({ kind: 'control_result', requestId: 'stop-2', ok: false, error: 'Stop has not been confirmed.', code: 'STOP_NOT_CONFIRMED', codexState: idle });
+  expect(hook.result.current.error).toBeNull();
+});
+
+test('unconfirmed stop and unrelated control failures survive non-idle or dirty idle snapshots', async () => {
+  const { hook, emit } = await setupStopAlerts();
+  const stopFailed: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'stopFailed', turnId: 'turn-1', error: 'native stop failed', goal: null, questions: [],
+  };
+  emit({ kind: 'control_result', requestId: 'stop-3', ok: false, error: 'Stop has not been confirmed.', code: 'STOP_NOT_CONFIRMED', codexState: stopFailed });
+  emit({ kind: 'status', text: 'codex_control', codexState: { ...stopFailed, phase: 'idle', error: 'still failing' } });
+  expect(hook.result.current.error).toBe('Stop has not been confirmed.');
+  emit({ kind: 'status', text: 'codex_control', codexState: stopFailed });
+  expect(hook.result.current.error).toBe('Stop has not been confirmed.');
+
+  // A later non-Stop failure replaces the alert and must not be retired by idle.
+  emit({ kind: 'control_result', requestId: 'model-1', ok: false, error: 'Model switch failed', codexState: stopFailed });
+  emit({ kind: 'status', text: 'codex_control', codexState: { ...stopFailed, phase: 'idle', error: undefined } });
+  expect(hook.result.current.error).toBe('Model switch failed');
+
+});
