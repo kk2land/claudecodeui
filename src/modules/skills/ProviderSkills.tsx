@@ -714,6 +714,9 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
             <div className="grid min-w-0 gap-3 lg:grid-cols-2">
               {group.skills.map((skill) => {
                 const supportsToggle = typeof skill.enabled === 'boolean';
+                // DSH exposes a plain invocation prompt as `command`, so use the
+                // real skill name as the title and skip the duplicate subtitle.
+                const isDshSkill = skill.provider === 'dsh';
                 // Pending markers are provider-scoped so a slow request from a
                 // previously selected provider cannot unlock this row.
                 const isUpdating = updatingSkillPaths.includes(`${skill.provider}:${skill.sourcePath}`);
@@ -724,8 +727,10 @@ export default function ProviderSkills({ selectedProvider, currentProjects }: Pr
                   >
                     <div className="flex min-w-0 items-start justify-between gap-3">
                       <div className="min-w-0 space-y-1">
-                        <div className="break-all font-mono text-sm font-semibold text-foreground">{skill.command}</div>
-                        <div className="text-sm text-muted-foreground">{skill.name}</div>
+                        <div className="break-all font-mono text-sm font-semibold text-foreground">
+                          {isDshSkill ? skill.name : skill.command}
+                        </div>
+                        {!isDshSkill && <div className="text-sm text-muted-foreground">{skill.name}</div>}
                       </div>
                       {supportsToggle && (
                         <div className="flex flex-shrink-0 flex-col items-end gap-1">
