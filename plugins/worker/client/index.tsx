@@ -747,7 +747,7 @@ function SettingsView({
         },
         pi: {
           model: piModel.trim() || null,
-          effort: piEffort || null,
+          effort: piEffort.trim() || null,
         },
       },
     };
@@ -844,20 +844,13 @@ function SettingsView({
           </label>
           <label>
             Reasoning
-            <select
+            <input
+              type="text"
               aria-label="Pi 默认 reasoning"
+              placeholder="留空沿用执行器现有配置"
               value={piEffort}
               onChange={(event) => setPiEffort(event.target.value)}
-            >
-              <option value="">使用执行器现有配置</option>
-              <option value="off">off</option>
-              <option value="minimal">minimal</option>
-              <option value="low">low</option>
-              <option value="medium">medium</option>
-              <option value="high">high</option>
-              <option value="xhigh">xhigh</option>
-              <option value="max">max</option>
-            </select>
+            />
           </label>
           <label>
             并发
