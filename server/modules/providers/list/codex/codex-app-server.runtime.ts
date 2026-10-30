@@ -488,13 +488,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         code: 'CODEX_WORKER_WAKE_STOPPED', statusCode: 409,
       });
     }
-    // Only an explicit user turn re-activates automatic Worker delivery.
+    if (session.stopRequested) {
+      if (session.stop || session.state.phase !== 'idle') throw new Error('The previous Codex stop has not been confirmed.');
+      session.stopRequested = false;
+    }
+    // Only an explicit user turn after confirmed cleanup re-activates Worker delivery.
     if (!workerWakeup && options.userTurn === true) {
       await this.workerBridge?.activateSession(sessionId).catch(() => {});
-    }
-    if (session.stopRequested) {
-      if (session.state.phase !== 'idle') throw new Error('The previous Codex stop has not been confirmed.');
-      session.stopRequested = false;
     }
     if (session.turn && !session.turn.terminal) throw new Error('Codex already has an active turn.');
     if (options.collaborationMode === 'plan' || options.collaborationMode === 'default') {
@@ -1017,9 +1017,6 @@ export class CodexAppServerRuntime implements IProviderRuntime {
           if (session.threadId) await request('thread/backgroundTerminals/clean', { threadId: session.threadId });
         } while (session.turn && !session.turn.terminal);
         this.cancelRequests(session);
-        session.state.phase = 'idle';
-        session.state.error = undefined;
-        this.publish(session);
         return true;
       } catch (error) {
         // Exit already published the terminal state. Old stops must not overwrite a replacement session.
@@ -1038,10 +1035,18 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     let combined!: Promise<boolean>;
     combined = (async () => {
       const [nativeStopped, workersStopped] = await Promise.all([nativeStop, workerCleanup]);
-      if (!workersStopped) {
-        session.state.phase = 'stopFailed';
-        session.state.error = 'Worker cleanup was not confirmed. Retry the stop before sending another turn.';
-        this.publish(session);
+      // Keep Stop visible while either cleanup is pending. A process exit may
+      // already have discarded this session, so never publish over its replacement.
+      if (this.sessions.get(sessionId) === session) {
+        if (!workersStopped) {
+          session.state.phase = 'stopFailed';
+          session.state.error = 'Worker cleanup was not confirmed. Retry the stop before sending another turn.';
+          this.publish(session);
+        } else if (nativeStopped) {
+          session.state.phase = 'idle';
+          session.state.error = undefined;
+          this.publish(session);
+        }
       }
       if (session.stop === combined) session.stop = null;
       return nativeStopped && workersStopped;

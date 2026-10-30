@@ -87,4 +87,3 @@ export function createWorkerModule(options: {
     shutdown: () => host.shutdown(),
   };
 }
-

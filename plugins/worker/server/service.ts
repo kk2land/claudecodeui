@@ -1708,4 +1708,3 @@ function realPath(value: string): string {
 function clean(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
-

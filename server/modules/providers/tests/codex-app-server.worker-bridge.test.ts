@@ -148,21 +148,39 @@ test('runtime handoff stops the associated workers and still unsubscribes a know
   await h.runtime.close();
 });
 
-test('Stop starts native interruption without waiting for delayed Worker cleanup', async () => {
+test('Stop interrupts native work immediately and stays stopping until Worker cleanup finishes', { timeout: 10_000 }, async (t) => {
   const h = harness();
   let releaseWorker!: (value: boolean) => void;
-  h.setStopSession(async () => await new Promise((resolve) => { releaseWorker = resolve; }));
+  const workerCleanup = new Promise<boolean>((resolve) => { releaseWorker = resolve; });
+  h.setStopSession(() => workerCleanup);
   const run = h.runtime.run('hello', { ...options, userTurn: true }, h.writer, h.context);
   await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
   const stopping = h.runtime.abort('session-1');
+  t.after(async () => {
+    releaseWorker?.(true);
+    await stopping;
+    await h.runtime.close();
+  });
   await eventually(() => h.calls.some((call) => call.method === 'turn/interrupt'));
   assert.ok(releaseWorker);
   // Native interruption was observed while Worker cleanup is still pending.
   h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
   await run;
+  await eventually(() => h.calls.some((call) => call.method === 'thread/backgroundTerminals/clean'));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runtime.getState('session-1').phase, 'stopping');
+  await assert.rejects(
+    h.runtime.run('too early', { ...options, userTurn: true }, h.writer, {
+      ...h.context,
+      resolveProviderSessionId: () => 'native-thread',
+    }),
+    /The previous Codex stop has not been confirmed/,
+  );
+  assert.equal(h.calls.filter((call) => call.method === 'turn/start').length, 1);
+  assert.equal(h.bridgeCalls.filter((call) => call === 'activate:session-1').length, 1);
   releaseWorker(true);
   assert.equal(await stopping, true);
-  await h.runtime.close();
+  assert.equal(h.runtime.getState('session-1').phase, 'idle');
 });
 
 test('an unconfirmed Worker cleanup makes Stop false even after native interruption succeeds', async () => {
