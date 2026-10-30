@@ -5,7 +5,7 @@ import os from 'os';
 
 import { spawn } from 'cross-spawn';
 
-import { getBundledPlugin, getBundledPluginDirectory } from './bundled-plugins.service.js';
+import { getBundledPlugins, getBundledPluginDirectory } from './bundled-plugins.service.js';
 import {
   createPluginGitError, createPluginGitSpawnError, getPluginGitSpawnOptions, stopPluginGitOnServerExit,
 } from './plugin-git.service.js';
@@ -162,8 +162,7 @@ export function scanPlugins() {
   }
 
   const seenNames = new Set();
-  const bundled = getBundledPlugin();
-  if (bundled) {
+  for (const bundled of getBundledPlugins()) {
     plugins.push({ ...bundled, permissions: [], enabled: config[bundled.name]?.enabled !== false });
     seenNames.add(bundled.name);
   }

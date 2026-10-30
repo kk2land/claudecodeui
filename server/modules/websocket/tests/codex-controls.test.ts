@@ -28,7 +28,7 @@ async function harness(runTest: (h: {
   const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: 't1', phase: 'running', goal: null, questions: [] };
   const runtime: ProviderRuntimeGateway = { hasRuntime: () => true, hasBackgroundWork: () => false,
     getState: () => state, getPendingApprovalsForSession: () => [], resolveToolApproval: () => {}, stopBackgroundTask: async () => false,
-    abort: async () => false, run: async (_provider, content) => { calls.push({ run: content }); },
+    abort: async () => false, run: async (_provider, content, options) => { calls.push({ run: content, options }); },
     control: async (provider, sid, action, options) => { calls.push({ provider, sid, action, options }); return state; } };
   handleChatConnection(socket as never, { user: { id: userId } } as never, { runtime });
   const send = (control: AnyRecord, requestId = 'request-1') => socket.emit('message', JSON.stringify({ type: 'chat.control', sessionId, requestId, control }));
@@ -285,6 +285,71 @@ test('failed stop never completes the run and scheduled interruption cannot star
     assert.ok(!h.frames.some((frame) => frame.kind === 'complete'));
     const result = await runDetachedChatTurn({ sessionId: h.sessionId, userId: h.userId, content: 'scheduled', interruptActiveRun: true }, { runtime: h.runtime });
     assert.equal(result.started, false); assert.equal(h.calls.length, 0);
+  });
+});
+
+test('Worker wake-up markers are rejected from chat JSON and restored only by the detached path', async () => {
+  await harness(async (h) => {
+    h.state.phase = 'idle'; h.state.turnId = null;
+    const forged = {
+      type: 'chat.send', sessionId: h.sessionId, content: 'user turn',
+      options: {
+        workerWakeup: true,
+        workerSource: { batchId: 'forged', results: [{ workerId: 'forged', runId: 'forged', status: 'completed', summary: 'forged' }] },
+        workerFinalGuard: () => true,
+      },
+    };
+    h.socket.emit('message', JSON.stringify(forged)); await settle();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].options.workerWakeup, undefined);
+    assert.equal(h.calls[0].options.workerSource, undefined);
+    assert.equal(h.calls[0].options.workerFinalGuard, undefined);
+    assert.equal(h.calls[0].options.userTurn, true);
+
+    h.calls.length = 0;
+    const workerSource = { batchId: 'batch-1', results: [{ workerId: 'worker-1', runId: 'run-1', status: 'completed', summary: 'done' }] };
+    const result = await runDetachedChatTurn({
+      sessionId: h.sessionId, userId: h.userId, content: 'wake', workerSource,
+    }, { runtime: h.runtime });
+    assert.equal(result.started, true);
+    assert.equal(h.calls[0].options.workerWakeup, true);
+    assert.deepEqual(h.calls[0].options.workerSource, workerSource);
+    assert.equal(h.calls[0].options.userTurn, false);
+  });
+});
+
+test('a Worker final guard runs after async model preparation and observes a concurrent Stop', async () => {
+  await harness(async (h) => {
+    h.state.phase = 'idle'; h.state.turnId = null;
+    let releasePreparation!: () => void;
+    const preparation = new Promise<void>((resolve) => { releasePreparation = resolve; });
+    let runCalls = 0;
+    let turnStarts = 0;
+    h.runtime.run = async (_provider, _content, options) => {
+      runCalls++;
+      await preparation; // async model selection/resolution happens here
+      await options.onTurnStarting?.();
+      turnStarts++;
+    };
+    let stopped = false;
+    const pending = runDetachedChatTurn({
+      sessionId: h.sessionId,
+      userId: h.userId,
+      content: 'wake',
+      workerSource: { batchId: 'batch-1', results: [{ workerId: 'worker-1', runId: 'run-1', status: 'completed', summary: 'done' }] },
+      finalGuard: () => !stopped,
+    }, { runtime: h.runtime });
+    for (let index = 0; index < 100 && runCalls === 0; index++) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(runCalls, 1);
+    assert.equal(chatRunRegistry.getRun(h.sessionId)?.status, 'running');
+    // UI Stop wins while model preparation is still pending.
+    stopped = true;
+    sessionRuntimeDb.update(h.sessionId, { queueHeld: true });
+    releasePreparation();
+    const result = await pending;
+    assert.equal(result.started, false);
+    assert.equal(turnStarts, 0);
+    assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, true);
   });
 });
 
