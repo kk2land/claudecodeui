@@ -63,6 +63,30 @@ const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
 const runs = new Map<string, ChatRun>();
 
 /**
+ * Listeners notified once when a run receives its terminal `complete`.
+ *
+ * The only consumer is the composition-injected scheduled-messages dispatcher,
+ * which handles its own asynchronous failures. Notification runs after the run
+ * is marked completed so the next queued turn starts from a fresh run entry.
+ */
+const turnCompletedListeners = new Set<(appSessionId: string) => void>();
+
+/**
+ * Subscribes to terminal run completions; used by the composition root to hand
+ * turn-completion notification to the scheduled-messages dispatcher.
+ *
+ * Returns an unsubscribe function so tests and server shutdown can remove it.
+ */
+export function onChatRunCompleted(listener: (appSessionId: string) => void): () => void {
+  turnCompletedListeners.add(listener);
+  return () => { turnCompletedListeners.delete(listener); };
+}
+
+function announceRunCompleted(appSessionId: string): void {
+  for (const listener of turnCompletedListeners) listener(appSessionId);
+}
+
+/**
  * Answers whether a completed run must stay registered a while longer. Set by
  * the composition root to the provider runtimes' background-work check: a
  * session whose turn ended but whose agents, workflows or commands are still
@@ -133,6 +157,12 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
   run.events.push(outbound);
   if (run.events.length > MAX_BUFFERED_EVENTS_PER_RUN) {
     run.events.splice(0, run.events.length - MAX_BUFFERED_EVENTS_PER_RUN);
+  }
+
+  if (message.kind === 'complete') {
+    // After recording, so a listener that starts the next turn cannot replace
+    // the map entry before this run's own terminal event is buffered.
+    announceRunCompleted(run.appSessionId);
   }
 
   return outbound;

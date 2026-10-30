@@ -207,3 +207,40 @@ test('failed Worker cleanup blocks an uncached SDK handoff before unsubscribe', 
   assert.equal(h.calls.some((call) => call.method === 'thread/unsubscribe'), false);
   await h.runtime.close();
 });
+
+test('a successful Worker config is reported on the session state', async () => {
+  const h = harness();
+  const run = h.runtime.run('hello', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  assert.equal(h.runtime.getState('session-1').workerEnabled, true);
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await run;
+  await h.runtime.close();
+});
+
+test('a missing Worker config never advertises Worker tools', async () => {
+  const h = harness();
+  h.setPrepare(null);
+  const run = h.runtime.run('hello', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  assert.equal(h.runtime.getState('session-1').workerEnabled, false);
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await run;
+  await h.runtime.close();
+});
+
+test('a deferred Worker wake-up creates no native turn and no failed state', async () => {
+  const h = harness();
+  await assert.rejects(
+    h.runtime.run('wake', {
+      ...options,
+      workerWakeup: true,
+      deferTurn: () => false,
+    }, h.writer, h.context),
+    { code: 'WORKER_WAKE_DEFERRED' },
+  );
+  assert.equal(h.calls.some((call) => call.method === 'turn/start'), false);
+  assert.equal(h.runtime.getState('session-1').phase, 'idle');
+  assert.equal(h.events.some((event) => event.kind === 'error'), false);
+  await h.runtime.close();
+});

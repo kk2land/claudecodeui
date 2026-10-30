@@ -24,8 +24,11 @@ import {
   clearQueuedMessage,
   hydrateChatDrafts,
   readDraftText,
+  readQueuedMessageFiles,
   readQueuedMessages,
+  rememberPendingChatSend,
   subscribeToChatDrafts,
+  takeRejectedChatSends,
   writeDraftText,
   writeQueuedMessage,
   writeQueuedMessages,
@@ -162,16 +165,18 @@ const toQueuedDraft = (saved: {
   options?: QueuedSendOptions;
   attachments?: unknown[];
   images?: unknown[];
-}): QueuedDraft => ({
+}, files: File[] = []): QueuedDraft => ({
   id: saved.id,
   content: saved.content,
-  attachments: [],
+  attachments: files,
   uploadedAttachments: saved.attachments ?? saved.images,
   options: saved.options,
 });
 
 const restoreQueuedDrafts = (sessionKey: string): QueuedDraft[] => (
-  readQueuedMessages(sessionKey).map(toQueuedDraft)
+  readQueuedMessages(sessionKey).map((saved) => (
+    toQueuedDraft(saved, saved.id ? readQueuedMessageFiles(sessionKey, saved.id) : [])
+  ))
 );
 
 /** Maps a composer entry to the JSON-safe shape the queue store persists. */
@@ -190,12 +195,18 @@ const queuedDraftsEqual = (left: QueuedDraft[], right: QueuedDraft[]): boolean =
   return comparable(left).join('\u0000') === comparable(right).join('\u0000');
 };
 
-/** Server reconciliation retains browser files only for unchanged entries with the same ticket. */
+/**
+ * Server reconciliation retains browser files for unchanged entries with the
+ * same ticket. New files restored from an ACK fill a card that hydrate drew
+ * first, while an existing local File[] is never replaced by a receipt.
+ */
 const reconcileQueuedDrafts = (previous: QueuedDraft[], saved: QueuedDraft[]): QueuedDraft[] => {
-  if (queuedDraftsEqual(previous, saved)) return previous;
+  const savedHasFiles = saved.some((draft) => draft.attachments.length > 0);
+  if (queuedDraftsEqual(previous, saved) && !savedHasFiles) return previous;
   return saved.map((draft) => {
     const local = previous.find((entry) => entry.id === draft.id && queuedDraftsEqual([entry], [draft]));
-    return local ? { ...draft, attachments: local.attachments } : draft;
+    const attachments = local && local.attachments.length > 0 ? local.attachments : draft.attachments;
+    return { ...draft, attachments };
   });
 };
 
@@ -1170,6 +1181,32 @@ export function useChatComposerState({
       setIsUserScrolledUp(false);
       setTimeout(() => scrollToBottom(), 100);
 
+      const sendOptions = {
+        ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
+        clientMessageId,
+        ...(planTask ? { collaborationMode: 'plan' } : {}),
+        attachments: uploadedAttachments,
+      };
+      // Only the native app-server path with Worker configured can accept a
+      // normal `chat.send` into the server-owned queue while this composer sees
+      // no local run. Other providers, SDK compatibility and edit sends keep
+      // their existing receipt-free behavior.
+      const tracksWorkerQueueReceipt = provider === 'codex'
+        && codexControls?.state?.runtime === 'app-server'
+        && codexControls.state.workerEnabled === true
+        && !editingAnchorId;
+      if (tracksWorkerQueueReceipt) {
+        // Remember the exact prompt first so `chat_queued` can adopt the
+        // server's ticket and a refusal can restore text and files.
+        rememberPendingChatSend({
+          sessionId: targetSessionId,
+          clientMessageId,
+          content: messageContent,
+          options: sendOptions,
+          files: currentAttachments,
+          attachments: uploadedAttachments,
+        });
+      }
       // One message shape for every provider. The backend resolves the
       // provider, project path, and provider-native resume id from the
       // session row; `options` only carries composer-level preferences.
@@ -1181,12 +1218,7 @@ export function useChatComposerState({
         sessionId: targetSessionId,
         ...(editingAnchorId ? { anchorId: editingAnchorId } : {}),
         content: messageContent,
-        options: {
-          ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
-          clientMessageId,
-          ...(planTask ? { collaborationMode: 'plan' } : {}),
-          attachments: uploadedAttachments,
-        },
+        options: sendOptions,
       });
       setEditingAnchorId(null);
 
@@ -1372,6 +1404,26 @@ export function useChatComposerState({
       return;
     }
 
+    // A send the server refused is handed back only to its own conversation.
+    // If the user has typed while waiting, keep both prompts instead of
+    // replacing either one.
+    const restoreRejectedSends = () => {
+      const rejected = takeRejectedChatSends(draftScope);
+      if (rejected.length === 0) return;
+      const rejectedText = rejected.map((send) => send.content).filter((text) => text.trim()).join('\n\n');
+      setInputState((previous) => {
+        const value = rejectedText
+          ? previous.value.trim() ? `${previous.value}\n\n${rejectedText}` : rejectedText
+          : previous.value;
+        inputValueRef.current = value;
+        return { scope: draftScope, value };
+      });
+      setAttachedFiles((previous) => {
+        const files = rejected.flatMap((send) => send.files);
+        return files.length === 0 ? previous : [...previous, ...files.filter((file) => !previous.includes(file))];
+      });
+    };
+
     const restoreDraft = () => {
       const savedInput = readDraftText(draftScope);
       setInputState((previous) => {
@@ -1381,6 +1433,7 @@ export function useChatComposerState({
         inputValueRef.current = savedInput;
         return { scope: draftScope, value: savedInput };
       });
+      restoreRejectedSends();
     };
 
     restoreDraft();

@@ -363,6 +363,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.assertLiveSession(target);
       if (!result.thread?.id) throw new Error('Codex did not return a thread id.');
       target.threadId = result.thread.id;
+      // Only the native thread's accepted config proves Worker tools exist.
+      target.state.workerEnabled = Boolean(workerConfig);
       target.model = result.model || result.thread.model || target.model;
       target.modelProvider = typeof result.modelProvider === 'string' ? result.modelProvider : null;
       if (selection && target.modelProvider !== selection.modelProvider) {
@@ -511,6 +513,19 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
       writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
+    }
+    // A Worker wake-up consults its trusted final gate immediately before the
+    // native turn exists. A user message that arrived after the Worker batch was
+    // claimed defers this turn normally: no native turn is created, so there is
+    // no failed state, no error event and no failure notification. The host
+    // puts the same batch back to pending and retries it later.
+    const deferTurn = typeof options.deferTurn === 'function'
+      ? options.deferTurn as () => boolean
+      : null;
+    if (deferTurn && !deferTurn()) {
+      throw new AppError('The Worker wake-up was deferred until the session is idle.', {
+        code: 'WORKER_WAKE_DEFERRED', statusCode: 409,
+      });
     }
     const turn = this.newTurn(session, writer, null, options.composerPredictions === true);
     this.publish(session);

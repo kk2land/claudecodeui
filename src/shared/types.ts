@@ -806,6 +806,23 @@ export type QueuedDraft = {
   options?: QueuedSendOptions;
 };
 
+/**
+ * One `chat.send` waiting for the server's receipt, kept only in memory so a
+ * `chat_queued` acknowledgement can adopt the server's queue ticket and a
+ * refusal can restore the exact text and attachments the user submitted.
+ */
+export type PendingChatSend = {
+  sessionId: string;
+  clientMessageId: string;
+  content: string;
+  /** Final options sent with `chat.send`, including `clientMessageId`. */
+  options: QueuedSendOptions;
+  /** Browser files still attached in this composer, retained so a refusal can put them back. */
+  files: File[];
+  /** Uploaded descriptors already carried by the send. */
+  attachments: unknown[];
+};
+
 /** The answer to the prompt shown when sending over a session's background work: send now (stopping that work), queue the message until the work finishes, or do nothing. */
 export type BackgroundSendChoice = 'send' | 'queue' | 'cancel';
 
@@ -2095,6 +2112,8 @@ export type CodexSessionState = {
   modelSelection?: CodexModelSelection;
   activeModelSelection?: CodexModelSelection;
   queueHeld?: boolean;
+  /** True once the backend configured the Worker MCP on this session's native thread; do not infer it from provider capabilities. */
+  workerEnabled?: boolean;
   turnId: string | null;
   phase: 'idle' | 'starting' | 'running' | 'stopping' | 'stopFailed' | 'failed';
   goal: CodexGoal | null;

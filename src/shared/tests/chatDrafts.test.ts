@@ -11,7 +11,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
  * mirror once at module scope.
  */
 
-type SavedDraft = { scope: string; text: string; queuedMessages?: unknown[] };
+type SavedDraft = { scope: string; text: string; queuedMessages?: unknown[]; knownQueuedMessageIds?: string[] };
 
 const savedDrafts: SavedDraft[] = [];
 const deletedScopes: string[] = [];
@@ -30,7 +30,7 @@ vi.mock('@/shared/api', () => ({
           headers: { 'Content-Type': 'application/json' },
         });
       },
-      saveDraft: async (scope: string, draft: { text: string; queuedMessages?: unknown[] }) => {
+      saveDraft: async (scope: string, draft: { text: string; queuedMessages?: unknown[]; knownQueuedMessageIds?: string[] }) => {
         savedDrafts.push({ scope, ...draft });
         return new Response('{}', { status: 200 });
       },
@@ -176,6 +176,7 @@ test('a queued message round-trips alongside the draft text', async () => {
     scope: 'session-a',
     text: 'still editing',
     queuedMessages: [{ content: 'send this next', attachments: [] }],
+    knownQueuedMessageIds: [],
   }]);
 });
 
@@ -425,6 +426,7 @@ test('a whole-queue write persists every entry rather than a single slot', async
     scope: 'session-a',
     text: '',
     queuedMessages: [{ id: 'a', content: 'one' }, { id: 'b', content: 'two' }],
+    knownQueuedMessageIds: ['a', 'b'],
   });
 });
 
@@ -468,7 +470,12 @@ test('a failed queue addition survives hydrate and typing retries its latest val
   store.writeDraftText('session-a', 'the next draft');
   await vi.advanceTimersByTimeAsync(1_500);
   assert.equal(save.mock.calls.length, 2);
-  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'the next draft', queuedMessages: [message] }]);
+  assert.deepEqual(savedDrafts, [{
+    scope: 'session-a',
+    text: 'the next draft',
+    queuedMessages: [message],
+    knownQueuedMessageIds: ['queued-1'],
+  }]);
   await store.hydrateChatDrafts();
   assert.deepEqual(store.readQueuedMessages('session-a'), []);
   store.writeDraftText('session-a', 'draft after dispatch');
@@ -489,7 +496,12 @@ test('a failed cancellation stays cancelled locally and retries the empty queue'
   assert.deepEqual(store.readQueuedMessages('session-a'), []);
   store.writeDraftText('session-a', 'keep this draft');
   await vi.advanceTimersByTimeAsync(1_500);
-  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'keep this draft', queuedMessages: [] }]);
+  assert.deepEqual(savedDrafts, [{
+    scope: 'session-a',
+    text: 'keep this draft',
+    queuedMessages: [],
+    knownQueuedMessageIds: ['cancelled'],
+  }]);
 });
 
 test('a transient queue failure retries without another keystroke', async () => {
@@ -500,7 +512,12 @@ test('a transient queue failure retries without another keystroke', async () => 
   store.writeQueuedMessage('session-a', { id: 'retry', content: 'send when online' });
   await vi.advanceTimersByTimeAsync(1_500);
   assert.equal(save.mock.calls.length, 2);
-  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'retry', content: 'send when online' }] }]);
+  assert.deepEqual(savedDrafts, [{
+    scope: 'session-a',
+    text: '',
+    queuedMessages: [{ id: 'retry', content: 'send when online' }],
+    knownQueuedMessageIds: ['retry'],
+  }]);
 });
 
 test('a text-only retry never carries a queue the server has dispatched', async () => {
@@ -533,9 +550,31 @@ test('retrying an older failed request uses the latest queue rather than its old
   store.writeQueuedMessage('session-a', latest);
   rejectFirst(new Error('offline'));
   await vi.advanceTimersByTimeAsync(1_500);
-  assert.deepEqual(save.mock.calls.at(-1)?.[1], { text: '', queuedMessages: [latest] });
+  assert.deepEqual(save.mock.calls.at(-1)?.[1], {
+    text: '',
+    queuedMessages: [latest],
+    knownQueuedMessageIds: ['old', 'new'],
+  });
   assert.deepEqual(store.readQueuedMessages('session-a').map(({ id }) => id), ['new']);
   assert.ok(save.mock.calls.slice(1).every(([, draft]) => !draft.queuedMessages?.some((entry) => (entry as { id?: string }).id === 'old')));
+});
+
+test('a successful queue save does not keep deleted tickets known forever', async () => {
+  const store = await loadStore();
+  serverDrafts = [{ scope: 'session-a', text: '', queuedMessages: [{ id: 'old', content: 'old' }] }];
+  await store.hydrateChatDrafts();
+
+  store.clearQueuedMessage('session-a', 'old');
+  await vi.advanceTimersByTimeAsync(0);
+  assert.deepEqual(savedDrafts.at(-1)?.knownQueuedMessageIds, ['old']);
+
+  store.writeQueuedMessage('session-a', { id: 'new', content: 'new' });
+  await vi.advanceTimersByTimeAsync(0);
+  assert.deepEqual(
+    savedDrafts.at(-1)?.knownQueuedMessageIds,
+    ['new'],
+    'the successfully deleted ticket is not carried by every later snapshot',
+  );
 });
 
 test('a newer queued save supersedes an older failure without replaying dispatched turns', async () => {
@@ -614,7 +653,12 @@ test('an unsaved queue survives a page reload with its original ticket', async (
   await resumed.hydrateChatDrafts();
   assert.deepEqual(resumed.readQueuedMessages('session-a'), [message]);
   await vi.advanceTimersByTimeAsync(1_500);
-  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [message] }]);
+  assert.deepEqual(savedDrafts, [{
+    scope: 'session-a',
+    text: '',
+    queuedMessages: [message],
+    knownQueuedMessageIds: ['durable-ticket'],
+  }]);
 });
 
 test('an unsaved cancellation survives reload even when the draft is empty', async () => {
@@ -631,7 +675,12 @@ test('an unsaved cancellation survives reload even when the draft is empty', asy
   await resumed.hydrateChatDrafts();
   assert.deepEqual(resumed.readQueuedMessages('session-a'), []);
   await vi.advanceTimersByTimeAsync(1_500);
-  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [] }]);
+  assert.deepEqual(savedDrafts, [{
+    scope: 'session-a',
+    text: '',
+    queuedMessages: [],
+    knownQueuedMessageIds: ['cancelled'],
+  }]);
 });
 
 test('a successfully saved mirror never replays a dispatched queue after reload', async () => {
@@ -661,7 +710,12 @@ test('a cancellation survives reload while its first save is still unanswered', 
   await resumed.hydrateChatDrafts();
   assert.deepEqual(resumed.readQueuedMessages('session-a'), []);
   await vi.advanceTimersByTimeAsync(1_500);
-  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', queuedMessages: [] }]);
+  assert.deepEqual(savedDrafts, [{
+    scope: 'session-a',
+    text: '',
+    queuedMessages: [],
+    knownQueuedMessageIds: ['cancelled'],
+  }]);
 });
 
 test('clearing the last text survives reload before its debounce has sent a request', async () => {

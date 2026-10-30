@@ -807,6 +807,16 @@ export type CodexSessionState = {
   };
   runtime: CodexRuntimeMode;
   mode: CodexCollaborationMode;
+  /**
+   * Whether the last successful thread setup installed the Worker MCP config.
+   *
+   * Only an app-server thread whose native start/resume accepted the temporary
+   * `mcp_servers.cloudcli_workers` override reports true. A missing/disabled
+   * plugin, a failed registration, or another provider leaves it false/absent,
+   * so the chat gateway never offers Worker-specific busy queueing to sessions
+   * that have no Worker tools.
+   */
+  workerEnabled?: boolean;
   /** Explicit selection for this session's next turn, including already queued input. */
   modelSelection?: CodexModelSelection;
   /** Actual loaded thread configuration; absent until start/resume succeeds. */

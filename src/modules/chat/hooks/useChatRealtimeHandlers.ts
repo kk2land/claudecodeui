@@ -7,6 +7,13 @@ import { playChatCompletionSound, playNotificationSound } from '@/shared/utils';
 import type { SessionStore } from '@/modules/chat/hooks/useSessionStore';
 import { normalizedToChatMessages } from '@/modules/chat/hooks/useChatMessages';
 import { collectRunningBackgroundTasks, listRunningBackgroundLaunches, readBackgroundTaskId, readBackgroundTaskStatus } from '@/modules/chat/utils/backgroundTasks';
+import {
+  adoptQueuedChatMessage,
+  forgetPendingChatSend,
+  hydrateChatDrafts,
+  rejectPendingChatSend,
+  removeStartedQueuedMessage,
+} from '@/shared/chatDrafts';
 
 const isActionablePermissionRequest = (request: { toolName?: unknown } | null | undefined): boolean => {
   return request?.toolName !== 'ExitPlanMode' && request?.toolName !== 'exit_plan_mode';
@@ -147,6 +154,54 @@ export function useChatRealtimeHandlers({
         }
       }
 
+      // A server-owned queue receipt belongs to the session that sent it, never
+      // to whichever conversation is currently visible. It means the backend
+      // already persisted the turn, so adopt its ticket locally and let the
+      // draft hydrate supply the authoritative queue and delivery receipt.
+      if (msg.kind === 'chat_queued') {
+        const queuedSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : '';
+        const clientMessageId = typeof msg.clientMessageId === 'string' ? msg.clientMessageId : '';
+        const queuedRecord = msg.queuedMessage && typeof msg.queuedMessage === 'object'
+          ? msg.queuedMessage as Record<string, unknown>
+          : null;
+        const messageId = typeof msg.messageId === 'string'
+          ? msg.messageId
+          : typeof queuedRecord?.id === 'string'
+            ? queuedRecord.id
+            : '';
+        if (!queuedSessionId || !clientMessageId || !messageId) return;
+        sessionStore.removeOptimisticUserEcho(queuedSessionId, clientMessageId);
+        adoptQueuedChatMessage({
+          scope: queuedSessionId,
+          clientMessageId,
+          messageId,
+          queuedMessage: {
+            content: queuedRecord?.content,
+            options: queuedRecord?.options,
+            attachments: Array.isArray(queuedRecord?.attachments) ? queuedRecord.attachments : undefined,
+          },
+        });
+        void hydrateChatDrafts();
+        return;
+      }
+
+      // The dispatched turn now owns the message, so both the pending receipt
+      // and its queue card must retire before the user row is appended.
+      if (
+        msg.kind === 'text'
+        && msg.role === 'user'
+        && typeof msg.clientMessageId === 'string'
+        && msg.clientMessageId
+      ) {
+        forgetPendingChatSend(msg.clientMessageId);
+        if (sid && removeStartedQueuedMessage(sid, {
+          id: typeof msg.id === 'string' ? msg.id : undefined,
+          clientMessageId: msg.clientMessageId,
+        })) {
+          void hydrateChatDrafts();
+        }
+      }
+
       if (msg.kind === 'control_result') { reportNativeState(); return; }
       if (msg.kind === 'status' && msg.text === 'codex_control') { reportNativeState(); return; }
 
@@ -200,6 +255,24 @@ export function useChatRealtimeHandlers({
 
         case 'protocol_error': {
           console.error('[Chat] Protocol error:', msg.code, msg.error);
+          const protocolCode = String(msg.code ?? '');
+          const refusedClientMessageId = typeof msg.clientMessageId === 'string' ? msg.clientMessageId : '';
+          // Idempotent duplicate: the server already accepted this send. Never
+          // restore or resend it; the accepted user row/echo stays in place and
+          // the receipt/native state clears the tracking.
+          if (protocolCode === 'MESSAGE_ALREADY_SENT') {
+            if (refusedClientMessageId) forgetPendingChatSend(refusedClientMessageId);
+            reportNativeState();
+            return;
+          }
+          // A refused `chat.send` never started a turn: remove its optimistic
+          // echo and hand the prompt and files back to the composer that sent
+          // it. The running-turn decision is made below from native state.
+          const refusedSend = refusedClientMessageId ? rejectPendingChatSend(refusedClientMessageId) : null;
+          if (refusedClientMessageId) {
+            const refusedSessionId = refusedSend?.sessionId || sid;
+            if (refusedSessionId) sessionStore.removeOptimisticUserEcho(refusedSessionId, refusedClientMessageId);
+          }
           // The ✕ on a task whose end never reached this client (its process
           // went away, say): settle its card and chip instead of reporting a
           // failure the user can do nothing about.
@@ -233,12 +306,19 @@ export function useChatRealtimeHandlers({
             }
           }
           if (sid) {
-            // Surface the failure in the conversation and stop the spinner —
-            // the run never started (or was rejected), so no `complete` follows.
-            // A refused stop request is not about the run: the task had
-            // already settled, and idling here would drop a response in
+            // Surface the failure in the conversation. A native snapshot is
+            // authoritative; otherwise only the queue-full/content fallbacks
+            // may describe a genuinely running main turn and keep it busy.
+            // Every other refusal ends this send's optimistic processing, as
+            // before. A refused stop request is not about the run: the task
+            // had already settled, and idling here would drop a response in
             // flight on that session.
-            if (!['NO_SUCH_TASK', 'TASK_ID_REQUIRED', 'RUN_IN_PROGRESS', 'NO_ACTIVE_RUN'].includes(String(msg.code))) {
+            const fallbackBusy = protocolCode === 'QUEUE_LIMIT_REACHED' || protocolCode === 'CONTENT_REQUIRED';
+            if (
+              !reportNativeState()
+              && !fallbackBusy
+              && !['NO_SUCH_TASK', 'TASK_ID_REQUIRED', 'RUN_IN_PROGRESS', 'NO_ACTIVE_RUN'].includes(protocolCode)
+            ) {
               onSessionIdle?.(sid);
             }
             sessionStore.appendRealtime(sid, {

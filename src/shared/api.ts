@@ -554,7 +554,13 @@ export const api = {
     drafts: () => get('/api/user/drafts'),
     // `queuedMessages` is the whole FIFO queue; `queuedMessage` remains
     // accepted by the server for older clients.
-    saveDraft: (scope: string, draft: { text: string; queuedMessages?: unknown[]; queuedMessage?: unknown }) =>
+    saveDraft: (scope: string, draft: {
+      text: string;
+      queuedMessages?: unknown[];
+      queuedMessage?: unknown;
+      /** Tickets this queue snapshot's edit saw; omitted keeps legacy whole-queue replacement. */
+      knownQueuedMessageIds?: string[];
+    }) =>
       put('/api/user/drafts', { scope, ...draft }),
     // Appends an independent turn to the scope's FIFO queue on the server.
     appendQueuedMessage: (scope: string, queuedMessage: unknown) =>

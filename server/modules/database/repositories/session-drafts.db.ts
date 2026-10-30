@@ -27,7 +27,84 @@ type SavedDraft = {
   queuedMessage?: unknown | null;
   /** The whole pending queue, oldest first. Preferred by every current caller. */
   queuedMessages?: unknown[];
+  /**
+   * Tickets the browser actually saw in this snapshot, including ones it
+   * deleted. Only these entries may be replaced or removed; server-side tickets
+   * outside the set are preserved so a delayed PUT cannot erase a queued turn
+   * added meanwhile.
+   */
+  knownQueuedMessageIds?: string[];
 };
+
+/**
+ * Merges a browser snapshot that carries the tickets it actually saw.
+ *
+ * Existing ticket-bearing entries the browser knew about are replaced by the
+ * snapshot entry or removed when absent. Entries it did not know about stay in
+ * their server FIFO positions, and new snapshot entries are appended after
+ * them. Legacy entries without a ticket keep the old positional replacement:
+ * the Nth snapshot entry without an id replaces or deletes the Nth existing one,
+ * so hydrating and editing legacy data cannot duplicate it.
+ */
+function mergeKnownQueuedMessages(
+  existingQueue: unknown[],
+  snapshot: unknown[],
+  knownIds: string[],
+): unknown[] {
+  const known = new Set(knownIds);
+  const snapshotById = new Map<string, unknown>();
+  const snapshotWithoutId: unknown[] = [];
+  for (const message of snapshot) {
+    const id = queuedMessageId(message);
+    if (id) snapshotById.set(id, message);
+    else snapshotWithoutId.push(message);
+  }
+
+  const merged: unknown[] = [];
+  const seen = new Set<string>();
+  let idlessIndex = 0;
+  for (const message of existingQueue) {
+    const id = queuedMessageId(message);
+    if (!id) {
+      const replacement = snapshotWithoutId[idlessIndex];
+      idlessIndex += 1;
+      if (replacement !== undefined) merged.push(replacement);
+      continue;
+    }
+    if (known.has(id)) {
+      const replacement = snapshotById.get(id);
+      if (replacement !== undefined) {
+        merged.push(replacement);
+        seen.add(id);
+      }
+      continue;
+    }
+    if (snapshotById.has(id)) {
+      merged.push(snapshotById.get(id));
+      seen.add(id);
+      continue;
+    }
+    merged.push(message);
+    seen.add(id);
+  }
+
+  let snapshotIdlessIndex = 0;
+  for (const message of snapshot) {
+    const id = queuedMessageId(message);
+    if (!id) {
+      if (snapshotIdlessIndex < idlessIndex) {
+        snapshotIdlessIndex += 1;
+        continue;
+      }
+      merged.push(message);
+      continue;
+    }
+    if (seen.has(id)) continue;
+    merged.push(message);
+    seen.add(id);
+  }
+  return merged;
+}
 
 /** The durable ticket of a stored entry, when it has one. */
 function queuedMessageId(value: unknown): string | null {
@@ -35,6 +112,22 @@ function queuedMessageId(value: unknown): string | null {
     ? (value as { id: string }).id
     : null;
 }
+
+/** One queued entry plus whether it was appended and whether a matching send already left the queue. */
+type EnqueuedChatMessage = {
+  queuedMessage: QueuedChatMessage & { id: string };
+  appended: boolean;
+  alreadySent: boolean;
+};
+
+/**
+ * Receipt states that prove this ticket was claimed or accepted.
+ *
+ * The dispatcher writes `dispatching` then `accepted`; a manual steer writes
+ * `steering` before one of the terminal states. A rejected or resolved receipt
+ * leaves the turn sendable again.
+ */
+const CLAIMED_RECEIPT_STATUSES = "('dispatching', 'accepted', 'steering', 'unknown')";
 
 function toRecord(row: DraftRow): SessionDraftRecord {
   const queuedMessages = readQueuedMessages(row.queued_message);
@@ -75,6 +168,74 @@ export const sessionDraftsDb = {
         queuedMessages: [...queue, queuedMessage],
       });
       return { queuedMessage, appended: queue.length > 0 };
+    })();
+  },
+
+  /**
+   * Reports whether this exact user/client/session ticket was already claimed
+   * or accepted by the dispatcher or a manual steer.
+   *
+   * Scoping all three columns is what keeps an identical client id in another
+   * session or another user's queue from claiming this send.
+   */
+  hasSentChatMessage(userId: number, scope: string, clientMessageId: string): boolean {
+    return Boolean(getConnection().prepare(
+      `SELECT 1 FROM queued_steer_receipts
+       WHERE user_id = ? AND session_id = ? AND message_id = ?
+         AND status IN ${CLAIMED_RECEIPT_STATUSES} LIMIT 1`,
+    ).get(userId, scope, clientMessageId));
+  },
+
+  /**
+   * Queues a `chat.send` that lost to a running turn or an existing user FIFO.
+   *
+   * The composer's `clientMessageId` is the stable queue ticket, so a repeated
+   * send returns the original stored entry. Once that ticket was claimed or
+   * accepted by the dispatcher/steer receipts, the retry reports alreadySent
+   * instead of enqueueing it again. It appends behind every waiting user
+   * message, and the queue cap including a claimed slot still applies.
+   */
+  enqueueChatMessage(
+    userId: number,
+    scope: string,
+    message: QueuedChatMessage,
+    clientMessageId: string,
+  ): EnqueuedChatMessage {
+    const db = getConnection();
+    return db.transaction(() => {
+      const existingRow = db.prepare('SELECT draft_text, queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
+        .get(userId, scope) as { draft_text: string; queued_message: string | null } | undefined;
+      const queue = readQueuedMessages(existingRow?.queued_message ?? null);
+      const existing = queue.find((entry) => queuedMessageId(entry) === clientMessageId);
+      if (existing) {
+        return {
+          queuedMessage: existing as QueuedChatMessage & { id: string },
+          appended: false,
+          alreadySent: false,
+        };
+      }
+      if (sessionDraftsDb.hasSentChatMessage(userId, scope, clientMessageId)) {
+        return {
+          queuedMessage: {
+            ...message,
+            id: clientMessageId,
+            options: { ...message.options, clientMessageId },
+          },
+          appended: false,
+          alreadySent: true,
+        };
+      }
+
+      const queuedMessage = {
+        ...message,
+        id: clientMessageId,
+        options: { ...message.options, clientMessageId },
+      };
+      sessionDraftsDb.saveDraft(userId, scope, {
+        text: existingRow?.draft_text ?? '',
+        queuedMessages: [...queue, queuedMessage],
+      });
+      return { queuedMessage, appended: true, alreadySent: false };
     })();
   },
 
@@ -217,10 +378,10 @@ export const sessionDraftsDb = {
         db.prepare("DELETE FROM queued_steer_receipts WHERE request_id = ? AND status = 'dispatching'")
           .run(candidate.dispatchRequestId);
       }
+      const restoredId = queuedMessageId(candidate.queuedMessage);
       const existing = db.prepare('SELECT queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
         .get(candidate.userId, candidate.sessionId) as { queued_message: string | null } | undefined;
       const queue = readQueuedMessages(existing?.queued_message ?? null);
-      const restoredId = queuedMessageId(candidate.queuedMessage);
       if (restoredId && queue.some((entry) => queuedMessageId(entry) === restoredId)) {
         return;
       }
@@ -268,7 +429,12 @@ export const sessionDraftsDb = {
     const db = getConnection();
     const existing = db.prepare('SELECT queued_message, queue_status FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
       .get(userId, scope) as { queued_message: string | null; queue_status: string } | undefined;
-    let queuedMessages = draft.queuedMessages ?? (draft.queuedMessage == null ? [] : [draft.queuedMessage]);
+    const snapshot = draft.queuedMessages ?? (draft.queuedMessage == null ? [] : [draft.queuedMessage]);
+    // A legacy snapshot is still the whole queue. A ticket-aware snapshot only
+    // replaces/removes what the browser saw, preserving server-side additions.
+    let queuedMessages = draft.knownQueuedMessageIds
+      ? mergeKnownQueuedMessages(readQueuedMessages(existing?.queued_message ?? null), snapshot, draft.knownQueuedMessageIds)
+      : snapshot;
     if (queuedMessages.length > MAX_QUEUED_MESSAGES) {
       throw new AppError(`At most ${MAX_QUEUED_MESSAGES} messages can be queued for one chat.`, {
         code: 'QUEUE_LIMIT_REACHED',
@@ -277,7 +443,9 @@ export const sessionDraftsDb = {
     }
     // A delayed draft PUT must not resurrect a message already accepted by a
     // steer or by the dispatcher, which holds a receipt while the turn runs.
-    const receiptIds = (statuses: string) => (db.prepare(`SELECT message_id FROM queued_steer_receipts
+    // DISTINCT keeps one claimed ticket from reserving a queue slot twice if
+    // an older database still holds more than one receipt for it.
+    const receiptIds = (statuses: string) => (db.prepare(`SELECT DISTINCT message_id FROM queued_steer_receipts
       WHERE user_id = ? AND session_id = ? AND status IN (${statuses})`)
       .all(userId, scope) as { message_id: string }[]).map(({ message_id }) => message_id);
     const consumedIds = new Set(receiptIds("'dispatching', 'accepted'"));

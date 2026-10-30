@@ -1,6 +1,6 @@
 import { api } from '@/shared/api';
 import { MAX_QUEUED_MESSAGES } from '@/shared/constants';
-import type { QueuedDelivery, QueuedSendOptions } from '@/shared/types';
+import type { PendingChatSend, QueuedDelivery, QueuedSendOptions } from '@/shared/types';
 
 /**
  * Unsent composer text and queued messages, stored in `auth.db` rather than in
@@ -65,7 +65,20 @@ export class QueueLimitError extends Error {
 const listeners = new Set<() => void>();
 
 let drafts = new Map<string, DraftRecord>();
+// Sends awaiting a server receipt, keyed by the client message id the server
+// echoes back. An acknowledgement turns one into the queue ticket it created;
+// a refusal returns it to the composer instead of losing the prompt.
+const pendingChatSends = new Map<string, PendingChatSend>();
+// Refused sends are handed back to their own composer on its next draft
+// notification, never to whichever session happens to be open.
+const rejectedChatSends = new Map<string, PendingChatSend[]>();
 const pendingScopes = new Set<string>();
+// Browser files for acknowledged queue tickets, kept only for this page's
+// lifetime so editing a hydrated card can resend the original attachments.
+const queuedMessageFiles = new Map<string, Map<string, File[]>>();
+// Queue tickets this page has seen per scope. An explicit queue PUT names the
+// tickets its snapshot knew so the backend preserves later server entries.
+const knownQueuedTickets = new Map<string, Set<string>>();
 // Debounced text edits remain local until their own save completes.
 const pendingTextScopes = new Set<string>();
 // Only explicit queue mutations may send a queue snapshot to the server.
@@ -87,6 +100,56 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
 const isEmptyDraft = (draft: DraftRecord): boolean => (
   draft.text === '' && draft.queuedMessages.length === 0
 );
+
+const readQueuedMessageId = (message: StoredQueuedMessage): string | null => (
+  typeof message.id === 'string' && message.id ? message.id : null
+);
+
+const readQueuedTicketIds = (messages: StoredQueuedMessage[] | undefined): string[] => (
+  (messages ?? [])
+    .map(readQueuedMessageId)
+    .filter((id): id is string => id !== null)
+);
+
+/** Captures the union of tickets already seen and the snapshot's own tickets. */
+function captureKnownQueuedTickets(scope: string, messages: StoredQueuedMessage[] | undefined): string[] {
+  const ids = [...(knownQueuedTickets.get(scope) ?? [])];
+  for (const id of readQueuedTicketIds(messages)) {
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+/**
+ * Drops tickets this snapshot successfully deleted, but leaves dirty newer
+ * edits their own chance to settle. Current queue tickets always stay known.
+ */
+function settleKnownQueuedTickets(scope: string, savedTicketIds: string[]): void {
+  const known = knownQueuedTickets.get(scope) ?? new Set<string>();
+  const currentIds = new Set(readQueuedTicketIds(readQueuedMessages(scope)));
+  for (const id of currentIds) known.add(id);
+  const hasNewerQueueWrite = pendingQueueScopes.has(scope)
+    || (writingQueueScopes.get(scope) ?? 0) > 1;
+  if (!hasNewerQueueWrite) {
+    for (const id of savedTicketIds) {
+      if (!currentIds.has(id)) known.delete(id);
+    }
+  }
+  if (known.size > 0) knownQueuedTickets.set(scope, known);
+  else knownQueuedTickets.delete(scope);
+}
+
+function forgetQueuedMessageFiles(scope: string, ticketIds: string[]): void {
+  const files = queuedMessageFiles.get(scope);
+  if (!files || ticketIds.length === 0) return;
+  for (const id of ticketIds) files.delete(id);
+  if (files.size === 0) queuedMessageFiles.delete(scope);
+}
+
+/** The browser files retained for one acknowledged queue ticket on this page. */
+export function readQueuedMessageFiles(scope: string, ticketId: string): File[] {
+  return queuedMessageFiles.get(scope)?.get(ticketId) ?? [];
+}
 
 /**
  * Turns one stored entry into a usable queued message, or null when it has
@@ -150,6 +213,10 @@ function readMirror(): Map<string, DraftRecord> {
       // a cached queue the server may already have dispatched after a reload.
       if (value.unsavedText === true) pendingTextScopes.add(scope);
       if (value.unsavedQueue === true) pendingQueueScopes.add(scope);
+      if (Array.isArray(value.knownQueuedMessageIds)) {
+        const known = value.knownQueuedMessageIds.filter((id): id is string => typeof id === 'string' && id.length > 0);
+        if (known.length > 0) knownQueuedTickets.set(scope, new Set(known));
+      }
       if (value.unsavedText === true || value.unsavedQueue === true) pendingScopes.add(scope);
     }
     return restored;
@@ -163,17 +230,23 @@ function writeMirror(): void {
     const scopes = new Set([
       ...drafts.keys(), ...pendingScopes, ...pendingTextScopes, ...pendingQueueScopes, ...writingScopes.keys(),
     ]);
-    const mirror = new Map<string, DraftRecord & { unsavedText?: boolean; unsavedQueue?: boolean }>();
+    const mirror = new Map<string, DraftRecord & {
+      unsavedText?: boolean;
+      unsavedQueue?: boolean;
+      knownQueuedMessageIds?: string[];
+    }>();
     for (const scope of scopes) {
       const draft = drafts.get(scope) ?? EMPTY_DRAFT;
       const unsavedText = pendingTextScopes.has(scope) || writingTextScopes.has(scope);
       const unsavedQueue = pendingQueueScopes.has(scope) || writingQueueScopes.has(scope);
+      const known = unsavedQueue ? [...(knownQueuedTickets.get(scope) ?? [])] : [];
       // An empty record carries an unsaved cancellation across reloads.
       if (isEmptyDraft(draft) && !unsavedText && !unsavedQueue) continue;
       mirror.set(scope, {
         ...draft,
         ...(unsavedText ? { unsavedText: true } : {}),
         ...(unsavedQueue ? { unsavedQueue: true } : {}),
+        ...(known.length > 0 ? { knownQueuedMessageIds: known } : {}),
       });
     }
     localStorage.setItem(MIRROR_STORAGE_KEY, JSON.stringify(Object.fromEntries(mirror)));
@@ -207,12 +280,17 @@ function flushServerWrites(): Promise<void> {
   if (serverRetryTimer !== null) clearTimeout(serverRetryTimer);
   serverRetryTimer = null;
   const generation = draftGeneration;
-  const entries = [...pendingScopes].map((scope) => ({
-    scope,
-    draft: drafts.get(scope),
-    textChanged: pendingTextScopes.has(scope),
-    queueChanged: pendingQueueScopes.has(scope),
-  }));
+  const entries = [...pendingScopes].map((scope) => {
+    const draft = drafts.get(scope);
+    const queueChanged = pendingQueueScopes.has(scope);
+    return {
+      scope,
+      draft,
+      textChanged: pendingTextScopes.has(scope),
+      queueChanged,
+      knownQueuedMessageIds: queueChanged ? captureKnownQueuedTickets(scope, draft?.queuedMessages) : undefined,
+    };
+  });
   pendingScopes.clear();
   pendingTextScopes.clear();
   pendingQueueScopes.clear();
@@ -224,19 +302,25 @@ function flushServerWrites(): Promise<void> {
   const result = writeChain.catch(() => {}).then(async () => {
     let failure: unknown;
     let retryableFailure = false;
-    for (const { scope, draft, textChanged, queueChanged } of entries) {
+    for (const { scope, draft, textChanged, queueChanged, knownQueuedMessageIds } of entries) {
       if (generation !== draftGeneration) throw new Error('Draft save cancelled after sign-out.');
       let response: Response | undefined;
       try {
         // An empty text-only save must also leave another tab's queue alone.
         response = await api.user.saveDraft(scope, {
           text: draft?.text ?? '',
-          ...(queueChanged ? { queuedMessages: draft?.queuedMessages ?? [] } : {}),
+          ...(queueChanged ? {
+            queuedMessages: draft?.queuedMessages ?? [],
+            knownQueuedMessageIds: knownQueuedMessageIds ?? [],
+          } : {}),
         });
         if (response && !response.ok) throw new Error(`Draft save failed (${response.status})`);
         if (generation === draftGeneration) {
           // A hydrate may have read before this write but answer after it.
-          if (queueChanged) queueRevisions.set(scope, (queueRevisions.get(scope) ?? 0) + 1);
+          if (queueChanged) {
+            queueRevisions.set(scope, (queueRevisions.get(scope) ?? 0) + 1);
+            settleKnownQueuedTickets(scope, knownQueuedMessageIds ?? []);
+          }
           if (textChanged) textRevisions.set(scope, (textRevisions.get(scope) ?? 0) + 1);
         }
       } catch (error) {
@@ -297,6 +381,119 @@ export async function persistQueuedMessage(scope: string): Promise<void> {
   await flushServerWrites();
 }
 
+/** Remembers one chat.send until its queue receipt, native echo, refusal or reset clears it. */
+export function rememberPendingChatSend(send: PendingChatSend): void {
+  pendingChatSends.set(send.clientMessageId, send);
+}
+
+/** Drops receipt tracking for a send that no longer needs recovery. */
+export function forgetPendingChatSend(clientMessageId: string): void {
+  pendingChatSends.delete(clientMessageId);
+}
+
+/**
+ * Adopts a server-accepted queue entry from a `chat_queued` receipt.
+ *
+ * The server's `messageId` becomes the durable ticket, while the original
+ * send's content/options fill anything the receipt omits. This write is local
+ * only: the backend already persisted the entry, and a whole-queue snapshot
+ * from this composer could be stale. `hydrateChatDrafts` remains the authority
+ * for the rest of the queue and its delivery receipt.
+ */
+export function adoptQueuedChatMessage(args: {
+  scope: string;
+  clientMessageId: string;
+  messageId: string;
+  queuedMessage: {
+    content?: unknown;
+    options?: unknown;
+    attachments?: unknown[];
+  };
+}): void {
+  const pending = pendingChatSends.get(args.clientMessageId);
+  forgetPendingChatSend(args.clientMessageId);
+  const receiptOptions = isRecord(args.queuedMessage.options)
+    ? args.queuedMessage.options as QueuedSendOptions
+    : undefined;
+  const normalized = normalizeQueuedMessage({
+    id: args.messageId,
+    content: typeof args.queuedMessage.content === 'string'
+      ? args.queuedMessage.content
+      : pending?.content ?? '',
+    options: {
+      ...(pending?.options ?? {}),
+      ...(receiptOptions ?? {}),
+      clientMessageId: args.clientMessageId,
+    },
+    attachments: Array.isArray(args.queuedMessage.attachments)
+      ? args.queuedMessage.attachments
+      : pending?.attachments ?? [],
+  });
+  if (!normalized) {
+    return;
+  }
+  if (pending && pending.files.length > 0) {
+    const files = queuedMessageFiles.get(args.scope) ?? new Map<string, File[]>();
+    files.set(args.messageId, pending.files);
+    queuedMessageFiles.set(args.scope, files);
+  }
+  const queue = readQueuedMessages(args.scope);
+  const index = queue.findIndex((entry) => entry.id === args.messageId);
+  const next = index >= 0
+    ? queue.map((entry, position) => (position === index ? normalized : entry))
+    : [...queue, normalized];
+  updateDraft(args.scope, { queuedMessages: next.slice(-MAX_QUEUED_MESSAGES) }, false);
+}
+
+/**
+ * Keeps a refused send for its own composer. Returns the entry so the caller
+ * can report the failure without triggering an automatic resend.
+ */
+export function rejectPendingChatSend(clientMessageId: string): PendingChatSend | null {
+  const pending = pendingChatSends.get(clientMessageId);
+  if (!pending) {
+    return null;
+  }
+  forgetPendingChatSend(clientMessageId);
+  const rejected = rejectedChatSends.get(pending.sessionId) ?? [];
+  rejectedChatSends.set(pending.sessionId, [...rejected, pending]);
+  notifyListeners();
+  return pending;
+}
+
+/** Takes the refusals belonging to one scope so only that composer restores them. */
+export function takeRejectedChatSends(scope: string): PendingChatSend[] {
+  const rejected = rejectedChatSends.get(scope) ?? [];
+  rejectedChatSends.delete(scope);
+  return rejected;
+}
+
+/**
+ * Removes the queued card a started turn now owns. Matching uses the server's
+ * queue ticket and the original client id because a dispatched echo may carry
+ * either identity. Returns true when the card was present.
+ */
+export function removeStartedQueuedMessage(
+  scope: string,
+  identity: { id?: string; clientMessageId?: string },
+): boolean {
+  const queue = readQueuedMessages(scope);
+  const next = queue.filter((entry) => (
+    entry.id !== identity.id
+    && !(identity.clientMessageId && entry.options?.clientMessageId === identity.clientMessageId)
+  ));
+  if (next.length === queue.length) {
+    return false;
+  }
+  const removedIds = queue.filter((entry) => !next.includes(entry)).map(readQueuedMessageId).filter((id): id is string => id !== null);
+  forgetQueuedMessageFiles(scope, removedIds);
+  // The server removed the entry when it dispatched the turn; a local snapshot
+  // write here would race that acknowledgement.
+  updateDraft(scope, { queuedMessages: next }, false);
+  for (const id of removedIds) knownQueuedTickets.get(scope)?.delete(id);
+  return true;
+}
+
 /** Chat's queue card reads the server-owned delivery state after hydrate/reconnect. */
 export function readQueuedDelivery(scope: string): QueuedDelivery | null {
   return drafts.get(scope)?.queuedDelivery ?? null;
@@ -319,7 +516,13 @@ function flushServerWritesNow(): void {
   flushServerWrites();
 }
 
-function updateDraft(scope: string, update: Partial<DraftRecord>): void {
+/**
+ * Applies a local draft change. A queue change normally schedules its server
+ * snapshot; server-owned acknowledgements pass `persistQueue: false` because
+ * the backend already stored them and a composer snapshot must not overwrite
+ * the authoritative queue.
+ */
+function updateDraft(scope: string, update: Partial<DraftRecord>, persistQueue = true): void {
   const current = drafts.get(scope) ?? EMPTY_DRAFT;
   const next: DraftRecord = { ...current, ...update };
 
@@ -340,11 +543,16 @@ function updateDraft(scope: string, update: Partial<DraftRecord>): void {
     textRevisions.set(scope, (textRevisions.get(scope) ?? 0) + 1);
   }
   if (update.queuedMessages !== undefined) {
-    pendingQueueScopes.add(scope);
+    const known = knownQueuedTickets.get(scope) ?? new Set<string>();
+    for (const id of [...readQueuedTicketIds(current.queuedMessages), ...readQueuedTicketIds(next.queuedMessages)]) {
+      known.add(id);
+    }
+    if (known.size > 0) knownQueuedTickets.set(scope, known);
+    if (persistQueue) pendingQueueScopes.add(scope);
     queueRevisions.set(scope, (queueRevisions.get(scope) ?? 0) + 1);
   }
   writeMirror();
-  queueServerWrite(scope);
+  if (persistQueue) queueServerWrite(scope);
   notifyListeners();
 }
 
@@ -409,6 +617,8 @@ export function writeQueuedMessages(scope: string, messages: StoredQueuedMessage
   if (JSON.stringify(current) === JSON.stringify(messages)) {
     return;
   }
+  const nextIds = new Set(readQueuedTicketIds(messages));
+  forgetQueuedMessageFiles(scope, readQueuedTicketIds(current).filter((id) => !nextIds.has(id)));
   updateDraft(scope, { queuedMessages: messages });
   flushServerWritesNow();
 }
@@ -429,6 +639,8 @@ export function clearQueuedMessage(scope: string, messageId?: string): void {
   if (next.length === queue.length) {
     return;
   }
+  const nextIds = new Set(readQueuedTicketIds(next));
+  forgetQueuedMessageFiles(scope, readQueuedTicketIds(queue).filter((id) => !nextIds.has(id)));
   updateDraft(scope, { queuedMessages: next });
   // Editing or cancelling must beat the server's next dispatcher poll.
   flushServerWritesNow();
@@ -524,6 +736,33 @@ export async function hydrateChatDrafts(): Promise<void> {
   }
 
   drafts = merged;
+  const retainedScopes = new Set([...merged.keys(), ...localScopes]);
+  for (const scope of retainedScopes) {
+    const queuePreserved = pendingQueueScopes.has(scope)
+      || writingQueueScopes.has(scope)
+      || queueChangedDuringRequest(scope);
+    const tickets = readQueuedTicketIds(merged.get(scope)?.queuedMessages);
+    if (queuePreserved) {
+      const known = knownQueuedTickets.get(scope) ?? new Set<string>();
+      for (const id of tickets) known.add(id);
+      if (known.size > 0) knownQueuedTickets.set(scope, known);
+      else knownQueuedTickets.delete(scope);
+    } else if (tickets.length > 0) {
+      knownQueuedTickets.set(scope, new Set(tickets));
+    } else {
+      knownQueuedTickets.delete(scope);
+    }
+  }
+  for (const scope of [...knownQueuedTickets.keys()]) {
+    if (!retainedScopes.has(scope)) knownQueuedTickets.delete(scope);
+  }
+  for (const [scope, files] of queuedMessageFiles) {
+    const tickets = new Set(readQueuedTicketIds(merged.get(scope)?.queuedMessages));
+    for (const id of [...files.keys()]) {
+      if (!tickets.has(id)) files.delete(id);
+    }
+    if (files.size === 0) queuedMessageFiles.delete(scope);
+  }
   writeMirror();
   notifyListeners();
 }
@@ -536,6 +775,10 @@ export function resetChatDrafts(): void {
   writingTextScopes.clear();
   writingQueueScopes.clear();
   drafts = new Map();
+  queuedMessageFiles.clear();
+  knownQueuedTickets.clear();
+  pendingChatSends.clear();
+  rejectedChatSends.clear();
   pendingScopes.clear();
   pendingTextScopes.clear();
   pendingQueueScopes.clear();

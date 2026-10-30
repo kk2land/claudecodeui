@@ -1,6 +1,7 @@
 import spawn from 'cross-spawn';
 
 import { sessionDraftsDb, userDb, userPreferencesDb } from '@/modules/database/index.js';
+import { requestQueuedMessageDispatch } from '@/modules/scheduled-messages/index.js';
 
 import { createUserRouter } from './user.routes.js';
 import { createUserService } from './user.service.js';
@@ -58,6 +59,7 @@ const userService = createUserService({
     deleteDraft: (userId, scope) => sessionDraftsDb.deleteDraft(userId, scope),
   },
   readSystemGitConfig,
+  onQueueChanged: (scope) => requestQueuedMessageDispatch(scope),
   applyGlobalGitConfig: async (gitName, gitEmail) => {
     await runGit(['config', '--global', 'user.name', gitName]);
     await runGit(['config', '--global', 'user.email', gitEmail]);

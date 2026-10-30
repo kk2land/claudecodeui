@@ -310,6 +310,44 @@ test('a busy race after claim releases the same batch to pending and retries unc
   assert.equal(h.wakeCalls.length, 1);
 });
 
+test('a user message queued after the Worker claim sends the same batch back to pending', async () => {
+  const h = harness();
+  await h.prepare();
+  let guarded = false;
+  let firstAttempt = true;
+  h.setRunTurn(async (input) => {
+    // The native runtime consults this immediately before turn/start. A user
+    // message queued after the claim makes it false; the batch must simply
+    // wait again, not become a failed delivery.
+    if (firstAttempt) {
+      firstAttempt = false;
+      h.setDrafts('session-1', true);
+      guarded = true;
+    }
+    return (input.finalGuard as () => boolean)()
+      ? { started: true, error: null }
+      : { started: false, error: 'User message has priority.' };
+  });
+  h.emitNotification(notification());
+  await tick();
+  h.fireTimers();
+  await tick();
+
+  assert.equal(guarded, true);
+  assert.equal(h.claims.length, 1);
+  assert.equal(h.settlements.at(-1)?.delivery, 'pending');
+  assert.equal(h.settlements.some((settle) => settle.delivery === 'held'), false);
+  assert.equal(h.settlements.some((settle) => settle.delivery === 'unknown'), false);
+
+  h.setDrafts('session-1', false);
+  await tick();
+  h.fireTimers();
+  await tick();
+  assert.equal(h.claims.length, 2, 'the same batch was retried, not acknowledged away');
+  assert.deepEqual(h.claims.at(-1), ['notification-1']);
+  assert.equal(h.settlements.at(-1)?.delivery, 'delivered');
+});
+
 test('two simultaneous results are merged into one wake turn with batch metadata', async () => {
   const h = harness();
   await h.prepare();

@@ -234,11 +234,16 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
   }
 
   function finalGuard(entry: RegisteredOwner, appServerInstanceId: string): boolean {
+    const sessionId = entry.owner.parentSessionId;
     return !shuttingDown
       && owners.get(entry.owner.id) === entry
       && entry.owner.appServerInstanceId === appServerInstanceId
       && !entry.owner.paused
-      && !dependencies.settings.get(entry.owner.parentSessionId).queueHeld;
+      && !dependencies.settings.get(sessionId).queueHeld
+      // A user turn queued after this batch was claimed has priority. Returning
+      // false here makes the host settle the same batch back to pending; it is
+      // a normal delay, not a native failure.
+      && !dependencies.drafts.hasQueuedMessages(sessionId);
   }
 
   async function deliverOwner(entry: RegisteredOwner): Promise<void> {

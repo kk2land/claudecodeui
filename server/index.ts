@@ -17,7 +17,7 @@ import {
     providerRuntimeService,
     setCodexWorkerBridge,
 } from '@/modules/providers/index.js';
-import { broadcastCodexRateLimits, chatRunRegistry, createWebSocketServer } from '@/modules/websocket/index.js';
+import { broadcastCodexRateLimits, chatRunRegistry, createWebSocketServer, onChatRunCompleted } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -48,6 +48,7 @@ import { voiceRoutes } from './modules/voice/index.js';
 import {
     closeScheduledMessageDispatcher,
     initializeScheduledMessageDispatcher,
+    requestQueuedMessageDispatch,
     scheduledMessagesRoutes,
 } from './modules/scheduled-messages/index.js';
 import browserUseRoutes from './modules/browser-use/browser-use.routes.js';
@@ -124,6 +125,9 @@ createWebSocketServer(server, {
     },
     chat: {
         runtime: providerRuntimeService,
+        // A busy `chat.send` fallback and a resumed Codex queue both ask the
+        // scheduled-messages dispatcher to try the new head immediately.
+        notifyQueueChanged: requestQueuedMessageDispatch,
     },
     shell: {
         resolveProviderSessionId: (sessionId, provider) => {
@@ -393,7 +397,12 @@ async function startServer() {
             await initializeSessionsWatcher();
             // Sends anything that came due while the server was not running,
             // then keeps polling.
-            initializeScheduledMessageDispatcher(providerRuntimeService);
+            initializeScheduledMessageDispatcher(providerRuntimeService, {
+                // Turn completion is injected from the websocket module's
+                // barrel so a finished run starts the next queued prompt at
+                // once instead of waiting for the 15s supplemental check.
+                subscribeTurnCompleted: onChatRunCompleted,
+            });
 
             // Start server-side plugin processes for enabled plugins
             workerModule.initialize();

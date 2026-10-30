@@ -53,7 +53,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_context",
     {
-      description: "当前父会话的 owner、并发设置和活动任务摘要",
+      description: "获取当前父会话的 owner、并发设置、活动任务与待确认通知摘要；派发后通常交还回合，由终态通知唤醒后再验收",
       inputSchema: {},
     },
     async () => {
@@ -68,7 +68,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_list",
     {
-      description: "列出当前 owner 的 worker，可按状态过滤",
+      description: "列出当前 owner 的 worker 与待确认通知，可按状态过滤；这不是等待或保活机制，不要用它反复轮询",
       inputSchema: {
         status: z
           .enum([
@@ -109,7 +109,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "启动一个 DSH 或 Pi 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区",
+      description: "异步启动一个 DSH 或 Pi 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
       inputSchema: startShape,
     },
     async (input) => {
@@ -124,7 +124,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_resume",
     {
-      description: "续接已有 worker 的原生会话；cwd、home 和原生身份保持不变",
+      description: "异步续接已有 worker 的原生会话，cwd、home 和原生身份保持不变；接受后立即返回，终态自动通知，正常下一步是交还父回合而非轮询",
       inputSchema: {
         workerId: z.string(),
         prompt: z.string(),
@@ -147,7 +147,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_get",
     {
-      description: "读取一个 worker 及其全部运行记录",
+      description: "读取一个 worker 及其全部运行记录与待确认通知；收到终态后应检查实际 diff 与测试证据，不要反复轮询",
       inputSchema: { workerId: z.string() },
     },
     async ({ workerId }) => {
@@ -192,7 +192,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_wait",
     {
-      description: "等待 worker 进入终态，最多 25 秒",
+      description: "等待 worker 进入终态，最多 25 秒；仅供用户明确要求等待或必要的短检查，不要循环调用以维持父回合 Processing",
       inputSchema: {
         workerId: z.string(),
         timeoutSeconds: z.number().int().positive().max(25).optional(),

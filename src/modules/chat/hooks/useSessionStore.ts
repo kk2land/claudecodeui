@@ -888,6 +888,22 @@ export function useSessionStore() {
     notify(sessionId);
   }, [getSlot, notify]);
 
+  /** Removes this client's optimistic echo once a queue receipt owns the turn. */
+  const removeOptimisticUserEcho = useCallback((sessionId: string, messageId: string) => {
+    const slot = storeRef.current.get(sessionId);
+    if (!slot) return;
+    const next = slot.realtimeMessages.filter((message) => !(
+      message.id === messageId
+      && message.kind === 'text'
+      && message.role === 'user'
+      && message.isOptimistic
+    ));
+    if (next.length === slot.realtimeMessages.length) return;
+    slot.realtimeMessages = next;
+    recomputeMergedIfNeeded(slot);
+    notify(sessionId);
+  }, [notify]);
+
   /**
    * Refreshes only the persisted tail and stitches it onto the contiguous
    * cached suffix. Large turns request a small offset bridge rather than the
@@ -995,6 +1011,7 @@ export function useSessionStore() {
     fetchFromServer,
     fetchMore,
     appendRealtime,
+    removeOptimisticUserEcho,
     truncateAt,
     refreshLatestFromServer,
     setActiveSession,
@@ -1004,7 +1021,7 @@ export function useSessionStore() {
     getMessages,
     getSessionSlot,
   }), [
-    fetchFromServer, fetchMore, appendRealtime, truncateAt, refreshLatestFromServer,
+    fetchFromServer, fetchMore, appendRealtime, removeOptimisticUserEcho, truncateAt, refreshLatestFromServer,
     setActiveSession, isStale, updateStreaming, finalizeStreaming,
     getMessages, getSessionSlot,
   ]);

@@ -31,8 +31,12 @@ Worker MCP。若 skill 或 MCP 不可用，父会话应报告阻塞，而不是�
   `writePaths` 中声明互不重叠的修改范围。
 
 `writePaths` 是相对 cwd 的已声明范围，`[]` 表示只读任务；它约束任务与 review 范围，不是额外的文件系统
-权限。随后可用 `worker_list`、`worker_get`、`worker_logs`、`worker_wait` 跟踪；`worker_cancel` 取消；
-`worker_resume` 用原 worker 继续，保留 cwd、home 与原生会话身份，但创建新的 runId，可显式覆盖模型/effort。
+权限。`worker_start`/`worker_resume` 是异步派发：接受请求（包括进入排队）后立即返回，Worker 在后台继续，
+父会话可以接收新的用户提示词。父会话只剩等待 Worker 时，应报告「已派发/后台进行」并结束当前派发回合、
+交还输入权，不要用重复 `worker_list`/`worker_get`/`worker_wait` 让回合保持 Processing，也不要把已派发
+说成验收完成；终态由 outbox 自动通知，届时再检查实际 diff 与测试。`worker_wait` 仍保留给用户明确要求
+等待或必要的短检查；`worker_cancel` 取消，`worker_resume` 用原 worker 继续并保留 cwd、home 与原生会话
+身份，但创建新的 runId，可显式覆盖模型/effort。
 
 父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。页面只读状态并执行取消、暂停、恢复、清理和
@@ -129,12 +133,15 @@ Pi：
 
 ## 自动唤醒、Stop 与恢复
 
-终态通知保存于插件独立 outbox，不占用用户的三条消息队列。parent 空闲时合并约 500ms 窗口，忙时约每 2 秒
-检查；用户排队消息优先。active goal、原生后台任务、queueHeld、stopping、stopFailed 等情况均等候；
-其他 worker 仍在运行时可以处理已完成结果。普通 busy 只是延后领取，通知保持 `pending`。显式暂停、Stop
-或丢失 authority 时，待发通知转为 `held`，必须等用户明确继续或手工重试，不会被自动唤醒改回 `pending`。
-MCP 的 `ack` 只表示已收到，不是验收；已通过 MCP 确认的结果会取消待发通知，领取批次与回执避免重复投递。
-通知投递失败可在 UI 手工重试。
+主会话同一时间只处理一个回合：已开始的回合会先完成，随后用户排队消息按 FIFO 优先，最后才由 Worker outbox
+结果唤醒。用户输入入队或回合完成时立即触发调度，另有约 15 秒的用户队列补充检查。Worker outbox 在父会话
+空闲时约 500ms 合并一次通知，忙碌时约每 2 秒重试；这些重试不会抢占或中断用户回合。独立的新用户任务不会
+自动 steer 或取消已派发的 Worker。active goal、原生后台任务、queueHeld、stopping、stopFailed 等情况均等候；
+其他 worker 仍在运行时可以处理已完成结果。普通 busy 只是延后领取，通知保持 `pending`。用户队列上限仍为 3
+条，与 Worker outbox 相互独立，outbox 不占用户队列额度；`chat.send` 与忙碌状态竞态时，消息进入现有持久
+队列并返回 `chat_queued`。显式暂停、Stop 或丢失 authority 时，待发通知转为 `held`，必须等用户明确继续
+或手工重试，不会被自动唤醒改回 `pending`。MCP 的 `ack` 只表示已收到，不是验收；已通过 MCP 确认的结果会
+取消待发通知，领取批次与回执避免重复投递。通知投递失败可在 UI 手工重试。
 
 主会话 Stop 会先封住新任务与自动唤醒，再取消该父会话的排队与运行任务；app-server 退出清理该实例全部
 worker，CloudCLI 退出清理全部。关闭浏览器或切换页面不取消任务。主停止或退出触发的取消不会自动唤醒父会话。
@@ -169,4 +176,4 @@ CLI 与进程组已停止，再通过 UI 或 `worker_recover` 提交说明与 `c
 
 自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理，不需要调用真实模型。
 真实 Codex app-server 与 DSH/Pi 的联通仍需在支持这些执行器的部署环境验收。浏览器验收先完成构建，
-再按仓库流程由用户启动或重启测试进程。
+再按 AGENTS.md 的本地手工测试流程由 Codex 直接启动或重启测试进程并检查日志，不要要求用户代为启动。

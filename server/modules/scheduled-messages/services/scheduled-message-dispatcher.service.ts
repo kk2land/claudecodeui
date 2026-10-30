@@ -7,16 +7,50 @@ import { readQueuedChatMessage } from '@/shared/utils.js';
 import type { QueuedChatMessage } from '@/shared/index.js';
 
 /**
- * How often due messages are looked for.
+ * How often due scheduled messages are looked for.
  *
  * A minute is the granularity the composer offers, and a claim is indexed on
  * `(status, scheduled_for)`, so the poll is one cheap query. Anything finer
  * would buy precision nobody asked for.
  */
-const POLL_INTERVAL_MS = 30_000;
+const SCHEDULED_POLL_INTERVAL_MS = 30_000;
+
+/**
+ * Supplemental check for persisted user queues.
+ *
+ * Enqueue and turn completion trigger a pass immediately. This interval is only
+ * the safety net for an event that could not be observed (for example an append
+ * before the process finished starting), and is deliberately shorter than the
+ * scheduled-message minute granularity because queued prompts are expected to
+ * follow the current turn closely.
+ */
+const QUEUE_RECHECK_INTERVAL_MS = 15_000;
 
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let dispatchInFlight = false;
+let queueTimer: ReturnType<typeof setInterval> | null = null;
+let scheduledDispatchInFlight = false;
+let activeRuntime: ProviderRuntimeGateway | null = null;
+let unsubscribeTurnCompleted: (() => void) | null = null;
+/**
+ * Sessions with a queued dispatch in flight.
+ *
+ * A provider run can last for minutes. Tracking this per session means one
+ * long turn cannot hold the global lock and starve every other session.
+ */
+const dispatchingSessions = new Set<string>();
+/**
+ * Sessions whose next queue head should be tried as soon as the current run
+ * settles. Set by a completion notification or an enqueue that raced the run.
+ */
+const deferredSessionDispatches = new Set<string>();
+/**
+ * Sessions where a due scheduled message owns the next turn.
+ *
+ * Set before the scheduled turn aborts/waits out the current run, so a
+ * completion notification cannot reserve the ordinary queue in the gap. It is
+ * released when that scheduled turn settles, then the queue is tried at once.
+ */
+const scheduledPrioritySessions = new Set<string>();
 
 function readOptions(raw: string): Record<string, unknown> {
   try {
@@ -29,16 +63,17 @@ function readOptions(raw: string): Record<string, unknown> {
   }
 }
 
+/** Returns whether the claimed turn was admitted; false means its head was restored or consumed. */
 async function sendClaimedQueuedMessage(
   candidate: QueuedSessionMessageRecord,
   runtime: ProviderRuntimeGateway,
-): Promise<void> {
+): Promise<boolean> {
   const message = readQueuedChatMessage(candidate.queuedMessage);
   if (!message) {
     // An unusable legacy entry is consumed without reserving a slot forever.
     sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
     sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
-    return;
+    return false;
   }
 
   // The claim removed only the head and reserved its slot; the tail stays
@@ -50,12 +85,14 @@ async function sendClaimedQueuedMessage(
     if (started) {
       sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
     }
+    return started;
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
     console.error('[ScheduledMessages] Queued message dispatch failed', {
       sessionId: candidate.sessionId,
       error: reason,
     });
+    return false;
   }
 }
 
@@ -120,16 +157,33 @@ async function sendClaimedQueuedMessageHead(
  * turn was promised to go "when this finishes", so it waits for that work too.
  */
 function isSessionBusy(sessionId: string, runtime: ProviderRuntimeGateway): boolean {
-  return chatRunRegistry.isProcessing(sessionId) || runtime.hasBackgroundWork(sessionId)
+  return scheduledPrioritySessions.has(sessionId)
+    || chatRunRegistry.isProcessing(sessionId) || runtime.hasBackgroundWork(sessionId)
     || Boolean(runtime.isQueueBlocked?.(sessionId));
 }
 
-/** Sends idle sessions' persisted turns; used by the timer and providers' queue integration tests. */
-export async function dispatchQueuedMessages(runtime: ProviderRuntimeGateway): Promise<number> {
-  const candidates = sessionDraftsDb.listQueuedMessages();
+/**
+ * Sends idle sessions' persisted turns; used by the timer and providers' queue
+ * integration tests.
+ *
+ * `sessionId` narrows one pass to a single session, which is what enqueue and
+ * turn-completion notifications use. Different sessions progress independently;
+ * a long provider run only occupies its own session's slot.
+ */
+export async function dispatchQueuedMessages(
+  runtime: ProviderRuntimeGateway,
+  options: { sessionId?: string } = {},
+): Promise<number> {
+  const candidates = sessionDraftsDb.listQueuedMessages().filter(
+    (candidate) => !options.sessionId || candidate.sessionId === options.sessionId,
+  );
   let claimed = 0;
 
   await Promise.all(candidates.map(async (candidate) => {
+    // A previous pass still owns this session's slot until its run settles.
+    if (dispatchingSessions.has(candidate.sessionId)) {
+      return;
+    }
     if (isSessionBusy(candidate.sessionId, runtime)) {
       return;
     }
@@ -137,10 +191,54 @@ export async function dispatchQueuedMessages(runtime: ProviderRuntimeGateway): P
       return;
     }
     claimed += 1;
-    await sendClaimedQueuedMessage(candidate, runtime);
+    dispatchingSessions.add(candidate.sessionId);
+    let admitted = false;
+    try {
+      admitted = await sendClaimedQueuedMessage(candidate, runtime);
+    } finally {
+      dispatchingSessions.delete(candidate.sessionId);
+      // Completion (or an enqueue) during the run asked for another pass; do
+      // it on the next tick so this call still reports the turn it claimed.
+      // An unadmitted attempt restored its head and must not immediately retry
+      // itself in a tight loop; the supplemental poll owns that retry.
+      if (deferredSessionDispatches.delete(candidate.sessionId) && admitted) {
+        scheduleSessionDispatch(candidate.sessionId);
+      }
+    }
   }));
 
   return claimed;
+}
+
+/**
+ * Asks the dispatcher to try this session now, or as soon as its run settles.
+ *
+ * Exported for the User module's enqueue path, the Codex busy `chat.send`
+ * fallback, Codex queue-resume controls, and the composition root's turn
+ * completion notification. It never throws and never blocks the request that
+ * changed the queue.
+ */
+export function requestQueuedMessageDispatch(sessionId?: string): void {
+  const runtime = activeRuntime;
+  if (!runtime) {
+    return;
+  }
+  if (sessionId && (dispatchingSessions.has(sessionId) || scheduledPrioritySessions.has(sessionId))) {
+    deferredSessionDispatches.add(sessionId);
+    return;
+  }
+  void dispatchQueuedMessages(runtime, sessionId ? { sessionId } : undefined).catch((error: unknown) => {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[ScheduledMessages] Immediate queued-message dispatch failed', { sessionId, error: message });
+  });
+}
+
+/** Runs one session's next pass after the current dispatch promise settles. */
+function scheduleSessionDispatch(sessionId: string): void {
+  const timer = setTimeout(() => {
+    requestQueuedMessageDispatch(sessionId);
+  }, 0);
+  timer.unref?.();
 }
 
 /** Records why a claimed message did not go, and shows it on its session's banner. */
@@ -153,6 +251,11 @@ async function sendClaimedMessage(
   row: ScheduledMessageRow,
   runtime: ProviderRuntimeGateway,
 ): Promise<void> {
+  // The scheduled turn may abort the current run and emit its complete event
+  // before its own dispatch is reserved. Holding this session's priority
+  // across that whole turn stops the completion listener from inserting the
+  // ordinary queue in the gap.
+  scheduledPrioritySessions.add(row.session_id);
   try {
     const result = await runDetachedChatTurn(
       {
@@ -178,6 +281,12 @@ async function sendClaimedMessage(
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     recordFailure(row, message);
+  } finally {
+    scheduledPrioritySessions.delete(row.session_id);
+    deferredSessionDispatches.delete(row.session_id);
+    // The scheduled turn has settled: the waiting user queue follows on the
+    // next tick, preserving FIFO instead of waiting for the 15s fallback.
+    scheduleSessionDispatch(row.session_id);
   }
 }
 
@@ -219,35 +328,61 @@ export async function dispatchDueScheduledMessages(
  * restart and one that came due while the server was down is sent on the first
  * poll after it comes back, rather than being skipped.
  */
-export function initializeScheduledMessageDispatcher(runtime: ProviderRuntimeGateway): void {
+export function initializeScheduledMessageDispatcher(
+  runtime: ProviderRuntimeGateway,
+  options: {
+    /**
+     * Composition-root bridge to the websocket module's completion notice.
+     * Injected instead of deep-importing the registry here, which keeps the
+     * scheduled-messages module's dependencies explicit and acyclic.
+     */
+    subscribeTurnCompleted?: (listener: (sessionId: string) => void) => () => void;
+  } = {},
+): void {
   if (pollTimer) {
     return;
   }
+  activeRuntime = runtime;
 
-  const poll = () => {
-    // A pass that overruns the interval must not be started again underneath
-    // itself; the claim is transactional but the runs are not.
-    if (dispatchInFlight) {
+  const pollScheduled = () => {
+    // A due-message pass that overruns the interval must not be started again
+    // underneath itself; the claim is transactional but the runs are not.
+    if (scheduledDispatchInFlight) {
       return;
     }
-    dispatchInFlight = true;
+    scheduledDispatchInFlight = true;
     void dispatchDueScheduledMessages(runtime)
-      .then(() => dispatchQueuedMessages(runtime))
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
-        console.error('[ScheduledMessages] Dispatch pass failed', { error: message });
+        console.error('[ScheduledMessages] Scheduled dispatch pass failed', { error: message });
       })
       .finally(() => {
-        dispatchInFlight = false;
+        scheduledDispatchInFlight = false;
       });
   };
 
-  pollTimer = setInterval(poll, POLL_INTERVAL_MS);
-  // Never keep the process alive just to poll for scheduled messages.
-  pollTimer.unref?.();
+  const pollQueue = () => {
+    void dispatchQueuedMessages(runtime).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.error('[ScheduledMessages] Queued-message dispatch pass failed', { error: message });
+    });
+  };
 
-  // Catch up on anything that came due while the server was not running.
-  poll();
+  pollTimer = setInterval(pollScheduled, SCHEDULED_POLL_INTERVAL_MS);
+  queueTimer = setInterval(pollQueue, QUEUE_RECHECK_INTERVAL_MS);
+  // Never keep the process alive just to poll for messages.
+  pollTimer.unref?.();
+  queueTimer.unref?.();
+
+  // A turn that ends starts the next user prompt immediately; the interval is
+  // only the fallback. The root injects the websocket module's subscriber.
+  unsubscribeTurnCompleted = options.subscribeTurnCompleted?.((sessionId) => {
+    requestQueuedMessageDispatch(sessionId);
+  }) ?? null;
+
+  // Catch up on anything that came due or was queued while the server was down.
+  pollScheduled();
+  pollQueue();
 }
 
 export function closeScheduledMessageDispatcher(): void {
@@ -255,4 +390,12 @@ export function closeScheduledMessageDispatcher(): void {
     clearInterval(pollTimer);
     pollTimer = null;
   }
+  if (queueTimer) {
+    clearInterval(queueTimer);
+    queueTimer = null;
+  }
+  unsubscribeTurnCompleted?.();
+  unsubscribeTurnCompleted = null;
+  activeRuntime = null;
+  deferredSessionDispatches.clear();
 }

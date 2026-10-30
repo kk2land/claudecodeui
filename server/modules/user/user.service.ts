@@ -30,7 +30,12 @@ type UserDependencies = {
   };
   drafts: {
     getDrafts(userId: number): DraftRecord[];
-    saveDraft(userId: number, scope: string, draft: { text: string; queuedMessages: unknown[] }): void;
+    saveDraft(userId: number, scope: string, draft: {
+      text: string;
+      queuedMessages: unknown[];
+      /** Tickets the browser saw; omitted keeps the legacy whole-queue replacement. */
+      knownQueuedMessageIds?: string[];
+    }): void;
     saveDraftText(userId: number, scope: string, text: string): void;
     appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage): { queuedMessage: QueuedChatMessage; appended: boolean } | null;
     clearQueuedMessage(userId: number, scope: string): void;
@@ -38,6 +43,12 @@ type UserDependencies = {
   };
   readSystemGitConfig(): Promise<GitConfig>;
   applyGlobalGitConfig(gitName: string, gitEmail: string): Promise<void>;
+  /**
+   * Asks the scheduled-messages dispatcher to try this scope immediately after
+   * an enqueue. Injected by the module assembly so the User module never
+   * deep-imports the dispatcher implementation.
+   */
+  onQueueChanged?(scope: string): void;
   logInfo(message: string): void;
   logError(message: string, error: unknown): void;
 };
@@ -103,6 +114,26 @@ const readQueuedMessages = (payload: { queuedMessage?: unknown; queuedMessages?:
     });
   }
   return [payload.queuedMessage];
+};
+
+/**
+ * Reads the optional set of queue tickets the browser saw in this snapshot.
+ *
+ * Omission keeps the legacy whole-queue replacement. When present every id must
+ * be a non-empty string; duplicates are collapsed so the repository receives a
+ * stable set without doing transport validation.
+ */
+const readKnownQueuedMessageIds = (value: unknown): string[] | undefined => {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new AppError('knownQueuedMessageIds must be an array of message ids', {
+      code: 'INVALID_KNOWN_QUEUED_MESSAGE_IDS',
+      statusCode: 400,
+    });
+  }
+  return [...new Set((value as string[]).map((id) => id.trim()))];
 };
 
 const readDraftScope = (value: unknown): string => {
@@ -245,7 +276,12 @@ export function createUserService(dependencies: UserDependencies) {
 
     saveDraft(userId: number, scopeInput: unknown, body: unknown) {
       const scope = readDraftScope(scopeInput);
-      const payload = (body ?? {}) as { text?: unknown; queuedMessage?: unknown; queuedMessages?: unknown };
+      const payload = (body ?? {}) as {
+        text?: unknown;
+        queuedMessage?: unknown;
+        queuedMessages?: unknown;
+        knownQueuedMessageIds?: unknown;
+      };
       const text = typeof payload.text === 'string' ? payload.text : '';
 
       if (text.length > MAX_DRAFT_TEXT_LENGTH) {
@@ -263,10 +299,16 @@ export function createUserService(dependencies: UserDependencies) {
         return { success: true };
       }
 
+      const queuedMessages = readQueuedMessages(payload);
+      const knownQueuedMessageIds = readKnownQueuedMessageIds(payload.knownQueuedMessageIds);
       dependencies.drafts.saveDraft(userId, scope, {
         text,
-        queuedMessages: readQueuedMessages(payload),
+        queuedMessages,
+        ...(knownQueuedMessageIds ? { knownQueuedMessageIds } : {}),
       });
+      // A saved queue may be the first thing waiting on an otherwise idle
+      // session (for example a stale busy badge); try it right away.
+      if (queuedMessages.length) dependencies.onQueueChanged?.(scope);
       return { success: true };
     },
 
@@ -287,6 +329,7 @@ export function createUserService(dependencies: UserDependencies) {
           { code: 'QUEUED_MESSAGE_NOT_COMBINABLE', statusCode: 409 },
         );
       }
+      dependencies.onQueueChanged?.(scope);
       return { success: true, queuedMessage: result.queuedMessage, appended: result.appended };
     },
 

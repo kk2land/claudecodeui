@@ -182,6 +182,7 @@ test('saveDraft adopts a legacy single queued message and rejects a non-array qu
 
 test('appendQueuedMessage hands the repository the message and returns what is now queued', () => {
   const appended: unknown[][] = [];
+  const changed: string[] = [];
   const service = createUserService(createDependencies({
     drafts: {
       ...noDrafts,
@@ -190,6 +191,7 @@ test('appendQueuedMessage hands the repository the message and returns what is n
         return { queuedMessage: { content: 'A\n\nB', attachments: [] }, appended: true };
       },
     },
+    onQueueChanged: (scope) => changed.push(scope),
   }));
 
   const result = service.appendQueuedMessage(5, 'session-1', {
@@ -209,6 +211,7 @@ test('appendQueuedMessage hands the repository the message and returns what is n
     queuedMessage: { content: 'A\n\nB', attachments: [] },
     appended: true,
   });
+  assert.deepEqual(changed, ['session-1'], 'an enqueue asks the dispatcher to try this scope immediately');
 });
 
 test('appendQueuedMessage refuses a message with nothing to send, or a bad scope', () => {
@@ -260,4 +263,31 @@ test('saveDraft rejects text past the storage limit', () => {
     () => service.saveDraft(5, 'session-1', { text: 'x'.repeat(100_001) }),
     /too long/i,
   );
+});
+
+test('saveDraft validates and forwards the optional known ticket set', () => {
+  const saved: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    drafts: { ...noDrafts, saveDraft: (...args) => saved.push(args) },
+  }));
+
+  service.saveDraft(5, 'session-1', {
+    queuedMessages: [{ id: 'A', content: 'A' }],
+    knownQueuedMessageIds: ['A', 'A', ' B '],
+  });
+  assert.deepEqual(saved, [[5, 'session-1', {
+    text: '',
+    queuedMessages: [{ id: 'A', content: 'A' }],
+    knownQueuedMessageIds: ['A', 'B'],
+  }]]);
+
+  for (const invalid of ['A', [1], ['']]) {
+    assert.throws(
+      () => service.saveDraft(5, 'session-1', {
+        queuedMessages: [],
+        knownQueuedMessageIds: invalid,
+      }),
+      (error: Error & { code?: string }) => error.code === 'INVALID_KNOWN_QUEUED_MESSAGE_IDS',
+    );
+  }
 });

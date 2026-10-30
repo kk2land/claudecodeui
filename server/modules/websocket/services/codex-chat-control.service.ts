@@ -21,6 +21,12 @@ type ControlDependencies = {
   runtime: ProviderRuntimeGateway;
   connection: RealtimeClientConnection;
   filterAttachments(value: unknown): unknown[];
+  /**
+   * Composition-injected queue-change notice. Resuming a held queue or
+   * recovering an uncertain delivery makes a waiting user turn sendable
+   * immediately instead of waiting for the supplemental poll.
+   */
+  notifyQueueChanged?(sessionId: string): void;
 };
 
 type ControlResult = {
@@ -67,7 +73,7 @@ function parseControl(raw: AnyRecord): CodexControlAction {
 /** The WebSocket chat entry point delegates Codex controls and durable steer receipts here. */
 export async function executeCodexChatControl(input: ControlInput, dependencies: ControlDependencies): Promise<ControlResult> {
   const { sessionId, userId } = input;
-  const { runtime, connection, filterAttachments } = dependencies;
+  const { runtime, connection, filterAttachments, notifyQueueChanged } = dependencies;
   const requestId = typeof input.requestId === 'string' ? input.requestId : '';
   const numericUserId = Number(userId);
   const response = { kind: 'control_result' as const, sessionId, requestId };
@@ -91,6 +97,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
         sessionDraftsDb.resumeQueue(numericUserId, sessionId);
       }
       sessionRuntimeDb.update(sessionId, { queueHeld: false });
+      notifyQueueChanged?.(sessionId);
     } else {
       let action: CodexControlAction;
       if (raw.action === 'steer') {

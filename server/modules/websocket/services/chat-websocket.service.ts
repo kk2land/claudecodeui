@@ -1,8 +1,9 @@
+import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
 import type { WebSocket } from 'ws';
 
-import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
+import { sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { providerModelsService, sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { executeCodexChatControl } from '@/modules/websocket/services/codex-chat-control.service.js';
@@ -19,6 +20,7 @@ import type {
   LLMProvider,
   ProviderRuntimeGateway,
   ProviderRuntimeWriter,
+  QueuedChatMessage,
   WorkerWakeSource,
 } from '@/shared/index.js';
 import { AppError, parseIncomingJsonObject } from '@/shared/index.js';
@@ -68,6 +70,13 @@ export function filterImagesToUploadStore(
 type ChatWebSocketDependencies = {
   /** Central dispatcher for every provider SDK/CLI runtime. */
   runtime: ProviderRuntimeGateway;
+  /**
+   * Composition-injected notice that a fallback `chat.send` added a user turn
+   * to the durable queue. The scheduled-messages dispatcher is tried right
+   * away; the session stays busy here, so this only covers a run that ended in
+   * the tiny verify/queue window.
+   */
+  notifyQueueChanged?: (sessionId: string) => void;
 };
 
 /**
@@ -128,6 +137,134 @@ function readRequiredSessionId(data: AnyRecord): string | null {
   return sessionId.length > 0 ? sessionId : null;
 }
 
+/** True while the server already owns a turn for this session. */
+function isChatTurnBusy(
+  sessionId: string,
+  provider: LLMProvider,
+  runtime: ProviderRuntimeGateway,
+): boolean {
+  if (chatRunRegistry.isProcessing(sessionId)) {
+    return true;
+  }
+  const state = runtime.getState?.(provider, sessionId);
+  return state?.goal?.status === 'active'
+    || ['starting', 'running', 'stopping', 'stopFailed'].includes(state?.phase ?? '');
+}
+
+/**
+ * Persists a `chat.send` that lost the race with an already-running turn.
+ *
+ * This is deliberately limited to Codex app-server sessions whose last thread
+ * setup accepted the Worker MCP config: only those sessions promise the user an
+ * automatic, Worker-aware queue. Everything else keeps the existing
+ * `RUN_IN_PROGRESS` behaviour for non-Codex providers and SDK sessions.
+ *
+ * The same attachment trust boundary as a normal send applies, and the turn is
+ * appended behind every existing user message so a late send cannot jump the
+ * FIFO. A ticket already claimed or accepted by the dispatcher/steer receipts
+ * is never enqueued or run again. Returns false when the caller must continue
+ * with normal dispatch.
+ */
+function queueBusyChatSend(
+  ws: WebSocket,
+  userId: string | number | null,
+  resolved: ResolvedSendTarget,
+  data: AnyRecord,
+  dependencies: ChatWebSocketDependencies,
+): boolean {
+  const { sessionId, provider } = resolved;
+  const numericUserId = Number(userId);
+  if (provider !== 'codex' || !Number.isSafeInteger(numericUserId)) {
+    return false;
+  }
+  const state = dependencies.runtime.getState?.('codex', sessionId);
+  if (state?.runtime !== 'app-server' || state.workerEnabled !== true) {
+    return false;
+  }
+  const codexSettings = sessionRuntimeDb.get(sessionId);
+  if (codexSettings.runtime !== 'app-server' || codexSettings.modelSelection?.model === null) {
+    return false;
+  }
+
+  const clientOptions: AnyRecord = { ...(data.options ?? {}) };
+  // Server-owned wake-up markers are never accepted from chat JSON.
+  delete clientOptions.workerWakeup;
+  delete clientOptions.workerSource;
+  delete clientOptions.workerFinalGuard;
+  delete clientOptions.userTurn;
+  const clientMessageId = typeof clientOptions.clientMessageId === 'string' && clientOptions.clientMessageId.trim()
+    ? clientOptions.clientMessageId.trim()
+    : randomUUID();
+
+  // An idle session still has to protect a waiting user FIFO, and an accepted
+  // ticket must be reported without running again. Otherwise a normal send
+  // proceeds through dispatchRun.
+  const busy = isChatTurnBusy(sessionId, provider, dependencies.runtime);
+  const hasQueued = sessionDraftsDb.hasQueuedMessages(sessionId);
+  const alreadySent = sessionDraftsDb.hasSentChatMessage(numericUserId, sessionId, clientMessageId);
+  if (!busy && !hasQueued && !alreadySent) {
+    return false;
+  }
+
+  const errorExtra = () => ({
+    clientMessageId,
+    codexState: dependencies.runtime.getState?.('codex', sessionId),
+  });
+
+  const attachmentCandidates = [
+    ...normalizeAttachmentDescriptors(clientOptions.images),
+    ...normalizeAttachmentDescriptors(clientOptions.files),
+    ...normalizeAttachmentDescriptors(clientOptions.attachments),
+  ];
+  const uniqueAttachments = filterAttachmentsToUploadStore(attachmentCandidates).filter(
+    (descriptor, index, all) => all.findIndex((candidate) => candidate.path === descriptor.path) === index,
+  );
+  const content = typeof data.content === 'string' ? data.content : '';
+  if (!content.trim() && uniqueAttachments.length === 0) {
+    sendProtocolError(
+      ws,
+      'CONTENT_REQUIRED',
+      'A queued message needs text or at least one valid attachment.',
+      sessionId,
+      errorExtra(),
+    );
+    return true;
+  }
+
+  const message: QueuedChatMessage = {
+    content,
+    options: { ...clientOptions, clientMessageId },
+    attachments: uniqueAttachments,
+  };
+  try {
+    const queued = sessionDraftsDb.enqueueChatMessage(numericUserId, sessionId, message, clientMessageId);
+    if (queued.alreadySent) {
+      sendProtocolError(
+        ws,
+        'MESSAGE_ALREADY_SENT',
+        'That message has already been sent for this session.',
+        sessionId,
+        errorExtra(),
+      );
+      return true;
+    }
+    // The frame carries the exact saved record; messageId is its ticket.
+    sendJson(ws, {
+      kind: 'chat_queued',
+      sessionId,
+      clientMessageId,
+      messageId: queued.queuedMessage.id,
+      queuedMessage: queued.queuedMessage,
+    });
+    if (queued.appended) dependencies.notifyQueueChanged?.(sessionId);
+  } catch (error) {
+    const code = error instanceof AppError ? error.code : 'QUEUE_REJECTED';
+    const text = error instanceof Error ? error.message : String(error);
+    sendProtocolError(ws, code, text, sessionId, errorExtra());
+  }
+  return true;
+}
+
 /**
  * Handles `chat.send`: resolves the session row (provider, project path, and
  * provider-native id all come from the database — never from the client),
@@ -141,6 +278,13 @@ async function handleChatSend(
 ): Promise<void> {
   const resolved = resolveSendTarget(ws, data, dependencies, 'chat.send');
   if (!resolved) {
+    return;
+  }
+
+  // A browser that thought the session was idle can still race an existing
+  // turn. Worker-enabled Codex sessions keep that turn durable instead of
+  // answering RUN_IN_PROGRESS; every other provider keeps the old behaviour.
+  if (queueBusyChatSend(ws, userId, resolved, data, dependencies)) {
     return;
   }
 
@@ -214,6 +358,17 @@ async function dispatchRun(
     return { started: false, error };
   }
 
+  const workerWakeup = extraRuntimeOptions.workerWakeup === true;
+  const workerFinalGuard = typeof extraRuntimeOptions.workerFinalGuard === 'function'
+    ? extraRuntimeOptions.workerFinalGuard as () => boolean
+    : undefined;
+  // A Worker wake-up never reserves a turn its trusted gate already refuses.
+  // The host distinguishes Stop (held) from a user message (pending retry)
+  // from the returned result; no run is registered here.
+  if (workerWakeup && workerFinalGuard && !workerFinalGuard()) {
+    return { started: false, error: 'The session stopped or is waiting on a user message.' };
+  }
+
   const state = dependencies.runtime.getState?.(provider, sessionId);
   if (state?.runtime === 'app-server' && (state.goal?.status === 'active' || ['stopping', 'stopFailed'].includes(state.phase))) {
     if (ws) sendProtocolError(ws, 'RUN_IN_PROGRESS', 'Pause the active goal or confirm the stop before starting another turn.', sessionId);
@@ -282,10 +437,6 @@ async function dispatchRun(
   // Brand-new sessions have no provider id yet, so the runtime starts fresh
   // and announces one, which the gateway writer captures and maps back to the
   // app session id.
-  const workerWakeup = extraRuntimeOptions.workerWakeup === true;
-  const workerFinalGuard = typeof extraRuntimeOptions.workerFinalGuard === 'function'
-    ? extraRuntimeOptions.workerFinalGuard as () => boolean
-    : undefined;
   const runtimeOptions: AnyRecord = {
     ...clientOptions,
     ...extraRuntimeOptions,
@@ -302,6 +453,9 @@ async function dispatchRun(
   // detached/automatic wake-up never counts as an explicit user turn.
   runtimeOptions.userTurn = Boolean(ws);
   delete runtimeOptions.workerFinalGuard;
+  // The Codex app-server consults this immediately before creating its native
+  // turn, covering a user message that arrived after the Worker gate above.
+  if (workerWakeup && workerFinalGuard) runtimeOptions.deferTurn = workerFinalGuard;
 
   let failure: string | null = null;
   let turnStarting = false;
@@ -326,6 +480,7 @@ async function dispatchRun(
       markTurnStarting();
     };
   } else if (waitsForCodexSetup) runtimeOptions.onTurnStarting = markTurnStarting;
+  let deferred = false;
   try {
     // Runs only now that the session is reserved, because an edit rewinds the
     // conversation here and a rewind for a run that was never admitted cannot
@@ -336,18 +491,27 @@ async function dispatchRun(
     if (!waitsForCodexSetup && !workerWakeup) markTurnStarting();
     await dependencies.runtime.run(provider, command, runtimeOptions, run.writer);
   } catch (error) {
-    failure = error instanceof Error ? error.message : String(error);
-    console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
+    if (error instanceof AppError && error.code === 'WORKER_WAKE_DEFERRED') {
+      // Normal delay: the user queue won the final gate before a native turn
+      // existed. It is not a provider failure and must not surface an error.
+      deferred = true;
+      failure = error.message;
+    } else {
+      failure = error instanceof Error ? error.message : String(error);
+      console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
+    }
   } finally {
     // Safety net: a runtime that crashed (or resolved) without emitting its
     // terminal `complete` would otherwise leave the session stuck in
     // "processing" forever on every connected client. Scoped to THIS run —
     // a queued message can start the session's next run before this promise
     // settles, and the session-keyed completeRun would kill that new run.
-    chatRunRegistry.completeRunIfCurrent(run, { exitCode: 1 });
+    // A deferred Worker wake-up never started a native turn; its reservation is
+    // released as an aborted run so no failure is reported.
+    chatRunRegistry.completeRunIfCurrent(run, deferred ? { exitCode: 0, aborted: true } : { exitCode: 1 });
   }
 
-  return { started: failure ? turnStarting : true, error: failure };
+  return { started: deferred ? false : failure ? turnStarting : true, error: failure };
 }
 
 /**
@@ -768,7 +932,12 @@ export function handleChatConnection(
             requestId: data.requestId,
             control: data.control,
             options: data.options,
-          }, { runtime: dependencies.runtime, connection: ws, filterAttachments: filterAttachmentsToUploadStore }));
+          }, {
+            runtime: dependencies.runtime,
+            connection: ws,
+            filterAttachments: filterAttachmentsToUploadStore,
+            notifyQueueChanged: dependencies.notifyQueueChanged,
+          }));
           return;
         case 'chat.edit-send':
           await handleChatEditSend(ws, userId, data, dependencies);
