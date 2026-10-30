@@ -435,6 +435,8 @@ export const api = {
     codexRateLimits: () => get('/api/providers/codex/rate-limits'),
     refreshCodexRateLimits: () => post('/api/providers/codex/rate-limits/refresh'),
     codexModelProviders: () => get('/api/providers/codex/model-providers'),
+    setCodexDefaultModelProvider: (modelProvider: string) =>
+      put('/api/providers/codex/model-providers/default', { modelProvider }),
     codexModelProviderModels: (modelProvider: string) =>
       get(`/api/providers/codex/model-providers/${encodeURIComponent(modelProvider)}/models`),
 

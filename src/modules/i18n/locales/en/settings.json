@@ -431,6 +431,14 @@
         "settings_file": "To use the subscription, remove {{variable}} from the \"env\" block of ~/.claude/settings.json."
       }
     },
+    "modelProvider": {
+      "title": "Default model service",
+      "description": "Used for new Codex conversations.",
+      "loading": "Reading model services...",
+      "loadFailed": "Could not load model services.",
+      "retry": "Retry",
+      "saveFailed": "Could not save the default model service: {{error}}"
+    },
     "login": {
       "title": "Login",
       "reAuthenticate": "Re-authenticate",

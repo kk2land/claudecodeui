@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { api } from '@/shared/api';
+import { CODEX_MODEL_PROVIDERS_CHANGED_EVENT } from '@/shared/constants';
 import type { CodexControls, CodexModelProviderControls, CodexModelProviders, ProviderModelOption } from '@/shared/types';
 
 /** ChatInterface exposes the saved service and its model catalog to Codex settings and the composer. */
@@ -47,10 +48,21 @@ export function useCodexModelProviders({ enabled, controls, model, knownModels }
     }
   }, []);
 
+  // Session changes re-read the directory so a new conversation uses the latest
+  // global default, while saved session selections still win over it below.
   useEffect(() => {
     let active = true;
     queueMicrotask(() => { if (active && enabled) void refresh().catch(() => setDirectory(null)); });
     return () => { active = false; };
+  }, [enabled, controls.sessionId, refresh]);
+
+  // Settings saves announce the new default; re-read it so the next new
+  // conversation follows the value the server confirmed.
+  useEffect(() => {
+    if (!enabled) return;
+    const onChanged = () => { void refresh().catch(() => setDirectory(null)); };
+    window.addEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, onChanged);
+    return () => window.removeEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, onChanged);
   }, [enabled, refresh]);
 
   useEffect(() => {

@@ -108,6 +108,10 @@ function harness(opts: {
       providerEligible: opts.providerEligible ?? (() => true),
       random: opts.random ?? Math.random,
       cliVersion: () => ('cliVersion' in opts ? opts.cliVersion! : '0.163.0'),
+      modelProviders: {
+        list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] }),
+        models: async (modelProvider: string) => ({ modelProvider, models: ['test-model'], expiresAt: Date.now() + 60_000 }),
+      },
     },
   );
 

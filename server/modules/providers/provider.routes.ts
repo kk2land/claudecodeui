@@ -671,6 +671,18 @@ router.get('/codex/model-providers', asyncHandler(async (_req: Request, res: Res
   res.json(createApiSuccessResponse(await codexModelProviderService.list()));
 }));
 
+/** Saves the default inference service for Codex threads created afterwards. */
+router.put('/codex/model-providers/default', asyncHandler(async (req: Request, res: Response) => {
+  if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+    throw new AppError('Request body must be an object.', { code: 'INVALID_REQUEST_BODY', statusCode: 400 });
+  }
+  const modelProvider = readOptionalQueryString((req.body as Record<string, unknown>).modelProvider);
+  if (!modelProvider) {
+    throw new AppError('modelProvider is required.', { code: 'CODEX_MODEL_PROVIDER_REQUIRED', statusCode: 400 });
+  }
+  res.json(createApiSuccessResponse(await codexModelProviderService.setDefault(modelProvider)));
+}));
+
 router.get('/codex/model-providers/:modelProvider/models', asyncHandler(async (req: Request, res: Response) => {
   const modelProvider = readPathParam(req.params.modelProvider, 'modelProvider').trim();
   res.json(createApiSuccessResponse(await codexModelProviderService.models(modelProvider)));

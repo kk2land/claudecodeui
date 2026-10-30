@@ -6,6 +6,7 @@ import ComposerModelMenu from '@/modules/chat/composer/ComposerModelMenu';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { useCodexModelProviders } from '@/modules/chat/hooks/useCodexModelProviders';
 import { api } from '@/shared/api';
+import { CODEX_MODEL_PROVIDERS_CHANGED_EVENT } from '@/shared/constants';
 import type { CodexControls, CodexModelProviderControls } from '@/shared/types';
 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
@@ -164,4 +165,57 @@ test('a persisted empty model never falls back to the global or active thread mo
   await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
   expect(view.result.current.model).toBe('');
   expect(view.result.current.modelProvider).toBe('beta');
+});
+
+test('a settings save announcement re-reads the directory so new conversations use the new default', async () => {
+  const read = vi.spyOn(api.providers, 'codexModelProviders')
+    .mockImplementationOnce(() => response(directory))
+    .mockImplementation(() => response({ ...directory, defaultProvider: 'beta' }));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['shared-model'] }));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models }));
+  await waitFor(() => expect(view.result.current.modelProvider).toBe('alpha'));
+
+  act(() => { window.dispatchEvent(new Event(CODEX_MODEL_PROVIDERS_CHANGED_EVENT)); });
+
+  await waitFor(() => expect(view.result.current.modelProvider).toBe('beta'));
+  expect(read).toHaveBeenCalledTimes(2);
+});
+
+test('switching to another conversation re-reads the directory default', async () => {
+  const read = vi.spyOn(api.providers, 'codexModelProviders')
+    .mockImplementationOnce(() => response(directory))
+    .mockImplementationOnce(() => response({ ...directory, defaultProvider: 'beta' }));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['shared-model'] }));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(
+    ({ sessionId }) => useCodexModelProviders({ enabled: true, controls: { ...controls, sessionId }, model: 'shared-model', knownModels: models }),
+    { initialProps: { sessionId: 'session-one' } },
+  );
+  await waitFor(() => expect(view.result.current.modelProvider).toBe('alpha'));
+
+  view.rerender({ sessionId: 'session-two' });
+
+  await waitFor(() => expect(view.result.current.modelProvider).toBe('beta'));
+  expect(read).toHaveBeenCalledTimes(2);
+});
+
+test('a saved session selection still wins after the session changes and the directory reloads', async () => {
+  const read = vi.spyOn(api.providers, 'codexModelProviders')
+    .mockImplementationOnce(() => response(directory))
+    .mockImplementation(() => response({ ...directory, defaultProvider: 'openai' }));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['beta-only'] }));
+  const controls: CodexControls = { ...nativeControls, state: { ...nativeControls.state!,
+    modelSelection: { modelProvider: 'beta', model: 'beta-only' } } };
+  const view = renderHook(
+    ({ sessionId }) => useCodexModelProviders({ enabled: true, controls: { ...controls, sessionId }, model: 'shared-model', knownModels: models }),
+    { initialProps: { sessionId: 'session-one' } },
+  );
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
+
+  view.rerender({ sessionId: 'session-two' });
+
+  await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
+  expect(view.result.current.modelProvider).toBe('beta');
+  expect(view.result.current.model).toBe('beta-only');
 });

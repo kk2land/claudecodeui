@@ -63,8 +63,9 @@ test('pinned Codex preserves model services across switching, forking, and indep
   }
   // The production fork client shares this same isolated native process.
   t.mock.method(codexAppServerTransport, 'request', (method: string, params: unknown) => transport.request(method, params));
+  const modelProviders = new CodexModelProviderService({ home: root, environment: {} });
   const runtime = new CodexAppServerRuntime(transport, sessionRuntimeDb, 10_000, () => {}, async () => [], 30_000,
-    { modelProviders: new CodexModelProviderService({ home: root, environment: {} }) });
+    { modelProviders });
   const bindings = new Map<string, string>();
   const context: ProviderRuntimeContext = {
     resolveProviderSessionId: (id) => bindings.get(id ?? '') ?? null,
@@ -123,6 +124,21 @@ test('pinned Codex preserves model services across switching, forking, and indep
     assert.equal(bindings.get('one'), originalThread);
     assert.equal(requests[5].url, '/beta/responses');
     assert.equal(JSON.stringify(requests[5].body.input).includes('fork-only-input'), false);
+
+    // Saving the global default affects only threads created afterwards: the
+    // already-loaded alpha session stays on alpha and the process is not restarted.
+    const processId = transport.status.pid;
+    assert.ok(processId);
+    const saved = await modelProviders.setDefault('beta');
+    assert.equal(saved.defaultProvider, 'beta');
+    await runtime.run('existing-session-keeps-alpha', options('two'), writer('two'), context);
+    assert.equal(requests[6].url, '/alpha/responses');
+    sessionsDb.createAppSession('three', 'codex', root);
+    sessionRuntimeDb.update('three', { runtime: 'app-server' });
+    await runtime.run('new-session-uses-saved-default', options('three'), writer('three'), context);
+    assert.equal(requests[7].url, '/beta/responses');
+    assert.equal(transport.status.pid, processId);
+    assert.equal(bindings.get('one'), originalThread);
   } finally {
     finishFirst?.();
     await transport.close(); await runtime.close();

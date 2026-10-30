@@ -9,6 +9,7 @@ import test from 'node:test';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type {
   AnyRecord,
   CodexPredictionConfigResult,
@@ -119,6 +120,7 @@ test('real 0.163.0 app-server forks an ephemeral prediction, parses the JSON sug
   const runtime = new CodexAppServerRuntime(transport, settingsDb, 5_000, () => {}, async () => [], 30_000, {
     configProvider,
     providerEligible: () => true,
+    modelProviders: new CodexModelProviderService({ home: root, environment: {} }),
   });
 
   let threadId: string | null = null;

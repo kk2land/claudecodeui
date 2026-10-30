@@ -194,6 +194,11 @@ test('process stop during a turn abort never lets old cleanup spawn a replacemen
   const runtime = new CodexAppServerRuntime(transport, {
     get: () => settings,
     update: (_id, patch) => settings = { ...settings, ...patch },
+  }, undefined, undefined, undefined, undefined, {
+    modelProviders: {
+      list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] }),
+      models: async (modelProvider) => ({ modelProvider, models: ['test-model'], expiresAt: 0 }),
+    },
   });
   let interrupted!: () => void;
   const interruptSent = new Promise<void>((resolve) => { interrupted = resolve; });

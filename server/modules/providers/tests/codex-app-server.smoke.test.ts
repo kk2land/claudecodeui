@@ -11,6 +11,7 @@ import { Codex } from '@openai/codex-sdk';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import { createCodexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
 import type { AnyRecord, ProviderRuntimeContext, SessionRuntimeSettings } from '@/shared/index.js';
 
@@ -77,7 +78,8 @@ test('pinned app-server steers, stops a real background process, forks and persi
     stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: root },
   }), timeoutMs: 5000 });
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
-  const runtime = new CodexAppServerRuntime(transport, { get: () => settings, update: (_, patch) => settings = { ...settings, ...patch } }, 5000, () => {});
+  const runtime = new CodexAppServerRuntime(transport, { get: () => settings, update: (_, patch) => settings = { ...settings, ...patch } }, 5000, () => {},
+    undefined, undefined, { modelProviders: new CodexModelProviderService({ home: root, environment: {} }) });
   let threadId: string | null = null;
   const writer = { send: (event: unknown) => events.push(event as AnyRecord), setSessionId: (id: string) => { threadId = id; }, nextTurn: () => writer };
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => threadId, resolveResumeModel: async () => 'gpt-5.4',
@@ -172,7 +174,8 @@ test('pinned native runtime reloads SDK additions after a confirmed runtime hand
     update: (_: string, patch: Partial<SessionRuntimeSettings>) => settings = { ...settings, ...patch },
     holdCodexAppServerQueues: () => { if (settings.runtime === 'app-server') settings = { ...settings, queueHeld: true }; },
   };
-  const runtime = new CodexAppServerRuntime(transport, settingsDb, 5000, () => {});
+  const runtime = new CodexAppServerRuntime(transport, settingsDb, 5000, () => {}, undefined, undefined,
+    { modelProviders: new CodexModelProviderService({ home: root, environment: {} }) });
   let threadId: string | null = null;
   const writer = { send: () => {}, setSessionId: (id: string) => { threadId = id; } };
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => threadId, resolveResumeModel: async () => 'gpt-5.4',

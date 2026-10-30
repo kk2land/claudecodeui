@@ -34,7 +34,18 @@ vi.mock('@/shared/context/WebSocketContext', () => ({
 
 vi.mock('@/shared/api', async (importOriginal) => ({
   ...(await importOriginal<typeof SharedApi>()),
-  api: { providers: { codexRateLimits: mocks.codexRateLimits, refreshCodexRateLimits: mocks.refreshCodexRateLimits } },
+  api: {
+    providers: {
+      codexRateLimits: mocks.codexRateLimits,
+      refreshCodexRateLimits: mocks.refreshCodexRateLimits,
+      // The default-service card also mounts for Codex; keep its directory inert
+      // so the only alert under test is the quota refresh failure.
+      codexModelProviders: () => Promise.resolve(new Response(JSON.stringify({
+        success: true,
+        data: { defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] },
+      }), { status: 200 })),
+    },
+  },
 }));
 
 const authStatus: ProviderAuthStatus = {

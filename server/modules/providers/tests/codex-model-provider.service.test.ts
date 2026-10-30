@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -31,6 +31,110 @@ test('only extra config entries enable the picker; metadata never contains endpo
   const serialized = JSON.stringify(await service.list());
   assert.equal(serialized.includes('secret'), false);
   assert.equal(serialized.includes('https://'), false);
+});
+
+test('the default provider edit preserves comments, CRLF and unrelated model_provider keys', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-default-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const configPath = path.join(home, 'config.toml');
+  const original = [
+    '# keep this comment',
+    'model = "gpt-5"',
+    '"model_provider" = "beta"   # stay inline',
+    'notes = """',
+    'model_provider = "fake-inside-a-string"',
+    '"""',
+    '',
+    '[model_providers.alpha]',
+    'name = "Alpha service"',
+    'base_url = "https://alpha.example/v1"',
+    '',
+    '[model_providers.beta]',
+    'name = "Beta service"',
+    'base_url = "https://beta.example/v1"',
+    '',
+    '[profiles.fast]',
+    'model_provider = "beta"',
+    '',
+  ].join('\r\n');
+  await writeFile(configPath, original);
+  const service = new CodexModelProviderService({ home });
+
+  const changed = await service.setDefault('alpha');
+  assert.equal(changed.defaultProvider, 'alpha');
+  assert.deepEqual(changed.providers.map((provider) => provider.id), ['openai', 'alpha', 'beta']);
+  const withAlpha = original.replace('"model_provider" = "beta"', '"model_provider" = "alpha"');
+  assert.equal(await readFile(configPath, 'utf8'), withAlpha);
+
+  // Saving the value already present does not touch the file.
+  const before = await stat(configPath);
+  await service.setDefault('alpha');
+  assert.equal((await stat(configPath)).mtimeMs, before.mtimeMs);
+
+  // OpenAI removes only the root statement, keeping the multiline decoys and
+  // the profiles.*.model_provider assignment byte-identical.
+  await service.setDefault('openai');
+  const withoutRoot = withAlpha.replace('"model_provider" = "alpha"   # stay inline\r\n', '');
+  assert.equal(await readFile(configPath, 'utf8'), withoutRoot);
+  assert.ok(withoutRoot.includes('model_provider = "fake-inside-a-string"'));
+  assert.ok(withoutRoot.includes('[profiles.fast]\r\nmodel_provider = "beta"\r\n'));
+
+  // A new assignment is inserted before the first table header, still CRLF.
+  const directory = await service.setDefault('beta');
+  assert.equal(directory.defaultProvider, 'beta');
+  const expected = withoutRoot.replace('[model_providers.alpha]', 'model_provider = "beta"\r\n[model_providers.alpha]');
+  assert.equal(await readFile(configPath, 'utf8'), expected);
+  assert.equal(/[^\r]\n/.test(await readFile(configPath, 'utf8')), false);
+});
+
+test('an unknown default service fails without creating or rewriting config', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-default-unknown-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const home = path.join(root, 'codex-home');
+  const service = new CodexModelProviderService({ home, environment: {} });
+
+  await assert.rejects(service.setDefault('missing'), { code: 'CODEX_MODEL_PROVIDER_NOT_FOUND' });
+  await assert.rejects(stat(path.join(home, 'config.toml')), { code: 'ENOENT' });
+  await assert.rejects(stat(home), { code: 'ENOENT' }, 'selecting an unknown service creates no home directory');
+
+  assert.deepEqual(await service.setDefault('openai'), {
+    defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }],
+  });
+  await assert.rejects(stat(path.join(home, 'config.toml')), { code: 'ENOENT' }, 'OpenAI needs no config.toml');
+
+  await writeFile(path.join(root, 'config.toml'), 'model_provider = [');
+  const invalid = new CodexModelProviderService({ home: root, environment: {} });
+  await assert.rejects(invalid.setDefault('openai'), { code: 'CODEX_CONFIG_INVALID' });
+  assert.equal(await readFile(path.join(root, 'config.toml'), 'utf8'), 'model_provider = [');
+});
+
+test('an explicit root openai default is removed and ordinary values still skip unchanged writes', async (t) => {
+  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-openai-default-'));
+  t.after(() => rm(home, { recursive: true, force: true }));
+  const configPath = path.join(home, 'config.toml');
+  const original = [
+    '# keep',
+    'model_provider = "openai" # remove this statement',
+    'model = "gpt-5"',
+    '',
+    '[profiles.fast]',
+    'model_provider = "openai"',
+    '',
+  ].join('\n');
+  await writeFile(configPath, original);
+  const service = new CodexModelProviderService({ home, environment: {} });
+
+  const directory = await service.setDefault('openai');
+  assert.equal(directory.defaultProvider, 'openai');
+  const expected = original.replace('model_provider = "openai" # remove this statement\n', '');
+  assert.equal(await readFile(configPath, 'utf8'), expected);
+  assert.ok(expected.includes('[profiles.fast]\nmodel_provider = "openai"'));
+
+  const pinned = new Date('2020-01-02T03:04:05.000Z');
+  await utimes(configPath, pinned, pinned);
+  const before = await stat(configPath);
+  await service.setDefault('openai');
+  assert.equal((await stat(configPath)).mtimeMs, before.mtimeMs);
 });
 
 test('catalog requests use each service authentication and cache successes for exactly sixty seconds', async (t) => {

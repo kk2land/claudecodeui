@@ -169,7 +169,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private readonly providerEligible: (provider: string | null) => boolean;
   private readonly random: () => number;
   private readonly readCliVersion: () => string | null;
-  private readonly modelProviders: Pick<typeof codexModelProviderService, 'models'>;
+  private readonly modelProviders: Pick<typeof codexModelProviderService, 'list' | 'models'>;
   // Incremented on every app-server exit and turned invalid by close(). A
   // prediction run captures it up front so its cleanup can never address a
   // replacement process with the old thread ids.
@@ -196,7 +196,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       /** Test-only CLI identity; production reads the running launcher's version. */
       cliVersion?: () => string | null;
       /** Configured model directory, injectable so protocol tests never use real credentials. */
-      modelProviders?: Pick<typeof codexModelProviderService, 'models'>;
+      modelProviders?: Pick<typeof codexModelProviderService, 'list' | 'models'>;
     } = {},
   ) {
     this.configProvider = options.configProvider ?? new CodexPredictionConfigProvider();
@@ -290,6 +290,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.publish(target);
     target.setup = (async () => {
       target.model = selection?.model ?? await context.resolveResumeModel(sessionId, options.model) ?? '';
+      // New threads inherit the current global default; an explicit session
+      // selection wins. Existing threads resume without a global override here.
+      const requestedModelProvider = selection?.modelProvider
+        ?? (!providerId ? (await this.modelProviders.list()).defaultProvider : undefined);
       this.assertLiveSession(target);
       if (target.stopRequested && !providerId) return;
       const permission = this.permissionOptions(options);
@@ -298,7 +302,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         // cannot migrate existing threads. Resume reads their history separately.
         ...(providerId ? { threadId: providerId, excludeTurns: true } : { historyMode: 'legacy' }),
         cwd: options.cwd ?? options.projectPath,
-        ...(selection ? { modelProvider: selection.modelProvider } : {}),
+        ...(requestedModelProvider ? { modelProvider: requestedModelProvider } : {}),
         ...(target.model ? { model: target.model } : {}), ...permission,
       });
       this.assertLiveSession(target);

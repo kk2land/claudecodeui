@@ -396,6 +396,14 @@
       "stale": "这些数值可能已过期，请刷新。",
       "refreshFailed": "刷新失败"
     },
+    "modelProvider": {
+      "title": "默认模型服务",
+      "description": "用于新建的 Codex 会话。",
+      "loading": "正在读取模型服务...",
+      "loadFailed": "无法读取模型服务。",
+      "retry": "重试",
+      "saveFailed": "无法保存默认模型服务：{{error}}"
+    },
     "login": {
       "title": "登录",
       "reAuthenticate": "重新认证",

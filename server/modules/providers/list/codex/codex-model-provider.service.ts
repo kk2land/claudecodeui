@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { createHash } from 'node:crypto';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
@@ -9,6 +9,8 @@ import { promisify } from 'node:util';
 import TOML from '@iarna/toml';
 
 import { AppError, readObjectRecord, readOptionalString } from '@/shared/index.js';
+
+import { rewriteCodexDefaultModelProvider } from './codex-skills-config-editor.js';
 
 type ProviderConfig = {
   name?: string;
@@ -47,10 +49,13 @@ export class CodexModelProviderService {
     this.now = options.now ?? Date.now;
   }
 
-  private async readConfig() {
-    let raw = '';
-    try { raw = await readFile(path.join(this.home, 'config.toml'), 'utf8'); }
+  private async readConfigText(): Promise<string> {
+    try { return await readFile(path.join(this.home, 'config.toml'), 'utf8'); }
     catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+    return '';
+  }
+
+  private parseConfig(raw: string): { providers: Map<string, ProviderConfig>; defaultProvider: string } {
     let config: Record<string, unknown>;
     try { config = TOML.parse(raw) as Record<string, unknown>; }
     catch { throw new AppError('Could not parse Codex config.toml.', { code: 'CODEX_CONFIG_INVALID', statusCode: 400 }); }
@@ -68,14 +73,46 @@ export class CodexModelProviderService {
     return { providers, defaultProvider: readOptionalString(config.model_provider) || 'openai' };
   }
 
-  /** Only labels and ids leave this service; opening the picker never starts app-server. */
-  async list(): Promise<CodexModelProviders> {
-    const { providers, defaultProvider } = await this.readConfig();
+  private async readConfig() {
+    return this.parseConfig(await this.readConfigText());
+  }
+
+  /** Builds the credential-free directory returned to routes and the picker. */
+  private directory(providers: Map<string, ProviderConfig>, defaultProvider: string): CodexModelProviders {
     return {
       defaultProvider,
       hasCustomProviders: providers.size > 1,
       providers: [...providers].map(([id, config]) => ({ id, name: config.name || id })),
     };
+  }
+
+  /** Only labels and ids leave this service; opening the picker never starts app-server. */
+  async list(): Promise<CodexModelProviders> {
+    const { providers, defaultProvider } = await this.readConfig();
+    return this.directory(providers, defaultProvider);
+  }
+
+  /**
+   * Persists the default service for new Codex threads without reserializing
+   * config.toml. Routes and the native runtime share this service; the runtime
+   * re-reads `defaultProvider` per new thread, so saving never starts or
+   * restarts app-server. Missing config.toml means the built-in OpenAI default.
+   */
+  async setDefault(modelProvider: string): Promise<CodexModelProviders> {
+    const raw = await this.readConfigText();
+    const { providers, defaultProvider } = this.parseConfig(raw);
+    if (!providers.has(modelProvider)) throw new AppError('This model provider is no longer configured in Codex.', {
+      code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
+    });
+    // An explicit `model_provider = "openai"` still needs the rewrite to remove
+    // the redundant key; other unchanged defaults need no file write.
+    if (modelProvider !== 'openai' && defaultProvider === modelProvider) return this.directory(providers, defaultProvider);
+
+    const { raw: next, changed } = rewriteCodexDefaultModelProvider(raw, modelProvider);
+    if (!changed) return this.directory(providers, defaultProvider);
+    await mkdir(this.home, { recursive: true });
+    await writeFile(path.join(this.home, 'config.toml'), next, 'utf8');
+    return this.directory(providers, modelProvider);
   }
 
   /** Reads an OpenAI-compatible /models endpoint using the selected service's own authentication. */

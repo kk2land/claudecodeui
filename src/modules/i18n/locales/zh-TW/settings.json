@@ -385,6 +385,14 @@
         "unconfirmed": "伺服器沒有回應（{{error}}）。更新可能已經執行；上方是伺服器最後回報的版本。"
       }
     },
+    "modelProvider": {
+      "title": "預設模型服務",
+      "description": "用於新建的 Codex 工作階段。",
+      "loading": "正在讀取模型服務...",
+      "loadFailed": "無法讀取模型服務。",
+      "retry": "重試",
+      "saveFailed": "無法儲存預設模型服務：{{error}}"
+    },
     "login": {
       "title": "登入",
       "reAuthenticate": "重新驗證",

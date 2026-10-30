@@ -1,25 +1,29 @@
 import { AppError } from '@/shared/utils.js';
 
 /**
- * Offset-preserving TOML editing for the Codex `[[skills.config]]` entries.
+ * Offset-preserving TOML editing for Codex `[[skills.config]]` entries and the
+ * top-level `model_provider` default.
  *
- * The Codex skills provider must flip one `enabled` boolean while leaving every
- * other byte — comments, indentation, blank lines, quoting style and line
- * endings — exactly as the user wrote it. Serializing the parsed document would
- * discard all of that, so this module scans the raw text and rewrites only the
- * boolean token.
+ * The Codex skills provider flips one `enabled` boolean, and
+ * `CodexModelProviderService` changes only the root default service, while
+ * leaving comments, indentation, blank lines, quoting style and line endings as
+ * the user wrote them. Serializing the parsed document would discard all of
+ * that, so this module scans the raw text and rewrites only the relevant token.
+ * Removing an OpenAI default follows the whole assignment statement, including
+ * an inline comment attached to it.
  *
- * The scanner understands the subset of TOML needed for that job: table headers,
- * dotted/quoted keys and value spans. It skips comments and every string form
- * (basic, literal, multiline), so `[[skills.config]]` or `enabled =` text inside
- * a string can never be mistaken for syntax. Layouts it cannot locate safely
- * (an inline `skills.config = [...]` array, for example) raise
- * `CODEX_SKILLS_CONFIG_UNSAFE`; there is deliberately no reserialization
- * fallback.
+ * The scanner understands the subset of TOML needed for those jobs: table
+ * headers, dotted/quoted keys and value spans. It skips comments and every
+ * string form (basic, literal, multiline), so `[[skills.config]]`, `enabled =`
+ * or `model_provider =` text inside a string can never be mistaken for syntax.
+ * Layouts it cannot locate safely (an inline `skills.config = [...]` array, for
+ * example) raise `CODEX_SKILLS_CONFIG_UNSAFE`; there is deliberately no
+ * reserialization fallback.
  */
 
 type TomlAssignment = {
   keyPath: string[];
+  keyStart: number;
   valueStart: number;
   valueEnd: number;
 };
@@ -28,6 +32,7 @@ type TomlTable = {
   isArrayOfTables: boolean;
   keyPath: string[];
   assignments: TomlAssignment[];
+  headerStart: number;
 };
 
 type LocatedSkillEntry = {
@@ -324,10 +329,11 @@ const scanTableHeader = (
   return { isArrayOfTables, keyPath: parsed.keyPath, end: index };
 };
 
-/** Walks the document and returns every table with its top-level assignments. */
+/** Walks the document and returns the root table plus every table with its top-level assignments. */
 const scanTomlTables = (raw: string): TomlTable[] => {
-  const tables: TomlTable[] = [];
-  let currentTable: TomlTable | null = null;
+  const rootTable: TomlTable = { isArrayOfTables: false, keyPath: [], assignments: [], headerStart: -1 };
+  const tables: TomlTable[] = [rootTable];
+  let currentTable = rootTable;
   let index = 0;
 
   while (index < raw.length) {
@@ -346,12 +352,14 @@ const scanTomlTables = (raw: string): TomlTable[] => {
         isArrayOfTables: header.isArrayOfTables,
         keyPath: header.keyPath,
         assignments: [],
+        headerStart: index,
       };
       tables.push(currentTable);
       index = header.end;
       continue;
     }
 
+    const keyStart = index;
     const parsedKey = scanKeyPath(raw, index);
     let valueStart = skipWhitespace(raw, parsedKey.end);
     if (raw[valueStart] !== '=') {
@@ -359,8 +367,9 @@ const scanTomlTables = (raw: string): TomlTable[] => {
     }
     valueStart = skipWhitespace(raw, valueStart + 1);
     const valueEnd = scanValue(raw, valueStart);
-    currentTable?.assignments.push({
+    currentTable.assignments.push({
       keyPath: parsedKey.keyPath,
+      keyStart,
       valueStart,
       valueEnd,
     });
@@ -414,6 +423,64 @@ const detectNewline = (raw: string): '\n' | '\r\n' => {
   const lineFeed = raw.indexOf('\n');
   return lineFeed > 0 && raw[lineFeed - 1] === '\r' ? '\r\n' : '\n';
 };
+
+const lineStartAt = (raw: string, index: number): number => raw.lastIndexOf('\n', index - 1) + 1;
+
+/**
+ * Rewrites only the top-level `model_provider` assignment.
+ *
+ * Used by `CodexModelProviderService.setDefault` after the caller has parsed the
+ * document and confirmed that the service exists. `openai` removes the
+ * assignment (Codex's built-in default) rather than writing it; every other id
+ * replaces just the string token, or inserts a new assignment before the first
+ * table header. Other comments, quoting, spacing, line endings and all nested
+ * `model_provider` keys stay byte-identical; the removed statement's inline
+ * comment goes with it. Returns `changed: false` when the existing bytes already
+ * express the requested default.
+ */
+export function rewriteCodexDefaultModelProvider(
+  raw: string,
+  modelProvider: string,
+): { raw: string; changed: boolean } {
+  const tables = scanTomlTables(raw);
+  const existing = tables[0].assignments.find(({ keyPath }) => keyPath.length === 1 && keyPath[0] === 'model_provider');
+
+  if (modelProvider === 'openai') {
+    if (!existing) {
+      return { raw, changed: false };
+    }
+    // Delete the whole statement, including the inline comment it owns.
+    const start = lineStartAt(raw, existing.keyStart);
+    const lineBreak = raw.indexOf('\n', existing.valueEnd);
+    const end = lineBreak === -1 ? raw.length : lineBreak + 1;
+    return { raw: `${raw.slice(0, start)}${raw.slice(end)}`, changed: true };
+  }
+
+  const encoded = JSON.stringify(modelProvider);
+  if (existing) {
+    if (raw.slice(existing.valueStart, existing.valueEnd) === encoded) {
+      return { raw, changed: false };
+    }
+    return {
+      raw: `${raw.slice(0, existing.valueStart)}${encoded}${raw.slice(existing.valueEnd)}`,
+      changed: true,
+    };
+  }
+
+  const newline = detectNewline(raw);
+  const assignment = `model_provider = ${encoded}`;
+  const firstHeader = tables.find((table) => table.headerStart >= 0);
+  if (firstHeader) {
+    const start = lineStartAt(raw, firstHeader.headerStart);
+    return { raw: `${raw.slice(0, start)}${assignment}${newline}${raw.slice(start)}`, changed: true };
+  }
+
+  if (!raw) {
+    return { raw: `${assignment}${newline}`, changed: true };
+  }
+  const prefix = raw.endsWith('\n') ? raw : `${raw}${newline}`;
+  return { raw: `${prefix}${assignment}${newline}`, changed: true };
+}
 
 /**
  * Appends a `[[skills.config]]` entry after the untouched original text.

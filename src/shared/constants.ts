@@ -236,3 +236,14 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
   opencode: 'opencodePermissions',
   dsh: 'dshPermissions',
 };
+
+// ---------------------------
+
+//----------------- CODEX MODEL PROVIDERS ------------
+
+/**
+ * Window event dispatched after the global Codex default model service is saved.
+ * Mounted chat hooks listen for it to re-read the directory so new conversations
+ * pick up the confirmed default without a reload.
+ */
+export const CODEX_MODEL_PROVIDERS_CHANGED_EVENT = 'codex-model-providers-changed';

@@ -13,8 +13,12 @@ afterEach(() => {
   else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = originalGoalSetting;
 });
 
-function harness(timeout = 100) {
+function harness(
+  timeout = 100,
+  overrides: { defaultProvider?: () => string; directoryReads?: string[] } = {},
+) {
   const calls: Array<{ method: string; params: AnyRecord }> = [];
+  const directoryReads = overrides.directoryReads ?? [];
   let notify: (frame: CodexRpcFrame) => void = () => {};
   let request: (frame: CodexRpcFrame) => Promise<unknown> = async () => ({});
   let exit: (error: Error) => void = () => {};
@@ -59,7 +63,14 @@ function harness(timeout = 100) {
   const runtime = new CodexAppServerRuntime(rpc, settingsDb, timeout, (_, id) => accepted.push(id), async (sessionId) => {
     historyReads.push(sessionId);
     return storedMessages;
-  }, 30_000, { modelProviders: { models: async (modelProvider) => ({ modelProvider, models: ['test-model', 'second-model'], expiresAt: Date.now() + 60_000 }) } });
+  }, 30_000, { modelProviders: {
+    list: async () => {
+      const defaultProvider = overrides.defaultProvider?.() ?? 'openai';
+      directoryReads.push(defaultProvider);
+      return { defaultProvider, hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] };
+    },
+    models: async (modelProvider) => ({ modelProvider, models: ['test-model', 'second-model'], expiresAt: Date.now() + 60_000 }),
+  } });
   const events: AnyRecord[] = [];
   let writerNumber = 1;
   const writer: ProviderRuntimeWriter = { send: (data) => events.push({ ...data as AnyRecord, writer: 1 }), setSessionId: (id) => { nativeId = id; }, nextTurn: () => {
@@ -71,7 +82,7 @@ function harness(timeout = 100) {
   const event = (method: string, params: AnyRecord = {}) => notify({ method, params: { threadId: 'native-thread', ...params } });
   const finish = (id = 'turn-1', status = 'completed') => event('turn/completed', { turn: { id, status } });
   return { runtime, calls, handlers, events, event, finish, request: (frame: CodexRpcFrame) => request(frame), exit: (error: Error) => exit(error), accepted,
-    options, writer, context, settingsDb, storedMessages, historyReads, settings: () => settingsDb.get('app-session'),
+    options, writer, context, settingsDb, storedMessages, historyReads, directoryReads, settings: () => settingsDb.get('app-session'),
     control: (action: Parameters<CodexAppServerRuntime['control']>[1]) => runtime.control('app-session', action, options, writer, context),
     run: (text = 'hello', extra: AnyRecord = {}) => runtime.run(text, { ...options, ...extra }, writer, context) };
 }
@@ -110,6 +121,57 @@ test('model providers switch only after the current task ends and resume the sam
   assert.deepEqual(h.runtime.getState('app-session').activeModelSelection, { modelProvider: 'beta', model: 'second-model' });
   h.finish('turn-2'); await next;
   await h.runtime.close();
+});
+
+test('new threads read the latest configured default service on every thread/start', { timeout: 5_000 }, async (t) => {
+  let defaultProvider = 'alpha';
+  const h = harness(100, { defaultProvider: () => defaultProvider });
+  t.after(async () => { await h.runtime.close(); });
+  h.context.resolveProviderSessionId = () => null;
+  h.handlers.set('thread/start', async (params) => ({ thread: { id: 'first-thread' }, model: params.model, modelProvider: params.modelProvider }));
+
+  const first = h.runtime.run('first', { ...h.options, sessionId: 'first-session' }, h.writer, h.context);
+  first.catch(() => {});
+  await eventually(() => h.runtime.getState('first-session').turnId === 'turn-1');
+  h.event('turn/completed', { threadId: 'first-thread', turn: { id: 'turn-1', status: 'completed' } });
+  await first;
+
+  defaultProvider = 'beta';
+  h.handlers.set('thread/start', async (params) => ({ thread: { id: 'second-thread' }, model: params.model, modelProvider: params.modelProvider }));
+  const second = h.runtime.run('second', { ...h.options, sessionId: 'second-session' }, h.writer, h.context);
+  second.catch(() => {});
+  await eventually(() => h.runtime.getState('second-session').turnId === 'turn-2');
+  h.event('turn/completed', { threadId: 'second-thread', turn: { id: 'turn-2', status: 'completed' } });
+  await second;
+
+  const starts = h.calls.filter(({ method }) => method === 'thread/start');
+  assert.equal(starts.length, 2);
+  assert.equal(starts[0].params.modelProvider, 'alpha');
+  assert.equal(starts[1].params.modelProvider, 'beta');
+  assert.deepEqual(h.directoryReads, ['alpha', 'beta']);
+});
+
+test('an explicit session selection wins over the default and resume keeps its recorded provider', { timeout: 5_000 }, async (t) => {
+  const h = harness(100, { defaultProvider: () => 'alpha' });
+  t.after(async () => { await h.runtime.close(); });
+  h.settingsDb.update('explicit-session', { modelSelection: { modelProvider: 'beta', model: 'second-model' } });
+  h.handlers.set('thread/start', async (params) => ({ thread: { id: 'native-thread' }, model: params.model, modelProvider: params.modelProvider }));
+  h.handlers.set('thread/resume', async (params) => ({ thread: { id: params.threadId }, model: params.model, modelProvider: params.modelProvider ?? 'recorded-service' }));
+
+  const explicit = h.runtime.run('explicit', { ...h.options, sessionId: 'explicit-session' }, h.writer, h.context);
+  explicit.catch(() => {});
+  await eventually(() => h.runtime.getState('explicit-session').turnId === 'turn-1');
+  h.event('turn/completed', { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } });
+  await explicit;
+  assert.equal(h.calls.find(({ method }) => method === 'thread/start')?.params.modelProvider, 'beta');
+  assert.deepEqual(h.directoryReads, [], 'an explicit selection never reads the global directory');
+
+  // The writer now maps app-session to the native thread, so this is a resume.
+  await h.control({ action: 'goal', operation: 'get' });
+  const resume = h.calls.find(({ method }) => method === 'thread/resume')!;
+  assert.equal(resume.params.threadId, 'native-thread');
+  assert.equal(Object.hasOwn(resume.params, 'modelProvider'), false);
+  assert.deepEqual(h.directoryReads, [], 'resume never re-reads the global default');
 });
 
 test('unavailable models clear the selection and failed resumes hold the queue before delivering input', async () => {
