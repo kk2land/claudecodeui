@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 
+import { useSessionWorkerActivity } from '@/modules/chat/hooks/useSessionWorkerActivity';
 import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
@@ -221,12 +222,17 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   // the handshake and never falls back to an ordinary turn on an unknown build.
   const sessionSnapshot = sessionId ? snapshots[sessionId] : undefined;
   const nativeRuntime = sessionSnapshot?.runtime !== 'sdk';
+  // Worker activity is its own signal: a native Codex turn or queued prompt never
+  // substitutes for a Worker plugin run owned by this exact chat.
+  const hasActiveWorkers = useSessionWorkerActivity({
+    enabled, native: nativeRuntime, projectId: project?.projectId, sessionId,
+  });
   const predictionsSupported = predictionsImplemented && nativeRuntime
     && (sessionSnapshot ? sessionSnapshot.predictionSupported === true : true);
   // A known-incompatible build is reported explicitly instead of silently
   // offering a toggle that could never produce a suggestion.
   const predictionsUnsupported = predictionsImplemented && nativeRuntime
     && Boolean(sessionId) && sessionSnapshot?.predictionSupported === false;
-  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? '']?.message ?? null,
+  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, hasActiveWorkers, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? '']?.message ?? null,
     pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

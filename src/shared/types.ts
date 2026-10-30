@@ -2160,6 +2160,8 @@ export type CodexControls = {
   predictionsSupported?: boolean;
   /** The selected session's Codex build lacks the prediction protocol. */
   predictionsUnsupported?: boolean;
+  /** A Worker plugin run owned by this session is still occupying; never native turn activity. */
+  hasActiveWorkers?: boolean;
   state: CodexSessionState | null;
   error: string | null;
   pending: boolean;

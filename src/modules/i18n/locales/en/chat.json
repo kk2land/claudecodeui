@@ -134,6 +134,7 @@
     "processIdle": "Process stopped",
     "processId": "Codex launcher process ID",
     "processStartedAt": "Started at",
+    "workersActive": "A Worker is active in this session",
     "permissionMode": "Permission Mode",
     "modes": {
       "default": "Default Mode",

@@ -6,10 +6,16 @@ import { api } from '@/shared/api';
 import { hydrateChatDrafts, readQueuedMessage, resetChatDrafts, writeQueuedMessage } from '@/shared/chatDrafts';
 import type { CodexSessionState, Project, ServerEvent } from '@/shared/types';
 
-const { subscribe } = vi.hoisted(() => ({ subscribe: vi.fn() }));
+const { subscribe, workerPlugin } = vi.hoisted(() => ({
+  subscribe: vi.fn(), workerPlugin: { enabled: false },
+}));
 vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ subscribe }) }));
+vi.mock('@/modules/plugins', () => ({
+  usePlugins: () => ({ plugins: [{ name: 'worker', enabled: workerPlugin.enabled }] }),
+}));
 
 afterEach(() => {
+  workerPlugin.enabled = false;
   resetChatDrafts();
   vi.unstubAllGlobals();
   vi.useRealTimers();
@@ -54,6 +60,35 @@ test('the first remote model selection allocates a session and survives navigati
     expect(hook.result.current.pending).toBe(false);
   });
   expect(create).toHaveBeenCalledTimes(1);
+});
+
+test('reports Worker activity for the current native session', async () => {
+  workerPlugin.enabled = true;
+  const listeners = new Set<(event: ServerEvent) => void>();
+  subscribe.mockImplementation((listener: (event: ServerEvent) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  });
+  vi.spyOn(api.providers, 'capabilities').mockResolvedValue(Response.json({ success: true, data: { providers: [] } }));
+  vi.spyOn(api.user, 'drafts').mockImplementation(async () => Response.json({ drafts: [] }));
+  const state: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [],
+  };
+  const sendMessage = vi.fn((message) => queueMicrotask(() => {
+    for (const listener of listeners) listener({ kind: 'control_result', sessionId: 'session-worker',
+      requestId: message.requestId, ok: true, codexState: state } as ServerEvent);
+  }));
+  const workerState = vi.spyOn(api.plugins, 'workerState').mockResolvedValue(Response.json({
+    workers: [{ parentSessionId: 'session-worker', projectId: 'project', latestRun: { status: 'running' } }],
+  }));
+  const hook = renderHook(() => useCodexControls({
+    enabled: true, sessionId: 'session-worker',
+    project: { projectId: 'project', fullPath: '/project' } as Project,
+    options: {}, sendMessage, onSessionEstablished: () => {},
+  }));
+  await waitFor(() => expect(hook.result.current.hasActiveWorkers).toBe(true));
+  expect(workerState).toHaveBeenCalledWith('project', 'session-worker', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  hook.unmount();
 });
 
 test('restores controls and assigns a persisted steer ID without native randomUUID', async () => {

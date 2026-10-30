@@ -614,6 +614,16 @@ export const api = {
           ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
         },
       ),
+    // Scoped Worker plugin state: always names the current project and parent
+    // session so an unfiltered snapshot can never light another chat's activity.
+    workerState: (
+      projectId: string,
+      parentSessionId: string,
+      options: ApiRequestOptions = {},
+    ) => get(
+      `/api/plugins/worker/rpc/state${query({ projectId, parentSessionId })}`,
+      options,
+    ),
   },
 
   browserUse: {

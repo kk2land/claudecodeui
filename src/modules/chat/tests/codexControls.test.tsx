@@ -86,6 +86,21 @@ test('the process stop button works during a turn and disables once the process 
   expect(screen.queryByText('PID 43210')).toBeNull();
 });
 
+test('the Codex settings button shows Worker activity without changing its click target', () => {
+  const codex = { ...controls(), hasActiveWorkers: true };
+  const view = render(<CodexControlPanel controls={codex} onExecutePlan={() => {}} />);
+  const button = screen.getByRole('button', { name: 'Codex' });
+  expect(button.querySelector('.animate-spin')).not.toBeNull();
+  expect(screen.getByRole('status').textContent).toContain('Worker');
+  fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+
+  view.rerender(<CodexControlPanel controls={{ ...codex, hasActiveWorkers: false }} onExecutePlan={() => {}} />);
+  expect(button.querySelector('.animate-spin')).toBeNull();
+  fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('false');
+});
+
 function composer(codex: CodexControls, isLoading = true, processingSessions?: SessionActivityMap) {
   const send = vi.fn(); const add = vi.fn();
   const view = renderHook(() => useChatComposerState({ selectedProject: project, selectedSession: { id: 'codex-session' } as ProjectSession,
