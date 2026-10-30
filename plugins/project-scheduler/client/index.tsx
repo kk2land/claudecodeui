@@ -216,6 +216,28 @@ function Scheduler({ host }: { host: SchedulerHost }) {
       setMessage(String(error));
     }
   };
+  const copyTaskId = async (taskId: string) => {
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(taskId);
+      copied = true;
+    } catch {
+      const textarea = document.createElement("textarea");
+      textarea.value = taskId;
+      textarea.style.position = "fixed";
+      textarea.style.opacity = "0";
+      document.body.appendChild(textarea);
+      textarea.select();
+      try {
+        copied = document.execCommand("copy");
+      } catch {
+        copied = false;
+      } finally {
+        textarea.remove();
+      }
+    }
+    setMessage(copied ? "任务 ID 已复制" : "复制失败，请手动复制");
+  };
   const toggleTask = async (task: SchedulerTaskRow) => {
     const id = key(task);
     setPendingToggles((previous) => new Set(previous).add(id));
@@ -429,7 +451,15 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                     </button>
                     <small>
                       {effectiveScope === "all" ? task.projectName + " · " : ""}
-                      {task.taskId}
+                      <button
+                        type="button"
+                        className="cron-task-id"
+                        title={`复制任务 ID：${task.taskId}`}
+                        aria-label={`复制任务 ID ${task.taskId}`}
+                        onClick={() => void copyTaskId(task.taskId)}
+                      >
+                        {task.taskId}
+                      </button>
                     </small>
                   </td>
                   <td>
