@@ -200,7 +200,7 @@ function ChatInterface({
 
   const codexControls = useCodexControls({
     enabled: provider === 'codex', sessionId: selectedSession?.id || currentSessionId,
-    project: selectedProject, options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
+    project: selectedProject, chatActive: isActive, options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
     sendMessage, onSessionEstablished: handleSessionEstablished,
   });
   const runtimeControls = useProviderRuntimeControls({

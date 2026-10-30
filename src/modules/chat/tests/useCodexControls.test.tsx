@@ -91,6 +91,43 @@ test('reports Worker activity for the current native session', async () => {
   hook.unmount();
 });
 
+test('keeps native Codex state while the chat is inactive and starts Worker polling on resume', async () => {
+  workerPlugin.enabled = true;
+  const listeners = new Set<(event: ServerEvent) => void>();
+  subscribe.mockImplementation((listener: (event: ServerEvent) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  });
+  vi.spyOn(api.providers, 'capabilities').mockResolvedValue(Response.json({ success: true, data: { providers: [] } }));
+  vi.spyOn(api.user, 'drafts').mockImplementation(async () => Response.json({ drafts: [] }));
+  const state: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'running', turnId: 'turn-inactive', goal: null, questions: [],
+  };
+  const workerState = vi.spyOn(api.plugins, 'workerState').mockResolvedValue(Response.json({
+    workers: [{ parentSessionId: 'session-inactive', projectId: 'project', latestRun: { status: 'running' } }],
+  }));
+  const sendMessage = vi.fn();
+  const hook = renderHook(({ chatActive }: { chatActive: boolean }) => useCodexControls({
+    enabled: true, sessionId: 'session-inactive', chatActive,
+    project: { projectId: 'project', fullPath: '/project' } as Project,
+    options: {}, sendMessage, onSessionEstablished: () => {},
+  }), { initialProps: { chatActive: false } });
+
+  expect(workerState).not.toHaveBeenCalled();
+  act(() => {
+    for (const listener of listeners) listener({
+      kind: 'control_result', sessionId: 'session-inactive', requestId: 'manual', ok: true, codexState: state,
+    } as ServerEvent);
+  });
+  await waitFor(() => expect(hook.result.current.state?.turnId).toBe('turn-inactive'));
+  expect(workerState).not.toHaveBeenCalled();
+
+  hook.rerender({ chatActive: true });
+  await waitFor(() => expect(hook.result.current.hasActiveWorkers).toBe(true));
+  expect(workerState).toHaveBeenCalledWith('project', 'session-inactive', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+  hook.unmount();
+});
+
 test('restores controls and assigns a persisted steer ID without native randomUUID', async () => {
   localStorage.clear();
   resetChatDrafts();

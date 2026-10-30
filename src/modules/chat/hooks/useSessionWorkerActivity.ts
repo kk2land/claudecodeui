@@ -22,6 +22,8 @@ type Args = {
   enabled: boolean;
   /** False for the SDK runtime, which never owns Worker plugin runs. */
   native: boolean;
+  /** False while another workspace tab covers the chat; pauses polling without changing Codex controls. */
+  chatActive?: boolean;
   projectId: string | null | undefined;
   sessionId: string | null;
 };
@@ -31,17 +33,21 @@ type Args = {
  * running Worker. It reuses the authenticated Worker plugin state endpoint and is
  * intentionally separate from Codex's own native turn activity.
  */
-export function useSessionWorkerActivity({ enabled, native, projectId, sessionId }: Args): boolean {
+export function useSessionWorkerActivity({ enabled, native, chatActive = true, projectId, sessionId }: Args): boolean {
   const { plugins } = usePlugins();
   const workerEnabled = plugins.some((plugin) => plugin.name === 'worker' && plugin.enabled);
-  const active = enabled && native && workerEnabled && Boolean(projectId) && Boolean(sessionId);
+  const active = chatActive && enabled && native && workerEnabled && Boolean(projectId) && Boolean(sessionId);
   const scope = active ? `${projectId}:${sessionId}` : null;
   // The scope tag makes a result from a previous project/session immediately
   // unusable, even before the old effect cleanup has run.
   const [snapshot, setSnapshot] = useState<{ scope: string; active: boolean } | null>(null);
 
   useEffect(() => {
-    if (!scope || !projectId || !sessionId) return;
+    if (!scope || !projectId || !sessionId) {
+      // Do not let a paused or out-of-scope result reappear before the next fresh read.
+      setSnapshot(null);
+      return;
+    }
     let current = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let inFlight = false;

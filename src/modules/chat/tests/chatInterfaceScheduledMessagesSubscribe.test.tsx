@@ -30,6 +30,7 @@ const harness = vi.hoisted(() => ({
   composer: vi.fn((_props: ComponentProps<typeof ChatComposer>) => null),
   // The websocket context's own function; ChatInterface must pass this one on, not a stand-in.
   subscribe: (_listener: (event: ServerEvent) => void) => () => {},
+  useCodexControls: vi.fn((_args: unknown) => ({ state: { runtime: 'app-server' } })),
   useScheduledMessages: vi.fn((_sessionId: string | null, _subscribe?: unknown) => ({
     scheduledMessages: [],
     schedule: async () => null,
@@ -62,7 +63,7 @@ vi.mock('@/modules/chat/hooks/useChatProviderState', () => ({
     selectProviderEffort: harness.selectProviderEffort, selectProviderModel: harness.selectProviderModel }),
 }));
 vi.mock('@/modules/chat/hooks/useCodexControls', () => ({
-  useCodexControls: () => ({ state: { runtime: 'app-server' } }),
+  useCodexControls: harness.useCodexControls,
 }));
 vi.mock('@/modules/chat/hooks/useProviderRuntimeControls', () => ({
   useProviderRuntimeControls: () => ({ available: false }),
@@ -126,6 +127,21 @@ test('ChatInterface gives useScheduledMessages the websocket subscribe, so the b
       'useScheduledMessages must get the websocket context\'s subscribe, or scheduled_messages_changed is never heard',
     );
   }
+});
+
+test('forwards the Chat tab active state to the Codex controller without disabling Codex', () => {
+  harness.provider = 'codex';
+  const view = render(<ChatInterface isActive={false} selectedProject={project}
+    selectedSession={{ ...session, provider: 'codex' }} ws={null} sendMessage={() => {}} />);
+  let args = harness.useCodexControls.mock.calls.at(-1)![0] as { enabled: boolean; chatActive: boolean };
+  assert.equal(args.enabled, true);
+  assert.equal(args.chatActive, false);
+
+  view.rerender(<ChatInterface isActive selectedProject={project}
+    selectedSession={{ ...session, provider: 'codex' }} ws={null} sendMessage={() => {}} />);
+  args = harness.useCodexControls.mock.calls.at(-1)![0] as { enabled: boolean; chatActive: boolean };
+  assert.equal(args.enabled, true);
+  assert.equal(args.chatActive, true);
 });
 
 test('a service model without catalog metadata retains Codex reasoning choices and saves the chosen effort', async () => {

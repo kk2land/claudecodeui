@@ -15,13 +15,15 @@ type Args = {
   enabled: boolean;
   sessionId: string | null;
   project: Project | null;
+  /** False while another workspace tab covers the chat; only gates Worker activity polling. */
+  chatActive?: boolean;
   options: Record<string, unknown>;
   sendMessage(message: unknown): void;
   onSessionEstablished(sessionId: string, context: SessionEstablishedContext): void;
 };
 
 /** ChatInterface owns this controller; all native controls wait for a scoped server acknowledgement. */
-export function useCodexControls({ enabled, sessionId, project, options, sendMessage, onSessionEstablished }: Args): CodexControls {
+export function useCodexControls({ enabled, sessionId, project, chatActive = true, options, sendMessage, onSessionEstablished }: Args): CodexControls {
   const { subscribe } = useWebSocket();
   const capabilities = useProviderCapabilities();
   const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
@@ -225,7 +227,7 @@ export function useCodexControls({ enabled, sessionId, project, options, sendMes
   // Worker activity is its own signal: a native Codex turn or queued prompt never
   // substitutes for a Worker plugin run owned by this exact chat.
   const hasActiveWorkers = useSessionWorkerActivity({
-    enabled, native: nativeRuntime, projectId: project?.projectId, sessionId,
+    enabled, native: nativeRuntime, chatActive, projectId: project?.projectId, sessionId,
   });
   const predictionsSupported = predictionsImplemented && nativeRuntime
     && (sessionSnapshot ? sessionSnapshot.predictionSupported === true : true);
