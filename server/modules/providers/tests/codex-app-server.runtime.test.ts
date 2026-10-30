@@ -92,6 +92,12 @@ async function eventually(predicate: () => boolean) {
   assert.ok(predicate(), 'expected state was never reached');
 }
 
+function startTimeoutError() {
+  return new AppError('Codex app-server did not confirm turn/start.', {
+    code: 'CODEX_APP_SERVER_TIMEOUT', statusCode: 504, details: { method: 'turn/start', resultUnknown: true },
+  });
+}
+
 test('model providers switch only after the current task ends and resume the same native thread', async () => {
   const h = harness();
   h.handlers.set('thread/start', async () => ({ thread: { id: 'native-thread' }, model: 'test-model', modelProvider: 'alpha' }));
@@ -754,6 +760,125 @@ test('a late turn/start timeout cannot reopen a stop settled by native terminal 
   assert.equal(h.runtime.getState('app-session').phase, 'idle');
   assert.equal(h.runtime.getState('app-session').error, undefined);
   assert.equal(h.events.some((event) => event.kind === 'error'), false);
+});
+
+test('turn/started before a start timeout keeps the turn running without an error', async () => {
+  const h = harness();
+  let rejectStart!: (error: Error) => void;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  const running = h.run();
+  await eventually(() => Boolean(rejectStart));
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  await eventually(() => h.runtime.getState('app-session').phase === 'running');
+
+  rejectStart(startTimeoutError());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runtime.getState('app-session').phase, 'running');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+  assert.equal(h.events.some((event) => event.codexState?.phase === 'stopFailed'), false);
+
+  h.finish('turn-1'); await running;
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+});
+
+test('a start timeout before turn/started recovers when the native start arrives', async () => {
+  const h = harness();
+  let rejectStart!: (error: Error) => void;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  const running = h.run();
+  await eventually(() => Boolean(rejectStart));
+
+  rejectStart(startTimeoutError());
+  await eventually(() => h.runtime.getState('app-session').phase === 'stopFailed');
+  assert.equal(h.runtime.getState('app-session').error, 'Codex app-server did not confirm turn/start.');
+
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  await eventually(() => h.runtime.getState('app-session').phase === 'running' && h.runtime.getState('app-session').error === undefined);
+  h.finish('turn-1'); await running;
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+});
+
+test('a normal completed turn clears a prior start timeout error', async () => {
+  const h = harness();
+  let rejectStart!: (error: Error) => void;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  const running = h.run();
+  await eventually(() => Boolean(rejectStart));
+
+  rejectStart(startTimeoutError());
+  await eventually(() => h.runtime.getState('app-session').phase === 'stopFailed');
+  assert.equal(h.runtime.getState('app-session').error, 'Codex app-server did not confirm turn/start.');
+
+  h.finish('turn-1'); await running;
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+  assert.equal(h.events.find((event) => event.kind === 'complete')?.success, true);
+});
+
+test('a failed turn and an unconfirmed stop keep their own errors', async () => {
+  const failed = harness();
+  const failing = failed.run();
+  await eventually(() => Boolean(failed.runtime.getState('app-session').turnId));
+  failed.event('turn/completed', { turn: { id: 'turn-1', status: 'failed', error: { message: 'Temporary failure' } } });
+  await failing;
+  assert.equal(failed.runtime.getState('app-session').error, 'Temporary failure');
+  assert.equal(failed.events.find((event) => event.kind === 'complete')?.success, false);
+
+  const stopped = harness(15);
+  const stoppingRun = stopped.run();
+  await eventually(() => Boolean(stopped.runtime.getState('app-session').turnId));
+  assert.equal(await stopped.runtime.abort('app-session'), false);
+  const stopError = stopped.runtime.getState('app-session').error;
+  assert.match(stopError ?? '', /has not confirmed the stop/);
+  stopped.event('turn/completed', { turn: { id: 'turn-1', status: 'completed' } }); await stoppingRun;
+  assert.equal(stopped.runtime.getState('app-session').error, stopError);
+  assert.notEqual(stopped.runtime.getState('app-session').phase, 'idle');
+  assert.equal(await stopped.runtime.abort('app-session'), true);
+  assert.equal(stopped.runtime.getState('app-session').error, undefined);
+});
+
+test('a native terminal settles the run before the start acknowledgement and ignores it afterwards', { timeout: 1_000 }, async () => {
+  const h = harness();
+  let acknowledge!: (value: AnyRecord) => void;
+  h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+  const running = h.run();
+  await eventually(() => Boolean(acknowledge));
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  h.finish('turn-1');
+  await running; // not held for the longer acknowledgement budget
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+
+  let rejectStart!: (error: Error) => void;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  const next = h.run('next');
+  await eventually(() => Boolean(rejectStart));
+  h.event('turn/started', { turn: { id: 'turn-2' } });
+  await eventually(() => h.runtime.getState('app-session').phase === 'running');
+
+  // The first turn's late ACK lands while the second turn is running.
+  acknowledge({ turn: { id: 'turn-1' } });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runtime.getState('app-session').turnId, 'turn-2');
+  assert.equal(h.runtime.getState('app-session').phase, 'running');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+
+  h.finish('turn-2'); await next;
+  h.handlers.set('turn/start', async () => ({ turn: { id: 'turn-3' } }));
+  const third = h.run('third');
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-3');
+  // The second start's late rejection lands while the third turn is running.
+  rejectStart(startTimeoutError());
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runtime.getState('app-session').turnId, 'turn-3');
+  assert.equal(h.runtime.getState('app-session').phase, 'running');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+
+  h.finish('turn-3'); await third;
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
 });
 
 test('a rejected turn/start lets Stop clean up without an uncertain state', async () => {

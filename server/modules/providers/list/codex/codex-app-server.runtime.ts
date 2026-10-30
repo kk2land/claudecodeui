@@ -471,13 +471,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         ...this.turnPermissions(options),
       });
       turn.starting = starting;
-      let result: AnyRecord;
+      let result: AnyRecord | undefined;
       try {
-        result = await starting;
+        // A native terminal can arrive before the proxy acknowledges turn/start;
+        // release the run rather than waiting out the acknowledgement budget.
+        result = await Promise.race([starting, turn.done.then(() => undefined)]);
       } finally {
         turn.starting = null;
       }
-      if (!result.turn?.id) throw new Error('Codex did not return a turn id.');
+      if (turn.terminal) return;
+      if (!result?.turn?.id) throw new Error('Codex did not return a turn id.');
       session.historyReady = true;
       turn.id = result.turn.id;
       if (!turn.terminal) {
@@ -500,12 +503,14 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (turn.terminal && error instanceof AppError && error.code === 'CODEX_APP_SERVER_STOPPED') return;
       // An uncertain start must be reconciled instead of opening a duplicate turn.
       if (error instanceof AppError && error.code === 'CODEX_APP_SERVER_TIMEOUT') {
-        // Native terminal evidence already settled this turn; a late timeout
-        // rejection must not resurrect an uncertain stop state.
-        if (turn.terminal) { await turn.done; return; }
-        session.state.phase = 'stopFailed';
-        session.state.error = error.message;
-        this.publish(session);
+        // A native terminal or a turn/started id proves this turn exists; a
+        // slow proxy acknowledgement is not an uncertain stop. Only an RPC with
+        // no native evidence keeps the resultUnknown/stopFailed protection.
+        if (!turn.terminal && !turn.id) {
+          session.state.phase = 'stopFailed';
+          session.state.error = error.message;
+          this.publish(session);
+        }
         await turn.done;
       } else {
         this.complete(session, 'failed', error instanceof Error ? error.message : String(error));
@@ -526,6 +531,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (error) {
       session.state.error = error;
       turn.writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'error', content: error }));
+    } else if (status === 'completed' && !session.stopRequested) {
+      // A normal completion supersedes an earlier startup-acknowledgement
+      // warning; a failed or stopped turn keeps its own error instead.
+      session.state.error = undefined;
     }
     this.publish(session);
     const success = status === 'completed' && !['blocked', 'usageLimited', 'budgetLimited'].includes(session.state.goal?.status ?? '');
@@ -790,6 +799,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       session.turn!.id = turnId;
       session.state.turnId = turnId;
       session.state.phase = session.stopRequested ? 'stopping' : 'running';
+      // A running native turn proves the start was accepted; retire the stale
+      // startup-timeout warning. A stopping or failed turn keeps its own error.
+      if (!session.stopRequested) session.state.error = undefined;
       this.publish(session);
       if (session.stopRequested) {
         void this.interrupt(session, session.turn!).then(() => { if (!session.stop) void this.abort(session.id); })

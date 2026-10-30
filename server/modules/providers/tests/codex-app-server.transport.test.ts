@@ -325,6 +325,39 @@ test('RPC timeouts keep the process alive and mark the result as unknown', async
   await h.transport.close();
 });
 
+test('turn/start waits out a queued proxy acknowledgement while other RPCs keep the 30-second deadline', async (t) => {
+  const h = fakeProcess();
+  const transport = new CodexAppServerTransport({ spawn: () => h.child });
+  let startFrame: CodexRpcFrame | undefined;
+  h.onFrame((frame) => {
+    if (frame.id === undefined) return;
+    if (frame.method === 'turn/start') { startFrame = frame; return; }
+    if (frame.method === 'thread/read') return;
+    h.reply({ id: frame.id, result: {} });
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  try {
+    const start = transport.request('turn/start', { threadId: 'native-thread' });
+    const other = transport.request('thread/read', { threadId: 'native-thread' });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(startFrame, 'turn/start was written');
+
+    t.mock.timers.tick(30_000);
+    await assert.rejects(other, (error: any) => error.code === 'CODEX_APP_SERVER_TIMEOUT');
+    assert.equal(transport.status.pendingRequests, 1, 'turn/start remains pending past the ordinary deadline');
+
+    // Just short of the 15-minute budget, the acknowledgement still settles it.
+    t.mock.timers.tick(15 * 60_000 - 30_000 - 1);
+    assert.equal(transport.status.pendingRequests, 1);
+    h.reply({ id: startFrame!.id, result: { turn: { id: 'turn-1' } } });
+    assert.deepEqual(await start, { turn: { id: 'turn-1' } });
+    assert.equal(transport.status.pendingRequests, 0);
+  } finally {
+    t.mock.timers.reset();
+    await transport.close();
+  }
+});
+
 test('EPIPE clears pending requests and emits one process failure', async () => {
   const h = fakeProcess(); let exits = 0;
   h.transport.onExit(() => { exits++; });
