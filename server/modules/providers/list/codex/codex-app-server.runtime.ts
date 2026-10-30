@@ -32,6 +32,12 @@ import type {
 type NativeTurn = {
   id: string | null;
   writer: ProviderRuntimeWriter;
+  /**
+   * The in-flight `turn/start` RPC only, present until its ack or rejection.
+   * Stop awaits it to distinguish "not acknowledged yet" from "result unknown";
+   * it must never hold the longer `turn.done` wait of the whole run.
+   */
+  starting?: Promise<AnyRecord> | null;
   done: Promise<void>;
   finish(): void;
   terminal: boolean;
@@ -457,13 +463,20 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       // Queue dispatch keeps its receipt reserved until input can actually be
       // delivered. A failed provider resume must leave that message queued.
       options.onTurnStarting?.();
-      const result = await this.client.request('turn/start', {
+      const starting = this.client.request('turn/start', {
         threadId: session.threadId,
         input,
         clientUserMessageId,
         collaborationMode: this.collaboration(session),
         ...this.turnPermissions(options),
       });
+      turn.starting = starting;
+      let result: AnyRecord;
+      try {
+        result = await starting;
+      } finally {
+        turn.starting = null;
+      }
       if (!result.turn?.id) throw new Error('Codex did not return a turn id.');
       session.historyReady = true;
       turn.id = result.turn.id;
@@ -471,13 +484,25 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         session.state.turnId = turn.id;
         session.state.phase = session.stopRequested ? 'stopping' : 'running';
         this.publish(session);
-        if (session.stopRequested) await this.interrupt(session, turn);
+      }
+      // Let the Stop that is already settling observe this id; a Stop that
+      // already returned uncertain owns no coordinator, so reconcile it here.
+      if (session.stopRequested) {
+        const continuing = session.stop;
+        if (continuing) await continuing;
+        if (this.sessions.get(session.id) === session && session.turn === turn
+          && session.stopRequested && !session.stop && session.state.phase !== 'idle') {
+          void this.abort(session.id, false);
+        }
       }
       await turn.done;
     } catch (error) {
       if (turn.terminal && error instanceof AppError && error.code === 'CODEX_APP_SERVER_STOPPED') return;
       // An uncertain start must be reconciled instead of opening a duplicate turn.
       if (error instanceof AppError && error.code === 'CODEX_APP_SERVER_TIMEOUT') {
+        // Native terminal evidence already settled this turn; a late timeout
+        // rejection must not resurrect an uncertain stop state.
+        if (turn.terminal) { await turn.done; return; }
         session.state.phase = 'stopFailed';
         session.state.error = error.message;
         this.publish(session);
@@ -909,11 +934,19 @@ export class CodexAppServerRuntime implements IProviderRuntime {
             session.state.goal = result.goal;
           } catch (error) { pauseError = error; }
         }
+        // An unacknowledged start has no native id to interrupt yet. Wait for
+        // the RPC to settle or the turn to end natively before reconciling;
+        // run() alone turns a rejection into a terminal or uncertain outcome.
+        const startingTurn = session.turn;
+        if (startingTurn && !startingTurn.terminal && !startingTurn.id && startingTurn.starting) {
+          await bounded(Promise.race([startingTurn.starting.catch(() => undefined), startingTurn.done]));
+        }
         // Retrying an uncertain turn/start recovers its id before interrupting it.
-        if (session.threadId && session.turn && !session.turn.id && !session.setup) {
+        const pendingTurn = session.turn;
+        if (session.threadId && pendingTurn && !pendingTurn.terminal && !pendingTurn.id && !session.setup) {
           const result = await request('thread/read', { threadId: session.threadId, includeTurns: true });
           const active = result.thread?.turns?.find((turn: AnyRecord) => turn.status === 'inProgress');
-          if (active) session.turn.id = active.id;
+          if (active) pendingTurn.id = active.id;
         }
         do {
           while (session.turn && !session.turn.terminal) {

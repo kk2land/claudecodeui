@@ -633,6 +633,143 @@ test('stop during turn/start preserves intent until the native id arrives', asyn
   assert.equal(await stopping, true); await running;
 });
 
+test('stop waits for an unacknowledged first turn/start instead of reading unmaterialized history', async () => {
+  const h = harness();
+  let acknowledge: ((value: AnyRecord) => void) | undefined;
+  h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('thread native-thread is not materialized yet; includeTurns is unavailable before first user message', {
+      code: 'CODEX_APP_SERVER_REJECTED',
+    });
+  });
+  const running = h.run();
+  await eventually(() => Boolean(acknowledge));
+  const stopping = h.runtime.abort('app-session');
+  try {
+    await eventually(() => h.runtime.getState('app-session').phase === 'stopping');
+    // Prove Stop neither reads unusable history nor reports a premature failure.
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.calls.some((call) => call.method === 'thread/read'), false);
+    assert.equal(h.events.some((event) => event.kind === 'complete'), false);
+    assert.equal(h.runtime.getState('app-session').phase, 'stopping');
+    assert.equal(h.settings().queueHeld, true);
+
+    acknowledge!({ turn: { id: 'turn-1' } });
+    await eventually(() => h.calls.some((call) => call.method === 'turn/interrupt' && call.params.turnId === 'turn-1'));
+    h.finish('turn-1', 'interrupted');
+    assert.equal(await stopping, true);
+    await running;
+    assert.equal(h.runtime.getState('app-session').phase, 'idle');
+    assert.equal(h.runtime.getState('app-session').error, undefined);
+    assert.equal(h.calls.filter((call) => call.method === 'turn/start').length, 1);
+  } finally {
+    acknowledge?.({ turn: { id: 'turn-1' } });
+    h.finish('turn-1', 'interrupted');
+    await running.catch(() => {});
+  }
+});
+
+test('a late turn/start ack confirms a stop that timed out without a turn/started notification', async () => {
+  const h = harness(15);
+  let acknowledge: ((value: AnyRecord) => void) | undefined;
+  h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('thread native-thread is not materialized yet; includeTurns is unavailable before first user message', {
+      code: 'CODEX_APP_SERVER_REJECTED',
+    });
+  });
+  const running = h.run();
+  await eventually(() => Boolean(acknowledge));
+  try {
+    assert.equal(await h.runtime.abort('app-session'), false);
+    assert.equal(h.runtime.getState('app-session').phase, 'stopFailed');
+
+    acknowledge!({ turn: { id: 'turn-1' } });
+    await eventually(() => h.calls.some((call) => call.method === 'turn/interrupt' && call.params.turnId === 'turn-1'));
+    h.finish('turn-1', 'interrupted');
+    await eventually(() => h.runtime.getState('app-session').phase === 'idle');
+    assert.equal(h.runtime.getState('app-session').error, undefined);
+    assert.equal(h.settings().queueHeld, true);
+    await running;
+  } finally {
+    acknowledge?.({ turn: { id: 'turn-1' } });
+    h.finish('turn-1', 'interrupted');
+    await running.catch(() => {});
+  }
+});
+
+test('native terminal evidence settles a stop before the turn/start ack returns', async () => {
+  const h = harness();
+  let acknowledge: ((value: AnyRecord) => void) | undefined;
+  h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('thread native-thread is not materialized yet; includeTurns is unavailable before first user message', {
+      code: 'CODEX_APP_SERVER_REJECTED',
+    });
+  });
+  const running = h.run();
+  await eventually(() => Boolean(acknowledge));
+  const stopping = h.runtime.abort('app-session');
+  let settled = false;
+  void stopping.then(() => { settled = true; });
+  // Let abort reach its pending-start wait; the RPC ack is still outstanding.
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(settled, false);
+  assert.equal(h.runtime.getState('app-session').phase, 'stopping');
+  assert.equal(h.calls.some((call) => call.method === 'thread/read'), false);
+
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  h.finish('turn-1', 'interrupted');
+  assert.equal(await stopping, true);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+
+  // The late ack neither reopens the turn nor changes the settled state.
+  acknowledge!({ turn: { id: 'turn-1' } });
+  await running;
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').turnId, null);
+});
+
+test('a late turn/start timeout cannot reopen a stop settled by native terminal evidence', async () => {
+  const h = harness();
+  let rejectStart: ((error: Error) => void) | undefined;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  h.handlers.set('thread/read', async () => {
+    throw new AppError('thread native-thread is not materialized yet; includeTurns is unavailable before first user message', {
+      code: 'CODEX_APP_SERVER_REJECTED',
+    });
+  });
+  const running = h.run();
+  await eventually(() => Boolean(rejectStart));
+  const stopping = h.runtime.abort('app-session');
+  await new Promise((resolve) => setImmediate(resolve));
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  h.finish('turn-1', 'interrupted');
+  assert.equal(await stopping, true);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+
+  rejectStart!(new AppError('Start acknowledgement timed out', { code: 'CODEX_APP_SERVER_TIMEOUT' }));
+  await running;
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.runtime.getState('app-session').error, undefined);
+  assert.equal(h.events.some((event) => event.kind === 'error'), false);
+});
+
+test('a rejected turn/start lets Stop clean up without an uncertain state', async () => {
+  const h = harness();
+  let rejectStart: ((error: Error) => void) | undefined;
+  h.handlers.set('turn/start', () => new Promise((_resolve, reject) => { rejectStart = reject; }));
+  const running = h.run();
+  await eventually(() => Boolean(rejectStart));
+  const stopping = h.runtime.abort('app-session');
+  rejectStart!(new AppError('Invalid turn input', { code: 'CODEX_APP_SERVER_REJECTED', statusCode: 400 }));
+  await assert.rejects(running, /Invalid turn input/);
+  assert.equal(await stopping, true);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+  assert.equal(h.calls.some((call) => call.method === 'thread/read'), false);
+});
+
 test('pausing a blocked goal persists paused, and exhausted budgets stay enforced after pause', async () => {
   const h = harness();
   await h.control({ action: 'goal', operation: 'set', objective: 'finish', tokenBudget: 20 });
