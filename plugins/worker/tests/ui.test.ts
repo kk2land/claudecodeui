@@ -126,7 +126,7 @@ function byLabel(root: ParentNode, label: string): HTMLElement | null {
   return root.querySelector<HTMLElement>('[aria-label="' + label + '"]');
 }
 async function typeInto(
-  input: HTMLInputElement | HTMLTextAreaElement,
+  input: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
   value: string,
 ) {
   const setter = Object.getOwnPropertyDescriptor(
@@ -138,6 +138,7 @@ async function typeInto(
     Event: new (type: string, init?: { bubbles?: boolean }) => Event;
   };
   input.dispatchEvent(new view.Event("input", { bubbles: true }));
+  input.dispatchEvent(new view.Event("change", { bubbles: true }));
   await delay(0);
 }
 
@@ -215,6 +216,11 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     },
     settings: {
       concurrency: { dsh: 3, pi: 3 },
+      defaultWorkerType: "dsh",
+      defaults: {
+        dsh: { model: null, effort: null },
+        pi: { model: null, effort: null },
+      },
       softReminderSeconds: 600,
       softReminderSteps: 20,
       hardTimeoutSeconds: null,
@@ -279,6 +285,11 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       if (pathAndQuery === "/settings")
         return {
           concurrency: { dsh: 4, pi: 2 },
+          defaultWorkerType: "pi",
+          defaults: {
+            dsh: { model: "dsh-default", effort: "high" },
+            pi: { model: "pi-default", effort: "low" },
+          },
           softReminderSeconds: 600,
           softReminderSteps: 20,
           hardTimeoutSeconds: null,
@@ -468,14 +479,38 @@ test("DOM: per-worker cancel sends only that worker id", async () => {
   }
 });
 
-test("DOM: settings require positive integers and save the exact concurrency body", async () => {
+test("DOM: settings load and save type, model, reasoning, and concurrency fields", async () => {
   const mounted = await mountPlugin();
   try {
-    await waitFor(() => Boolean(findButton(mounted.container, "并发设置")), "设置入口");
-    button(mounted.container, "并发设置").click();
+    await waitFor(() => Boolean(findButton(mounted.container, "Worker 设置")), "设置入口");
+    button(mounted.container, "Worker 设置").click();
     await waitFor(() => Boolean(byLabel(mounted.container, "DSH 并发")), "设置面板");
     const dsh = byLabel(mounted.container, "DSH 并发") as HTMLInputElement;
     const pi = byLabel(mounted.container, "Pi 并发") as HTMLInputElement;
+    const defaultType = byLabel(
+      mounted.container,
+      "默认 Worker 类型",
+    ) as HTMLSelectElement;
+    const dshModel = byLabel(
+      mounted.container,
+      "DSH 默认模型",
+    ) as HTMLInputElement;
+    const dshEffort = byLabel(
+      mounted.container,
+      "DSH 默认 reasoning",
+    ) as HTMLInputElement;
+    const piModel = byLabel(
+      mounted.container,
+      "Pi 默认模型",
+    ) as HTMLInputElement;
+    const piEffort = byLabel(
+      mounted.container,
+      "Pi 默认 reasoning",
+    ) as HTMLSelectElement;
+    assert.equal(defaultType.value, "dsh");
+    assert.equal(dshModel.value, "");
+    assert.equal(piEffort.value, "");
+
     await typeInto(dsh, "0");
     await waitFor(
       () => textOf(mounted.container).includes("必须是大于 0 的整数"),
@@ -484,12 +519,30 @@ test("DOM: settings require positive integers and save the exact concurrency bod
     assert.equal(button(mounted.container, "保存设置").disabled, true);
     await typeInto(dsh, "4");
     await typeInto(pi, "2");
+    await typeInto(dshEffort, "high");
+    await waitFor(
+      () => textOf(mounted.container).includes("DSH reasoning 需要同时配置"),
+      "DSH effort 需要模型",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    await typeInto(defaultType, "pi");
+    await typeInto(dshModel, "dsh-default");
+    await typeInto(piModel, "pi-default");
+    await typeInto(piEffort, "low");
     await waitFor(() => !button(mounted.container, "保存设置").disabled, "可保存");
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存请求");
     assert.deepEqual(callsTo(mounted, "/settings")[0]!.body, {
       concurrency: { dsh: 4, pi: 2 },
+      defaultWorkerType: "pi",
+      defaults: {
+        dsh: { model: "dsh-default", effort: "high" },
+        pi: { model: "pi-default", effort: "low" },
+      },
     });
+    await waitFor(() => defaultType.value === "pi", "保存后回填默认类型");
+    assert.equal(piModel.value, "pi-default");
+    assert.equal(dshEffort.value, "high");
   } finally {
     mounted.unmount();
   }

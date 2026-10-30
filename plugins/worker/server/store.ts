@@ -13,6 +13,11 @@ import type {
 
 export const DEFAULT_SETTINGS: WorkerSettings = {
   concurrency: { dsh: 3, pi: 3 },
+  defaultWorkerType: "dsh",
+  defaults: {
+    dsh: { model: null, effort: null },
+    pi: { model: null, effort: null },
+  },
   softReminderSeconds: 600,
   softReminderSteps: 20,
   hardTimeoutSeconds: null,
@@ -95,9 +100,13 @@ export class WorkerStore {
     const row = this.db
       .prepare("SELECT body FROM settings WHERE id=1")
       .get() as { body: string } | undefined;
-    return row
-      ? (JSON.parse(row.body) as WorkerSettings)
-      : structuredClone(DEFAULT_SETTINGS);
+    if (!row) return structuredClone(DEFAULT_SETTINGS);
+    // Legacy rows lack only the fields added later; service writes validate the persisted values.
+    // The spread also retains unrelated top-level fields so a later save cannot drop them.
+    return {
+      ...structuredClone(DEFAULT_SETTINGS),
+      ...(JSON.parse(row.body) as WorkerSettings),
+    };
   }
 
   saveSettings(settings: WorkerSettings): void {

@@ -101,7 +101,11 @@ export type WorkerStartWorkspace = {
 export type WorkerStartInput = {
   /** Short user-visible label for the worker. */
   taskName: string;
-  type: WorkerType;
+  /**
+   * Native runner for this worker. Omitted selects `WorkerSettings.defaultWorkerType`; an explicit
+   * value always wins over the configured default.
+   */
+  type?: WorkerType;
   prompt: string;
   workspace: WorkerStartWorkspace;
   /**
@@ -295,19 +299,43 @@ export type WorkerNotification = {
 //----------------- SETTINGS, COUNTS, AND UI SNAPSHOTS ------------
 
 /**
+ * Configured model and native reasoning effort for one worker type. Null means the runner's
+ * existing default: Pi falls back to `CODEX_PI_MODEL` / `CODEX_PI_THINKING`, while a null DSH
+ * effort leaves the native model configuration untouched.
+ */
+export type WorkerDefault = {
+  model: string | null;
+  effort: string | null;
+};
+
+/** Per-type configured defaults used when a start request omits model/effort. */
+export type WorkerDefaults = Record<WorkerType, WorkerDefault>;
+
+/**
  * Effective worker settings. Concurrency applies per `(parentSessionId, projectId, workerType)`
  * key. Soft reminder defaults are 600 seconds / 20 steps; no hard timeout is applied by default.
  */
 export type WorkerSettings = {
   concurrency: Record<WorkerType, number>;
+  /** Type selected by a start request that omits `type`; initially `dsh`. */
+  defaultWorkerType: WorkerType;
+  /** Model and effort defaults for each type; initially null for both types. */
+  defaults: WorkerDefaults;
   softReminderSeconds: number;
   softReminderSteps: number;
   hardTimeoutSeconds: number | null;
 };
 
-/** Editable subset accepted by `PUT /settings`; reminder and timeout values stay server-owned. */
+/**
+ * Editable subset accepted by `PUT /settings`; reminder and timeout values stay server-owned.
+ * `defaultWorkerType` and `defaults` are optional so older concurrency-only clients preserve the
+ * fields they do not send. A supplied `defaults` must contain the full dsh/pi map; blank or null
+ * model/effort values clear that configured default.
+ */
 export type WorkerSettingsInput = {
   concurrency: Record<WorkerType, number>;
+  defaultWorkerType?: WorkerType;
+  defaults?: WorkerDefaults;
 };
 
 /** Worker counts keyed by every lifecycle status; absent keys are zero only in serialized data. */

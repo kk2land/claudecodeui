@@ -484,12 +484,34 @@
   gap: 5px;
   font-size: 12px;
 }
-.worker-form input {
+.worker-form input,
+.worker-form select {
   padding: 7px 9px;
   border: 1px solid var(--worker-border);
   border-radius: 6px;
   background: var(--worker-bg);
   color: var(--worker-ink);
+}
+.worker-form select {
+  min-height: 34px;
+}
+.worker-form-wide {
+  grid-column: 1 / -1;
+}
+.worker-fieldset {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+  padding: 12px;
+  border: 1px solid var(--worker-border);
+  border-radius: 6px;
+}
+.worker-fieldset legend {
+  padding: 0 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--worker-muted);
 }
 .worker-form p {
   grid-column: 1 / -1;

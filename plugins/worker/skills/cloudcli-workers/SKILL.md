@@ -25,7 +25,31 @@ description: 通过 CloudCLI Worker MCP 协调 DSH 与 Pi 子任务，包括规�
 
 - 多个 worker 共享同一 cwd 时只并行不重叠的路径；任何共同接口、共享契约或同一文件先指定唯一负责人，或改用 worktree/串行执行。
 - 为每次启动或续接生成新的 `requestId`；重试同一请求时才复用，避免重复执行。
-- 模型/effort 覆盖只在确有需要时显式给出；DSH 的 effort 必须同时给出模型。原生 runner 的成功只说明执行完成，不代表验收。
+- 显式用户选择优先；未指定的字段留给服务端按插件默认和原生配置解析，不要自行复制默认值。DSH 的 effort 需要请求或已配置默认提供有效模型。原生 runner 的成功只说明执行完成，不代表验收。
+
+## 默认值与显式选择
+
+- 用户在 `worker_context.settings` 中看到的 `defaultWorkerType` 和 `defaults` 是插件默认值。用户未指定某个字段时，仅省略该字段，让服务端解析；不要猜测或自行复制默认值。
+- 用户明确要求 worker 类型、模型或 reasoning 时，在 `worker_start` 中传对应的 `type`、`model`、`effort`。本 skill 与 MCP 的 reasoning 参数名是 `effort`；每个字段独立判断，显式值覆盖插件默认值。
+- 例如用户说「用 Pi、reasoning high」但没有指定模型：传 `type: "pi"` 和 `effort: "high"`，省略 `model`，保留用户明确给出的选择。
+- `worker_resume` 默认沿用原 run 记录的模型/effort，即使插件默认或环境已变化；只有用户明确要求改变时才传新的 `model`/`effort`。
+
+例如用户说「用 Pi、模型 X、reasoning high，在隔离 worktree 里修这个 bug」：
+
+```json
+{
+  "taskName": "fix worker defaults",
+  "type": "pi",
+  "prompt": "修复 …；运行 …；返回实际 diff 与测试证据。",
+  "workspace": { "mode": "worktree" },
+  "writePaths": ["plugins/worker"],
+  "model": "X",
+  "effort": "high",
+  "requestId": "worker-fix-defaults-1"
+}
+```
+
+对应 MCP 调用为 `worker_start`，参数即上述对象。用户未指定的字段逐个省略，保留其明确给出的类型、模型或 reasoning；不要把插件默认值全量复制到请求，仍需显式选择 `workspace.mode`。
 
 ## 执行、等待与结果
 

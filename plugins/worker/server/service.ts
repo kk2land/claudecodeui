@@ -22,6 +22,7 @@ import type {
   GuardianEvidence,
   WorkerCancelInput,
   WorkerCleanupInput,
+  WorkerDefaults,
   WorkerLogQuery,
   WorkerNotification,
   WorkerNotificationDelivery,
@@ -191,11 +192,78 @@ export class WorkerService {
         "INVALID_SETTINGS",
         "concurrency.dsh 和 concurrency.pi 必须是正整数",
       );
-    const settings = this.store.settings();
-    settings.concurrency = { dsh: dsh as number, pi: pi as number };
+    if (
+      input.defaultWorkerType !== undefined &&
+      input.defaultWorkerType !== "dsh" &&
+      input.defaultWorkerType !== "pi"
+    )
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "defaultWorkerType 必须是 dsh 或 pi",
+      );
+    const current = this.store.settings();
+    // Validate the complete candidate before mutating or saving anything, so an invalid field
+    // never partially persists.
+    const settings: WorkerSettings = {
+      ...current,
+      concurrency: { dsh: dsh as number, pi: pi as number },
+      defaultWorkerType: input.defaultWorkerType ?? current.defaultWorkerType,
+      defaults:
+        input.defaults === undefined
+          ? current.defaults
+          : this.validateDefaults(input.defaults),
+    };
     this.store.saveSettings(settings);
     void this.dispatch();
     return settings;
+  }
+
+  /** Validates a full dsh/pi defaults map and normalizes blank strings to null. */
+  private validateDefaults(value: WorkerDefaults): WorkerDefaults {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "defaults 必须包含 dsh 和 pi 两个配置对象",
+      );
+    const result = {} as WorkerDefaults;
+    for (const type of ["dsh", "pi"] as const) {
+      const entry = value[type];
+      if (!entry || typeof entry !== "object" || Array.isArray(entry))
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "defaults." + type + " 必须是配置对象",
+        );
+      const model = entry.model;
+      const effort = entry.effort;
+      if (model !== undefined && model !== null && typeof model !== "string")
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "defaults." + type + ".model 必须是字符串或 null",
+        );
+      if (effort !== undefined && effort !== null && typeof effort !== "string")
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "defaults." + type + ".effort 必须是字符串或 null",
+        );
+      const normalizedModel = clean(model);
+      const normalizedEffort = clean(effort);
+      if (
+        type === "pi" &&
+        normalizedEffort &&
+        !(PI_THINKING_LEVELS as readonly string[]).includes(normalizedEffort)
+      )
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "defaults.pi.effort 必须是受支持的 Pi thinking 级别",
+        );
+      if (type === "dsh" && normalizedEffort && !normalizedModel)
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "defaults.dsh.effort 需要同时配置 defaults.dsh.model",
+        );
+      result[type] = { model: normalizedModel, effort: normalizedEffort };
+    }
+    return result;
   }
 
   //------------------ START AND RESUME ----------------
@@ -216,14 +284,17 @@ export class WorkerService {
       this.assertReplay(existing, "start", fingerprint);
       return this.resultOf(existing.workerId, existing.runId);
     }
-    const selection = this.startSelection(input.type, input);
-    this.validateSelection(input.type, selection);
+    // Resolve mutable settings only after replay lookup: an omitted type must not reinterpret a
+    // request whose original run already exists.
     const settings = this.store.settings();
+    const type = input.type ?? settings.defaultWorkerType;
+    const selection = this.startSelection(type, input, settings.defaults[type]);
+    this.validateSelection(type, selection);
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, settings);
     const id = randomUUID();
     const runId = randomUUID();
     const createdAt = new Date(this.now()).toISOString();
-    const homes = nativeHome(input.type, this.options.dataDirectory, this.environment);
+    const homes = nativeHome(type, this.options.dataDirectory, this.environment);
     const run: WorkerRun = {
       id: runId,
       workerId: id,
@@ -254,7 +325,7 @@ export class WorkerService {
     };
     const worker: WorkerRecord = {
       id,
-      type: input.type,
+      type,
       taskName: input.taskName.trim(),
       ownerId,
       parentSessionId: owner.parentSessionId,
@@ -394,7 +465,11 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_INPUT", "请求体无效");
     if (typeof input.taskName !== "string" || !input.taskName.trim())
       throw new WorkerFailure("INVALID_INPUT", "taskName 不能为空");
-    if (input.type !== "dsh" && input.type !== "pi")
+    if (
+      input.type !== undefined &&
+      input.type !== "dsh" &&
+      input.type !== "pi"
+    )
       throw new WorkerFailure("INVALID_INPUT", "type 必须是 dsh 或 pi");
     if (typeof input.prompt !== "string" || !input.prompt.trim())
       throw new WorkerFailure("INVALID_INPUT", "prompt 不能为空");
@@ -509,24 +584,38 @@ export class WorkerService {
       );
   }
 
-  /** New runs snapshot request overrides first, then backend environment defaults. */
-  private startSelection(type: WorkerType, input: {
-    model?: string;
-    provider?: string;
-    effort?: string;
-  }): NativeSelection {
+  /**
+   * New runs snapshot the explicit request first, then the selected type's configured defaults,
+   * then the existing Pi environment fallback. DSH has no environment model fallback.
+   */
+  private startSelection(
+    type: WorkerType,
+    input: {
+      model?: string;
+      provider?: string;
+      effort?: string;
+    },
+    defaults: WorkerDefaults[WorkerType],
+  ): NativeSelection {
+    const configuredModel = clean(defaults.model);
+    const configuredEffort = clean(defaults.effort);
     if (type === "dsh")
       return {
-        model: clean(input.model),
+        model: clean(input.model) ?? configuredModel,
         provider: clean(input.provider),
-        effort: clean(input.effort),
+        effort: clean(input.effort) ?? configuredEffort,
       };
     return {
-      model: clean(input.model) ?? clean(this.environment.CODEX_PI_MODEL),
+      model:
+        clean(input.model) ??
+        configuredModel ??
+        clean(this.environment.CODEX_PI_MODEL),
       provider:
         clean(input.provider) ?? clean(this.environment.CODEX_PI_PROVIDER),
       effort:
-        clean(input.effort) ?? clean(this.environment.CODEX_PI_THINKING),
+        clean(input.effort) ??
+        configuredEffort ??
+        clean(this.environment.CODEX_PI_THINKING),
     };
   }
 

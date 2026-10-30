@@ -95,18 +95,44 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
       "worker_wait",
     ],
   );
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "dsh",
+    defaults: {
+      dsh: { model: "mcp-default-model", effort: "medium" },
+      pi: { model: null, effort: null },
+    },
+  });
   const context = text(await client.callTool({ name: "worker_context", arguments: {} }));
   assert.equal((context as { owner: { id: string } }).owner.id, "mcp-owner");
+  assert.deepEqual(
+    (context as { settings: { defaultWorkerType: string; defaults: unknown } })
+      .settings.defaultWorkerType,
+    "dsh",
+  );
+  assert.deepEqual(
+    (context as { settings: { defaults: unknown } }).settings.defaults,
+    {
+      dsh: { model: "mcp-default-model", effort: "medium" },
+      pi: { model: null, effort: null },
+    },
+  );
+  const { type: _omittedType, ...omitted } = startInput({
+    requestId: "mcp-start",
+    taskName: "mcp task",
+    model: "mcp-explicit-model",
+    effort: "low",
+  });
   const started = text(
     await client.callTool({
       name: "worker_start",
-      arguments: startInput({
-        requestId: "mcp-start",
-        taskName: "mcp task",
-      }),
+      arguments: omitted,
     }),
   ) as { worker: { id: string }; run: { id: string } };
   assert.ok(started.worker.id);
+  assert.equal(service.get(started.worker.id).worker.type, "dsh");
+  assert.equal(service.get(started.worker.id).worker.latestRun?.model, "mcp-explicit-model");
+  assert.equal(service.get(started.worker.id).worker.latestRun?.effort, "low");
   const waited = text(
     await client.callTool({
       name: "worker_wait",
@@ -154,6 +180,27 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
   ) as { text: string; done: boolean };
   assert.match(logs.text, /session/);
   assert.equal(logs.done, true);
+
+  const { type: _defaultOmittedType, ...defaultOmitted } = startInput({
+    requestId: "mcp-default-start",
+    taskName: "mcp default task",
+  });
+  const defaulted = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: defaultOmitted,
+    }),
+  ) as { worker: { id: string }; run: { id: string } };
+  const defaultWaited = text(
+    await client.callTool({
+      name: "worker_wait",
+      arguments: { workerId: defaulted.worker.id, timeoutSeconds: 10 },
+    }),
+  ) as { run: { status: string; model: string | null; effort: string | null } };
+  assert.equal(defaultWaited.run.status, "completed");
+  assert.equal(defaultWaited.run.model, "mcp-default-model");
+  assert.equal(defaultWaited.run.effort, "medium");
+  assert.equal(service.get(defaulted.worker.id).worker.type, "dsh");
 
   const intruder = service.registerOwner(
     {

@@ -55,6 +55,7 @@ import type {
   WorkerSettingsInput,
   WorkerStateSnapshot,
   WorkerStatus,
+  WorkerType,
 } from "../shared/contracts.js";
 import styles from "./worker.css";
 
@@ -718,16 +719,37 @@ function SettingsView({
 }) {
   const [dsh, setDsh] = useState(String(settings.concurrency.dsh));
   const [pi, setPi] = useState(String(settings.concurrency.pi));
+  const [defaultType, setDefaultType] = useState<WorkerType>(
+    settings.defaultWorkerType,
+  );
+  const [dshModel, setDshModel] = useState(settings.defaults.dsh.model ?? "");
+  const [dshEffort, setDshEffort] = useState(
+    settings.defaults.dsh.effort ?? "",
+  );
+  const [piModel, setPiModel] = useState(settings.defaults.pi.model ?? "");
+  const [piEffort, setPiEffort] = useState(settings.defaults.pi.effort ?? "");
   const [busy, setBusy] = useState(false);
   const validNumber = (value: string) => {
     const parsed = Number(value);
     return Number.isInteger(parsed) && parsed > 0;
   };
-  const valid = validNumber(dsh) && validNumber(pi);
+  const dshModelValue = dshModel.trim();
+  const valid = validNumber(dsh) && validNumber(pi) && (!dshEffort.trim() || !!dshModelValue);
   const save = async () => {
     if (!valid) return;
     const body: WorkerSettingsInput = {
       concurrency: { dsh: Number(dsh), pi: Number(pi) },
+      defaultWorkerType: defaultType,
+      defaults: {
+        dsh: {
+          model: dshModelValue || null,
+          effort: dshEffort.trim() || null,
+        },
+        pi: {
+          model: piModel.trim() || null,
+          effort: piEffort || null,
+        },
+      },
     };
     setBusy(true);
     try {
@@ -735,6 +757,11 @@ function SettingsView({
       onSaved(value);
       setDsh(String(value.concurrency.dsh));
       setPi(String(value.concurrency.pi));
+      setDefaultType(value.defaultWorkerType);
+      setDshModel(value.defaults.dsh.model ?? "");
+      setDshEffort(value.defaults.dsh.effort ?? "");
+      setPiModel(value.defaults.pi.model ?? "");
+      setPiEffort(value.defaults.pi.effort ?? "");
     } catch (error) {
       onError(String(error));
     } finally {
@@ -748,37 +775,107 @@ function SettingsView({
       </button>
       <header className="worker-heading">
         <div>
-          <h2>插件设置</h2>
-          <p>并发按 (父会话, 项目, 类型) 独立计算；每种类型各有自己的额度</p>
+          <h2>Worker 设置</h2>
+          <p>
+            并发额度修改会立即影响排队调度；默认类型、模型和 reasoning 仅用于之后的新
+            worker 启动请求
+          </p>
         </div>
       </header>
       <div className="worker-form">
-        <label>
-          DSH 并发
-          <input
-            type="number"
-            min="1"
-            step="1"
-            aria-label="DSH 并发"
-            value={dsh}
-            onChange={(event) => setDsh(event.target.value)}
-          />
+        <label className="worker-form-wide">
+          默认 Worker 类型
+          <select
+            aria-label="默认 Worker 类型"
+            value={defaultType}
+            onChange={(event) =>
+              setDefaultType(event.target.value as WorkerType)
+            }
+          >
+            <option value="dsh">DSH</option>
+            <option value="pi">Pi</option>
+          </select>
         </label>
-        <label>
-          Pi 并发
-          <input
-            type="number"
-            min="1"
-            step="1"
-            aria-label="Pi 并发"
-            value={pi}
-            onChange={(event) => setPi(event.target.value)}
-          />
-        </label>
+        <fieldset className="worker-fieldset">
+          <legend>DSH</legend>
+          <label>
+            默认模型
+            <input
+              type="text"
+              aria-label="DSH 默认模型"
+              placeholder="留空沿用执行器现有配置"
+              value={dshModel}
+              onChange={(event) => setDshModel(event.target.value)}
+            />
+          </label>
+          <label>
+            Reasoning
+            <input
+              type="text"
+              aria-label="DSH 默认 reasoning"
+              placeholder="留空沿用执行器现有配置；填写时需同时配置模型"
+              value={dshEffort}
+              onChange={(event) => setDshEffort(event.target.value)}
+            />
+          </label>
+          <label>
+            并发
+            <input
+              type="number"
+              min="1"
+              step="1"
+              aria-label="DSH 并发"
+              value={dsh}
+              onChange={(event) => setDsh(event.target.value)}
+            />
+          </label>
+        </fieldset>
+        <fieldset className="worker-fieldset">
+          <legend>Pi</legend>
+          <label>
+            默认模型
+            <input
+              type="text"
+              aria-label="Pi 默认模型"
+              placeholder="留空沿用执行器现有配置"
+              value={piModel}
+              onChange={(event) => setPiModel(event.target.value)}
+            />
+          </label>
+          <label>
+            Reasoning
+            <select
+              aria-label="Pi 默认 reasoning"
+              value={piEffort}
+              onChange={(event) => setPiEffort(event.target.value)}
+            >
+              <option value="">使用执行器现有配置</option>
+              <option value="off">off</option>
+              <option value="minimal">minimal</option>
+              <option value="low">low</option>
+              <option value="medium">medium</option>
+              <option value="high">high</option>
+              <option value="xhigh">xhigh</option>
+              <option value="max">max</option>
+            </select>
+          </label>
+          <label>
+            并发
+            <input
+              type="number"
+              min="1"
+              step="1"
+              aria-label="Pi 并发"
+              value={pi}
+              onChange={(event) => setPi(event.target.value)}
+            />
+          </label>
+        </fieldset>
         <p>
-          正整数。启动中、运行中、停止中和状态未知的 run 都占用额度；超过额度的请求按 FIFO 排队。
-          同一原生会话只允许一个调用。软提醒默认 {settings.softReminderSeconds} 秒 /{" "}
-          {settings.softReminderSteps} 步，硬超时
+          并发为正整数，按类型独立计算；启动中、运行中、停止中和状态未知的 run 都占用额度；
+          超过额度的请求按 FIFO 排队。模型或 reasoning 留空表示沿用执行器现有配置。
+          DSH reasoning 需要同时配置模型。同一原生会话只允许一个调用。软提醒默认{" "}
+          {settings.softReminderSeconds} 秒 / {settings.softReminderSteps} 步，硬超时
           {settings.hardTimeoutSeconds === null
             ? "默认关闭"
             : "默认 " + settings.hardTimeoutSeconds + " 秒"}
@@ -786,11 +883,13 @@ function SettingsView({
         </p>
         {!valid ? (
           <p className="worker-error" role="alert">
-            并发必须是大于 0 的整数。
+            {!validNumber(dsh) || !validNumber(pi)
+              ? "并发必须是大于 0 的整数。"
+              : "DSH reasoning 需要同时配置 DSH 默认模型。"}
           </p>
         ) : null}
         <button
-          className="worker-primary"
+          className="worker-primary worker-form-wide"
           disabled={busy || !valid}
           onClick={() => void save()}
         >
@@ -1086,7 +1185,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
                 disabled={!settings}
                 onClick={() => setView("settings")}
               >
-                <Settings2 size={15} /> 并发设置
+                <Settings2 size={15} /> Worker 设置
               </button>
               <button
                 className="worker-danger"

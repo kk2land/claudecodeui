@@ -671,3 +671,229 @@ test("restart finalizes from guardian evidence without re-running", async (t) =>
     .find((item) => item.runId === worker.latestRun?.id);
   assert.equal(notification?.delivery, "pending");
 });
+
+test("settings persist configured defaults, normalize legacy rows, and validate atomically", async (t) => {
+  const root = temporaryRoot("worker-settings-");
+  const { service, data } = createService(t, root);
+  // Simulate a row written before defaultWorkerType/defaults existed.
+  service.store.saveSettings({
+    concurrency: { dsh: 5, pi: 2 },
+    softReminderSeconds: 42,
+    softReminderSteps: 7,
+    hardTimeoutSeconds: 90,
+  } as never);
+  const normalized = service.settings();
+  assert.equal(normalized.defaultWorkerType, "dsh");
+  assert.deepEqual(normalized.defaults, {
+    dsh: { model: null, effort: null },
+    pi: { model: null, effort: null },
+  });
+  assert.deepEqual(normalized.concurrency, { dsh: 5, pi: 2 });
+  assert.equal(normalized.softReminderSeconds, 42);
+  assert.equal(normalized.softReminderSteps, 7);
+  assert.equal(normalized.hardTimeoutSeconds, 90);
+
+  const saved = service.updateSettings({
+    concurrency: { dsh: 6, pi: 1 },
+    defaultWorkerType: "pi",
+    defaults: {
+      dsh: { model: "dsh-model", effort: "high" },
+      pi: { model: "  pi-model  ", effort: "low" },
+    },
+  });
+  assert.equal(saved.defaultWorkerType, "pi");
+  assert.deepEqual(saved.defaults, {
+    dsh: { model: "dsh-model", effort: "high" },
+    pi: { model: "pi-model", effort: "low" },
+  });
+  assert.equal(saved.softReminderSeconds, 42);
+  assert.equal(saved.hardTimeoutSeconds, 90);
+
+  // An invalid field rejects the whole update: counts and defaults stay at the saved values.
+  assert.throws(
+    () =>
+      service.updateSettings({
+        concurrency: { dsh: 9, pi: 9 },
+        defaultWorkerType: "dsh",
+        defaults: {
+          dsh: { model: null, effort: "high" },
+          pi: { model: null, effort: null },
+        },
+      }),
+    /defaults\.dsh\.effort/,
+  );
+  assert.deepEqual(service.settings(), saved);
+  assert.throws(
+    () =>
+      service.updateSettings({
+        concurrency: { dsh: 0, pi: 1 },
+      }),
+    /正整数/,
+  );
+  assert.deepEqual(service.settings(), saved);
+
+  const reopened = new WorkerStore(data);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.settings(), saved);
+
+  // A legacy concurrency-only update preserves the new fields.
+  const updated = service.updateSettings({ concurrency: { dsh: 2, pi: 4 } });
+  assert.equal(updated.defaultWorkerType, "pi");
+  assert.deepEqual(updated.defaults, saved.defaults);
+});
+
+test("omitted type uses configured defaults ahead of Pi environment, and replay ignores later changes", async (t) => {
+  const root = temporaryRoot("worker-default-selection-");
+  const { service, data } = createService(t, root, {
+    CODEX_PI_MODEL: "env-model",
+    CODEX_PI_PROVIDER: "env-provider",
+    CODEX_PI_THINKING: "low",
+  });
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "pi",
+    defaults: {
+      dsh: { model: "dsh-default", effort: "high" },
+      pi: { model: "pi-default", effort: "medium" },
+    },
+  });
+  const input = startInput({
+    type: undefined,
+    requestId: "default-pi-1",
+  });
+  const started = await service.start("owner-1", input);
+  const first = await waitStatus(service, started.worker.id, ["completed"]);
+  assert.equal(first.type, "pi");
+  assert.equal(first.latestRun?.model, "pi-default");
+  assert.equal(first.latestRun?.provider, "env-provider");
+  assert.equal(first.latestRun?.effort, "medium");
+  const spec = JSON.parse(
+    fs.readFileSync(
+      path.join(data, "logs", first.id, first.latestRun!.id, "spec.json"),
+      "utf8",
+    ),
+  ) as { argv: string[] };
+  assert.deepEqual(
+    spec.argv.slice(spec.argv.indexOf("--model")),
+    ["--model", "pi-default", "--provider", "env-provider", "--thinking", "medium"],
+  );
+
+  const explicit = await service.start(
+    "owner-1",
+    startInput({
+      type: "dsh",
+      model: "explicit-dsh",
+      effort: "low",
+      requestId: "explicit-dsh-1",
+    }),
+  );
+  const explicitWorker = await waitStatus(service, explicit.worker.id, ["completed"]);
+  assert.equal(explicitWorker.type, "dsh");
+  assert.equal(explicitWorker.latestRun?.model, "explicit-dsh");
+  assert.equal(explicitWorker.latestRun?.effort, "low");
+  const dshSpec = JSON.parse(
+    fs.readFileSync(
+      path.join(data, "logs", explicitWorker.id, explicitWorker.latestRun!.id, "spec.json"),
+      "utf8",
+    ),
+  ) as { argv: string[] };
+  const modelPatch = dshSpec.argv
+    .filter((value, index) => index > 0 && dshSpec.argv[index - 1] === "--patch")
+    .map((file) => {
+      try {
+        return JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+      } catch {
+        return null;
+      }
+    })
+    .find((value) => Array.isArray(value)) as [
+    { config: { provider: string; model: string; reasoningEffort?: string } },
+  ];
+  assert.deepEqual(modelPatch[0]!.config, {
+    provider: "deepseek-official",
+    model: "explicit-dsh",
+    reasoningEffort: "low",
+  });
+
+  // The same raw request replay returns the original Pi run even though the default changed.
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "dsh",
+    defaults: {
+      dsh: { model: "changed-dsh", effort: null },
+      pi: { model: "changed-pi", effort: null },
+    },
+  });
+  const replayed = await service.start("owner-1", input);
+  assert.equal(replayed.worker.id, first.id);
+  assert.equal(replayed.run.id, first.latestRun?.id);
+  assert.equal(service.get(first.id).runs.length, 1);
+});
+
+test("queued runs keep accepted defaults and resume retains recorded selection", async (t) => {
+  const root = temporaryRoot("worker-default-queue-");
+  const { service, data } = createService(t, root, {
+    TEST_SCENARIO: "sleep",
+    TEST_DELAY_MS: "300",
+  });
+  service.updateSettings({
+    concurrency: { dsh: 1, pi: 1 },
+    defaultWorkerType: "dsh",
+    defaults: {
+      dsh: { model: "accepted-model", effort: "high" },
+      pi: { model: null, effort: null },
+    },
+  });
+  const blocker = await service.start("owner-1", startInput({ requestId: "queue-blocker" }));
+  await waitStatus(service, blocker.worker.id, ["running"]);
+  const queued = await service.start(
+    "owner-1",
+    startInput({ type: undefined, requestId: "queue-defaulted" }),
+  );
+  assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
+  assert.equal(queued.run.model, "accepted-model");
+  service.updateSettings({
+    concurrency: { dsh: 1, pi: 1 },
+    defaultWorkerType: "dsh",
+    defaults: {
+      dsh: { model: "changed-model", effort: "low" },
+      pi: { model: null, effort: null },
+    },
+  });
+  const retained = service.get(queued.worker.id).worker.latestRun!;
+  assert.equal(retained.model, "accepted-model");
+  assert.equal(retained.effort, "high");
+  const finished = await waitStatus(service, queued.worker.id, ["completed"]);
+  const spec = JSON.parse(
+    fs.readFileSync(
+      path.join(data, "logs", finished.id, finished.latestRun!.id, "spec.json"),
+      "utf8",
+    ),
+  ) as { argv: string[] };
+  const patchFile = spec.argv
+    .filter((value, index) => index > 0 && spec.argv[index - 1] === "--patch")
+    .find((file) => file.endsWith("model.patch.yml"))!;
+  const patch = JSON.parse(fs.readFileSync(patchFile, "utf8")) as [
+    { config: { model: string; reasoningEffort?: string } },
+  ];
+  assert.equal(patch[0]!.config.model, "accepted-model");
+  assert.equal(patch[0]!.config.reasoningEffort, "high");
+
+  const resumed = await service.resume("owner-1", {
+    workerId: finished.id,
+    prompt: "resume with recorded defaults",
+    requestId: "resume-defaulted",
+  });
+  assert.equal(resumed.run.model, "accepted-model");
+  assert.equal(resumed.run.effort, "high");
+  await waitStatus(service, finished.id, ["completed"]);
+  const overridden = await service.resume("owner-1", {
+    workerId: finished.id,
+    prompt: "resume with explicit override",
+    requestId: "resume-override",
+    model: "explicit-resume",
+    effort: "medium",
+  });
+  assert.equal(overridden.run.model, "explicit-resume");
+  assert.equal(overridden.run.effort, "medium");
+});

@@ -38,13 +38,55 @@ Worker MCP。若 skill 或 MCP 不可用，父会话应报告阻塞，而不是�
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。页面只读状态并执行取消、暂停、恢复、清理和
 通知重试；不展示任何凭证。没有会话时禁用会话视图，没有项目时仅保留全部视图。
 
+## 默认类型、模型与 reasoning
+
+Worker 设置可指定新的 worker 启动请求省略类型时使用的默认类型，以及 DSH/Pi 各自的默认模型和 effort。
+并发额度的修改会立即参与排队调度；默认类型、模型和 effort 只用于之后的新 worker 启动请求，不会改写已有
+记录或已接受/排队的 run。
+
+`GET /state` 的 `settings` 形状示例（`softReminderSeconds`、`softReminderSteps`、`hardTimeoutSeconds`
+由服务端管理，`PUT /settings` 不接受）：
+
+    {
+      "concurrency": { "dsh": 3, "pi": 3 },
+      "defaultWorkerType": "dsh",
+      "defaults": {
+        "dsh": { "model": null, "effort": null },
+        "pi": { "model": null, "effort": null }
+      },
+      "softReminderSeconds": 600,
+      "softReminderSteps": 20,
+      "hardTimeoutSeconds": null
+    }
+
+`PUT /settings` 仍要求 `concurrency` 为两个正整数。`defaultWorkerType` 和 `defaults` 可省略：旧客户端仅提交
+并发时，已保存的默认类型和模型/effort 保持不变。提供 `defaults` 时必须同时包含 `dsh` 与 `pi` 两个对象；
+`model`/`effort` 为字符串或 `null`，空白字符串按清除处理。非法类型、错误的值类型、缺失的类型对象、非正
+整数并发、无效 Pi thinking 级别，或 DSH effort 没有同时配置模型，都会让整次更新失败且不保存任何字段。
+旧版仅含并发、提醒与超时的设置 JSON 在读取时补齐 `defaultWorkerType: "dsh"` 和全为 `null` 的
+`defaults`，原有并发、提醒与超时保持不变；已有 worker/run 记录不会被重写。
+
+新 worker 启动请求的参数优先级为：请求中显式给出的非空值 > 所选类型的插件默认值 > 现有后端环境回退（仅 Pi：
+`CODEX_PI_MODEL`、`CODEX_PI_THINKING`）> 原生 CLI 自身默认。省略 `type` 时选择
+`defaultWorkerType`；显式 `dsh`/`pi` 总是优先。provider 仍只来自请求或 Pi 的
+`CODEX_PI_PROVIDER`，没有插件级 provider 默认。插件在接受请求时把最终 type/model/effort 快照到 run；
+之后修改默认不会改变已排队 run 已接受的值，原生 argv 与 DSH model patch 也使用该快照。
+
+skill 与 MCP 的参数名是 `effort`，不是 `reasoning`。调用方把用户说的 reasoning 映射为 `effort`；DSH 配置
+effort 时必须从请求或已配置默认获得有效模型，Pi 仅接受 `off/minimal/low/medium/high/xhigh/max`。模型或
+effort 留空表示沿用执行器现有配置，不会覆盖 Pi 的环境配置，也不是“清空原生配置”。
+
+续接（`worker_resume`）保持原 worker 类型、cwd、home 和原生会话身份；未显式覆盖的 model/effort 沿用上一次
+run 的记录值，即使插件默认或环境此后已变化，也不会重新套用新默认。显式覆盖仍按原有校验生效。并发额度仍
+按 `(parentSessionId, projectId, workerType)` 独立计算，默认类型或模型设置不改变额度与排队语义。
+
 ## 并发、排队与去重
 
 并发键为 `(parentSessionId, projectId, workerType)`，DSH 与 Pi 默认各 3，每个键独立。`starting`、
 `running`、`stopping`、`unknown` 都占用额度；超额请求按 FIFO 排队。同一原生会话只允许一个调用。
 start/resume 都要求调用方提供 `requestId` 作为幂等键；相同操作与载荷的重复键返回原 worker/run，不会再次
-启动 CLI。同一 `requestId` 用于不同操作或不同载荷时直接拒绝（ID 冲突），不会覆盖原记录。UI 的并发设置只
-接受正整数，保存后按类型生效。
+启动 CLI。同一 `requestId` 用于不同操作或不同载荷时直接拒绝（ID 冲突），不会覆盖原记录。Worker 设置中的
+并发只接受正整数，保存后按类型生效；默认类型与模型/reasoning 默认是独立的设置，不改变该并发键。
 
 ## 原生 CLI 参数与成功判定
 
@@ -75,7 +117,8 @@ Pi：
 
 - 通过 stdin 输入提示词，不追加 `-`。
 - `PI_CODING_AGENT_DIR` 使用原环境值或 `~/.pi/agent`。新请求参数优先级：
-  显式请求 > `CODEX_PI_*` 环境 > Pi 配置；续接时显式参数 > 旧记录。provider 必须与 model 一起给出。
+  显式请求 > 插件 Pi 默认 > `CODEX_PI_*` 环境 > Pi 配置；续接时显式参数 > 旧记录。provider 必须与
+  model 一起给出。
 - `thinking` 仅接受 `off/minimal/low/medium/high/xhigh/max`。
 - 续接前核实会话文件存在且非空、header 的 ID 与 cwd 匹配，否则不续接。
 - 成功要求：exit 0、会话身份匹配、最终 assistant 的 `stopReason=stop`、最终 `agent_end` 的
