@@ -97,6 +97,58 @@ test("enforces per-key FIFO concurrency", async (t) => {
   );
 });
 
+test("default quotas isolate dsh/pi, parents, and projects while sharing one existing cwd", async (t) => {
+  const root = temporaryRoot("worker-concurrency-scope-");
+  const { service, project } = createService(t, root, {
+    TEST_SCENARIO: "sleep",
+    TEST_DELAY_MS: "2000",
+  });
+  const project2 = path.join(root, "project2");
+  fs.mkdirSync(project2, { recursive: true });
+  service.registerOwner(
+    {
+      id: "owner-2",
+      parentSessionId: "parent-2",
+      projectId: "project-2",
+      projectPath: project2,
+      userId: 2,
+      appServerInstanceId: "app-2",
+      paused: false,
+    },
+    "owner-2-token",
+  );
+  const dsh = [];
+  for (let index = 0; index < 4; index++)
+    dsh.push(await service.start("owner-1", startInput({ requestId: "dsh-" + index })));
+  const pi = [];
+  for (let index = 0; index < 4; index++)
+    pi.push(
+      await service.start(
+        "owner-1",
+        startInput({ type: "pi", requestId: "pi-" + index }),
+      ),
+    );
+  const other = await service.start(
+    "owner-2",
+    startInput({ requestId: "other-1" }),
+  );
+  for (const item of [...dsh.slice(0, 3), ...pi.slice(0, 3), other])
+    await waitStatus(service, item.worker.id, ["running"]);
+  assert.equal(service.get(dsh[3]!.worker.id).worker.latestRun?.status, "queued");
+  assert.equal(service.get(pi[3]!.worker.id).worker.latestRun?.status, "queued");
+  assert.equal(service.get(other.worker.id).worker.cwd, fs.realpathSync(project2));
+  assert.equal(service.get(dsh[0]!.worker.id).worker.cwd, fs.realpathSync(project));
+
+  // Raising the DSH quota admits only that key's queued FIFO item; Pi and the
+  // separate parent/project remain on their own quotas.
+  service.updateSettings({ concurrency: { dsh: 4, pi: 3 } });
+  await waitStatus(service, dsh[3]!.worker.id, ["running"], 1000);
+  assert.equal(service.get(pi[3]!.worker.id).worker.latestRun?.status, "queued");
+
+  for (const item of [...dsh, ...pi, other])
+    await waitStatus(service, item.worker.id, ["completed"], 12000);
+});
+
 test("cancels a running group and holds the notification", async (t) => {
   const root = temporaryRoot("worker-cancel-");
   const pidFile = path.join(root, "pid");
@@ -127,6 +179,28 @@ test("cancels a running group and holds the notification", async (t) => {
     Boolean,
     5000,
   );
+});
+
+test("stopping keeps the concurrency slot until the process group is confirmed gone", async (t) => {
+  const root = temporaryRoot("worker-stopping-slot-");
+  const { service } = createService(t, root, { TEST_SCENARIO: "hangtree" });
+  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  const first = await service.start("owner-1", startInput({ requestId: "stopping-1" }));
+  await waitStatus(service, first.worker.id, ["running"]);
+  const cancelling = service.cancel({ workerIds: [first.worker.id] }, "host");
+  await waitFor(
+    () => service.get(first.worker.id).worker.latestRun?.status,
+    (status) => status === "stopping",
+  );
+  const queued = await service.start(
+    "owner-1",
+    startInput({ requestId: "stopping-2" }),
+  );
+  assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
+  assert.deepEqual(await cancelling, [first.worker.id]);
+  assert.equal(service.get(first.worker.id).worker.latestRun?.status, "cancelled");
+  await waitStatus(service, queued.worker.id, ["running"]);
+  await service.cancel({ workerIds: [queued.worker.id] }, "host");
 });
 
 test("kills a grandchild left behind by a normally exited CLI", async (t) => {

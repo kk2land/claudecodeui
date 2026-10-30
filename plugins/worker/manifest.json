@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "DSH 与 Pi 子任务调度、运行记录、日志、清理和停用通知",
   "author": "CloudCLI",
+  "icon": "icon.svg",
   "type": "module",
   "slot": "tab",
   "entry": "dist/client.js",

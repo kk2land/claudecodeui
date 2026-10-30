@@ -134,11 +134,11 @@ function harness(options: {
 
   return {
     service, ipc, outbox, requests, claims, settlements, timers, wakeCalls,
-    setActiveRun(sessionId: string, value: boolean) { value ? activeRuns.add(sessionId) : activeRuns.delete(sessionId); },
-    setQueueHeld(sessionId: string, value: boolean) { value ? queueHeld.add(sessionId) : queueHeld.delete(sessionId); },
-    setDrafts(sessionId: string, value: boolean) { value ? drafts.add(sessionId) : drafts.delete(sessionId); },
-    setBackground(sessionId: string, value: boolean) { value ? background.add(sessionId) : background.delete(sessionId); },
-    setGoal(sessionId: string, value: boolean) { value ? goals.add(sessionId) : goals.delete(sessionId); },
+    setActiveRun(sessionId: string, value: boolean) { if (value) activeRuns.add(sessionId); else activeRuns.delete(sessionId); },
+    setQueueHeld(sessionId: string, value: boolean) { if (value) queueHeld.add(sessionId); else queueHeld.delete(sessionId); },
+    setDrafts(sessionId: string, value: boolean) { if (value) drafts.add(sessionId); else drafts.delete(sessionId); },
+    setBackground(sessionId: string, value: boolean) { if (value) background.add(sessionId); else background.delete(sessionId); },
+    setGoal(sessionId: string, value: boolean) { if (value) goals.add(sessionId); else goals.delete(sessionId); },
     setPhase(sessionId: string, value: string) { phases.set(sessionId, value); },
     setRunTurn(impl: (input: Record<string, unknown>) => Promise<{ started: boolean; error: string | null }>) { runTurnImpl = impl; },
     setEnsureReady(impl: () => Promise<boolean>) { ensureReadyImpl = impl; },

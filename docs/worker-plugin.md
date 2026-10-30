@@ -42,8 +42,9 @@ Worker MCP。若 skill 或 MCP 不可用，父会话应报告阻塞，而不是�
 
 并发键为 `(parentSessionId, projectId, workerType)`，DSH 与 Pi 默认各 3，每个键独立。`starting`、
 `running`、`stopping`、`unknown` 都占用额度；超额请求按 FIFO 排队。同一原生会话只允许一个调用。
-start/resume 都要求调用方提供 `requestId` 作为幂等键；重复键返回原 worker/run，不会再次启动 CLI。
-UI 的并发设置只接受正整数，保存后按类型生效。
+start/resume 都要求调用方提供 `requestId` 作为幂等键；相同操作与载荷的重复键返回原 worker/run，不会再次
+启动 CLI。同一 `requestId` 用于不同操作或不同载荷时直接拒绝（ID 冲突），不会覆盖原记录。UI 的并发设置只
+接受正整数，保存后按类型生效。
 
 ## 原生 CLI 参数与成功判定
 
@@ -56,11 +57,14 @@ DSH：
       [--patch <运行模型 patch>] --json [--session-id <真实会话 ID>] -
 
 - stdin 传 UTF-8 提示词，末尾参数 `-` 表示从 stdin 读取。
+- 若设置了 `CLOUDCLI_DSH_PATCHES`（文件路径 JSON 数组），这些 patch 先于插件必需的会话持久化 patch 和
+  运行模型 patch 传入，顺序固定为：用户 patch、`dsh-session.patch.yml`、模型 patch。
 - `DSH_HOME` 使用原环境值或 `~/.dsh`；会话根由插件显式设为实例数据目录下的 `sessions/dsh`。
 - 模型与 effort 通过 `agent-default-model` 的 provider/model/reasoningEffort patch 注入，不伪造 CLI flags；
   effort 必须同时有显式模型。
 - 成功要求：exit 0、事件完整合法、`session.cwd` 与 ID 匹配、出现 final，且最后一个 turn_end 的
-  `reason.kind=completed`。原生身份未知时保持 `unknown`，不猜测。
+  `reason.kind=completed`。已确认 CLI 退出但事件协议非法（例如缺少或错误的原生会话身份）是 `failed`，
+  不会据此猜测原生身份，也不能续接；只有进程存活/退出证据本身缺失时才是 `unknown`。
 
 Pi：
 
@@ -82,8 +86,10 @@ Pi：
 
 终态通知保存于插件独立 outbox，不占用用户的三条消息队列。parent 空闲时合并约 500ms 窗口，忙时约每 2 秒
 检查；用户排队消息优先。active goal、原生后台任务、queueHeld、stopping、stopFailed 等情况均等候；
-其他 worker 仍在运行时可以处理已完成结果。MCP 的 `ack` 只表示已收到，不是验收；已通过 MCP 确认的结果会
-取消待发通知，领取批次与回执避免重复投递。通知投递失败可在 UI 手工重试。
+其他 worker 仍在运行时可以处理已完成结果。普通 busy 只是延后领取，通知保持 `pending`。显式暂停、Stop
+或丢失 authority 时，待发通知转为 `held`，必须等用户明确继续或手工重试，不会被自动唤醒改回 `pending`。
+MCP 的 `ack` 只表示已收到，不是验收；已通过 MCP 确认的结果会取消待发通知，领取批次与回执避免重复投递。
+通知投递失败可在 UI 手工重试。
 
 主会话 Stop 会先封住新任务与自动唤醒，再取消该父会话的排队与运行任务；app-server 退出清理该实例全部
 worker，CloudCLI 退出清理全部。关闭浏览器或切换页面不取消任务。主停止或退出触发的取消不会自动唤醒父会话。
