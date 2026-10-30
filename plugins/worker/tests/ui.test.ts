@@ -482,7 +482,10 @@ test("DOM: per-worker cancel sends only that worker id", async () => {
 test("DOM: settings load and save type, model, reasoning, and concurrency fields", async () => {
   const mounted = await mountPlugin();
   try {
-    await waitFor(() => Boolean(findButton(mounted.container, "Worker 设置")), "设置入口");
+    await waitFor(() => {
+      const entry = findButton(mounted.container, "Worker 设置");
+      return entry !== undefined && !entry.disabled;
+    }, "设置入口");
     button(mounted.container, "Worker 设置").click();
     await waitFor(() => Boolean(byLabel(mounted.container, "DSH 并发")), "设置面板");
     const dsh = byLabel(mounted.container, "DSH 并发") as HTMLInputElement;
