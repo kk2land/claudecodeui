@@ -48,9 +48,12 @@ function harness(options: {
     sessions.set(sessionId, { project_path: projectPath, provider: 'codex', projectId: `project-${projectPath.split('/').at(-1)}` });
   }
   const wakeCalls: Array<Record<string, unknown>> = [];
+  const logs: Array<{ message: string; detail: unknown }> = [];
   let ensureReadyImpl: () => Promise<boolean> = async () => true;
   let ensureReadyCalls = 0;
   let failPause = false;
+  let closeAllImpl: (() => Promise<unknown>) | null = null;
+  let disposed = false;
   let runTurnImpl: (input: Record<string, unknown>) => Promise<{ started: boolean; error: string | null }> =
     async (input) => { wakeCalls.push(input); return { started: true, error: null }; };
 
@@ -82,12 +85,13 @@ function harness(options: {
         settlements.push({ batchId: String(payload.batchId), delivery: String(payload.delivery) });
         return { settled: true };
       }
+      if (action === 'closeAll' && closeAllImpl) return await closeAllImpl();
       return { workerIds: [], confirmed: true, settled: true };
     },
     onEvent(listener: (event: never) => void) { events.add(listener); return () => events.delete(listener); },
     onReady(listener: () => void) { ready.add(listener); return () => ready.delete(listener); },
     onDisconnect(listener: () => void) { disconnects.add(listener); return () => disconnects.delete(listener); },
-    dispose() {},
+    dispose() { disposed = true; },
     emit(event: unknown) { for (const listener of events) listener(event as never); },
     emitReady() { for (const listener of ready) listener(); },
     emitDisconnect() { for (const listener of disconnects) listener(); },
@@ -128,12 +132,12 @@ function harness(options: {
     }) as typeof clearTimeout,
     randomToken: () => 'owner-token',
     randomBatchId: () => 'batch-1',
-    log: () => {},
+    log: (message, detail) => { logs.push({ message, detail }); },
   });
   service.initialize();
 
   return {
-    service, ipc, outbox, requests, claims, settlements, timers, wakeCalls,
+    service, ipc, outbox, requests, claims, settlements, timers, wakeCalls, logs,
     setActiveRun(sessionId: string, value: boolean) { if (value) activeRuns.add(sessionId); else activeRuns.delete(sessionId); },
     setQueueHeld(sessionId: string, value: boolean) { if (value) queueHeld.add(sessionId); else queueHeld.delete(sessionId); },
     setDrafts(sessionId: string, value: boolean) { if (value) drafts.add(sessionId); else drafts.delete(sessionId); },
@@ -144,6 +148,8 @@ function harness(options: {
     setEnsureReady(impl: () => Promise<boolean>) { ensureReadyImpl = impl; },
     ensureReadyCalls: () => ensureReadyCalls,
     setPauseFailure(value: boolean) { failPause = value; },
+    setCloseAll(impl: () => Promise<unknown>) { closeAllImpl = impl; },
+    disposed: () => disposed,
     async prepare(sessionId = 'session-1', appServerInstanceId = 'instance-1', registerOwnerOverride?: () => Promise<boolean>) {
       const session = sessions.get(sessionId)!;
       if (registerOwnerOverride) {
@@ -419,6 +425,10 @@ test('a plugin disconnect and restart pause live owners and hold pre-restart not
   const h = harness();
   await h.prepare();
   h.ipc.emitDisconnect();
+  assert.equal(
+    h.logs.filter((entry) => entry.message === '[Workers] Worker plugin disconnected; owners are locally paused until a user turn').length,
+    1,
+  );
   h.emitNotification(notification());
   await tick();
   h.fireTimers();
@@ -609,6 +619,48 @@ test('startup failure rolls back the provisional owner', async () => {
   await tick();
   assert.equal(h.wakeCalls.length, 0);
   assert.equal(h.requests.some((request) => request.action === 'registerOwner'), false);
+});
+
+test('shutdown waits for closeAll confirmation before disposing the Worker IPC', async () => {
+  const h = harness();
+  await h.prepare();
+  let release!: (value: unknown) => void;
+  h.setCloseAll(async () => await new Promise((resolve) => { release = resolve; }));
+  let settled = false;
+  const shuttingDown = h.service.shutdown().then(() => { settled = true; });
+  await tick();
+  assert.equal(h.requests.filter((request) => request.action === 'closeAll').length, 1);
+  assert.equal(settled, false);
+  assert.equal(h.disposed(), false);
+
+  release({ confirmed: true });
+  await shuttingDown;
+  assert.equal(settled, true);
+  assert.equal(h.disposed(), true);
+  assert.equal(h.logs.some((entry) => entry.message === '[Workers] Could not confirm Worker cleanup during shutdown'), false);
+});
+
+test('a disconnect during shutdown is silent but failed closeAll still reports unconfirmed cleanup', async () => {
+  const h = harness();
+  await h.prepare();
+  let rejectCloseAll!: (error: Error) => void;
+  h.setCloseAll(async () => await new Promise((_resolve, reject) => { rejectCloseAll = reject; }));
+  const shuttingDown = h.service.shutdown();
+  await tick();
+  h.ipc.emitDisconnect();
+  // Shutdown already paused owners itself; the generic disconnect warning must
+  // not claim that a user turn is required.
+  assert.equal(
+    h.logs.some((entry) => entry.message === '[Workers] Worker plugin disconnected; owners are locally paused until a user turn'),
+    false,
+  );
+
+  rejectCloseAll(new Error('worker did not confirm cleanup'));
+  await shuttingDown;
+  const failure = h.logs.find((entry) => entry.message === '[Workers] Could not confirm Worker cleanup during shutdown');
+  assert.ok(failure);
+  assert.equal((failure.detail as Error).message, 'worker did not confirm cleanup');
+  assert.equal(h.disposed(), true);
 });
 
 test('an earlier registered owner keeps Stop honest when pause is unconfirmed during startup', async () => {

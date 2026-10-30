@@ -69,7 +69,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
   const cancel = dependencies.clearTimeout ?? clearTimeout;
   const randomToken = dependencies.randomToken ?? (() => randomBytes(32).toString('hex'));
   const randomBatchId = dependencies.randomBatchId ?? randomUUID;
-  const log = dependencies.log ?? ((message, detail) => console.error(message, detail));
+  const log = dependencies.log ?? console.error;
   const ownerTimers = new Map<string, ReturnType<typeof setTimeout>>();
   let refreshing = false;
   let shuttingDown = false;
@@ -559,6 +559,9 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
           void refreshOutbox();
         }),
         dependencies.ipc.onDisconnect(() => {
+          // Shutdown already paused owners and cleared notifications; its
+          // closeAll catch reports any unconfirmed cleanup.
+          if (shuttingDown) return;
           clearAllTimers();
           // A plugin restart must stop automatic consequences immediately, not
           // only after the reconnect event.
