@@ -18,6 +18,8 @@ vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ sub
 vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
   useProviderCapabilities: () => ({ codex: { nativeControls: { predictions: true, goal: false } } }),
 }));
+// The Worker activity hook reads the public plugin context; no Worker is installed here.
+vi.mock('@/modules/plugins', () => ({ usePlugins: () => ({ plugins: [] }) }));
 
 const PROJECT: Project = { projectId: 'prediction-project', displayName: 'Prediction project', fullPath: '/tmp/prediction-project' };
 

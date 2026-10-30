@@ -124,6 +124,7 @@
     "processIdle": "进程未启动",
     "processId": "Codex 启动进程 PID",
     "processStartedAt": "启动时间",
+    "workersActive": "本会话有活动 Worker",
     "permissionMode": "权限模式",
     "modes": {
       "default": "默认模式",

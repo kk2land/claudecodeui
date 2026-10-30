@@ -1,7 +1,7 @@
 import { useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Square, Settings2 } from 'lucide-react';
+import { ChevronDown, Loader2, Square, Settings2 } from 'lucide-react';
 
 import type { CodexControls, CodexModelProviderControls, CodexUserInputRequest } from '@/shared/types';
 import { cn } from '@/shared/utils';
@@ -58,7 +58,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
   hasRunningTasks?: boolean;
 }) {
   const { t, i18n } = useTranslation('chat');
-  const { state, error, pending } = controls;
+  const { state, error, pending, hasActiveWorkers = false } = controls;
   const showResumeQueue = Boolean(state?.queueHeld && hasQueuedDraft);
   const runtimePanelId = useId();
   // Keep advanced runtime controls out of the toolbar until the user opens them.
@@ -90,6 +90,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
             </>}
           </>}
         </div>
+        {hasActiveWorkers && <span role="status" className="sr-only">{t('codex.workersActive')}</span>}
         <button type="button" className={`${button} gap-1.5`} aria-expanded={runtimeOpen}
           aria-controls={runtimePanelId} onClick={() => {
             if (!runtimeOpen && native && modelProviders) {
@@ -98,7 +99,11 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
             }
             setRuntimeOpen((open) => !open);
           }}>
-          <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />
+          {hasActiveWorkers
+            ? <span className="inline-flex" title={t('codex.workersActive')}>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              </span>
+            : <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />}
           Codex
           <ChevronDown className={`h-3.5 w-3.5 transition-transform ${runtimeOpen ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>

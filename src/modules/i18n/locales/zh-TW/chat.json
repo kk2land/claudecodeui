@@ -109,7 +109,8 @@
       "bypassPermissions": "完全的系統存取，無限制。所有指令自動執行，具有完整的磁碟和網路存取權限。請謹慎使用。",
       "plan": "計畫模式 - 不執行任何指令"
     },
-    "technicalDetails": "技術細節"
+    "technicalDetails": "技術細節",
+    "workersActive": "本工作階段有活動 Worker"
   },
   "input": {
     "placeholder": "輸入 / 叫用指令，@ 選取檔案，或向 {{provider}} 提問...",
