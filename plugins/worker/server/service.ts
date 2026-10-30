@@ -611,6 +611,9 @@ export class WorkerService {
         }
         selected.status = "starting";
         selected.startedAt = new Date(this.now()).toISOString();
+        selected.progress.hardTimeoutAt = selected.timeoutSeconds === null
+          ? null
+          : new Date(Date.parse(selected.startedAt) + selected.timeoutSeconds * 1000).toISOString();
         this.store.saveRun(selected);
         try {
           this.launch(worker, owner, selected);

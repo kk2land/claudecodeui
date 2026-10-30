@@ -573,6 +573,24 @@ test("DOM: cleanup is offered only for a stopped plugin-created worktree", async
   }
 });
 
+test("DOM: queued runs show the configured timeout before its deadline starts", async () => {
+  const queued = run({ status: "queued", startedAt: null, timeoutSeconds: 120 });
+  const record = worker({ latestRun: queued });
+  const mounted = await mountPlugin({
+    state: () => snapshot({ workers: [record] }),
+    detail: () => ({ worker: record, runs: [queued] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => textOf(mounted.container).includes("进度与预算"), "运行预算");
+    assert.ok(textOf(mounted.container).includes("硬超时 120 秒"));
+    assert.equal(textOf(mounted.container).includes("未设置硬超时"), false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
 test("DOM: log pagination requests the next cursor and appends the page", async () => {
   const mounted = await mountPlugin({
     logs: (_id, pathAndQuery) => {
@@ -588,6 +606,7 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
       () => textOf(byLabel(mounted.container, "原始事件日志")).includes("第一页"),
       "首屏日志",
     );
+    assert.ok(textOf(mounted.container).includes("每页 64 KiB"));
     const more = button(mounted.container, "加载更多");
     assert.equal(more.disabled, false);
     more.click();
@@ -599,7 +618,7 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
     assert.equal(logCalls.length, 2);
     assert.equal(
       logCalls[1]!.path,
-      "/workers/worker-1/logs?stream=events&limit=200&runId=run-1&cursor=next-1",
+      "/workers/worker-1/logs?stream=events&limit=65536&runId=run-1&cursor=next-1",
     );
     // The initial page never carries a cursor, and the second request forwards the server's.
     assert.equal(logCalls[0]!.path.includes("cursor="), false);

@@ -136,7 +136,11 @@ function prepareDsh(input: PrepareInput): NativeLaunch {
       "MODEL_REQUIRED",
       "DSH 设置 effort 前必须显式选择模型",
     );
-  const patches = [...dshLaunchPatches(input.baseEnvironment), input.dshPatch];
+  const patches = dshLaunchPatches(input.baseEnvironment);
+  // The native proxy may allow the run directory while restricting the installation directory.
+  const sessionPatch = path.join(input.runDirectory, "dsh-session.patch.yml");
+  fs.copyFileSync(input.dshPatch, sessionPatch);
+  patches.push(sessionPatch);
   if (model) {
     let routeProvider = provider;
     let routeModel = model;

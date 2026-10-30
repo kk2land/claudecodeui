@@ -66,7 +66,7 @@ export function workerApi(host: WorkerHost) {
       runId: string | null,
       stream: WorkerLogStream,
       cursor: string | null,
-      limit = 200,
+      limit = 64 * 1024,
     ) => {
       const params = new URLSearchParams({ stream, limit: String(limit) });
       if (runId) params.set("runId", runId);

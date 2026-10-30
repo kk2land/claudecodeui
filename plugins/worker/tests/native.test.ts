@@ -54,6 +54,7 @@ test("DSH uses headless, configured patches, persistence patch, model patch and 
   fs.mkdirSync(runDirectory, { recursive: true });
   const patch = path.join(root, "session.patch.yml");
   fs.writeFileSync(patch, "[]");
+  const runPatch = path.join(runDirectory, "dsh-session.patch.yml");
   const custom = path.join(root, "custom.patch.yml");
   fs.writeFileSync(custom, "[]");
   const current = run(root, { model: "provider/model", effort: "high" });
@@ -79,8 +80,9 @@ test("DSH uses headless, configured patches, persistence patch, model patch and 
     "--patch",
     custom,
     "--patch",
-    patch,
+    runPatch,
   ]);
+  assert.equal(fs.readFileSync(runPatch, "utf8"), fs.readFileSync(patch, "utf8"));
   assert.ok(launch.argv.includes("--json"));
   assert.equal(launch.argv.at(-1), "-");
   assert.equal(launch.argv.includes("--session-id"), false);
@@ -103,6 +105,8 @@ test("DSH uses headless, configured patches, persistence patch, model patch and 
     nativeSessionId: "session-abc",
     nativeSessionFile: null,
   });
+  const resumedDirectory = path.join(root, "resumed-run");
+  fs.mkdirSync(resumedDirectory);
   const resumed = prepareLaunch({
     type: "dsh",
     run: previous,
@@ -110,11 +114,14 @@ test("DSH uses headless, configured patches, persistence patch, model patch and 
     prompt: "again",
     previous,
     dataDirectory: path.join(root, "data"),
-    runDirectory,
+    runDirectory: resumedDirectory,
     executable: "/bin/fake-dsh",
     baseEnvironment: { DSH_HOME: "/wrong-home" },
     dshPatch: patch,
   });
+  const resumedPatch = path.join(resumedDirectory, "dsh-session.patch.yml");
+  assert.equal(resumed.argv[resumed.argv.indexOf("--patch") + 1], resumedPatch);
+  assert.equal(fs.readFileSync(resumedPatch, "utf8"), fs.readFileSync(patch, "utf8"));
   assert.deepEqual(
     resumed.argv.slice(
       resumed.argv.indexOf("--session-id"),

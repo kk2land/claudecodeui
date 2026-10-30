@@ -53,10 +53,12 @@ start/resume 都要求调用方提供 `requestId` 作为幂等键；相同操作
 
 DSH：
 
-    dsh --profile headless --patch <绝对路径>/plugins/worker/patches/dsh-session.patch.yml \
+    dsh --profile headless --patch <运行目录>/dsh-session.patch.yml \
       [--patch <运行模型 patch>] --json [--session-id <真实会话 ID>] -
 
 - stdin 传 UTF-8 提示词，末尾参数 `-` 表示从 stdin 读取。
+- 必需的会话 patch 由插件从打包文件原样复制到每次运行的目录，并以绝对路径传入；原生执行器读取运行副本，
+  续接也为新 run 准备独立副本。
 - 若设置了 `CLOUDCLI_DSH_PATCHES`（文件路径 JSON 数组），这些 patch 先于插件必需的会话持久化 patch 和
   运行模型 patch 传入，顺序固定为：用户 patch、`dsh-session.patch.yml`、模型 patch。
 - `DSH_HOME` 使用原环境值或 `~/.dsh`；会话根由插件显式设为实例数据目录下的 `sessions/dsh`。

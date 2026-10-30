@@ -167,9 +167,9 @@ function BudgetLine({
           超过 {settings.softReminderSeconds} 秒软提醒阈值（仅提醒，不终止）
         </span>
       ) : null}
-      {run.progress.hardTimeoutAt ? (
+      {run.timeoutSeconds !== null ? (
         <span className={budget.hardOverdue ? "worker-danger" : undefined}>
-          硬超时 {time(run.progress.hardTimeoutAt)}
+          硬超时 {run.progress.hardTimeoutAt ? time(run.progress.hardTimeoutAt) : `${run.timeoutSeconds} 秒`}
         </span>
       ) : (
         <span>未设置硬超时</span>
@@ -408,7 +408,7 @@ function LogPanel({
           ))}
         </div>
         <span className="worker-muted">
-          每页 200 行
+          每页 64 KiB
           {current.done ? " · 已到末尾" : ""}
         </span>
       </div>
