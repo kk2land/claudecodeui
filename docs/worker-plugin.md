@@ -1,8 +1,8 @@
 # CloudCLI Worker 插件
 
-基于 codex-app-server，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH 或 Pi 子任务执行，
+支持 Codex app-server 与 DSH ACP 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH 或 Pi 子任务执行，
 并在独立进程中记录运行、原始事件与结果。插件负责执行与记录；任务拆分、review 和 Git 集成仍由父会话
-与用户授权的 Codex 负责，不提供自动 Git 集成或 DAG。
+与用户授权的主代理负责，不提供自动 Git 集成或 DAG。
 
 ## 启用与 skill 部署
 
@@ -16,20 +16,37 @@
     ln -s /absolute/path/to/cloudcli/plugins/worker/skills/cloudcli-workers \
       "${CODEX_HOME:-$HOME/.codex}/skills/cloudcli-workers"
 
-宿主不会自动注入、复制或安装这个 skill，也不会修改用户的 Codex 全局配置。目标已存在时保留它，
-部署时核对并手动处理旧链接或目录。MCP 连接由 app-server 的线程配置临时注入，预测线程不启用
-Worker MCP。若 skill 未启用，或当前会话的 Worker MCP 未启用、未连接、缺少所需工具，Codex 应跳过
+DSH 可将同一个 skill 软链到 `${DSH_HOME:-$HOME/.dsh}/skills/cloudcli-workers`，或项目的
+`.agents/skills/cloudcli-workers`；已有目录或链接也应先核对，避免覆盖。
+
+宿主不会自动注入、复制或安装这个 skill。目标已存在时保留它，部署时核对并手动处理旧链接或目录。
+Worker 的通用规则、计划与合并后清理要求位于 `plugins/worker/CLOUDCLI-WORKERS.md`；运行
+`plugins/worker/install-codex-instructions.sh` 可把引用块写入 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md`。
+脚本只维护 `<!-- cloudcli-workers:start -->` 与 `<!-- cloudcli-workers:end -->` 之间的内容，保留块外原文，
+重复运行不重复添加；目录或文件缺失时创建，脚本或文档搬移后重新运行会更新引用路径。脚本仅依赖 POSIX sh，
+不部署 skill，也不改动其他配置。
+
+使用 skill 前还须让主代理读取通用规则：Codex 运行上述安装脚本；DSH 则在项目 `AGENTS.md` 中添加
+“开始任务时，请先阅读并遵循 `/absolute/path/to/cloudcli/plugins/worker/CLOUDCLI-WORKERS.md`
+中的技能禁用规则与 CloudCLI Worker 使用说明（含计划阶段的分工要求）。”仅软链 skill 不会自动引入该文档。
+
+MCP 连接由运行时临时注入，不在用户配置中预置：Codex app-server 通过 CLI `-c` 临时声明 Worker MCP URL
+并设 `enabled=false`，无需在 `config.toml` 预置；`thread/start` 与 `resume` 注入专属 owner 凭证，预测线程
+不启用 Worker MCP。DSH 仅在 ACP 启动时由临时 patch 挂载 HTTP Worker MCP，headless 不注入。
+Codex 原生预测 fork 会继承父线程 MCP 且拒绝配置覆盖；启用 Worker 工具的会话明确显示预测暂不可用，
+避免预测线程获得父会话的 Worker 凭证。未启用 Worker 的会话继续使用原生预测。
+若 skill 未启用，或当前会话的 Worker MCP 未启用、未连接、缺少所需工具，主代理应跳过
 该 skill 并用普通工具直接完成原任务，不要以「请连接 MCP 后重试」为前提报告阻塞。只有已进入 Worker
 委派流程后的持续调用失败才报告具体阻塞；任何情况下都不要绕到 shell、`dsh`/`pi` 或复制 runner
 启动/管理 worker。
 
 ## 使用
 
-先判断是否值得委派：简单问答、代码定位、少量明确的文案、配置或代码修改由 Codex 直接处理，无需调用
+先判断是否值得委派：简单问答、代码定位、少量明确的文案、配置或代码修改由主代理直接处理，无需调用
 `worker_context`。工作量较大、可独立交接的实现、排查或验证，在预期收益超过启动、交接与 review 成本时
 再交给 Worker；简单改动无需强行拆分，也不按文件数或代码行数机械决定。用户明确要求 Worker 执行时
 遵从其选择；讨论或修改 skill 本身不算要求派发。查看、续接或取消已有 Worker 仍使用对应 MCP 流程。
-Review 发现少量局部、修法明确的问题时，Codex 可直接修复并验证；主要实现返工通过原 Worker 续接。
+Review 发现少量局部、修法明确的问题时，主代理可直接修复并验证；主要实现返工通过原 Worker 续接。
 
 决定委派且满足 skill/MCP 启用条件后，先调用一次 `worker_context` 确认真实父会话、项目和可用状态；
 同一轮内复用，仅范围变化或需要刷新时再查。每次 `worker_start` 都必须显式选择工作区：
@@ -99,7 +116,8 @@ run 的记录值，即使插件默认或环境此后已变化，也不会重新�
 
 ## 并发、排队与去重
 
-并发键为 `(parentSessionId, projectId, workerType)`，DSH 与 Pi 默认各 3，每个键独立。`starting`、
+并发键为 `(parentSessionId, projectId, workerType)`，DSH 与 Pi 默认各 3，每个键独立。应用会话 ID 已隐含
+provider 隔离，父会话、项目与执行器的额度仍各自独立。`starting`、
 `running`、`stopping`、`unknown` 都占用额度；超额请求按 FIFO 排队。同一原生会话只允许一个调用。
 start/resume 都要求调用方提供 `requestId` 作为幂等键；相同操作与载荷的重复键返回原 worker/run，不会再次
 启动 CLI。同一 `requestId` 用于不同操作或不同载荷时直接拒绝（ID 冲突），不会覆盖原记录。Worker 设置中的
@@ -158,6 +176,8 @@ Pi：
 
 主会话 Stop 会先封住新任务与自动唤醒，再取消该父会话的排队与运行任务；app-server 退出清理该实例全部
 worker，CloudCLI 退出清理全部。关闭浏览器或切换页面不取消任务。主停止或退出触发的取消不会自动唤醒父会话。
+ACP 空闲回收只回收传输通道，不取消 worker；后续需要时按已有运行记录恢复结果。用户主动停止或切换到
+headless 会取消 worker。
 
 重启后恢复运行记录，旧任务不自动重跑。无法确认停止的 run 标记 `unknown` 并继续占额；必须由人工核实原生
 CLI 与进程组已停止，再通过 UI 或 `worker_recover` 提交说明与 `confirmedStopped: true`。恢复只写入核实
@@ -170,7 +190,9 @@ CLI 与进程组已停止，再通过 UI 或 `worker_recover` 提交说明与 `c
 插件自身退出时由独立监护进程清理。
 
 `worker_cleanup` 只清理插件创建、工作区干净且已经停止的 worktree；保留分支、会话与日志，不清理 `existing`
-目录或用户手工创建的 worktree。
+目录或用户手工创建的 worktree。主代理 review 并完成必要验证后，才在授权范围内合并；合并后必须执行
+`worker_cleanup`，且仅在没有其他任务占用时进行。清理后不能再用 `worker_resume` 续接，新任务应
+`worker_start` 新建。
 
 Worker 设置中的“日志和运行记录保留天数”同时控制日志和运行记录，默认 1 天，按每次运行的结束时间计算，
 1 天为 24 小时。插件启动恢复完成后、保存设置后立即检查，运行期间每分钟检查一次。仅删除到期的
@@ -183,7 +205,8 @@ worker 记录。原生会话、分支和工作目录不会被自动删除；记�
 
 插件数据位于宿主分配的插件数据目录（通常为 `CLOUDCLI_PLUGIN_DATA_DIR`，按宿主数据库路径隔离），包含
 运行记录、outbox 与实例会话目录 `sessions/dsh`、`sessions/pi`。日志与结果可能含敏感内容，只能通过受保护的 UI REST 与 MCP 读取；MCP token
-不进入 CLI 环境，host UI token 不能调用 MCP 或 IPC 控制操作。插件不改写用户全局配置与认证数据；执行器按既有方式读取配置和认证，Worker 原生会话使用独立存储。
+不进入 CLI 环境，host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自动改写用户全局配置与认证
+数据；安装脚本仅在用户主动运行时维护上述引用块。执行器按既有方式读取配置和认证，Worker 原生会话使用独立存储。
 
 `plugins/worker/shared/contracts.ts` 是插件、宿主桥接与 UI 共用的纯类型契约；宿主从
 `server/shared/index.ts` 重导出实际使用部分，插件模块直接从该文件导入，禁止重复定义。跨进程使用：
@@ -194,6 +217,9 @@ worker 记录。原生会话、分支和工作目录不会被自动删除；记�
 
 ## 验收限制
 
-自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理，不需要调用真实模型。
-真实 Codex app-server 与 DSH/Pi 的联通仍需在支持这些执行器的部署环境验收。浏览器验收先完成构建，
+自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；另有真实 Codex app-server 与 DSH ACP
+连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用。
+Codex CLI 与 SDK 固定为 `0.165.0`。本地启动器被代理替换时，可用 `CLOUDCLI_CODEX_TEST_BINARY` 指向同版本官方二进制，
+验证原生预测、模型服务切换与 SDK 会话交接，避免代理改写本地测试请求。
+实际部署中的执行器、认证和模型联通仍需环境验收。浏览器验收先完成构建，
 再按 AGENTS.md 的本地手工测试流程由 Codex 直接启动或重启测试进程并检查日志，不要要求用户代为启动。
