@@ -206,19 +206,35 @@ test('prediction requests require per-turn opt-in and an ordinary successful tur
   assert.equal(goal.calls.some((c) => c.method === 'thread/fork'), false);
 });
 
-test('a Worker-enabled parent reports prediction isolation as unsupported without fetching config or creating a fork', async () => {
+test('a Worker-enabled parent keeps its owner while predictions use an isolated ephemeral fork', async () => {
   let configCalls = 0;
+  let ownerCalls = 0;
   const h = harness({ config: () => { configCalls++; return READY_CONFIG; } });
   h.runtime.setWorkerBridge({
-    async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true, url: 'http://localhost/worker-mcp' } }; },
+    async prepareSession() {
+      ownerCalls++;
+      return { 'mcp_servers.cloudcli_workers': { enabled: true, url: 'http://localhost/worker-mcp' } };
+    },
     async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
   });
   await h.setup();
+  await eventually(() => h.predictions('thread/fork').length === 1, 'isolated prediction fork');
   assert.equal(h.state().workerEnabled, true);
-  assert.equal(h.state().prediction?.status, 'unavailable');
-  assert.equal(h.state().prediction?.reason, 'worker_mcp');
-  assert.equal(configCalls, 0);
-  assert.equal(h.predictions('thread/fork').length, 0);
+  assert.equal(configCalls, 1);
+  assert.deepEqual(h.predictions('thread/fork')[0].params, {
+    threadId: 'native-thread', model: 'test-model', modelProvider: 'openai',
+    sandbox: 'read-only', approvalPolicy: 'never', config: { mcp_servers: {} },
+    ephemeral: true, excludeTurns: true, threadSource: 'composer_predictions',
+  });
+  h.resolve('thread/fork', 1, { thread: { id: 'isolated-fork' } });
+  await eventually(() => h.predictions('turn/start').some((call) => call.params.threadId === 'isolated-fork'));
+  h.resolve('turn/start', 2, { turn: { id: 'prediction-turn' } });
+  h.rawEvent('item/agentMessage/delta', 'isolated-fork', { turnId: 'prediction-turn', delta: '{"suggestion":"Next."}' });
+  h.rawEvent('turn/completed', 'isolated-fork', { turn: { id: 'prediction-turn', status: 'completed' } });
+  await eventually(() => h.state().prediction?.status === 'ready');
+  assert.equal(h.state().prediction?.text, 'Next.');
+  assert.equal(h.state().workerEnabled, true);
+  assert.equal(ownerCalls, 1, 'only the parent registers Worker ownership');
   assert.equal(h.predictions('thread/start').length, 1);
   assert.equal(h.state().error, undefined);
 });

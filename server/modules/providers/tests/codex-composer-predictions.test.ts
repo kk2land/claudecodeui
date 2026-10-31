@@ -133,6 +133,30 @@ test('a valid JSON suggestion is parsed and returned ready', async () => {
   assert.deepEqual(outcome, { status: 'ready', text: 'Write the README.' });
 });
 
+test('MCP isolation uses a native ephemeral fork with the parent model route and an empty server map', async () => {
+  const h = harness();
+  const result = generate(h.executor, { isolateMcp: true, modelProvider: 'parent-provider' });
+  assert.deepEqual(h.calls[0].params, {
+    threadId: 'parent',
+    model: 'gpt-5.4',
+    modelProvider: 'parent-provider',
+    sandbox: 'read-only',
+    approvalPolicy: 'never',
+    config: { mcp_servers: {} },
+    ephemeral: true,
+    excludeTurns: true,
+    threadSource: 'composer_predictions',
+  });
+  h.resolve('thread/fork', 1, { thread: { id: 'isolated-fork' } });
+  await tick();
+  h.resolve('turn/start', 1, { turn: { id: 'prediction-turn' } });
+  h.event('item/agentMessage/delta', 'isolated-fork', { turnId: 'prediction-turn', delta: '{"suggestion":"Next."}' });
+  h.event('turn/completed', 'isolated-fork', { turn: { id: 'prediction-turn', status: 'completed' } });
+  assert.deepEqual(await result, { status: 'ready', text: 'Next.' });
+  assert.equal(h.calls.some((call) => call.method === 'thread/start'), false);
+  assert.ok(h.calls.some((call) => call.method === 'thread/unsubscribe' && call.params.threadId === 'isolated-fork'));
+});
+
 test('null and malformed answers map to empty / failed', async () => {
   for (const [json, reason] of [['{"suggestion": null}', 'empty'], ['not json', 'failed'], ['{"other": 1}', 'failed']] as const) {
     const h = harness();

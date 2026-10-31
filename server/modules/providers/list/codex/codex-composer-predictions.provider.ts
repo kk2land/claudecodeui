@@ -91,11 +91,12 @@ class Run {
 /**
  * Used by CodexAppServerRuntime to run predictions in ephemeral parent forks.
  *
- * The desktop client does not use a prediction RPC. It forks the parent with
- * `experimentalPredictionMode`, runs an ordinary text turn on that temporary
- * thread with the remotely configured prompt, reads the standard agent-message
- * notifications, and unsubscribes. This executor does the same; nothing it
- * receives may reach the parent conversation.
+ * The desktop client forks the parent with `experimentalPredictionMode`, runs
+ * the configured prompt on that temporary thread, then unsubscribes. Worker
+ * parents instead use a configurable ephemeral fork to disable inherited MCP:
+ * prediction mode rejects config overrides, and its disable-MCP switch only
+ * applies to incremental Responses Lite tools. Both paths retain parent history
+ * and keep the suggestion's events out of the parent conversation.
  */
 export class CodexComposerPredictions {
   /** Temporary thread id → its creating epoch; a thread remains owned until its
@@ -136,6 +137,9 @@ export class CodexComposerPredictions {
     sourceTurnId: string;
     config: CodexPredictionConfiguration;
     model: string;
+    modelProvider?: string | null;
+    /** Uses a configurable native fork so no parent MCP credentials remain active. */
+    isolateMcp?: boolean;
     effort: string | null;
     signal: AbortSignal;
   }): Promise<PredictionOutcome> {
@@ -149,12 +153,17 @@ export class CodexComposerPredictions {
     try {
       const forkPromise = this.client.request<AnyRecord>('thread/fork', {
         threadId: input.parentThreadId,
-        experimentalPredictionMode: true,
+        ...(input.isolateMcp ? {
+          // An ordinary fork otherwise falls back to global model settings.
+          model: input.model,
+          ...(input.modelProvider ? { modelProvider: input.modelProvider } : {}),
+          sandbox: 'read-only',
+          approvalPolicy: 'never',
+          config: { mcp_servers: {} },
+        } : { experimentalPredictionMode: true }),
         ephemeral: true,
         excludeTurns: true,
         threadSource: 'composer_predictions',
-        // Native prediction mode rejects configuration overrides. The runtime
-        // excludes Worker-enabled parents before entering this executor.
       });
       // The fork promise is observed for its full lifetime: whatever thread it
       // finally names is recorded and, if this run has been cancelled, cleaned

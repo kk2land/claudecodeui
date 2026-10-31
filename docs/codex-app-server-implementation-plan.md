@@ -290,7 +290,8 @@ Goal 在原生执行器内续轮，thread 控制器持续接收。更换目标�
 
 - CLI 升级到 `@openai/codex` 0.163.0（仅该包与平台二进制）。官方 `thread/prediction/request` 仍返回未实现，**不使用**该方法或 `thread/prediction/updated` 通知。
 - 远端配置：认证后 GET `https://chatgpt.com/backend-api/wham/predictions/config`，字段校验 `is_enabled`、`unsupported_models`、采样率、`prompt`、`prompt_version`、`prediction_reasoning_effort`；凭据读 `CODEX_HOME/auth.json`（显式 `apikey` 模式不当作 OAuth），成功结果按账号/token 身份缓存约 5 分钟，过期/401 经 app-server `account/read {refreshToken:true}` 后重读，不自行写 token；仅官方 origin，`redirect:'error'`。无可用凭据或配置时明确不可用，不伪造原生支持。
-- 生成：父 turn 成功后，`thread/fork {experimentalPredictionMode, ephemeral, excludeTurns, threadSource:'composer_predictions'}` 建临时线程，再以普通 `turn/start` 运行远端 prompt + JSON schema 指令的 turn；仅解析合法 JSON（`suggestion: string|null`），空/null 视为无建议。fork 失败直接不可用，**无 fresh-thread fallback**。
+- 生成：父 turn 成功后，无 Worker 的会话使用 `thread/fork {experimentalPredictionMode, ephemeral, excludeTurns, threadSource:'composer_predictions'}` 建临时线程。启用 Worker 的会话使用允许配置覆盖的普通原生临时 fork，显式保留父模型/服务并以 `config: {mcp_servers:{}}` 关闭预测分支的所有 MCP，同时请求只读权限；父会话保留 Worker 工具及异步调度。两条路径均以普通 `turn/start` 运行远端 prompt + JSON schema 指令，仅解析合法 JSON（`suggestion: string|null`），空/null 视为无建议。fork 失败直接不可用，**无 fresh-thread fallback**。
+- Worker 隔离：`experimentalPredictionMode` 不允许覆盖 MCP 配置，`experimentalDisablePredictionMcp` 仅作用于 Responses Lite 的增量工具路径，普通 Responses 下仍可能继承 Worker。因而 Worker 会话明确选择可配置的原生临时 fork，以牺牲专用预测模式的部分缓存复用换取 MCP 隔离，不以“已启用 Worker”为由整体关闭建议。真实二进制测试验证预测模型请求无 Worker 工具、预测分支 MCP 列表为空、显式调用 Worker 被拒绝，以及父会话 Worker 仍可调用。
 - 隔离与生命周期：预测线程的消息/用量/完成不进入父会话 transcript、队列、预算或 run completion，也不注册为子 agent；反向审批/提问自动取消且不弹 UI。
 - 资格边界：切到 Plan、原生 Goal 变为 active 时会立即清除进行中或已就绪的预测（配置加载期间同样在返回后复核），不再 fork，也不展示旧建议；切回普通模式不会复活已清除的预测。总 30s deadline 覆盖配置、fork 与 turn；newTurn/stop/release/close/进程退出/父 turn 重建均取消；晚到 fork/turn ACK 在后台按连接代际清理（interrupt + unsubscribe），旧代际不会向新进程发送旧 ID。
 - 能力门控：会话级 `predictionSupported` 依据真实 CLI 版本（公开稳定 0.163.0 起；预发布/未知视为不支持），前端据此展示或明确提示不支持，SDK 运行时隐藏原生入口。

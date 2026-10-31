@@ -5,7 +5,10 @@ import { createServer } from 'node:http';
 import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
-import test from 'node:test';
+import test, { type TestContext } from 'node:test';
+
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
@@ -46,7 +49,7 @@ const PREDICTION_CONFIG: CodexPredictionConfiguration = {
  * prompt, parses the JSON suggestion from a localhost Responses stub, and
  * unloads the fork — no account, no paid model, no network beyond 127.0.0.1.
  */
-test('bundled app-server forks an ephemeral prediction, parses the JSON suggestion and unloads it', { timeout: 60_000 }, async (t) => {
+async function verifyNativePrediction(t: TestContext, workerEnabled: boolean): Promise<void> {
   const require = createRequire(import.meta.url);
   let launcher: string;
   try { launcher = require.resolve('@openai/codex/bin/codex.js'); }
@@ -58,12 +61,27 @@ test('bundled app-server forks an ephemeral prediction, parses the JSON suggesti
   // turn gets a JSON suggestion. Every request is recorded so the assertions can
   // prove the prediction inherited the parent user+assistant context.
   const requests: AnyRecord[] = [];
+  const mcpConnections = new Set<McpServer>();
+  let workerCalls = 0;
   const server = createServer(async (request, response) => {
     try {
-      if (!request.url?.endsWith('/responses')) { response.writeHead(404); response.end(); return; }
       let text = '';
       for await (const chunk of request) text += chunk;
       const body = JSON.parse(text);
+      if (request.url === '/worker-mcp') {
+        const mcp = new McpServer({ name: 'fixture-worker', version: '1' });
+        mcp.registerTool('worker_context', { inputSchema: {}, description: 'Harmless Worker fixture' }, async () => {
+          workerCalls++;
+          return { content: [{ type: 'text' as const, text: 'parent Worker is available' }] };
+        });
+        const stream = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+        mcpConnections.add(mcp);
+        response.on('close', () => { void stream.close(); void mcp.close(); mcpConnections.delete(mcp); });
+        await mcp.connect(stream);
+        await stream.handleRequest(request, response, body);
+        return;
+      }
+      if (!request.url?.endsWith('/responses')) { response.writeHead(404); response.end(); return; }
       requests.push(body);
       const serialized = JSON.stringify(body.input ?? []);
       const isPrediction = serialized.includes('Return only JSON matching this schema');
@@ -93,18 +111,30 @@ test('bundled app-server forks an ephemeral prediction, parses the JSON suggesti
 
   const env = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')), CODEX_HOME: root };
   const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
+  // The installed launcher may enforce a task interval before turn/start.
   const transport = new CodexAppServerTransport({ spawn: () => spawn(binary || process.execPath,
     [...(binary ? [] : [launcher]), 'app-server', '-c', 'thread_unload_delay_secs=0'], {
     stdio: ['pipe', 'pipe', 'pipe'], env,
-  }), timeoutMs: 5000 });
+  }), timeoutMs: 30_000 });
 
   // Record the real `thread/fork` acknowledgement (the fork id is not guessable
   // and a fork is not a subagent, so it has no parentThreadId).
   const nativeRequest = transport.request.bind(transport);
   let forkInfo: AnyRecord | null = null;
+  let forkMcp: AnyRecord | null = null;
   transport.request = async <T = AnyRecord>(method: string, params?: unknown): Promise<T> => {
     const result = await nativeRequest<T>(method, params);
-    if (method === 'thread/fork') forkInfo = (result as AnyRecord).thread;
+    if (method === 'thread/fork') {
+      forkInfo = (result as AnyRecord).thread;
+      if (workerEnabled) {
+        forkMcp = await nativeRequest('mcpServerStatus/list', { threadId: forkInfo!.id, detail: 'toolsAndAuthOnly' });
+        // Exercise the native tool boundary while the fork is still loaded.
+        // This fixture never starts real Workers, even if isolation regresses.
+        await assert.rejects(nativeRequest('mcpServer/tool/call', {
+          threadId: forkInfo!.id, server: 'cloudcli_workers', tool: 'worker_context', arguments: {},
+        }), /unknown MCP server 'cloudcli_workers'/);
+      }
+    }
     return result;
   };
 
@@ -123,6 +153,14 @@ test('bundled app-server forks an ephemeral prediction, parses the JSON suggesti
     configProvider,
     providerEligible: () => true,
     modelProviders: new CodexModelProviderService({ home: root, environment: {} }),
+  });
+  if (workerEnabled) runtime.setWorkerBridge({
+    async prepareSession() {
+      return { 'mcp_servers.cloudcli_workers': { enabled: true,
+        url: 'http://127.0.0.1:' + address.port + '/worker-mcp',
+        http_headers: { Authorization: 'Bearer fixture-parent' } } };
+    },
+    async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
   });
 
   let threadId: string | null = null;
@@ -144,7 +182,7 @@ test('bundled app-server forks an ephemeral prediction, parses the JSON suggesti
     await until(() => {
       const status = runtime.getState('app-pred-smoke').prediction?.status;
       return status === 'ready' || status === 'unavailable';
-    }, 'prediction to settle');
+    }, 'prediction to settle', 35_000);
     const prediction = runtime.getState('app-pred-smoke').prediction;
     assert.equal(prediction?.status, 'ready', `prediction unavailable: ${JSON.stringify({ prediction, requests: requests.length })}`);
     assert.equal(prediction?.text, SUGGESTION, 'parsed JSON suggestion');
@@ -164,6 +202,14 @@ test('bundled app-server forks an ephemeral prediction, parses the JSON suggesti
     assert.ok(predictionJson.includes('PARENT_REPLY'), 'prediction input inherits the parent assistant reply');
     assert.ok(predictionJson.includes(PREDICTION_CONFIG.prompt), 'prediction input carries the configured prompt');
     assert.ok(predictionJson.includes('Return only JSON matching this schema'), 'prediction input carries the JSON schema instruction');
+    if (workerEnabled) {
+      assert.ok(JSON.stringify(requests[0].tools).includes('worker_context'), 'parent has Worker tools');
+      assert.ok(!JSON.stringify(predictionRequest.tools).includes('worker_context'), 'prediction has no Worker tools');
+      assert.deepEqual((forkMcp as AnyRecord | null)?.data, [], 'prediction has no configured MCP servers');
+      assert.equal(workerCalls, 0, 'even an explicit native tool call cannot invoke Worker from the fork');
+      assert.equal(predictionRequest.model, requests[0].model, 'prediction retains the parent model');
+      assert.equal(runtime.getState('app-pred-smoke').workerEnabled, true);
+    }
 
     // The fork was ephemeral, is a distinct thread and wrote no transcript.
     const fork = forkInfo as AnyRecord | null;
@@ -202,10 +248,23 @@ test('bundled app-server forks an ephemeral prediction, parses the JSON suggesti
       const loaded = await transport.request('thread/loaded/list', {}) as AnyRecord;
       return Array.isArray(loaded.data) && loaded.data.length === 1 && loaded.data[0] === threadId;
     }, 'fork unloaded leaving only the parent', 15_000);
+    if (workerEnabled) {
+      const status = await nativeRequest('mcpServerStatus/list', { threadId, serverName: 'cloudcli_workers', detail: 'toolsAndAuthOnly' });
+      assert.ok(status.data.some((entry: AnyRecord) => entry.tools?.worker_context), 'parent still has Worker tools');
+      await nativeRequest('mcpServer/tool/call', { threadId, server: 'cloudcli_workers', tool: 'worker_context', arguments: {} });
+      assert.equal(workerCalls, 1, 'parent Worker access still works after generating the suggestion');
+    }
   } finally {
     await runtime.abort('app-pred-smoke').catch(() => false);
     await transport.close(); await runtime.close();
+    for (const mcp of mcpConnections) await mcp.close();
     server.closeAllConnections(); await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
-});
+}
+
+test('bundled app-server forks an ephemeral prediction, parses the JSON suggestion and unloads it',
+  { timeout: 60_000 }, (t) => verifyNativePrediction(t, false));
+
+test('bundled app-server isolates Worker MCP while preserving parent history, model and Worker access',
+  { timeout: 60_000 }, (t) => verifyNativePrediction(t, true));
