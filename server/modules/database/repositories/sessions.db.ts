@@ -22,6 +22,8 @@ type SessionRow = {
   isArchived: number;
   created_at: string;
   updated_at: string;
+  /** Last chat open recorded by the app as ISO UTC; NULL until the first read. */
+  last_opened_at: string | null;
 };
 
 type RecentSessionsPage = {
@@ -30,7 +32,7 @@ type RecentSessionsPage = {
 };
 
 const SESSION_ROW_COLUMNS =
-  'session_id, provider, provider_session_id, project_path, jsonl_path, session_source, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at';
+  'session_id, provider, provider_session_id, project_path, jsonl_path, session_source, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at, last_opened_at';
 
 // Keep retired GPT Web rows available by id and for explicit project deletion,
 // while excluding them from UI pages, search, and transcript pruning.
@@ -495,6 +497,12 @@ export const sessionsDb = {
     ).run(customName, sessionId);
   },
 
+  /** Chat history and Codex state reads record opens for retention independently of transcript activity. */
+  recordSessionOpened(sessionId: string, openedAt = Date.now()): void {
+    getConnection().prepare('UPDATE sessions SET last_opened_at = ? WHERE session_id = ?')
+      .run(new Date(openedAt).toISOString(), sessionId);
+  },
+
   /**
    * Records the provider-native origin read from a transcript's first
    * metadata row. The synchronizer writes `unknown` when a transcript never
@@ -822,17 +830,20 @@ export const sessionsDb = {
    * app-created sessions still waiting for their first provider write and
    * OpenCode rows (whose transcripts all live inside one shared sqlite file).
    * Used by the session synchronizer to find rows whose transcript has been
-   * deleted underneath the index.
+   * deleted underneath the index, and by DSH retention to remove only the
+   * rows whose files it successfully deletes. An optional provider restricts
+   * maintenance without applying user-facing visibility filters.
    */
-  getSessionsWithTranscriptPath(): Array<{ session_id: string; jsonl_path: string }> {
+  getSessionsWithTranscriptPath(provider?: string): Array<{ session_id: string; jsonl_path: string }> {
     const db = getConnection();
     return db
       .prepare(
         `SELECT session_id, jsonl_path
          FROM sessions
          WHERE jsonl_path IS NOT NULL AND jsonl_path <> ''
+           AND (? IS NULL OR provider = ?)
            AND ${VISIBLE_SESSION_PROVIDER_SQL}`
       )
-      .all() as Array<{ session_id: string; jsonl_path: string }>;
+      .all(provider ?? null, provider ?? null) as Array<{ session_id: string; jsonl_path: string }>;
   },
 };

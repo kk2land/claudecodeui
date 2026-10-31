@@ -1,11 +1,48 @@
 import { stat } from 'node:fs/promises';
 
+import { z } from 'zod';
+
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { AppError } from '@/shared/index.js';
 import type { CodexModelSelection } from '@/shared/index.js';
 
-/** Session branching uses the runtime-owned persistent transport. */
+const threadListResponse = z.object({
+  data: z.array(z.object({
+    id: z.string().min(1),
+    source: z.union([z.string(), z.record(z.string(), z.unknown())]),
+    recencyAt: z.number().nullable().optional(),
+    updatedAt: z.number(),
+    status: z.object({ type: z.string() }),
+  })),
+  nextCursor: z.string().nullable().optional(),
+});
+
+/** Session branching and retention use the runtime-owned persistent transport. */
 export const codexAppServer = {
+  /** Retention explicitly includes exec, subagents, and every model provider on each page. */
+  async listThreads(archived: boolean, cursor?: string) {
+    const result = threadListResponse.parse(await codexAppServerTransport.request('thread/list', {
+      archived, cursor, limit: 100, modelProviders: [],
+      sourceKinds: ['cli', 'vscode', 'exec', 'appServer', 'subAgent', 'subAgentReview',
+        'subAgentCompact', 'subAgentThreadSpawn', 'subAgentOther', 'unknown'],
+      sortKey: 'recency_at', sortDirection: 'asc',
+    }));
+    return {
+      threads: result.data.map((thread) => ({
+        id: thread.id,
+        isExec: thread.source === 'exec',
+        lastUsedAt: (thread.recencyAt ?? thread.updatedAt) * 1000,
+        active: thread.status.type === 'active',
+      })),
+      nextCursor: result.nextCursor ?? null,
+    };
+  },
+
+  /** Retention delegates native storage and fork bookkeeping to Codex itself. */
+  async deleteThread(threadId: string): Promise<void> {
+    await codexAppServerTransport.request('thread/delete', { threadId });
+  },
+
   /**
    * Copies a thread into a new one that ends at `lastTurnId`, or copies the
    * whole thread when it is omitted.

@@ -15,6 +15,7 @@ import {
     codexRateLimitsService,
     initializeSessionsWatcher,
     providerRuntimeService,
+    sessionRetentionService,
     setCodexWorkerBridge,
     setDshWorkerBridge,
 } from '@/modules/providers/index.js';
@@ -397,6 +398,7 @@ async function startServer() {
 
             // Start watching the projects folder for changes
             await initializeSessionsWatcher();
+            sessionRetentionService.start();
             // Sends anything that came due while the server was not running,
             // then keeps polling.
             initializeScheduledMessageDispatcher(providerRuntimeService, {
@@ -417,6 +419,7 @@ async function startServer() {
         closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            await sessionRetentionService.close().catch((error) => console.error('[SessionRetention] Shutdown failed', error));
             // Seal Worker delivery and let the plugin confirm child cleanup before
             // the provider process and the plugin server are stopped.
             await workerModule.shutdown().catch((error) => console.error('[Workers] Shutdown failed', error));

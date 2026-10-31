@@ -365,6 +365,36 @@ Useful tests in this repo:
 If you touch sessions or session synchronization, add or update focused tests
 alongside the implementation.
 
+## Daily Session Retention
+
+`sessionRetentionService` runs once on every server startup, then every 24 hours
+while the server stays running. Failed files or providers are logged and retried
+on the next sweep. Shutdown clears the timer and drains any running sweep before
+closing provider runtimes.
+
+Codex retention lists every source and both archived states through the existing
+app-server connection. It retains `exec` threads for 7 days and all other sources
+for 30 days. The app records `last_opened_at` on Codex state and first-page
+history reads, including SDK chats and cached history. Retention uses the later
+of that persisted open time and native `recencyAt` (falling back to `updatedAt`);
+native history reads and resumes alone do not update recency. Opens are recorded
+from this version onward; existing rows without an open time use native timestamps.
+Native `thread/delete` owns file deletion and fork bookkeeping; only successful
+deletions remove the corresponding app index and history-cache entry.
+Codex can reject deleting a parent whose history is still referenced by a kept
+paginated fork; that parent remains eligible for a later sweep.
+
+DSH retention uses `DSH_HOME/sessions` (default `~/.dsh/sessions`), honoring the
+existing `CLOUDCLI_DSH_SESSIONS_DIR` override. All regular native generation
+files, including compressed `.zstd` logs, expire after 30 days by file mtime.
+Both providers retain files exactly at the cutoff and skip known active
+sessions. DSH matches deleted files to canonical index paths, including a linked
+configured home. The scanners preserve lock files and do not traverse symlink entries.
+
+The Worker plugin independently expires its native DSH and Pi session files
+after 3 days, once at plugin startup and then every 24 hours, including the legacy
+external session roots. Its configurable task-history retention remains separate.
+
 ## Common Mistakes
 
 - Adding provider files but forgetting `provider.registry.ts` or

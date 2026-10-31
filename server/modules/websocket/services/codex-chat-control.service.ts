@@ -114,6 +114,8 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
       } else {
         action = parseControl(raw);
       }
+      // Opening or reconnecting a chat requests state even in the SDK runtime.
+      if (action.action === 'state') sessionsDb.recordSessionOpened(sessionId);
       if (action.action === 'model-provider') {
         const state = runtime.getState?.('codex', sessionId);
         const currentProvider = state?.modelSelection?.modelProvider ?? state?.activeModelSelection?.modelProvider;

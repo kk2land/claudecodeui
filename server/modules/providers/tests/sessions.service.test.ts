@@ -235,6 +235,37 @@ test('history pages are sliced from the cached full transcript and see appended 
   }
 });
 
+test('cached Codex first-page reads renew the open time while older pages do not', { concurrency: false }, async (t) => {
+  const directory = await mkdtemp(path.join(os.tmpdir(), 'codex-history-open-'));
+  let now = Date.parse('2026-10-31T12:00:00.123Z');
+  t.mock.method(Date, 'now', () => now);
+  const load = t.mock.method(providerRegistry.resolveProvider('codex').sessions, 'fetchHistory', async () => ({
+    messages: [], total: 0, hasMore: false, offset: 0, limit: null,
+  }));
+  try {
+    await withIsolatedDatabase(async () => {
+      const file = path.join(directory, 'session.jsonl');
+      await writeFile(file, 'fixture');
+      sessionsDb.createSession('codex-cached-open', 'codex', directory, 'Cached history',
+        '2026-08-01T00:00:00.000Z', '2026-08-01T00:00:00.000Z', file);
+
+      await sessionsService.fetchHistory('codex-cached-open');
+      now += 86_400_000;
+      await sessionsService.fetchHistory('codex-cached-open', { offset: 0, limit: 20 });
+      const opened = sessionsDb.getSessionById('codex-cached-open')!;
+      assert.equal(opened.last_opened_at, new Date(now).toISOString());
+      assert.equal(opened.updated_at, '2026-08-01T00:00:00.000Z');
+      assert.equal(load.mock.callCount(), 1, 'the second open uses cached history');
+
+      now += 86_400_000;
+      await sessionsService.fetchHistory('codex-cached-open', { offset: 20, limit: 20 });
+      assert.equal(sessionsDb.getSessionById('codex-cached-open')?.last_opened_at, opened.last_opened_at);
+    });
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 /**
  * Stands in for the provider registry with one provider per id, each with the
  * runtime given — the seam through which a runtime's background work reaches

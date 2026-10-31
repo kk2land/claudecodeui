@@ -527,6 +527,11 @@ export const sessionsService = {
       });
     }
 
+    // First-page reads also cover cached chats reopened without a native resume.
+    if (session.provider === 'codex' && (options.offset ?? 0) === 0) {
+      sessionsDb.recordSessionOpened(sessionId);
+    }
+
     // App-created sessions that never produced a provider transcript yet
     // (e.g. first message still streaming) simply have no history.
     if (!session.provider_session_id) {

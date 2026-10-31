@@ -42,6 +42,33 @@ async function harness(runTest: (h: {
 const settle = () => new Promise((resolve) => setImmediate(resolve));
 const queued = { id: 'message-1', content: 'guide this', attachments: [{ path: '/etc/passwd' }] };
 
+for (const mode of ['app-server', 'sdk'] as const) {
+  test(`opening a chat in ${mode} mode records access while background subscriptions do not`, async (t) => {
+    let now = Date.parse('2026-10-31T12:00:00.123Z');
+    t.mock.method(Date, 'now', () => now);
+    await harness(async (h) => {
+      h.state.runtime = mode;
+      h.state.phase = 'idle';
+      h.state.turnId = null;
+      sessionRuntimeDb.update(h.sessionId, { runtime: mode });
+      const before = sessionsDb.getSessionById(h.sessionId)!;
+      assert.equal(before.last_opened_at, null);
+
+      h.send({ action: 'state' });
+      await settle();
+      const opened = sessionsDb.getSessionById(h.sessionId)!;
+      assert.equal(h.frames.at(-1)?.ok, true);
+      assert.equal(opened.last_opened_at, new Date(now).toISOString());
+      assert.equal(opened.updated_at, before.updated_at);
+
+      now += 60_000;
+      h.socket.emit('message', JSON.stringify({ type: 'chat.subscribe', sessions: [{ sessionId: h.sessionId, lastSeq: 0 }] }));
+      await settle();
+      assert.equal(sessionsDb.getSessionById(h.sessionId)?.last_opened_at, opened.last_opened_at);
+    });
+  });
+}
+
 test('model-provider controls validate and forward the current session selection', async () => {
   await harness(async (h) => {
     h.state.phase = 'idle'; h.state.turnId = null;

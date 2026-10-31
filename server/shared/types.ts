@@ -70,6 +70,20 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  */
 export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
 
+// ---------------------------
+//----------------- SESSION RETENTION ------------
+/**
+ * One provider retention sweep's counts, consumed by the daily maintenance service.
+ * Deleted counts successful native removals; skipped includes recent or active
+ * sessions, and failed counts individual removals or directory reads that failed.
+ */
+export type SessionRetentionSummary = {
+  deleted: number;
+  skipped: number;
+  failed: number;
+};
+
+// ---------------------------
 //----------------- DEEPSEEK HARNESS ------------
 /** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
 export type DshRuntimeMode = 'acp' | 'headless';

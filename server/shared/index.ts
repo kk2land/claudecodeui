@@ -47,6 +47,7 @@ export type {
   QueuedSessionMessageRecord,
   RealtimeClientConnection,
   SessionDraftRecord,
+  SessionRetentionSummary,
   SessionRuntimeSettings,
   SubagentActivity,
   SubagentInfo,

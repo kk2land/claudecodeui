@@ -445,6 +445,12 @@ const addSessionSourceColumn = (db: Database): void => {
   addColumnToTableIfNotExists(db, 'sessions', columnNames, 'session_source', 'TEXT');
 };
 
+/** Retention uses actual chat opens; older rows retain native timestamp fallbacks. */
+const addSessionLastOpenedAtColumn = (db: Database): void => {
+  const columnNames = getTableInfo(db, 'sessions').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'sessions', columnNames, 'last_opened_at', 'TEXT');
+};
+
 /**
  * Adds the `model` column that records which model each session runs with.
  *
@@ -619,6 +625,7 @@ export const runMigrations = (db: Database) => {
     addSessionEffortColumn(db);
     addForkedFromSessionIdColumn(db);
     addSessionSourceColumn(db);
+    addSessionLastOpenedAtColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
 

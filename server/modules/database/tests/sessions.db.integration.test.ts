@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection } from '@/modules/database/connection.js';
+import { closeConnection, getConnection } from '@/modules/database/connection.js';
 import { initializeDatabase } from '@/modules/database/init-db.js';
+import { runMigrations } from '@/modules/database/migrations.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 
@@ -133,6 +134,41 @@ test('repository reads normalize SQLite UTC timestamps to ISO strings', async ()
     assert.ok(row?.updated_at.endsWith('Z'));
     assert.match(row?.created_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
     assert.match(row?.updated_at ?? '', /^\d{4}-\d{2}-\d{2}T/);
+  });
+});
+
+test('last-opened migration preserves existing rows and opens survive reindexing and restart', async () => {
+  await withIsolatedDatabase(async () => {
+    const timestamp = '2026-08-01T00:00:00.000Z';
+    const openedAt = Date.parse('2026-10-31T12:00:00.123Z');
+    sessionsDb.createSession('opened-session', 'codex', '/workspace/demo-project', 'Keep name',
+      timestamp, timestamp, '/transcripts/opened-session.jsonl', 'exec');
+    sessionsDb.updateSessionIsArchived('opened-session', true);
+    const db = getConnection();
+    const indexes = db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions' ORDER BY name").all();
+    db.exec('ALTER TABLE sessions DROP COLUMN last_opened_at');
+
+    runMigrations(db);
+    const migrated = sessionsDb.getSessionById('opened-session')!;
+    assert.equal(migrated.last_opened_at, null);
+    assert.equal(migrated.custom_name, 'Keep name');
+    assert.equal(migrated.provider_session_id, 'opened-session');
+    assert.equal(migrated.session_source, 'exec');
+    assert.equal(migrated.isArchived, 1);
+    assert.deepEqual(db.prepare("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'sessions' ORDER BY name").all(), indexes);
+
+    sessionsDb.recordSessionOpened('opened-session', openedAt);
+    runMigrations(db);
+    sessionsDb.createSession('opened-session', 'codex', '/workspace/demo-project', 'Keep name',
+      timestamp, timestamp, '/transcripts/opened-session.jsonl', 'exec');
+    closeConnection();
+    await initializeDatabase();
+
+    const reopened = sessionsDb.getSessionById('opened-session')!;
+    assert.equal(reopened.last_opened_at, new Date(openedAt).toISOString());
+    assert.equal(reopened.created_at, timestamp);
+    assert.equal(reopened.updated_at, timestamp);
+    assert.equal(reopened.isArchived, 1, 'opening a chat does not unarchive it');
   });
 });
 
