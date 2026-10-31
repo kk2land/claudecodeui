@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
 import express from "express";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -6,7 +8,8 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createWorkerMcpServer } from "../server/mcp.js";
 import type { WorkerService } from "../server/service.js";
-import { createService, startInput, temporaryRoot } from "./helpers.js";
+import type { WorkerNotification, WorkerRecord, WorkerRun } from "../shared/contracts.js";
+import { createService, startInput, temporaryRoot, waitFor } from "./helpers.js";
 
 function text(result: unknown): unknown {
   const content = (result as { content?: { type: string; text?: string }[] }).content;
@@ -232,4 +235,51 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
     requestInit: { headers: { authorization: "Bearer ui-token" } },
   });
   await assert.rejects(unauthorized.connect(badTransport));
+});
+
+for (const type of ["dsh", "pi"] as const) test(`MCP corrects a slow ${type} task by cancelling and resuming its original session`, async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  let now = Date.now();
+  const { service, env, data } = createService(t, temporaryRoot("worker-mcp-correction-"), {
+    TEST_SCENARIO: "sleep", TEST_DELAY_MS: "60000",
+  }, { now: () => now });
+  const host = await mcpServer(service, "owner-token");
+  t.after(host.close);
+  const client = new Client({ name: "worker-correction", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(host.url, {
+    requestInit: { headers: { authorization: "Bearer owner-token" } },
+  }));
+  t.after(() => client.close());
+
+  const started = text(await client.callTool({ name: "worker_start", arguments: startInput({ type }) })) as { worker: WorkerRecord; run: WorkerRun };
+  await waitFor(() => service.get(started.worker.id).worker.latestRun?.status, (status) => status === "running");
+  now += 600_000;
+  t.mock.timers.tick(1000);
+  const observed = text(await client.callTool({ name: "worker_get", arguments: { workerId: started.worker.id } })) as { worker: WorkerRecord; notifications: WorkerNotification[] };
+  assert.equal(observed.worker.latestRun?.status, "running");
+  assert.equal(observed.notifications.length, 1);
+  assert.equal(observed.notifications[0]?.status, "running");
+  await client.callTool({ name: "worker_ack", arguments: { eventIds: observed.notifications.map((item) => item.id) } });
+  const feedback = { workerId: started.worker.id, prompt: "Preserve the existing edits. Implement the missing check, run the targeted test, and return its result.", requestId: "correction-1" };
+  const premature = await client.callTool({ name: "worker_resume", arguments: feedback });
+  assert.equal(premature.isError, true, "a budget warning is not permission to overlap the same session");
+  const cancelled = await client.callTool({ name: "worker_cancel", arguments: { workerIds: [started.worker.id], pause: false } });
+  assert.notEqual(cancelled.isError, true);
+  const stopped = service.get(started.worker.id).worker.latestRun!;
+  assert.equal(stopped.status, "cancelled");
+  assert.ok(stopped.nativeSessionId);
+  assert.equal(service.store.owner("owner-1")?.paused, false);
+
+  env.TEST_DELAY_MS = "1";
+  const resumed = text(await client.callTool({ name: "worker_resume", arguments: feedback })) as { worker: WorkerRecord; run: WorkerRun };
+  assert.equal(resumed.worker.id, started.worker.id);
+  assert.notEqual(resumed.run.id, started.run.id);
+  const finished = text(await client.callTool({ name: "worker_wait", arguments: { workerId: started.worker.id, timeoutSeconds: 5 } })) as { worker: WorkerRecord; run: WorkerRun };
+  assert.equal(finished.run.status, "completed");
+  assert.equal(finished.run.nativeSessionId, stopped.nativeSessionId);
+  assert.equal(finished.run.home, observed.worker.latestRun?.home);
+  assert.equal(finished.worker.cwd, observed.worker.cwd);
+  assert.equal(finished.run.progress.softReminderSentAt, null, "a new run has its own soft budget");
+  assert.match(fs.readFileSync(path.join(data, "logs", started.worker.id, resumed.run.id, "prompt.md"), "utf8"), /Preserve the existing edits/);
+  assert.deepEqual(service.notifications().map((item) => item.status), ["running", "cancelled", "completed"]);
 });

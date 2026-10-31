@@ -2110,7 +2110,7 @@ export type DshWorkerBridge = {
   closeRuntime(runtimeInstanceId: string, reason: string): Promise<void>;
 };
 
-/** One claimed worker result merged into the single parent wake-up turn. */
+/** One claimed Worker reminder or result merged into the parent wake-up turn; `running` denotes a soft-budget reminder. */
 export type WorkerWakeResult = {
   workerId: string;
   runId: string;

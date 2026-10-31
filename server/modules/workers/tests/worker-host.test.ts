@@ -563,6 +563,52 @@ test('two simultaneous results are merged into one wake turn with batch metadata
   assert.equal(h.settlements.filter((settle) => settle.delivery === 'delivered').length, 1);
 });
 
+for (const provider of ['codex', 'dsh'] as const) {
+  test(`${provider} delivers a progress reminder after user work and retains the original run identity`, async () => {
+    const h = harness({ providers: { 'session-1': provider } });
+    if (provider === 'dsh') await h.prepareDsh();
+    else await h.prepare();
+    h.setActiveRun('session-1', true);
+    h.emitNotification(notification({ status: 'running', summary: 'Task soft budget reached (600s elapsed).' }));
+    h.fireTimers();
+    await tick();
+    assert.equal(h.wakeCalls.length, 0);
+    assert.equal(h.claims.length, 0, 'a reminder must not interrupt the current parent turn');
+    h.setActiveRun('session-1', false);
+    h.setDrafts('session-1', true);
+    h.fireTimers();
+    await tick();
+    assert.equal(h.wakeCalls.length, 0, 'user queued messages retain priority');
+    h.setDrafts('session-1', false);
+    h.fireTimers();
+    await tick();
+    assert.equal(h.wakeCalls.length, 1);
+    assert.deepEqual(h.wakeCalls[0].workerSource, {
+      batchId: 'batch-1', results: [{ workerId: 'worker-1', runId: 'run-1', status: 'running', summary: 'Task soft budget reached (600s elapsed).' }],
+    });
+    const content = String(h.wakeCalls[0].content);
+    assert.match(content, /progress reminder/);
+    assert.match(content, /Read worker_get for the current run/);
+    assert.match(content, /Confirm cancellation before worker_resume/);
+    assert.match(content, /same workerId and a revised prompt/);
+    assert.equal(h.settlements.at(-1)?.delivery, 'delivered');
+    await h.service.shutdown();
+  });
+
+  test(`${provider} never wakes a stopped parent for a budget reminder`, async () => {
+    const h = harness({ providers: { 'session-1': provider } });
+    if (provider === 'dsh') await h.prepareDsh();
+    else await h.prepare();
+    await h.stop('session-1');
+    h.emitNotification(notification({ status: 'running', summary: 'Soft budget reached.' }));
+    h.fireTimers();
+    await tick();
+    assert.equal(h.wakeCalls.length, 0);
+    assert.equal(h.settlements.at(-1)?.delivery, 'held');
+    await h.service.shutdown();
+  });
+}
+
 test('an ACK before send removes one result and never settles it delivered', async () => {
   const h = harness({
     claim: async (ids) => ({

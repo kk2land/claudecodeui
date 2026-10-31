@@ -35,10 +35,10 @@ export type WorkerOccupyingStatus = Extract<
   "starting" | "running" | "stopping" | "unknown"
 >;
 
-/** Outcome recorded on a terminal notification; queued/in-flight states never appear here. */
+/** `running` marks a soft-budget reminder; the other values describe a terminal result. */
 export type WorkerNotificationStatus = Extract<
   WorkerStatus,
-  "completed" | "failed" | "cancelled" | "interrupted" | "unknown"
+  "running" | "completed" | "failed" | "cancelled" | "interrupted" | "unknown"
 >;
 
 /** Deduplication state of an outbox notification. `batchId` is set once a host claims it. */
@@ -281,7 +281,8 @@ export type WorkerRecord = {
 };
 
 /**
- * A persisted terminal result waiting for the host to wake the parent session. Notifications
+ * A persisted soft-budget reminder (`status: running`) or terminal result waiting for the host
+ * to wake the parent session. Each run has at most one reminder and one result. Notifications
  * live in the plugin outbox and never consume the user's three-message queue.
  */
 export type WorkerNotification = {

@@ -327,9 +327,16 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
           summary: notification.summary,
         })),
       };
+      const hasReminders = notifications.some((notification) => notification.status === 'running');
       const content = [
-        `Automatic Worker execution result (batch ${source.batchId}).`,
+        `Automatic Worker ${hasReminders ? 'progress reminder / execution result' : 'execution result'} (batch ${source.batchId}).`,
         'This is not user acceptance. Review the result before continuing.',
+        ...(hasReminders ? [
+          'A running status is a soft-budget reminder, not a failure or a cancellation request. Read worker_get for the current run before acting; it may have finished since this reminder.',
+          'Check actual files, diff and verification evidence; use worker_logs only as needed. If progress is sound, let it continue and return the parent turn without polling.',
+          'If it is looping, repeating checks or pursuing the wrong direction, cancel only that worker with worker_cancel (pause: false). Confirm cancellation before worker_resume with the same workerId and a revised prompt describing the concrete issue, preserved changes, next deliverable and stopping condition.',
+          'Do not resume an unknown or still-active run, bypass a user Stop, or repeatedly retry the same prompt without new evidence.',
+        ] : []),
         '',
         ...source.results.map((result) => [
           `Worker: ${result.workerId}`,

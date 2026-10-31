@@ -678,10 +678,10 @@ function NotificationList({
   return (
     <details className="worker-notifications" open>
       <summary>
-        <Bell size={14} /> 停用通知（{notifications.length}）
+        <Bell size={14} /> Worker 通知（{notifications.length}）
       </summary>
       <p className="worker-muted">
-        终态通知不占用用户消息队列；手动重试只重新投递通知，不重跑任务。
+        运行提醒与终态通知不占用用户消息队列；手动重试只重新投递通知，不重跑任务。
       </p>
       {notifications.map((item) => (
         <div className="worker-notification" key={item.id}>

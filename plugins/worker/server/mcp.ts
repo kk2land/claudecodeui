@@ -53,7 +53,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_context",
     {
-      description: "获取当前父会话的 owner、并发设置、活动任务与待确认通知摘要；派发后通常交还回合，由终态通知唤醒后再验收",
+      description: "获取当前父会话的 owner、并发设置、活动任务与待确认通知摘要；派发后通常交还回合，由运行提醒或终态通知唤醒后检查进展或验收",
       inputSchema: {},
     },
     async () => {
@@ -109,7 +109,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "异步启动一个 DSH 或 Pi 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
+      description: "异步启动一个 DSH 或 Pi 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
       inputSchema: startShape,
     },
     async (input) => {
@@ -124,7 +124,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_resume",
     {
-      description: "异步续接已有 worker 的原生会话，cwd、home 和原生身份保持不变；接受后立即返回，终态自动通知，正常下一步是交还父回合而非轮询",
+      description: "异步续接已确认停止的 worker 原生会话，cwd、home 和原生身份保持不变；纠偏时用同一 workerId 和说明具体偏差、下一步交付物的新 prompt。接受后立即返回，运行提醒和终态自动通知，交还父回合而非轮询",
       inputSchema: {
         workerId: z.string(),
         prompt: z.string(),
@@ -147,7 +147,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_get",
     {
-      description: "读取一个 worker 及其全部运行记录与待确认通知；收到终态后应检查实际 diff 与测试证据，不要反复轮询",
+      description: "读取一个 worker 及其全部运行记录与待确认通知；收到运行提醒先核对当前 run 与实际进展，收到终态检查 diff 与测试证据，不要反复轮询",
       inputSchema: { workerId: z.string() },
     },
     async ({ workerId }) => {
@@ -213,7 +213,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_ack",
     {
-      description: "确认已收到终态通知；仅表示收到，不代表验收",
+      description: "确认已收到运行提醒或终态通知；仅表示收到，不代表验收",
       inputSchema: { eventIds: z.array(z.string()) },
     },
     async ({ eventIds }) => {
@@ -228,7 +228,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_cancel",
     {
-      description: "取消当前 owner 的排队或活动运行，并可暂停新任务",
+      description: "取消当前 owner 的排队或活动运行并等待停止确认；纠偏时指定 workerIds、pause: false，确认停止后再用新提示词 resume。pause: true 会暂停 owner 的新任务与自动唤醒",
       inputSchema: {
         workerIds: z.array(z.string()).optional(),
         all: z.boolean().optional(),

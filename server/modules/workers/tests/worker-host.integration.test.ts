@@ -128,7 +128,8 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
       DSH_HOME: path.join(root, 'dsh-home'),
       PI_CODING_AGENT_DIR: path.join(root, 'pi-home'),
       TEST_SCENARIO: 'sleep',
-      TEST_DELAY_MS: '2500',
+      TEST_DELAY_MS: '4000',
+      TEST_STEPS_BEFORE_DELAY: '20',
       CLOUDCLI_PLUGIN_TOKEN: 'plugin-ui-token',
       CLOUDCLI_PLUGIN_DATA_DIR: data,
       CLOUDCLI_HOST_ROOT: pluginRoot,
@@ -217,12 +218,13 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     proxy.close(() => resolve());
   }));
 
-  const config = provider === 'dsh' ? null : await host.bridge.prepareSession({
+  const codexInput = {
     sessionId: 'session-1',
     projectPath: project,
     userId: 7,
     appServerInstanceId: 'instance-1',
-  });
+  };
+  const config = provider === 'dsh' ? null : await host.bridge.prepareSession(codexInput);
   const codexMcp = config ? (config as {
     'mcp_servers.cloudcli_workers': { url: string; http_headers: { Authorization: string } };
   })['mcp_servers.cloudcli_workers'] : null;
@@ -251,18 +253,22 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
       requestId: 'e2e-dsh-1',
     },
   })) as { worker: { id: string }; run: { id: string } };
+  // Recreating the parent's transport while its child is running must keep
+  // the live MCP credential usable and allow the same Worker to finish.
+  assert.deepEqual(provider === 'codex'
+    ? await host.bridge.prepareSession(codexInput)
+    : await host.dshBridge.prepareSession(dshInput), provider === 'codex' ? config : dshMcp);
   const waited = toolResult(await client.callTool({
     name: 'worker_wait',
     arguments: { workerId: started.worker.id, timeoutSeconds: 20 },
   })) as { run: { status: string }; notifications: WorkerNotification[] };
   assert.equal(waited.run.status, 'completed');
-  assert.equal(waited.notifications.length, 1);
-  const firstNotification = waited.notifications[0]!;
-  if (provider === 'dsh') {
-    assert.deepEqual(await host.dshBridge.prepareSession(dshInput), dshMcp, 'ACP recycling preserves the authenticated owner');
-    const context = toolResult(await client.callTool({ name: 'worker_context', arguments: {} })) as { owner: WorkerOwner };
-    assert.equal(context.owner.parentSessionId, 'session-1', 'the original MCP token remains valid after ACP recycling');
-  }
+  assert.equal(waited.notifications.length, 2);
+  assert.equal(waited.notifications.find((item) => item.status === 'running')?.delivery, 'held',
+    'completion supersedes a reminder waiting behind the busy parent');
+  const firstNotification = waited.notifications.find((item) => item.status === 'completed')!;
+  const context = toolResult(await client.callTool({ name: 'worker_context', arguments: {} })) as { owner: WorkerOwner };
+  assert.equal(context.owner.parentSessionId, 'session-1', 'the original MCP token remains valid after transport recycling');
 
   // The real SQLite outbox keeps the result pending while the parent is busy.
   await new Promise((resolve) => setTimeout(resolve, 800));
@@ -290,6 +296,24 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     headers: { authorization: 'Bearer plugin-ui-token' },
   })).json() as { notifications: WorkerNotification[] };
   assert.equal(state.notifications.find((item) => item.id === firstNotification.id)?.delivery, 'delivered');
+
+  // An idle parent receives the next run's reminder while the actual fixture
+  // CLI is still running, then gets a separate result through the same outbox.
+  const resumed = toolResult(await client.callTool({
+    name: 'worker_resume',
+    arguments: { workerId: started.worker.id, prompt: 'Continue the targeted fixture check.', requestId: 'e2e-dsh-reminder' },
+  })) as { run: { id: string } };
+  await waitFor(() => wakeCalls.length, (count) => count === 2, 8_000);
+  assert.match(String(wakeCalls[1]!.content), /progress reminder/);
+  assert.match(String(wakeCalls[1]!.content), new RegExp(`Run: ${resumed.run.id}`));
+  assert.match(String(wakeCalls[1]!.content), /Status: running/);
+  const active = toolResult(await client.callTool({ name: 'worker_get', arguments: { workerId: started.worker.id } })) as {
+    worker: { latestRun: { status: string } };
+  };
+  assert.equal(active.worker.latestRun.status, 'running');
+  await client.callTool({ name: 'worker_wait', arguments: { workerId: started.worker.id, timeoutSeconds: 20 } });
+  await waitFor(() => wakeCalls.length, (count) => count === 3, 8_000);
+  assert.match(String(wakeCalls[2]!.content), /Status: completed/);
 
   // An explicit Stop pauses the live owner and cancels the active Pi run.
   const stoppedWorker = toolResult(await client.callTool({
@@ -329,7 +353,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     return current.notifications.find((item) => item.workerId === stoppedWorker.worker.id);
   }, (notification) => notification?.delivery === 'held', 10_000);
   await new Promise((resolve) => setTimeout(resolve, 800));
-  assert.equal(wakeCalls.length, 1);
+  assert.equal(wakeCalls.length, 3);
 
   // Manual retry is the only path from held to a new automatic delivery.
   await lifecycle.activateSession('session-1');
@@ -348,9 +372,9 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     body: JSON.stringify({ eventIds: [stoppedNotification.id] }),
   });
   assert.equal(retried.status, 200);
-  await waitFor(() => wakeCalls.length, (count) => count === 2, 8_000);
-  assert.match(String(wakeCalls[1]!.content), new RegExp(`Worker: ${stoppedWorker.worker.id}`));
-  assert.match(String(wakeCalls[1]!.content), /Status: cancelled/);
+  await waitFor(() => wakeCalls.length, (count) => count === 4, 8_000);
+  assert.match(String(wakeCalls[3]!.content), new RegExp(`Worker: ${stoppedWorker.worker.id}`));
+  assert.match(String(wakeCalls[3]!.content), /Status: cancelled/);
 
   await host.shutdown();
   child.kill('SIGTERM');

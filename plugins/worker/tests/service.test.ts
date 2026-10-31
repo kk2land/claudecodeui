@@ -288,24 +288,41 @@ test("hard timeout fails the run with guardian evidence", async (t) => {
   assert.equal(service.notifications()[0]?.delivery, "pending");
 });
 
-test("soft reminder is recorded without cancelling the run", async (t) => {
+for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget notifies once without cancelling and preserves the later result`, async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
   const root = temporaryRoot("worker-reminder-");
+  let now = Date.now();
   const { service } = createService(t, root, {
     TEST_SCENARIO: "sleep",
     TEST_DELAY_MS: "3000",
-  });
-  const settings = service.settings();
-  service.store.saveSettings({ ...settings, softReminderSeconds: 1 });
+    TEST_STEPS_BEFORE_DELAY: trigger === "steps" ? "20" : "0",
+  }, { now: () => now });
   const started = await service.start("owner-1", startInput({ requestId: "reminder-1" }));
   await waitStatus(service, started.worker.id, ["running"]);
-  await waitFor(
-    () => service.get(started.worker.id).worker.latestRun?.progress.softReminderSentAt,
-    Boolean,
-    8000,
-  );
+  if (trigger === "elapsed") now += 600_000;
+  else await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
+    (log) => (log.match(/"phase":"step_end"/g) ?? []).length === 20);
+  t.mock.timers.tick(1000);
+  const reminder = service.notifications()[0]!;
+  assert.equal(reminder.status, "running");
+  assert.equal(reminder.delivery, "pending");
+  assert.equal(reminder.workerId, started.worker.id);
+  assert.equal(reminder.runId, started.run.id);
+  assert.match(reminder.summary, /soft budget reached/);
+  assert.match(reminder.summary, /thresholds 600s \/ 20 steps/);
+  if (trigger === "steps") assert.equal(service.get(started.worker.id).worker.latestRun?.progress.steps, 20);
+  assert.equal(service.state().counts.total.running, 1, "a reminder still occupies its execution slot");
+  t.mock.timers.tick(1000);
+  assert.equal(service.notifications().length, 1, "one reminder per run even when thresholds remain exceeded");
+  if (trigger === "elapsed") service.ack("owner-1", [reminder.id]);
+
   const completed = await waitStatus(service, started.worker.id, ["completed"]);
   assert.ok(completed.latestRun?.progress.softReminderSentAt);
   assert.equal(completed.latestRun?.status, "completed");
+  assert.equal(service.notifications().length, 2, "the reminder must not consume the terminal notification");
+  assert.equal(service.notifications()[0]?.delivery, trigger === "elapsed" ? "delivered" : "held");
+  const claimed = service.claimNotifications("owner-1", [], "result-batch");
+  assert.deepEqual(claimed.notifications.map((item) => item.status), ["completed"]);
 });
 
 test("credentials stay in the child process and out of run records", async (t) => {

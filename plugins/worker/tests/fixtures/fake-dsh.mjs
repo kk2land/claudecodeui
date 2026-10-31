@@ -8,7 +8,9 @@ if (process.env.TEST_PID_FILE) {
   const fsPid = await import("node:fs");
   fsPid.writeFileSync(process.env.TEST_PID_FILE, String(process.pid));
 }
-const sessionId = process.env.TEST_SESSION_ID || randomUUID();
+const args = process.argv.slice(2);
+const sessionOption = args.indexOf("--session-id");
+const sessionId = process.env.TEST_SESSION_ID || (sessionOption >= 0 ? args[sessionOption + 1] : randomUUID());
 const root = process.env.CODEX_DSH_SESSIONS_ROOT;
 if (root) {
   const directory = path.join(root, sessionId);
@@ -55,6 +57,10 @@ if (scenario === "hangtree") {
     await wait(300);
     emit({ type: "status", phase: "step_end", usage: { inputTokens: 1, outputTokens: 1 } });
     await wait(500);
+  }
+  for (let step = 0; step < Number(process.env.TEST_STEPS_BEFORE_DELAY || 0); step++) {
+    emit({ type: "status", phase: "step_end" });
+    emit({ type: "status", phase: "step_start" });
   }
   if (scenario === "sleep") await wait(Number(process.env.TEST_DELAY_MS || 400));
   if (scenario === "grandchild") {

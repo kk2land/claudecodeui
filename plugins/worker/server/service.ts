@@ -1031,9 +1031,19 @@ export class WorkerService {
     run: WorkerRun,
     status: WorkerNotification["status"],
     hold: boolean,
+    reminderSummary?: string,
   ): void {
-    if (this.store.notifications().some((item) => item.runId === run.id)) return;
-    const summary =
+    const notifications = this.store.notifications().filter((item) => item.runId === run.id);
+    const reminder = status === "running";
+    if (notifications.some((item) => (item.status === "running") === reminder)) return;
+    // A result supersedes a reminder still waiting behind the parent's user queue.
+    // Keep its history, but only the result should automatically wake that parent.
+    if (!reminder) for (const item of notifications) {
+      if (item.status !== "running" || item.delivery !== "pending") continue;
+      item.delivery = "held";
+      this.store.updateNotification(item);
+    }
+    const summary = reminderSummary ?? (
       worker.taskName +
       " " +
       status +
@@ -1041,7 +1051,7 @@ export class WorkerService {
         ? ": " + run.finalText.replace(/\s+/g, " ").slice(0, 240)
         : run.error
           ? ": " + run.error.message
-          : "");
+          : ""));
     const notification: WorkerNotification = {
       id: randomUUID(),
       ownerId: worker.ownerId,
@@ -1709,17 +1719,25 @@ export class WorkerService {
     const settings = this.store.settings();
     for (const handle of this.handles.values()) {
       const run = this.store.run(handle.runId);
-      if (!run || TERMINAL.includes(run.status)) continue;
+      if (!run || run.status !== "running") continue;
       if (run.progress.softReminderSentAt) continue;
       const dueTime =
         run.startedAt !== null &&
         this.now() - Date.parse(run.startedAt) >= settings.softReminderSeconds * 1000;
+      // Progress writes are throttled; use validated live steps so a long tool
+      // call after the threshold does not postpone its reminder until completion.
+      const steps = handle.progress.steps || null;
       const dueSteps =
-        run.progress.steps !== null && run.progress.steps >= settings.softReminderSteps;
+        steps !== null && steps >= settings.softReminderSteps;
       if (!dueTime && !dueSteps) continue;
+      run.progress.steps = steps;
       run.progress.softReminderSentAt = new Date(this.now()).toISOString();
       this.store.saveRun(run);
-      // Soft budget is an observable hint only; it never cancels the run.
+      const worker = this.store.worker(run.workerId)!;
+      const elapsed = run.startedAt === null ? 0 : Math.floor((this.now() - Date.parse(run.startedAt)) / 1000);
+      this.notify(worker, run, "running", this.owners.get(worker.ownerId)?.owner.paused === true,
+        `${worker.taskName}: soft budget reached (${elapsed}s elapsed, ${run.progress.steps ?? "unknown"} steps; thresholds ${settings.softReminderSeconds}s / ${settings.softReminderSteps} steps). Check actual progress before deciding whether to intervene.`);
+      // The reminder wakes an idle parent for review; it never cancels the run.
       this.emitChanged(run.workerId);
     }
   }
