@@ -183,7 +183,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private connectionEpoch = 1;
   // Injected by the server composition root; providers must not import workers.
   private workerBridge: CodexWorkerBridge | null = null;
-  private readonly fallbackInstanceId = randomUUID();
+  // Worker ownership belongs to this runtime, not to a proxy process that can
+  // exit after an idle timeout. A later native resume keeps the same owner.
+  private readonly workerRuntimeInstanceId = `codex:${randomUUID()}`;
 
   constructor(
     private readonly client: CodexRpcClient = codexAppServerTransport,
@@ -219,32 +221,30 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
       client.onRequest((frame) => this.onRequest(frame)),
-      client.onExit((error, appServerInstanceId) => {
+      client.onExit((error) => {
         // A new process may serve a later request; anything already in flight
         // belongs to the dead generation and must never be replayed against it.
         this.connectionEpoch += 1;
         const stopped = error instanceof AppError && error.code === 'CODEX_APP_SERVER_STOPPED';
-        // Close the workers that belonged to this exited process. The callback
-        // only reaches the plugin IPC; it never spawns a replacement app-server.
-        void this.workerBridge?.closeAppServer(
-          appServerInstanceId ?? this.fallbackInstanceId,
-          stopped ? 'Codex app-server stopped.' : 'Codex app-server exited.',
-        ).catch(() => {});
+        const cleanExit = error instanceof AppError && error.code === 'CODEX_APP_SERVER_CLEAN_EXIT';
+        // Transport loss never owns Worker cleanup. Explicit Stop and runtime
+        // shutdown call stopWorkers; an idle proxy can disappear independently.
         for (const exited of this.stopExitWaiters) exited();
         for (const closed of this.threadClosures.values()) closed();
         for (const session of this.sessions.values()) {
+          const idleExit = cleanExit && session.state.phase === 'idle' && session.state.goal?.status !== 'active';
           if (stopped || session.state.phase !== 'idle' || session.state.goal?.status === 'active') this.settings.update(session.id, { queueHeld: true });
           // Cancel work already awaiting setup/model resolution before process exit.
           if (stopped) this.stopVersions.set(session.id, (this.stopVersions.get(session.id) ?? 0) + 1);
-          session.state.error = stopped ? undefined : error.message;
-          session.state.phase = stopped ? 'stopping' : 'failed';
-          session.stopRequested = true;
+          session.state.error = stopped || idleExit ? undefined : error.message;
+          session.state.phase = stopped ? 'stopping' : idleExit ? 'idle' : 'failed';
+          session.stopRequested = !idleExit;
           if (stopped) session.state.goal = null;
           // A dropped prediction must not survive the process that would have answered it.
           this.clearPrediction(session);
           if (session.turn && !session.turn.terminal) this.complete(session, stopped ? 'interrupted' : 'failed', stopped ? undefined : error.message);
           this.cancelRequests(session);
-          session.state.phase = stopped ? 'idle' : 'failed';
+          session.state.phase = stopped || idleExit ? 'idle' : 'failed';
           this.publish(session);
           if (stopped) this.failures.delete(session.id);
           else this.failures.set(session.id, { state: this.getState(session.id), writer: session.writer });
@@ -259,8 +259,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.workerBridge = bridge;
   }
 
-  private appServerInstanceId(): string {
-    return this.client.ensureInstanceId?.() ?? this.client.instanceId ?? this.fallbackInstanceId;
+  /** The provider router and shutdown use this only for an explicit lifecycle stop. */
+  async stopWorkers(reason = 'Codex app-server stopped.'): Promise<void> {
+    // There may be no proxy to emit onExit while a run is resolving its model
+    // or Worker config. Cancel that setup at the same boundary as a live exit.
+    const sessionIds = new Set([...this.stopVersions.keys(), ...this.sessions.keys(), ...this.controls.keys()]);
+    for (const sessionId of sessionIds) this.stopVersions.set(sessionId, (this.stopVersions.get(sessionId) ?? 0) + 1);
+    for (const session of this.sessions.values()) {
+      session.stopRequested = true;
+      if (session.setup) this.sessions.delete(session.id);
+    }
+    await this.workerBridge?.closeAppServer(this.workerRuntimeInstanceId, reason);
   }
 
   /**
@@ -279,7 +288,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         sessionId,
         projectPath: String(options.projectPath ?? options.cwd ?? ''),
         userId: writer.userId ?? null,
-        appServerInstanceId: this.appServerInstanceId(),
+        appServerInstanceId: this.workerRuntimeInstanceId,
       });
     } catch {
       // Worker registration is optional; a bridge failure must not block Codex.
@@ -452,9 +461,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<void> {
     const sessionId = options.sessionId ?? randomUUID();
     const stopVersion = this.stopVersions.get(sessionId) ?? 0;
+    // Register before the first await so a process Stop also reaches runs
+    // waiting for a control before they have a NativeSession.
+    this.stopVersions.set(sessionId, stopVersion);
     // A confirmed provider/model choice is one snapshot for this turn. Changes
     // made while setup or inference is running belong to the following turn.
     await this.controls.get(sessionId)?.catch(() => {});
+    if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
+      writer.send(createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }));
+      return;
+    }
     const selection = this.settings.get(sessionId).modelSelection;
     if (selection?.model === null) throw new AppError('Choose a model before sending a prompt.', {
       code: 'CODEX_MODEL_REQUIRED', statusCode: 409,
@@ -464,6 +480,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       const loaded = this.sessions.get(sessionId);
       if (selection && loaded?.modelProvider !== selection.modelProvider) {
         await this.releaseSession(sessionId, context.resolveProviderSessionId(sessionId));
+      }
+      if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
+        throw new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED', statusCode: 409 });
       }
       session = await this.ensure(sessionId, options, writer, context, selection);
     } catch (error) {
@@ -1451,6 +1470,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   }
 
   async close(): Promise<void> {
+    // The host logs unconfirmed Worker cleanup; shutdown must still close the
+    // native transport, predictions and subscriptions.
+    await this.stopWorkers('Codex runtime closed.').catch(() => {});
     if (this.client === codexAppServerTransport) {
       await Promise.all(this.listActiveSessions().map(({ sessionId }) => this.abort(sessionId)));
       await codexAppServerTransport.close();

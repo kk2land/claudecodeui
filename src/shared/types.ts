@@ -1989,6 +1989,8 @@ export type ProviderRuntimeControls = {
   stoppableModes: string[];
   /** Activity of Worker plugin runs owned by this session, independent of its ACP process. */
   hasActiveWorkers?: boolean;
+  /** A failed Stop can be retried even after the native process exits or Worker activity cannot be read. */
+  canRetryStop?: boolean;
   state: ProviderRuntimeState | null;
   pending: boolean;
   error: string | null;
@@ -2186,6 +2188,8 @@ export type CodexControls = {
   predictionsUnsupported?: boolean;
   /** A Worker plugin run owned by this session is still occupying; never native turn activity. */
   hasActiveWorkers?: boolean;
+  /** A failed process Stop remains retryable even after the proxy exits and Worker polling fails. */
+  canRetryStop?: boolean;
   state: CodexSessionState | null;
   error: string | null;
   pending: boolean;

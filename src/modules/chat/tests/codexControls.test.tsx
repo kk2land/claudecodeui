@@ -68,7 +68,7 @@ test('execute plan changes mode and fills a prompt for review', async () => {
   expect(codex.control).toHaveBeenCalledWith({ action: 'mode', mode: 'default' });
 });
 
-test('the process stop button works during a turn and disables once the process exits', async () => {
+test('the process stop button works during a turn and remains available for Workers after idle exit', async () => {
   const diagnostics = { running: true, pid: 43210, startedAt: 1_800_000_000_000, pendingRequests: 0, launcherPath: null, cliVersion: null };
   const codex = controls({ diagnostics });
   const view = render(<CodexControlPanel controls={codex} onExecutePlan={() => {}} />);
@@ -84,6 +84,13 @@ test('the process stop button works during a turn and disables once the process 
   view.rerender(<CodexControlPanel controls={controls({ phase: 'idle', turnId: null, diagnostics: { ...diagnostics, running: false, pid: null, startedAt: null } })} onExecutePlan={() => {}} />);
   expect(button.disabled).toBe(true);
   expect(screen.queryByText('PID 43210')).toBeNull();
+  const idle = controls({ phase: 'idle', turnId: null, diagnostics: { ...diagnostics, running: false, pid: null, startedAt: null } });
+  view.rerender(<CodexControlPanel controls={{ ...idle, hasActiveWorkers: true }} onExecutePlan={() => {}} />);
+  expect(button.disabled).toBe(false);
+  view.rerender(<CodexControlPanel controls={{ ...idle, hasActiveWorkers: false }} onExecutePlan={() => {}} />);
+  expect(button.disabled).toBe(true);
+  view.rerender(<CodexControlPanel controls={{ ...idle, error: 'Worker cleanup not confirmed.', canRetryStop: true }} onExecutePlan={() => {}} />);
+  expect(button.disabled).toBe(false);
 });
 
 test('the Codex settings button shows Worker activity without changing its click target', () => {

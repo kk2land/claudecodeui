@@ -205,7 +205,7 @@ function ChatInterface({
   });
   const runtimeControls = useProviderRuntimeControls({
     provider, sessionId: selectedSession?.id || currentSessionId,
-    project: selectedProject, newSessionTrigger, onSessionEstablished: handleSessionEstablished,
+    project: selectedProject, chatActive: isActive, newSessionTrigger, onSessionEstablished: handleSessionEstablished,
   });
   // DSH registers Worker tools on the ACP session, including after idle
   // recycling; only then does a busy chat.send become a durable queue receipt.

@@ -476,12 +476,12 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     const ownerId = `${input.appServerInstanceId}:${input.sessionId}`;
     const previousOwnerId = sessionOwners.get(input.sessionId);
     const previous = previousOwnerId ? owners.get(previousOwnerId) : undefined;
-    // ACP process recycling must keep the same authority object and token:
+    // Transport recycling must keep the same authority object and token:
     // an in-flight outbox guard may already refer to this logical owner.
-    const reuse = provider === 'dsh' && previous?.owner.id === ownerId
+    const reuse = previous?.owner.id === ownerId
       && previous.owner.projectId === project.project_id && previous.owner.projectPath === projectPath
       && previous.owner.userId === input.userId;
-    if (reuse && previous.registered && dependencies.ipc.isReady()) return previous;
+    if (reuse && previous.registered && !previous.owner.paused && dependencies.ipc.isReady()) return previous;
     const entry: RegisteredOwner = reuse ? previous : {
       provider,
       owner: {
@@ -566,12 +566,21 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     },
     async closeAppServer(appServerInstanceId: string, reason: string) {
       const affected = currentOwners().filter((entry) => entry.owner.appServerInstanceId === appServerInstanceId);
-      for (const entry of affected) removeOwner(entry);
+      if (!affected.length) return;
+      // Retain the paused owner until cleanup confirms, so a failed explicit
+      // Stop stays retryable and cannot automatically wake or admit new work.
+      for (const entry of affected) pauseLocally(entry, reason);
       try {
-        await dependencies.ipc.request('closeInstance', { appServerInstanceId, reason });
+        // A provisional owner cannot have admitted a Worker yet; its pending
+        // registration already sees the local pause, even before IPC is ready.
+        if (affected.some((entry) => entry.registered)) {
+          await dependencies.ipc.request('closeInstance', { appServerInstanceId, reason });
+        }
       } catch (error) {
         log(`[Workers] Could not close Worker instance ${appServerInstanceId}`, error);
+        throw error;
       }
+      for (const entry of affected) removeOwner(entry);
     },
   };
 

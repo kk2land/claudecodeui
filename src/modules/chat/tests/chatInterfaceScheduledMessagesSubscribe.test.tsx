@@ -31,6 +31,7 @@ const harness = vi.hoisted(() => ({
   // The websocket context's own function; ChatInterface must pass this one on, not a stand-in.
   subscribe: (_listener: (event: ServerEvent) => void) => () => {},
   useCodexControls: vi.fn((_args: unknown) => ({ state: { runtime: 'app-server' } })),
+  useProviderRuntimeControls: vi.fn((_args: unknown) => ({ available: false })),
   useScheduledMessages: vi.fn((_sessionId: string | null, _subscribe?: unknown) => ({
     scheduledMessages: [],
     schedule: async () => null,
@@ -66,7 +67,7 @@ vi.mock('@/modules/chat/hooks/useCodexControls', () => ({
   useCodexControls: harness.useCodexControls,
 }));
 vi.mock('@/modules/chat/hooks/useProviderRuntimeControls', () => ({
-  useProviderRuntimeControls: () => ({ available: false }),
+  useProviderRuntimeControls: harness.useProviderRuntimeControls,
 }));
 vi.mock('@/modules/chat/hooks/useCodexModelProviders', () => ({
   useCodexModelProviders: () => ({ available: harness.provider === 'codex' && harness.servicesAvailable, model: harness.selectedModel ?? '',
@@ -141,6 +142,21 @@ test('forwards the Chat tab active state to the Codex controller without disabli
     selectedSession={{ ...session, provider: 'codex' }} ws={null} sendMessage={() => {}} />);
   args = harness.useCodexControls.mock.calls.at(-1)![0] as { enabled: boolean; chatActive: boolean };
   assert.equal(args.enabled, true);
+  assert.equal(args.chatActive, true);
+});
+
+test('forwards the Chat tab active state to DSH runtime controls', () => {
+  harness.provider = 'dsh';
+  const view = render(<ChatInterface isActive={false} selectedProject={project}
+    selectedSession={{ ...session, provider: 'dsh' }} ws={null} sendMessage={() => {}} />);
+  let args = harness.useProviderRuntimeControls.mock.calls.at(-1)![0] as { provider: string; chatActive: boolean };
+  assert.equal(args.provider, 'dsh');
+  assert.equal(args.chatActive, false);
+
+  view.rerender(<ChatInterface isActive selectedProject={project}
+    selectedSession={{ ...session, provider: 'dsh' }} ws={null} sendMessage={() => {}} />);
+  args = harness.useProviderRuntimeControls.mock.calls.at(-1)![0] as { provider: string; chatActive: boolean };
+  assert.equal(args.provider, 'dsh');
   assert.equal(args.chatActive, true);
 });
 

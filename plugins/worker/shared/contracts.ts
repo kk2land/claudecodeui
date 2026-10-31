@@ -196,6 +196,7 @@ export type WorkerOwner = {
    * there is no real user id (for example a detached turn) and must never be replaced by a guess.
    */
   userId: string | number | null;
+  /** Logical parent runtime identity; preserved across idle transport recycling. */
   appServerInstanceId: string;
   paused: boolean;
   pausedReason?: string;
@@ -483,6 +484,7 @@ export type CodexWorkerPrepareSessionInput = {
   projectPath: string;
   /** Null is a valid detached-turn identity and must not be replaced with a guessed user id. */
   userId: string | number | null;
+  /** Logical Codex runtime identity, independent of the current proxy process. */
   appServerInstanceId: string;
 };
 
@@ -490,8 +492,8 @@ export type CodexWorkerPrepareSessionInput = {
  * Callbacks the Codex adapter injects into the Worker plugin instead of importing the Worker
  * module directly. `prepareSession` registers the temporary MCP thread config and never injects
  * the user's Codex skill; `activateSession` runs only for an explicit user turn; `stopSession`
- * and `closeAppServer` forward host lifecycle cleanup. A null `prepareSession` result means no
- * override is needed.
+ * and `closeAppServer` forward explicit host lifecycle cleanup. Idle transport exits never
+ * close the logical owner. A null `prepareSession` result means no override is needed.
  */
 export type CodexWorkerBridge = {
   prepareSession: (

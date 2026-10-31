@@ -6,7 +6,7 @@ import type { IProviderRuntime } from '@/shared/index.js';
 import { AppError, createNormalizedMessage } from '@/shared/index.js';
 
 type RouterDependencies = {
-  native: Pick<typeof codexAppServerRuntime, 'run' | 'abort' | 'getState' | 'control' | 'listActiveSessions' | 'permissions' | 'close' | 'isBusy' | 'releaseSession'>;
+  native: Pick<typeof codexAppServerRuntime, 'run' | 'abort' | 'getState' | 'control' | 'listActiveSessions' | 'permissions' | 'close' | 'isBusy' | 'releaseSession' | 'stopWorkers'>;
   sdk: IProviderRuntime;
   settings: Pick<typeof sessionRuntimeDb, 'get' | 'update' | 'holdCodexAppServerQueues'>;
   isCodexSession(sessionId: string): boolean;
@@ -74,7 +74,10 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
         if (settings.get(sessionId).runtime === 'app-server') settings.update(sessionId, { queueHeld: true });
         if (!stopping) {
           stopVersion++;
-          stopping = stop().finally(() => { stopping = null; });
+          // Fence Workers even when the idle proxy has already exited. Native
+          // termination and Worker cleanup start together; both must settle.
+          const workerCleanup = native.stopWorkers();
+          stopping = Promise.all([stop(), workerCleanup]).then(() => {}).finally(() => { stopping = null; });
         }
         await stopping;
         return { ...native.getState(sessionId), ...settings.get(sessionId) };

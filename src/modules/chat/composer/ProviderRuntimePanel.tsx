@@ -1,7 +1,7 @@
 import { useId, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
-import { ChevronDown, Settings2, Square } from 'lucide-react';
+import { ChevronDown, Loader2, Settings2, Square } from 'lucide-react';
 
 import type { ProviderRuntimeControls } from '@/shared/types';
 
@@ -35,8 +35,14 @@ export function ProviderRuntimePanel({ controls, providerLabel, settingsContaine
       <div className="flex flex-wrap items-center justify-end gap-2">
         {settingsContainer === undefined && showResumeQueue && <button type="button" className={`${button} mr-auto`} disabled={pending || transitioning}
           onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('runtime.resumeQueue')}</button>}
+        {hasActiveWorkers && <span role="status" className="sr-only">{t('codex.workersActive')}</span>}
         <button type="button" className={`${button} gap-1.5`} aria-expanded={open} aria-controls={panelId} onClick={() => setOpen((value) => !value)}>
-          <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />{providerLabel}
+          {hasActiveWorkers
+            ? <span className="inline-flex" title={t('codex.workersActive')}>
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+              </span>
+            : <Settings2 className="h-3.5 w-3.5" aria-hidden="true" />}
+          {providerLabel}
           <ChevronDown className={`h-3.5 w-3.5 transition-transform ${open ? 'rotate-180' : ''}`} aria-hidden="true" />
         </button>
       </div>
@@ -53,7 +59,7 @@ export function ProviderRuntimePanel({ controls, providerLabel, settingsContaine
             </select>
           </label>
           {stoppable && <button type="button" className={`${button} h-9 gap-2 self-start px-3 sm:self-auto`}
-            disabled={pending || transitioning || (!hasActiveWorkers && !state?.diagnostics.running && state?.phase !== 'starting')}
+            disabled={pending || transitioning || (!controls.canRetryStop && !hasActiveWorkers && !state?.diagnostics.running && state?.phase !== 'starting')}
             onClick={() => void controls.control({ action: 'stop' }).catch(() => {})}>
             <Square className="h-3.5 w-3.5" aria-hidden="true" />
             {t('runtime.stop', { runtime: t(`runtime.modes.${state!.runtime}`, { defaultValue: state!.runtime }) })}

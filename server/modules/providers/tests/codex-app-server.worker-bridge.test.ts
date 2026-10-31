@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
+import { createCodexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
+import { AppError } from '@/shared/index.js';
 import type {
   AnyRecord,
   CodexRpcClient,
@@ -68,6 +70,7 @@ function harness() {
   };
   const stoppedSessions: string[] = [];
   let stopImpl: (sessionId: string) => Promise<boolean> = async () => true;
+  let closeImpl: () => Promise<void> = async () => {};
   const bridge: CodexWorkerBridge = {
     async prepareSession(input) {
       bridgeCalls.push(`prepare:${input.appServerInstanceId}:${input.sessionId}`);
@@ -75,13 +78,14 @@ function harness() {
     },
     async activateSession(sessionId) { bridgeCalls.push(`activate:${sessionId}`); },
     async stopSession(sessionId) { stoppedSessions.push(sessionId); return stopImpl(sessionId); },
-    async closeAppServer(instanceId) { bridgeCalls.push(`close:${instanceId}`); },
+    async closeAppServer(instanceId) { bridgeCalls.push(`close:${instanceId}`); await closeImpl(); },
   };
   runtime.setWorkerBridge(bridge);
   return {
     runtime, bridge, bridgeCalls, stoppedSessions, calls, events, writer, context, settingsDb,
     setPrepare(value: Record<string, unknown> | null) { prepareConfig = value; },
     setStopSession(impl: (sessionId: string) => Promise<boolean>) { stopImpl = impl; },
+    setClose(impl: () => Promise<void>) { closeImpl = impl; },
     event: (frame: CodexRpcFrame) => notify(frame),
     exit: (error: Error, instanceId?: string) => exit(error, instanceId),
   };
@@ -105,7 +109,7 @@ test('a user turn prepares the thread config and activates the Worker owner', as
   assert.deepEqual(start.params.config, {
     'mcp_servers.cloudcli_workers': { enabled: true, url: 'http://127.0.0.1:3001/api/worker-mcp' },
   });
-  assert.ok(h.bridgeCalls.includes('prepare:transport-instance:session-1'));
+  assert.match(h.bridgeCalls.find((call) => call.startsWith('prepare:'))!, /^prepare:codex:[^:]+:session-1$/);
   assert.ok(h.bridgeCalls.includes('activate:session-1'));
   const stopping = h.runtime.abort('session-1');
   await new Promise((resolve) => setImmediate(resolve));
@@ -133,11 +137,125 @@ test('Stop with no native session still cancels the session workers', async () =
   assert.deepEqual(h.stoppedSessions, ['session-1']);
 });
 
-test('app-server exit closes exactly its connection generation', async () => {
+test('idle proxy exit preserves Workers and their logical owner when a result resumes the native thread', async () => {
   const h = harness();
-  h.exit(new Error('app-server exited'), 'generation-7');
-  await eventually(() => h.bridgeCalls.includes('close:generation-7'));
+  const first = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await first;
+  const registration = h.bridgeCalls.find((call) => call.startsWith('prepare:'))!;
+
+  h.exit(new AppError('Proxy idle timeout.', { code: 'CODEX_APP_SERVER_CLEAN_EXIT' }), 'old-proxy');
+  assert.equal(h.bridgeCalls.some((call) => call.startsWith('close:')), false);
+  assert.equal(h.runtime.getState('session-1').phase, 'idle');
+  assert.equal(h.runtime.getState('session-1').error, undefined);
+  assert.equal(h.runtime.getState('session-1').workerEnabled, true);
+  assert.equal(h.settingsDb.get('session-1').queueHeld, false);
+
+  const resumed = h.runtime.run('Worker result', { ...options, workerWakeup: true }, h.writer,
+    { ...h.context, resolveProviderSessionId: () => 'native-thread' });
+  await eventually(() => h.calls.filter((call) => call.method === 'turn/start').length === 2);
+  assert.equal(h.calls.filter((call) => call.method === 'thread/resume').length, 1);
+  assert.deepEqual(h.bridgeCalls.filter((call) => call.startsWith('prepare:')), [registration, registration]);
+  assert.equal(h.bridgeCalls.filter((call) => call.startsWith('activate:')).length, 1);
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-2', status: 'completed' } } });
+  await resumed;
   await h.runtime.close();
+  assert.equal(h.bridgeCalls.filter((call) => call.startsWith('close:')).length, 1);
+});
+
+test('exit during a native turn keeps the failure and queue hold without replaying input or cancelling Workers', async () => {
+  const h = harness();
+  const run = h.runtime.run('in flight', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.exit(new AppError('Process exited.', { code: 'CODEX_APP_SERVER_CLEAN_EXIT' }));
+  await run;
+  assert.equal(h.runtime.getState('session-1').phase, 'failed');
+  assert.equal(h.settingsDb.get('session-1').queueHeld, true);
+  assert.equal(h.calls.filter((call) => call.method === 'turn/start').length, 1);
+  assert.equal(h.bridgeCalls.some((call) => call.startsWith('close:')), false);
+  await h.runtime.close();
+});
+
+test('explicit process Stop still cancels Workers after idle exit without starting another proxy', async () => {
+  const h = harness();
+  const run = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await run;
+  h.exit(new AppError('Proxy idle timeout.', { code: 'CODEX_APP_SERVER_CLEAN_EXIT' }));
+  const callsBeforeStop = h.calls.length;
+  let finishCleanup!: () => void;
+  const cleanup = new Promise<void>((resolve) => { finishCleanup = resolve; });
+  h.setClose(() => cleanup);
+  let stops = 0;
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => { stops++; } });
+  let confirmed = false;
+  const stopping = router.control!('session-1', { action: 'stop-app-server' }, options, h.writer, h.context)
+    .then(() => { confirmed = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(stops, 1);
+  assert.equal(confirmed, false, 'process Stop waits for Worker cleanup even with no live proxy');
+  assert.equal(h.calls.length, callsBeforeStop);
+  assert.equal(h.settingsDb.get('session-1').queueHeld, true);
+  assert.equal(h.bridgeCalls.filter((call) => call.startsWith('close:')).length, 1);
+  finishCleanup();
+  await stopping;
+  await h.runtime.close();
+});
+
+test('explicit process Stop reports unconfirmed Worker cleanup and leaves the queue paused', async () => {
+  const h = harness();
+  h.setClose(async () => { throw new Error('Worker cleanup not confirmed'); });
+  let stopped = false;
+  const router = createCodexRuntimeRouter({
+    native: h.runtime, settings: h.settingsDb, stop: async () => { stopped = true; },
+  });
+  await assert.rejects(router.control!('session-1', { action: 'stop-app-server' }, options, h.writer, h.context), /not confirmed/);
+  assert.equal(stopped, true, 'Worker failure must not skip native process termination');
+  assert.equal(h.settingsDb.get('session-1').queueHeld, true);
+  // Runtime shutdown still tears down its own resources after a Worker error.
+  await h.runtime.close();
+  assert.equal(h.calls.length, 0);
+});
+
+for (const blockedAt of ['model', 'worker-registration']) test(`process Stop after idle exit cancels setup waiting for ${blockedAt}`, async () => {
+  const h = harness();
+  const first = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await first;
+  h.exit(new AppError('Proxy idle timeout.', { code: 'CODEX_APP_SERVER_CLEAN_EXIT' }));
+  const before = h.calls.length;
+  let release!: () => void;
+  let blocked = false;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const context = { ...h.context, resolveProviderSessionId: () => 'native-thread',
+    resolveResumeModel: async () => {
+      if (blockedAt === 'model') { blocked = true; await gate; }
+      return 'test-model';
+    } };
+  const prepare = h.bridge.prepareSession;
+  h.bridge.prepareSession = async (input) => {
+    if (blockedAt === 'worker-registration') { blocked = true; await gate; }
+    return prepare(input);
+  };
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => {}, isStopping: () => false });
+  const pending = router.run('do not restart after Stop', { ...options, userTurn: true }, h.writer, context);
+  await eventually(() => blocked);
+  await router.control!('session-1', { action: 'stop-app-server' }, options, h.writer, context);
+  release();
+  await eventually(() => h.events.some((event) => event.kind === 'complete' && event.aborted)
+    || h.calls.slice(before).some((call) => call.method === 'turn/start'));
+  const staleCalls = h.calls.slice(before);
+  // Settle the buggy path too, so a regression reports an assertion instead of hanging.
+  if (staleCalls.some((call) => call.method === 'turn/start')) {
+    h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-2', status: 'completed' } } });
+  }
+  await pending;
+  await h.runtime.close();
+  assert.deepEqual(staleCalls, [], 'no old initialization may spawn a proxy or send a turn after Stop');
+  assert.equal(h.settingsDb.get('session-1').queueHeld, true);
 });
 
 test('runtime handoff stops the associated workers and still unsubscribes a known thread without a cached session', async () => {

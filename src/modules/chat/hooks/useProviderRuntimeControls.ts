@@ -10,6 +10,8 @@ type Args = {
   provider: LLMProvider;
   sessionId: string | null;
   project: Project | null;
+  /** False while another workspace tab covers the chat; only gates Worker activity polling. */
+  chatActive?: boolean;
   newSessionTrigger?: number;
   onSessionEstablished(sessionId: string, context: SessionEstablishedContext): void;
 };
@@ -17,7 +19,7 @@ type Args = {
 type PreparedSession = { id: string; establish(): boolean };
 
 /** ChatInterface uses this controller only for adapters advertising application-level runtime management. */
-export function useProviderRuntimeControls({ provider, sessionId, project, newSessionTrigger = 0, onSessionEstablished }: Args): ProviderRuntimeControls {
+export function useProviderRuntimeControls({ provider, sessionId, project, chatActive = true, newSessionTrigger = 0, onSessionEstablished }: Args): ProviderRuntimeControls {
   const capabilities = useProviderCapabilities()[provider]?.runtimeManagement;
   const available = Boolean(capabilities);
   const scope = `${provider}:${sessionId ?? `new:${project?.projectId ?? ''}:${newSessionTrigger}`}`;
@@ -28,8 +30,8 @@ export function useProviderRuntimeControls({ provider, sessionId, project, newSe
   }, [scope]);
   // Server snapshots stay scoped so a late poll cannot repaint another session or provider.
   const [snapshots, setSnapshots] = useState<Record<string, ProviderRuntimeState>>({});
-  // Action failures remain visible until another explicit action or a successful retry.
-  const [errors, setErrors] = useState<Record<string, { message: string; action: boolean } | null>>({});
+  // Retain the failed action so an unconfirmed Stop remains retryable after ACP exits.
+  const [errors, setErrors] = useState<Record<string, { message: string; action: ProviderRuntimeAction['action'] | null } | null>>({});
   // Mutation acknowledgements disable conflicting controls without blocking other sessions.
   const [pendingScopes, setPendingScopes] = useState<Set<string>>(new Set());
   const mutations = useRef(new Map<string, Promise<void>>());
@@ -90,7 +92,7 @@ export function useProviderRuntimeControls({ provider, sessionId, project, newSe
         } catch (error) {
           if (active && versions.current.get(scope) === version) {
             setErrors((old) => old[scope]?.action ? old : {
-              ...old, [scope]: { message: error instanceof Error ? error.message : String(error), action: false },
+              ...old, [scope]: { message: error instanceof Error ? error.message : String(error), action: null },
             });
           }
         }
@@ -116,7 +118,7 @@ export function useProviderRuntimeControls({ provider, sessionId, project, newSe
         setSnapshots((old) => ({ ...old, [scope]: body.data, [`${provider}:${session.id}`]: body.data }));
         session.establish();
       } catch (error) {
-        setErrors((old) => ({ ...old, [scope]: { message: error instanceof Error ? error.message : String(error), action: true } }));
+        setErrors((old) => ({ ...old, [scope]: { message: error instanceof Error ? error.message : String(error), action: action.action } }));
         throw error;
       } finally {
         mutations.current.delete(scope);
@@ -145,12 +147,14 @@ export function useProviderRuntimeControls({ provider, sessionId, project, newSe
   const hasActiveWorkers = useSessionWorkerActivity({
     enabled: provider === 'dsh' && available,
     native: state?.runtime === 'acp' && state.workerEnabled === true,
+    chatActive,
     projectId: project?.projectId,
     sessionId,
   });
 
   return {
     sessionId, available, modes: capabilities?.modes ?? [], stoppableModes: capabilities?.stoppableModes ?? [],
-    hasActiveWorkers, state, pending: pendingScopes.has(scope), error: errors[scope]?.message ?? null, control, prepareSend,
+    hasActiveWorkers, canRetryStop: errors[scope]?.action === 'stop',
+    state, pending: pendingScopes.has(scope), error: errors[scope]?.message ?? null, control, prepareSend,
   };
 }

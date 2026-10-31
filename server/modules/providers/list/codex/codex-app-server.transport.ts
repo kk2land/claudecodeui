@@ -55,8 +55,8 @@ export class CodexAppServerTransport implements CodexRpcClient {
   private stopTarget: ChildProcessWithoutNullStreams | null = null;
   private launcherPath: string | null = null;
   private cliVersion: string | null = null;
-  // Stable for one child generation, reserved before spawn so thread config can
-  // name the instance it belongs to. Cleared when that child exits.
+  // Physical connection identity, reserved before lazy spawn and cleared when
+  // that child exits. Logical Worker ownership is independent of this value.
   private connectionInstanceId: string | null = null;
   private workerMcpUrl: string | null = null;
 
@@ -240,8 +240,8 @@ export class CodexAppServerTransport implements CodexRpcClient {
       if (this.stopTarget === child) this.stopTarget = null;
       this.startedAt = null;
       this.ready = null;
-      // Capture the generation before clearing it so exit consumers close only
-      // the workers that belonged to this exact process.
+      // Capture the physical generation before clearing it. Worker ownership
+      // survives this transport; listeners still receive the exited identity.
       const instanceId = this.connectionInstanceId;
       this.connectionInstanceId = null;
       for (const entry of this.pending.values()) {
@@ -254,6 +254,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
     child.on('error', fail);
     child.on('exit', (code, signal) => fail(this.stopTarget === child
       ? new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED', statusCode: 409 })
+      : code === 0 ? new AppError('Codex app-server exited normally.', { code: 'CODEX_APP_SERVER_CLEAN_EXIT', statusCode: 503 })
       : new Error(`Codex app-server exited (${code ?? signal}). ${this.stderr.trim().split('\n').at(-1) ?? ''}`), true));
     child.stdin.on('error', fail);
     child.stdout.on('error', fail);

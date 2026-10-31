@@ -56,6 +56,7 @@ function harness(options: {
   let ensureReadyCalls = 0;
   let failPause = false;
   let closeAllImpl: (() => Promise<unknown>) | null = null;
+  let closeInstanceImpl: (() => Promise<unknown>) | null = null;
   let disposed = false;
   let runTurnImpl: (input: Record<string, unknown>) => Promise<{ started: boolean; error: string | null }> =
     async (input) => { wakeCalls.push(input); return { started: true, error: null }; };
@@ -89,6 +90,7 @@ function harness(options: {
         return { settled: true };
       }
       if (action === 'closeAll' && closeAllImpl) return await closeAllImpl();
+      if (action === 'closeInstance' && closeInstanceImpl) return await closeInstanceImpl();
       return { workerIds: [], confirmed: true, settled: true };
     },
     onEvent(listener: (event: never) => void) { events.add(listener); return () => events.delete(listener); },
@@ -158,6 +160,7 @@ function harness(options: {
     ensureReadyCalls: () => ensureReadyCalls,
     setPauseFailure(value: boolean) { failPause = value; },
     setCloseAll(impl: () => Promise<unknown>) { closeAllImpl = impl; },
+    setCloseInstance(impl: () => Promise<unknown>) { closeInstanceImpl = impl; },
     disposed: () => disposed,
     async prepare(sessionId = 'session-1', appServerInstanceId = 'instance-1', registerOwnerOverride?: () => Promise<boolean>) {
       const session = sessions.get(sessionId)!;
@@ -210,16 +213,21 @@ async function tick(count = 20): Promise<void> {
   for (let index = 0; index < count; index++) await new Promise((resolve) => setImmediate(resolve));
 }
 
-test('DSH ACP restoration reuses owner authority during an automatic wake-up', async () => {
-  const h = harness({ providers: { 'session-1': 'dsh' } });
-  const first = await h.prepareDsh();
-  assert.deepEqual(first, {
+for (const provider of ['codex', 'dsh'] as const) test(`${provider} transport restoration reuses owner authority during an automatic wake-up`, async () => {
+  const h = harness({ providers: { 'session-1': provider } });
+  const prepare = () => provider === 'codex' ? h.prepare() : h.prepareDsh();
+  const first = await prepare();
+  assert.deepEqual(first, provider === 'codex' ? {
+    'mcp_servers.cloudcli_workers': {
+      enabled: true, url: 'http://127.0.0.1:3001/api/worker-mcp', http_headers: { Authorization: 'Bearer owner-token' },
+    },
+  } : {
     url: 'http://127.0.0.1:3001/api/worker-mcp', headers: { Authorization: 'Bearer owner-token' },
   });
-  assert.equal(await h.prepare(), null, 'the Codex bridge cannot register a DSH parent');
+  assert.equal(await (provider === 'codex' ? h.prepareDsh() : h.prepare()), null, 'the other provider cannot register this parent');
   h.setRunTurn(async (input) => {
-    assert.deepEqual(await h.prepareDsh(), first, 'restarting ACP reuses its temporary credentials');
-    assert.equal((input.finalGuard as () => boolean)(), true, 'ACP setup must not invalidate the claimed batch');
+    assert.deepEqual(await prepare(), first, 'restarting the transport reuses its temporary credentials');
+    assert.equal((input.finalGuard as () => boolean)(), true, 'native setup must not invalidate the claimed batch');
     h.wakeCalls.push(input);
     return { started: true, error: null };
   });
@@ -229,7 +237,7 @@ test('DSH ACP restoration reuses owner authority during an automatic wake-up', a
   assert.equal(h.wakeCalls.length, 1);
   assert.equal(h.requests.filter((request) => request.action === 'registerOwner').length, 1);
   assert(h.stateProviders.length > 0);
-  assert(h.stateProviders.every((provider) => provider === 'dsh'));
+  assert(h.stateProviders.every((value) => value === provider));
   assert.equal(h.settlements.at(-1)?.delivery, 'delivered');
 });
 
@@ -322,6 +330,60 @@ test('closing a DSH runtime leaves the Codex parent in the same project active',
   h.fireTimers();
   await tick();
   assert.deepEqual(h.wakeCalls.map((call) => call.sessionId), ['session-1']);
+});
+
+test('an unconfirmed instance stop rejects, keeps the owner paused, and can be retried', async () => {
+  const h = harness();
+  await h.prepare();
+  h.setCloseInstance(async () => { throw new Error('Worker process exit not confirmed'); });
+  await assert.rejects(h.service.bridge.closeAppServer('instance-1', 'user-stop'), /not confirmed/);
+  h.emitNotification(notification());
+  h.fireTimers();
+  await tick();
+  assert.equal(h.wakeCalls.length, 0);
+  h.setCloseInstance(async () => ({ workerIds: ['worker-1'] }));
+  await h.service.bridge.closeAppServer('instance-1', 'retry-stop');
+  assert.equal(h.requests.filter((request) => request.action === 'closeInstance').length, 2);
+  await h.service.shutdown();
+});
+
+test('stopping an instance with no Worker owners needs no plugin IPC', async () => {
+  const h = harness();
+  h.ipc.running = false;
+  h.setCloseInstance(async () => { throw new Error('plugin unavailable'); });
+  await h.service.bridge.closeAppServer('unused-instance', 'user-stop');
+  assert.equal(h.requests.some((request) => request.action === 'closeInstance'), false);
+  await h.service.shutdown();
+});
+
+test('stopping during initial plugin startup fences the provisional owner without requiring IPC', async () => {
+  const h = harness();
+  let ready!: (value: boolean) => void;
+  h.setEnsureReady(async () => new Promise<boolean>((resolve) => { ready = resolve; }));
+  h.setCloseInstance(async () => { throw new Error('IPC not ready'); });
+  const preparing = h.prepare();
+  await h.service.bridge.closeAppServer('instance-1', 'user-stop');
+  ready(true);
+  await preparing;
+  assert.equal(h.requests.some((request) => request.action === 'closeInstance'), false);
+  const registration = h.requests.find((request) => request.action === 'registerOwner');
+  assert.equal((registration?.payload.owner as { paused: boolean }).paused, true);
+  await h.service.shutdown();
+});
+
+test('a user reconnect after an unconfirmed instance stop registers the paused owner again', async () => {
+  const h = harness();
+  const config = await h.prepare();
+  h.setCloseInstance(async () => { throw new Error('Worker cleanup not confirmed'); });
+  await assert.rejects(h.service.bridge.closeAppServer('instance-1', 'user-stop'));
+  assert.deepEqual(await h.prepare(), config);
+  const registrations = h.requests.filter((request) => request.action === 'registerOwner');
+  assert.equal(registrations.length, 2, 'closeInstance may have revoked the plugin token before returning its error');
+  assert.equal((registrations[1].payload.owner as { paused: boolean }).paused, true);
+  await h.activate();
+  const pauses = h.requests.filter((request) => request.action === 'setOwnerPaused');
+  assert.equal(pauses.at(-1)?.payload.paused, false);
+  await h.service.shutdown();
 });
 
 test('prepareSession returns only the per-server MCP override and registers a verified owner', async () => {

@@ -15,6 +15,7 @@ vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
 afterEach(() => {
   workerPlugin.enabled = false;
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 const project: Project = { projectId: 'project-1', displayName: 'Test', fullPath: '/tmp/project' };
@@ -76,7 +77,41 @@ test('failed stops report the server error and release pending state without pre
   await act(async () => { await expect(hook.result.current.control({ action: 'stop' })).rejects.toThrow('Still stopping.'); });
   expect(hook.result.current.pending).toBe(false);
   expect(hook.result.current.error).toBe('Still stopping.');
+  expect(hook.result.current.canRetryStop).toBe(true);
   expect(hook.result.current.state?.diagnostics.pid).toBe(42);
+});
+
+test('an idle process poll preserves a failed Worker stop until an explicit retry confirms cleanup', async () => {
+  vi.useFakeTimers();
+  let snapshot: ProviderRuntimeState = { ...state, runtime: 'acp', queueHeld: true, diagnostics: { ...state.diagnostics, running: true, pid: 42 } };
+  vi.spyOn(api.providers, 'runtimeState').mockImplementation(async () => response(snapshot));
+  const change = vi.spyOn(api.providers, 'controlRuntime')
+    .mockResolvedValueOnce(Response.json({ success: false, error: { code: 'DSH_WORKER_STOP_UNCONFIRMED', message: 'Worker cleanup not confirmed.' } }, { status: 409 }))
+    .mockImplementation(async () => response(snapshot));
+  const hook = renderHook(() => useProviderRuntimeControls({ provider: 'dsh', sessionId: 'session-1', project, onSessionEstablished: vi.fn() }));
+  await act(async () => { await expect(hook.result.current.control({ action: 'stop' })).rejects.toThrow('Worker cleanup not confirmed.'); });
+
+  snapshot = { ...snapshot, diagnostics: { ...state.diagnostics, running: false, pid: null } };
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(hook.result.current.state?.diagnostics.running).toBe(false);
+  expect(hook.result.current.error).toBe('Worker cleanup not confirmed.');
+  expect(hook.result.current.canRetryStop).toBe(true);
+
+  await act(async () => { await hook.result.current.control({ action: 'stop' }); });
+  expect(change).toHaveBeenCalledTimes(2);
+  expect(hook.result.current.error).toBeNull();
+  expect(hook.result.current.canRetryStop).toBe(false);
+  expect(hook.result.current.state?.queueHeld).toBe(true);
+  hook.unmount();
+});
+
+test('a runtime switch error never enables the Stop retry shortcut', async () => {
+  vi.spyOn(api.providers, 'runtimeState').mockImplementation(async () => response({ ...state, runtime: 'acp' }));
+  vi.spyOn(api.providers, 'controlRuntime').mockResolvedValue(Response.json({ success: false, error: 'Runtime change failed.' }, { status: 409 }));
+  const hook = renderHook(() => useProviderRuntimeControls({ provider: 'dsh', sessionId: 'session-1', project, onSessionEstablished: vi.fn() }));
+  await act(async () => { await expect(hook.result.current.control({ action: 'runtime', runtime: 'headless' })).rejects.toThrow('Runtime change failed.'); });
+  expect(hook.result.current.error).toBe('Runtime change failed.');
+  expect(hook.result.current.canRetryStop).toBe(false);
 });
 
 test('finishing a new-session action after navigation cannot navigate back to the old project', async () => {
@@ -141,6 +176,40 @@ test('headless and non-Worker ACP sessions never query Worker activity', async (
   expect(workerState).not.toHaveBeenCalled();
   expect(nonWorker.result.current.hasActiveWorkers).toBe(false);
   nonWorker.unmount();
+});
+
+test('leaving the Chat tab pauses DSH Worker reads and returning refreshes activity', async () => {
+  vi.useFakeTimers();
+  workerPlugin.enabled = true;
+  const read = vi.spyOn(api.providers, 'runtimeState').mockImplementation(async () => response({ ...state, runtime: 'acp', workerEnabled: true }));
+  let workersActive = true;
+  const workerState = vi.spyOn(api.plugins, 'workerState').mockImplementation(async () => Response.json({
+    workers: workersActive ? [{ parentSessionId: 'session-1', projectId: 'project-1', latestRun: { status: 'running' } }] : [],
+  }));
+  const hook = renderHook(({ chatActive }) => useProviderRuntimeControls({
+    provider: 'dsh', sessionId: 'session-1', project, chatActive, onSessionEstablished: vi.fn(),
+  }), { initialProps: { chatActive: false } });
+
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(read).toHaveBeenCalled();
+  expect(hook.result.current.available).toBe(true);
+  expect(workerState).not.toHaveBeenCalled();
+
+  hook.rerender({ chatActive: true });
+  await act(async () => {});
+  expect(hook.result.current.hasActiveWorkers).toBe(true);
+  expect(workerState).toHaveBeenCalledTimes(1);
+  hook.rerender({ chatActive: false });
+  expect(hook.result.current.hasActiveWorkers).toBe(false);
+  await act(async () => { await vi.advanceTimersByTimeAsync(6000); });
+  expect(workerState).toHaveBeenCalledTimes(1);
+
+  workersActive = false;
+  hook.rerender({ chatActive: true });
+  await act(async () => {});
+  expect(workerState).toHaveBeenCalledTimes(2);
+  expect(hook.result.current.hasActiveWorkers).toBe(false);
+  hook.unmount();
 });
 
 test('switching the DSH transport to headless clears Worker activity immediately', async () => {

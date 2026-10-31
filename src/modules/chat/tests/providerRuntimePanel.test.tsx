@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, within } from '@testing-library/react';
 import { expect, test, vi } from 'vitest';
 
 import '@/modules/i18n';
@@ -40,14 +40,40 @@ test('headless has no ACP stop button and explains its approval limit', () => {
   expect(screen.getByText(/no interactive approval channel/)).toBeTruthy();
 });
 
-test('an ACP Worker keeps Stop available after its process was recycled and explains why', () => {
+test('a session Worker spins the DSH settings icon and keeps Stop available after ACP recycling', () => {
   const value = controls({ diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null } });
   value.hasActiveWorkers = true;
-  render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
+  const view = render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
+  const button = screen.getByRole('button', { name: 'DeepSeek Harness' });
+  expect(button.querySelector('.animate-spin')).not.toBeNull();
+  expect(screen.getByRole('status').textContent).toBe('A Worker is active in this session');
+  fireEvent.click(button);
+  expect(button.getAttribute('aria-expanded')).toBe('true');
+  const stop = screen.getByRole('button', { name: 'Stop ACP' }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(false);
+  expect(within(screen.getByRole('region')).getByText('A Worker is active in this session')).toBeTruthy();
+  view.rerender(<ProviderRuntimePanel hasQueuedDraft controls={{ ...value, hasActiveWorkers: false }} providerLabel="DeepSeek Harness" />);
+  expect(button.querySelector('.animate-spin')).toBeNull();
+  expect(stop.disabled).toBe(true);
+  expect(screen.queryByText('A Worker is active in this session')).toBeNull();
+});
+
+test('an unconfirmed stop remains retryable after ACP exits even when Worker activity is unavailable', () => {
+  const value = {
+    ...controls({ queueHeld: true, diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null } }),
+    error: 'Worker cleanup not confirmed.', canRetryStop: true,
+  };
+  const view = render(<ProviderRuntimePanel controls={value} providerLabel="DeepSeek Harness" />);
   fireEvent.click(screen.getByRole('button', { name: 'DeepSeek Harness' }));
   const stop = screen.getByRole('button', { name: 'Stop ACP' }) as HTMLButtonElement;
   expect(stop.disabled).toBe(false);
-  expect(screen.getByText('A Worker is active in this session')).toBeTruthy();
+  fireEvent.click(stop);
+  expect(value.control).toHaveBeenCalledWith({ action: 'stop' });
+  view.rerender(<ProviderRuntimePanel controls={{ ...value, pending: true }} providerLabel="DeepSeek Harness" />);
+  expect(stop.disabled).toBe(true);
+  view.rerender(<ProviderRuntimePanel controls={{ ...value, error: null, canRetryStop: false }} providerLabel="DeepSeek Harness" />);
+  expect(stop.disabled).toBe(true);
+  expect(screen.queryByRole('alert')).toBeNull();
 });
 
 test('an idle ACP session without Workers never enables Stop on its own', () => {

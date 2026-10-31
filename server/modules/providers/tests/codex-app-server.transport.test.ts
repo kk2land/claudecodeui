@@ -8,6 +8,7 @@ import test from 'node:test';
 
 import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
+import { AppError } from '@/shared/index.js';
 import type { CodexRpcFrame, SessionRuntimeSettings } from '@/shared/index.js';
 
 function fakeProcess(pid = 43210) {
@@ -72,6 +73,21 @@ test('production spawn preserves Goals flags and supplies a disabled Worker tran
     if (original === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
     else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = original;
   }
+});
+
+test('a proxy exit with code zero reports a clean transport exit without starting a replacement', async () => {
+  const h = fakeProcess();
+  const exits: Error[] = [];
+  h.transport.onExit((error) => { exits.push(error); });
+  h.onFrame((frame) => { if (frame.id !== undefined) h.reply({ id: frame.id, result: {} }); });
+  await h.transport.request('ping');
+  h.child.emit('exit', 0, null);
+  assert.equal(exits.length, 1);
+  assert(exits[0] instanceof AppError);
+  assert.equal(exits[0].code, 'CODEX_APP_SERVER_CLEAN_EXIT');
+  assert.equal(h.transport.status.running, false);
+  assert.equal(h.frames.filter((frame) => frame.method === 'initialize').length, 1);
+  await h.transport.close();
 });
 
 test('transport reads the CLI version from the initialize echo, keeping a prerelease suffix', async () => {

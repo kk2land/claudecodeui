@@ -872,9 +872,9 @@ export type CodexRpcFrame = {
 export type CodexRpcClient = {
   readonly status?: NonNullable<CodexSessionState['diagnostics']>;
   /**
-   * Identity of the current app-server connection generation. The Worker bridge
-   * uses it to close exactly the workers that belonged to the process that
-   * exited; null/absent clients fall back to a runtime-owned stable id.
+   * Identity of the current physical app-server connection generation. Exit
+   * listeners can identify that process; Worker ownership uses a separate
+   * runtime identity and survives idle proxy exits.
    */
   readonly instanceId?: string | null;
   /** Reserves or returns the instance id before the lazy child is spawned. */

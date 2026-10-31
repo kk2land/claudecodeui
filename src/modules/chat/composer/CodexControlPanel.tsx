@@ -112,7 +112,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
         className="min-w-0 rounded-xl border border-border bg-muted/20 p-3">
         <div className="flex flex-wrap items-center gap-2">
           <button type="button" className={cn(button, 'h-9 gap-2 px-3')}
-            disabled={pending || !state?.diagnostics?.running} onClick={() => void controls.control({ action: 'stop-app-server' }).catch(() => {})}>
+            disabled={pending || (!controls.canRetryStop && !state?.diagnostics?.running && !hasActiveWorkers)} onClick={() => void controls.control({ action: 'stop-app-server' }).catch(() => {})}>
             <Square className="h-3.5 w-3.5" aria-hidden="true" />
             {t('codex.stopAppServer')}
           </button>

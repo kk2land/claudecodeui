@@ -9,7 +9,7 @@ import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDeliv
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
 /** Retained control failure; the code is kept only to retire an uncertain Stop on native idle. */
-type CodexControlError = { message: string; code?: string };
+type CodexControlError = { message: string; code?: string; processStop?: boolean };
 
 type Args = {
   enabled: boolean;
@@ -177,7 +177,10 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
       if (action.action === 'goal') setVisibleGoals((old) => new Set([...old, sid]));
       await send(sid, action);
     } catch (error) {
-      setErrors((old) => ({ ...old, [sid]: { message: error instanceof Error ? error.message : String(error) } }));
+      setErrors((old) => ({ ...old, [sid]: {
+        message: error instanceof Error ? error.message : String(error),
+        processStop: action.action === 'stop-app-server',
+      } }));
       throw error;
     }
   }, [enabled, sessionId, ensureSession, send, goalsEnabled]);
@@ -235,6 +238,8 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
   // offering a toggle that could never produce a suggestion.
   const predictionsUnsupported = predictionsImplemented && nativeRuntime
     && Boolean(sessionId) && sessionSnapshot?.predictionSupported === false;
-  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, hasActiveWorkers, goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? '']?.message ?? null,
+  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, hasActiveWorkers,
+    canRetryStop: errors[sessionId ?? '']?.processStop === true,
+    goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? '']?.message ?? null,
     pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };
 }

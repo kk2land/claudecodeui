@@ -375,6 +375,22 @@ test('an uncertain stop alert clears only after a clean native idle snapshot', a
   expect(hook.result.current.error).toBeNull();
 });
 
+test('a failed process stop stays retryable after native idle until a retry succeeds', async () => {
+  const { hook, emit, sendMessage, respond } = await setupStopAlerts();
+  sendMessage.mockImplementation((message) => queueMicrotask(() => respond(message, false, 'Worker cleanup not confirmed.')));
+  await act(async () => {
+    await expect(hook.result.current.control({ action: 'stop-app-server' })).rejects.toThrow('Worker cleanup not confirmed.');
+  });
+  emit({ kind: 'status', codexState: { runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [] } });
+  expect(hook.result.current.hasActiveWorkers).toBe(false);
+  expect(hook.result.current.canRetryStop).toBe(true);
+  expect(hook.result.current.error).toBe('Worker cleanup not confirmed.');
+  sendMessage.mockImplementation((message) => queueMicrotask(() => respond(message)));
+  await act(async () => { await hook.result.current.control({ action: 'stop-app-server' }); });
+  expect(hook.result.current.canRetryStop).toBe(false);
+  expect(hook.result.current.error).toBeNull();
+});
+
 test('a failure response already carrying recovered idle does not rewrite the stop alert', async () => {
   const { hook, emit } = await setupStopAlerts();
   const idle: CodexSessionState = {
