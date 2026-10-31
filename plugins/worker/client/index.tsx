@@ -1062,7 +1062,12 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
   const workers = useMemo(
     () =>
       liveSnapshot
-        ? liveSnapshot.workers.filter((worker) => matchesScope(worker, query))
+        ? liveSnapshot.workers
+            .filter((worker) => matchesScope(worker, query))
+            .sort((a, b) =>
+              Number(b.latestRun?.status === "starting" || b.latestRun?.status === "running")
+              - Number(a.latestRun?.status === "starting" || a.latestRun?.status === "running"),
+            )
         : [],
     [liveSnapshot, query],
   );
