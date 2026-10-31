@@ -32,7 +32,7 @@ Use this flow when a change needs to be verified in a real browser:
 
 1. Codex runs `npm run build` from this repository and checks that it succeeds.
 2. Codex runs these commands directly, in order, without asking the user to run them or confirm:
-   - `/Users/agent/Projects/ops/init_claudecodeui.sh 1`
+   - `/Users/agent/Projects/ops/cloudcli_init.sh 1`
    - `/Users/agent/Projects/ops/cloudcli.sh dev`
 3. Codex confirms `http://localhost:3000` is ready and checks `/Users/agent/workspaces/tap/dev/cloudcli.log` for startup and plugin errors, then uses `$ego-browser` to open `http://localhost:3000` and verify the affected frontend functionality.
 
