@@ -12,7 +12,11 @@ const NOW = Date.parse("2026-10-31T00:00:00.000Z");
 
 function setup(t: TestContext): WorkerService {
   const root = temporaryRoot("worker-retention-");
-  const service = new WorkerService({ dataDirectory: root, now: () => NOW });
+  const service = new WorkerService({
+    dataDirectory: root,
+    environment: { HOME: path.join(root, "home") },
+    now: () => NOW,
+  });
   t.after(async () => {
     // These seeded active records have no real processes to stop during teardown.
     for (const run of service.store.activeRuns()) {

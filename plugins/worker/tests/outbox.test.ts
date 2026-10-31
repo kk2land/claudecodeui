@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import path from "node:path";
 import test from "node:test";
 import { WorkerStore } from "../server/store.js";
 import { WorkerService } from "../server/service.js";
@@ -94,7 +95,7 @@ test("startup holds pending notifications for a persisted paused owner", (t) => 
   store.close();
   const service = new WorkerService({
     dataDirectory: directory,
-    environment: {},
+    environment: { HOME: path.join(directory, "home") },
   });
   t.after(() => service.close());
   service.recoverFromDisk();

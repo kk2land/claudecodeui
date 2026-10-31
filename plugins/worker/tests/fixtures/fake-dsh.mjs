@@ -20,6 +20,7 @@ if (root) {
 const emit = (value) => process.stdout.write(JSON.stringify(value) + "\n");
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+if (scenario === "null-before-session") emit(null);
 emit({ type: "session", sessionId, cwd: process.cwd() });
 emit({ type: "status", phase: "step_start" });
 emit({ type: "tool_call", tool: "read", callId: "c1" });

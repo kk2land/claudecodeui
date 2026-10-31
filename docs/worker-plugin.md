@@ -110,6 +110,15 @@ Worker 设置可指定新的 worker 启动请求省略类型时使用的默认�
 旧设置 JSON 在读取时补齐缺少的 `defaultWorkerType: "dsh"`、全为 `null` 的 `defaults` 和
 `retentionDays: 1`，原有字段保持不变。
 
+原生 DSH/Pi 会话文件独立保留 3 天，按文件修改时间计算；插件启动时清理一次，之后每 24 小时清理一次。
+范围包括 `CODEX_DSH_SESSIONS_ROOT`（默认 `$HOME/tmp/codex-dsh-sessions`）、`$HOME/.pi/agent/sessions`，
+以及插件数据目录下的 `sessions/dsh`、`sessions/pi`。DSH 的历史 generation 和 `.zstd` 文件也参与清理。
+恰好达到 3 天的文件仍保留；排队、启动、运行、停止中或状态未知的 Worker 引用的原生会话会跳过。
+DSH 即使尚无文件路径也按已记录的原生 ID 保护会话目录，Pi 在启动前记录文件路径；
+恢复记录仍无法确定会话身份时，保留该运行所属会话根，待确认停止后再参与清理。
+`HOME` 缺失时依次使用 `USERPROFILE` 和系统用户目录定位共享会话目录。
+清理保留锁文件和其他非会话文件，失败项记录到插件日志并在下次清理时重试。插件停用期间不执行清理。
+
 新 worker 启动请求的参数优先级为：请求中显式给出的非空值 > 所选类型的插件默认值 > 现有后端环境回退（仅 Pi：
 `CODEX_PI_MODEL`、`CODEX_PI_THINKING`）> 原生 CLI 自身默认。省略 `type` 时选择
 `defaultWorkerType`；显式 `dsh`/`pi` 总是优先。provider 仍只来自请求或 Pi 的

@@ -18,6 +18,7 @@ import {
 } from "./native.js";
 import type { ProgressTracker } from "./native.js";
 import { readLogPage } from "./logs.js";
+import { sweepNativeSessions } from "./native-retention.js";
 import type {
   GuardianEvidence,
   WorkerCancelInput,
@@ -111,6 +112,8 @@ export class WorkerService {
   private readonly pendingAdmissions = new Set<string>();
   private readonly reminderTimer: NodeJS.Timeout;
   private readonly retentionTimer: NodeJS.Timeout;
+  private nativeRetentionTimer: NodeJS.Timeout | null = null;
+  private nativeRetentionSweep: Promise<void> | null = null;
   private dispatching = false;
   private closing = false;
   private recovering = false;
@@ -750,6 +753,11 @@ export class WorkerService {
       baseEnvironment: safeEnvironment,
       dshPatch: this.dshPatch(),
     });
+    // Pi names its transcript before spawn; persist it so cleanup can protect the file.
+    if (!run.nativeSessionFile && launch.sessionFile) {
+      run.nativeSessionFile = launch.sessionFile;
+      this.store.saveRun(run);
+    }
     const specPath = path.join(runDirectory, "spec.json");
     fs.writeFileSync(
       specPath,
@@ -851,7 +859,25 @@ export class WorkerService {
     } catch {
       return;
     }
-    trackProgress(this.store.worker(handle.workerId)?.type ?? "dsh", event, handle.progress);
+    const worker = this.store.worker(handle.workerId);
+    trackProgress(worker?.type ?? "dsh", event, handle.progress);
+    let identityChanged = false;
+    if (worker?.type === "dsh" && !run.nativeSessionId) {
+      const value = event as Record<string, unknown> | null;
+      const id = value?.type === "session" ? value.sessionId : null;
+      const cwd = value?.type === "session" ? value.cwd : null;
+      if (
+        typeof id === "string" &&
+        id.trim() &&
+        path.basename(id) === id &&
+        typeof cwd === "string" &&
+        path.isAbsolute(cwd) &&
+        path.resolve(cwd) === path.resolve(worker.cwd)
+      ) {
+        run.nativeSessionId = id;
+        identityChanged = true;
+      }
+    }
     run.progress.steps = handle.progress.steps ? handle.progress.steps : null;
     run.progress.phase = handle.progress.phase;
     run.progress.currentTool = handle.progress.currentTool;
@@ -859,6 +885,7 @@ export class WorkerService {
     if (run.status === "starting") run.status = "running";
     const timestamp = this.now();
     const important =
+      identityChanged ||
       handle.progress.phase === "turn_end" ||
       handle.progress.phase === "final" ||
       handle.progress.phase === "error";
@@ -1645,6 +1672,11 @@ export class WorkerService {
         }
         const worker = this.store.worker(run.workerId);
         if (!worker) continue;
+        if (!run.nativeSessionId || !run.nativeSessionFile) {
+          const parsed = this.parseRun(worker, run, run.nativeSessionId);
+          run.nativeSessionId = parsed?.nativeSessionId ?? run.nativeSessionId;
+          run.nativeSessionFile = parsed?.nativeSessionFile ?? run.nativeSessionFile;
+        }
         run.status = "unknown";
         run.error = {
           code: "RESTART_UNKNOWN",
@@ -1661,6 +1693,58 @@ export class WorkerService {
       this.recovering = false;
     }
     this.pruneHistory();
+    this.startNativeSessionCleanup();
+  }
+
+  /** Starts one immediate sweep and a per-instance 24-hour timer, once per service. */
+  private startNativeSessionCleanup(): void {
+    if (this.closing || this.storeClosed || this.nativeRetentionTimer) return;
+    this.nativeRetentionTimer = setInterval(
+      () => void this.runNativeSessionCleanup(),
+      24 * 60 * 60 * 1000,
+    );
+    this.nativeRetentionTimer.unref?.();
+    void this.runNativeSessionCleanup();
+  }
+
+  private runNativeSessionCleanup(): Promise<void> {
+    if (this.closing || this.storeClosed) return Promise.resolve();
+    if (this.nativeRetentionSweep) return this.nativeRetentionSweep;
+    const sweep = (async () => {
+      // Yield once so a concurrent trigger observes the in-flight sweep.
+      await Promise.resolve();
+      try {
+        sweepNativeSessions({
+          dataDirectory: this.options.dataDirectory,
+          environment: this.environment,
+          now: this.now(),
+          activeRuns: this.store.activeRuns().flatMap((run) => {
+            const worker = this.store.worker(run.workerId);
+            return worker
+              ? [{
+                  type: worker.type,
+                  sessionsRoot: run.sessionsRoot,
+                  nativeSessionId: run.nativeSessionId,
+                  nativeSessionFile: run.nativeSessionFile,
+                }]
+              : [];
+          }),
+          log: (message) => this.logNativeSessionCleanup(message),
+        });
+      } catch (error) {
+        this.logNativeSessionCleanup(
+          "native session cleanup failed: " + String(error),
+        );
+      } finally {
+        this.nativeRetentionSweep = null;
+      }
+    })();
+    this.nativeRetentionSweep = sweep;
+    return sweep;
+  }
+
+  private logNativeSessionCleanup(message: string): void {
+    process.stderr.write("worker " + message + "\n");
   }
 
   private pruneHistory(): void {
@@ -1691,8 +1775,13 @@ export class WorkerService {
     this.closing = true;
     clearInterval(this.reminderTimer);
     clearInterval(this.retentionTimer);
+    if (this.nativeRetentionTimer) {
+      clearInterval(this.nativeRetentionTimer);
+      this.nativeRetentionTimer = null;
+    }
     let failure: unknown;
     try {
+      await this.nativeRetentionSweep;
       await this.closeAll("插件进程退出");
     } catch (error) {
       failure = error;
