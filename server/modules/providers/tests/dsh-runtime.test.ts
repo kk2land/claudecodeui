@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm, stat, symlink, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -10,14 +10,15 @@ import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provi
 import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js';
 import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
 import { createProviderTokenUsageService } from '@/modules/providers/services/provider-token-usage.service.js';
-import type { AnyRecord, DshRuntimeMode, DshRuntimeSettings, ProviderRuntimeContext } from '@/shared/types.js';
+import type { AnyRecord, DshRuntimeMode, DshRuntimeSettings, DshWorkerBridge, ProviderRuntimeContext } from '@/shared/types.js';
 import { parseFilesInputTag, parseImagesInputTag } from '@/shared/image-attachments.js';
 
 const actor = `#!/usr/bin/env node
 import { appendFileSync, readFileSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 const log = (v) => appendFileSync(process.env.FAKE_DSH_LOG, JSON.stringify(v)+'\\n');
-log({args:process.argv.slice(2)});
+const patchPaths = process.argv.slice(2).flatMap((value, index, args) => value === '--patch' ? [args[index + 1]] : []);
+log({args:process.argv.slice(2), patches:patchPaths.map((file) => JSON.parse(readFileSync(file, 'utf8')))});
 const output = (v) => process.stdout.write(JSON.stringify(v)+'\\n');
 if (process.argv.includes('headless')) {
   let input='';
@@ -73,25 +74,72 @@ if (process.argv.includes('headless')) {
 }
 `;
 
-async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = null, synchronize?: () => Promise<number>, environment: NodeJS.ProcessEnv = {}) {
+async function fixture(mode: DshRuntimeMode = 'acp', nativeId: string | null = null, synchronize?: () => Promise<number>, environment: NodeJS.ProcessEnv = {}, bridge: DshWorkerBridge | null = null) {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh runtime '));
   const bin = path.join(root, 'fake-dsh.mjs'), log = path.join(root, 'calls.jsonl');
   await writeFile(bin, actor, { mode: 0o755 });
   const config = new DshConfigurationProvider({ ...process.env, CLOUDCLI_DSH_RUNTIME: mode, CLOUDCLI_DSH_BIN: bin,
-    DSH_HOME: root, CLOUDCLI_DSH_PATCHES: '[]', CLOUDCLI_DSH_TIMEOUT_MS: '2000', FAKE_DSH_LOG: log, ...environment });
+    DSH_HOME: root, CLOUDCLI_DSH_PATCHES: '[]', CLOUDCLI_DSH_TIMEOUT_MS: '10000', FAKE_DSH_LOG: log, ...environment });
   const messages: AnyRecord[] = [];
   let captured = nativeId;
   let syncs = 0;
   const saved = new Map<string, DshRuntimeSettings>();
   const settings = { getDsh: (id: string) => saved.get(id) ?? null, saveDsh: (id: string, value: DshRuntimeSettings) => { saved.set(id, value); } };
-  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), new DshMcpProvider(config), { synchronize: async () => { syncs++; return synchronize ? synchronize() : 0; } }, settings);
+  const mcp = new DshMcpProvider(config);
+  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), mcp, { synchronize: async () => { syncs++; return synchronize ? synchronize() : 0; } }, settings);
+  runtime.setWorkerBridge(bridge);
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => captured, resolveResumeModel: async (_id, model) => model || 'default',
     getProviderModels: async () => ({ OPTIONS: [], DEFAULT: 'default' }), normalizeMessage: () => [], isProviderInstalled: async () => true };
   const run = (prompt: string, options: AnyRecord = {}) => runtime.run(prompt, { sessionId: 'app', cwd: root, ...options },
     { send: (value) => messages.push(value as AnyRecord), setSessionId: (id) => { captured = id; } }, context);
-  return { runtime, messages, run, root, settings, get syncs() { return syncs; }, get captured() { return captured; },
+  return { runtime, messages, run, root, settings, mcp, get syncs() { return syncs; }, get captured() { return captured; },
     calls: async () => (await readFile(log, 'utf8')).trim().split('\n').map((line) => JSON.parse(line) as AnyRecord),
     close: async () => { await runtime.close(); await rm(root, { recursive: true, force: true }); } };
+}
+
+/** Reads the `--patch` paths from one fake CLI argv log entry. */
+function patchArgs(call: AnyRecord): string[] {
+  if (!Array.isArray(call.args)) return [];
+  return call.args.reduce((paths: string[], argument: string, index: number) =>
+    argument === '--patch' ? [...paths, call.args[index + 1]] : paths, []);
+}
+
+/** Records host bridge calls while allowing each test to gate or fail cleanup. */
+function bridgeHarness() {
+  const calls: Array<{ method: string; sessionId?: string; reason?: string; runtimeInstanceId?: string }> = [];
+  const prepares: AnyRecord[] = [];
+  let connection: { url: string; headers: Record<string, string> } | null = {
+    url: 'http://127.0.0.1:4321/api/worker-mcp',
+    headers: { authorization: 'Bearer worker-token' },
+  };
+  let prepareError: Error | null = null;
+  let stopResult: boolean | Promise<boolean> = true;
+  const bridge: DshWorkerBridge = {
+    isSessionEnabled: () => connection !== null && prepareError === null,
+    async prepareSession(input) {
+      prepares.push(input as AnyRecord);
+      calls.push({ method: 'prepare', sessionId: input.sessionId, runtimeInstanceId: input.runtimeInstanceId });
+      if (prepareError) throw prepareError;
+      return connection;
+    },
+    async activateSession(sessionId) { calls.push({ method: 'activate', sessionId }); },
+    async stopSession(sessionId, reason) {
+      calls.push({ method: 'stop', sessionId, reason });
+      return stopResult;
+    },
+    async closeRuntime(runtimeInstanceId, reason) {
+      calls.push({ method: 'closeRuntime', runtimeInstanceId, reason });
+    },
+  };
+  return {
+    bridge, calls, prepares,
+    setConnection(value: typeof connection) { connection = value; },
+    setPrepareError(error: Error | null) { prepareError = error; },
+    setStopResult(value: boolean | Promise<boolean>) { stopResult = value; },
+    patchFiles(calls: AnyRecord[]): string[] {
+      return calls.flatMap(patchArgs);
+    },
+  };
 }
 
 async function until(condition: () => boolean | Promise<boolean>): Promise<void> {
@@ -470,5 +518,285 @@ test('ACP usage_update is scoped to its app session and cached for the token-usa
       total: 1_000_000,
     });
     assert.equal((await service.getSessionTokenUsage('usage-b')).unsupported, true);
+  } finally { await f.close(); }
+});
+
+async function exists(file: string): Promise<boolean> {
+  try { await access(file); return true; } catch { return false; }
+}
+
+test('ACP mounts the Worker MCP through the launch patch after user patches and keeps user MCP on session/new', { skip: process.platform === 'win32' }, async () => {
+  const userDirectory = await mkdtemp(path.join(os.tmpdir(), 'dsh-user-patch-'));
+  const userPatch = path.join(userDirectory, 'user.patch.yml');
+  await writeFile(userPatch, '[]');
+  const h = bridgeHarness();
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_PATCHES: JSON.stringify([userPatch]) }, h.bridge);
+  try {
+    await f.mcp.upsertServer({ name: 'local', scope: 'project', workspacePath: f.root, transport: 'http',
+      url: 'http://127.0.0.1:4999/mcp', headers: { 'x-user': 'yes' } });
+    await f.run('hello');
+    const calls = await f.calls();
+    const patches = h.patchFiles(calls);
+    assert.equal(patches[0], userPatch, 'user CLOUDCLI_DSH_PATCHES must stay first');
+    assert.equal(patches.length, 2);
+    const workerPatch = patches[1];
+    assert.notEqual(workerPatch, userPatch);
+    assert.equal((await stat(workerPatch)).mode & 0o777, 0o600);
+    const rows = JSON.parse(await readFile(workerPatch, 'utf8'));
+    assert.deepEqual(rows, [{ insert: [{
+      id: 'cloudcli-workers-mcp',
+      name: '@deepseek-ai/dsh-mcp-client',
+      config: {
+        serverName: 'cloudcli_workers',
+        transport: 'streamable-http',
+        url: 'http://127.0.0.1:4321/api/worker-mcp',
+        headers: { authorization: 'Bearer worker-token' },
+      },
+    }] }]);
+    const created = calls.find((call) => call.method === 'session/new');
+    assert.deepEqual(created?.params.mcpServers.map((server: AnyRecord) => server.name), ['local']);
+    assert.equal(JSON.stringify(created?.params.mcpServers).includes('cloudcli_workers'), false,
+      'the Worker is never mounted twice through session/new');
+    assert.equal(h.prepares[0].sessionId, 'app');
+    assert.equal(h.prepares[0].projectPath, f.root);
+    assert.match(String(h.prepares[0].runtimeInstanceId), /^dsh:/);
+    await f.close();
+    assert.equal(await exists(workerPatch), false, 'the temporary patch directory is removed with its process');
+  } finally {
+    await f.close();
+    await rm(userDirectory, { recursive: true, force: true });
+  }
+});
+
+test('a missing bridge, a failed prepare, and every headless turn all remain plain chat without Worker injection', { skip: process.platform === 'win32' }, async () => {
+  const plain = await fixture();
+  try {
+    await plain.run('hello');
+    assert.equal((await plain.calls()).every((call) => patchArgs(call).length === 0), true);
+  } finally { await plain.close(); }
+  const h = bridgeHarness();
+  h.setPrepareError(new Error('Worker host unavailable'));
+  const failing = await fixture('acp', null, undefined, {}, h.bridge);
+  try {
+    await failing.run('hello');
+    assert.equal(failing.messages.at(-1)?.success, true);
+    assert.equal(h.calls.filter((call) => call.method === 'prepare').length, 1);
+    assert.equal((await failing.calls()).every((call) => patchArgs(call).length === 0), true);
+    assert.equal(failing.messages.some((message) => message.kind === 'error'), false);
+  } finally { await failing.close(); }
+  const headlessBridge = bridgeHarness();
+  const headless = await fixture('headless', null, undefined, {}, headlessBridge.bridge);
+  try {
+    await headless.mcp.upsertServer({ name: 'local', scope: 'project', workspacePath: headless.root, transport: 'http',
+      url: 'http://127.0.0.1:4999/mcp', headers: {} });
+    await headless.run('hello', { model: 'deepseek-official/flash' });
+    assert.equal(headlessBridge.calls.length, 0, 'headless never prepares or activates a Worker owner');
+    const logged = (await headless.calls()).find((call) => Array.isArray(call.args));
+    assert.equal(logged?.patches.length, 1);
+    assert.equal(JSON.stringify(logged?.patches).includes('cloudcli_workers'), false);
+    assert(JSON.stringify(logged?.patches).includes('@deepseek-ai/dsh-mcp-client'), 'the user MCP declaration still reaches headless');
+  } finally { await headless.close(); }
+});
+
+test('ACP idle recycling leaves Workers running and an automatic wake-up resumes the same native session and runtime instance', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' }, h.bridge);
+  try {
+    await f.run('first turn', { userTurn: true });
+    const firstCalls = await f.calls();
+    const firstPatch = h.patchFiles(firstCalls)[0];
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/close'));
+    await until(async () => !await exists(firstPatch));
+    assert.equal(f.runtime.management.getState('app').workerEnabled, true, 'Worker ownership survives ACP recycling');
+    assert.equal(h.calls.some((call) => call.method === 'stop'), false, 'idle recycling must not cancel Workers');
+    assert.equal(h.calls.some((call) => call.method === 'closeRuntime'), false);
+    const instanceId = h.prepares[0].runtimeInstanceId;
+    await f.run('wake up', { workerWakeup: true, deferTurn: () => true });
+    const calls = await f.calls();
+    assert.equal(calls.filter((call) => call.method === 'initialize').length, 2);
+    assert.equal(calls.filter((call) => call.method === 'session/resume').length, 1);
+    assert.equal(calls.filter((call) => call.method === 'session/new').length, 1);
+    assert.equal(calls.filter((call) => call.method === 'session/prompt').length, 2);
+    assert.equal(f.captured, 'native-acp');
+    assert.equal(h.prepares.length, 2);
+    assert.deepEqual(h.prepares.map((input) => input.runtimeInstanceId), [instanceId, instanceId]);
+    assert.equal(h.calls.filter((call) => call.method === 'activate').length, 1, 'only the explicit first turn activates');
+    const secondPatch = h.patchFiles(calls)[1];
+    assert.notEqual(secondPatch, firstPatch);
+    assert.equal(await exists(firstPatch), false, 'the recycled generation leaves no temporary directory behind');
+  } finally { await f.close(); }
+});
+
+test('explicit user turns activate the Worker owner while automatic wake-ups never do', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  const f = await fixture('acp', null, undefined, {}, h.bridge);
+  try {
+    await f.run('explicit turn', { userTurn: true });
+    await f.run('automatic wake', { workerWakeup: true });
+    await f.run('wake marked as both', { workerWakeup: true, userTurn: true });
+    assert.deepEqual(h.calls.filter((call) => call.method === 'activate').map((call) => call.sessionId), ['app']);
+    assert.equal(h.prepares.length, 3, 'prepareSession runs on every ACP turn');
+  } finally { await f.close(); }
+});
+
+test('a deferred final gate sends no native prompt and publishes neither an error nor a failed complete', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  const f = await fixture('acp', null, undefined, {}, h.bridge);
+  try {
+    await assert.rejects(
+      f.run('wake', { workerWakeup: true, deferTurn: () => false }),
+      { code: 'WORKER_WAKE_DEFERRED' },
+    );
+    assert.equal((await f.calls()).some((call) => call.method === 'session/prompt'), false);
+    assert.equal(f.messages.some((message) => message.kind === 'error'), false);
+    assert.equal(f.messages.some((message) => message.kind === 'complete'), false);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+  } finally { await f.close(); }
+});
+
+for (const stop of ['abort', 'management'] as const) test(`${stop} confirms Stop while a deferred Worker wake-up finishes indexing`, { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  let indexing = false;
+  let finishIndex!: () => void;
+  const indexGate = new Promise<void>((resolve) => { finishIndex = resolve; });
+  const f = await fixture('acp', null, async () => {
+    indexing = true;
+    await indexGate;
+    return 0;
+  }, {}, h.bridge);
+  try {
+    const running = f.run('wake', { workerWakeup: true, deferTurn: () => false });
+    await until(() => indexing);
+    const stopping = stop === 'abort'
+      ? f.runtime.abort('app')
+      : f.runtime.management.control('app', { action: 'stop' });
+    finishIndex();
+    const [, result] = await Promise.all([assert.rejects(running, { code: 'WORKER_WAKE_DEFERRED' }), stopping]);
+    if (stop === 'abort') assert.equal(result, true);
+    else assert.equal((result as { queueHeld: boolean }).queueHeld, true);
+    assert.equal((await f.calls()).some((call) => call.method === 'session/prompt'), false);
+    assert.equal(f.messages.some((message) => message.kind === 'error' || message.kind === 'complete'), false);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+  } finally { finishIndex(); await f.close(); }
+});
+
+test('Stop during asynchronous ACP preparation prevents session/prompt and the trusted turn-start hook', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  let releasePrepare!: () => void;
+  const gate = new Promise<void>((resolve) => { releasePrepare = resolve; });
+  let preparing = false;
+  const bridge: DshWorkerBridge = {
+    ...h.bridge,
+    async prepareSession(input) {
+      preparing = true;
+      await gate;
+      return { url: 'http://127.0.0.1:4321/api/worker-mcp', headers: {} };
+    },
+  };
+  const f = await fixture('acp', null, undefined, {}, bridge);
+  let turnStarting = 0;
+  try {
+    const running = f.run('hello', { userTurn: true, onTurnStarting: () => { turnStarting++; } });
+    await until(() => preparing);
+    const stopping = f.runtime.abort('app');
+    releasePrepare();
+    await running;
+    assert.equal(await stopping, true);
+    assert.equal(turnStarting, 0);
+    assert.equal(await exists(path.join(f.root, 'calls.jsonl')), false, 'Stop before launch starts no ACP process at all');
+    assert.deepEqual(h.calls.filter((call) => call.method === 'stop').map((call) => call.sessionId), ['app']);
+    assert.equal(f.messages.some((message) => message.kind === 'complete'), false);
+  } finally { await f.close(); }
+});
+
+test('management stop starts Worker cancellation synchronously and waits for its confirmation', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  let releaseStop!: (value: boolean) => void;
+  h.setStopResult(new Promise<boolean>((resolve) => { releaseStop = resolve; }));
+  const f = await fixture('acp', null, undefined, {}, h.bridge);
+  try {
+    await f.run('hello', { userTurn: true });
+    const stopping = f.runtime.management.control('app', { action: 'stop' });
+    await until(() => h.calls.some((call) => call.method === 'stop'));
+    assert.equal(f.runtime.management.getState('app').phase, 'stopping');
+    let settled = false;
+    void stopping.then(() => { settled = true; });
+    await delay(20);
+    assert.equal(settled, false, 'stop must not resolve before Worker cleanup confirms');
+    releaseStop(true);
+    const state = await stopping;
+    assert.equal(state.queueHeld, true);
+    assert.equal(state.diagnostics.running, false);
+  } finally { await f.close(); }
+});
+
+test('unconfirmed Worker cleanup keeps ACP paused instead of claiming a successful stop or abort', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  h.setStopResult(false);
+  const f = await fixture('acp', null, undefined, {}, h.bridge);
+  try {
+    await f.run('hello', { userTurn: true });
+    await assert.rejects(
+      f.runtime.management.control('app', { action: 'stop' }),
+      { code: 'DSH_WORKER_STOP_UNCONFIRMED' },
+    );
+    assert.equal(f.runtime.isQueueBlocked('app'), true);
+    assert.equal(f.runtime.management.getState('app').runtime, 'acp');
+    assert.equal(f.runtime.management.getState('app').diagnostics.running, false);
+    assert.equal(await f.runtime.abort('app'), false);
+    assert.equal(f.runtime.isQueueBlocked('app'), true);
+  } finally { await f.close(); }
+});
+
+test('switching an idle ACP session to headless cancels Workers even after the local owner was recycled', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' }, h.bridge);
+  try {
+    await f.run('hello', { userTurn: true });
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/close'));
+    await until(() => f.runtime.listActiveSessions().length === 0);
+    h.setStopResult(false);
+    await assert.rejects(
+      f.runtime.management.control('app', { action: 'runtime', runtime: 'headless' }),
+      { code: 'DSH_WORKER_STOP_UNCONFIRMED' },
+    );
+    assert.equal(f.runtime.management.getState('app').runtime, 'acp');
+    assert.equal(f.runtime.isQueueBlocked('app'), true);
+    h.setStopResult(true);
+    const state = await f.runtime.management.control('app', { action: 'runtime', runtime: 'headless' });
+    assert.equal(state.runtime, 'headless');
+    assert.equal(state.workerEnabled, false, 'headless never exposes Worker queue or stop support');
+    const stops = h.calls.filter((call) => call.method === 'stop');
+    assert.equal(stops.length, 2);
+    assert.deepEqual(stops.map((call) => call.reason), ['runtime-headless', 'runtime-headless']);
+    assert.equal(h.calls.some((call) => call.method === 'closeRuntime'), false);
+    assert.equal(await f.runtime.abort('app'), true, 'Stop still fences an already recycled idle ACP session');
+    await f.close();
+    const closed = h.calls.filter((call) => call.method === 'closeRuntime');
+    assert.equal(closed.length, 1);
+    assert.equal(closed[0].runtimeInstanceId, h.prepares[0].runtimeInstanceId);
+  } finally { await f.close(); }
+});
+
+test('a changed Worker endpoint or credential rebuilds the next ACP generation before the prompt', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  const f = await fixture('acp', null, undefined, {}, h.bridge);
+  try {
+    await f.run('first', { userTurn: true });
+    const firstPatch = h.patchFiles(await f.calls())[0];
+    h.setConnection({ url: 'http://127.0.0.1:4321/api/worker-mcp', headers: { authorization: 'Bearer rotated-token' } });
+    await f.run('second');
+    const calls = await f.calls();
+    assert.equal(calls.filter((call) => call.method === 'initialize').length, 2, 'credential changes must replace the old process');
+    assert.equal(calls.filter((call) => call.method === 'session/resume').length, 1);
+    const patches = h.patchFiles(calls);
+    assert.equal(patches.length, 2);
+    assert.deepEqual(JSON.parse(await readFile(patches[1], 'utf8'))[0].insert[0].config.headers, { authorization: 'Bearer rotated-token' });
+    assert.equal(await exists(firstPatch), false, 'the replaced generation recycles its temporary patch directory');
+    h.setConnection(null);
+    await f.run('third');
+    const noWorker = h.patchFiles(await f.calls());
+    assert.equal(noWorker.length, 2, 'disabling the Worker removes its patch on the next send');
+    assert.equal((await f.calls()).filter((call) => call.method === 'initialize').length, 3);
   } finally { await f.close(); }
 });

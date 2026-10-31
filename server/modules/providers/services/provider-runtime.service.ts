@@ -80,6 +80,11 @@ export function createProviderRuntimeService(
       return dependencies.resolveProvider(providerName).runtime.getState?.(sessionId);
     },
 
+    /** Workers and WebSocket dispatch read managed transport state without invoking the HTTP validation boundary. */
+    getManagedState(providerName: LLMProvider, sessionId: string) {
+      return dependencies.resolveProvider(providerName).runtime.management?.getState(sessionId);
+    },
+
     isQueueBlocked(sessionId: string): boolean {
       return dependencies.listProviders().some((provider) => provider.runtime.isQueueBlocked?.(sessionId));
     },

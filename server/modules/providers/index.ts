@@ -1,5 +1,9 @@
-import type { CodexWorkerBridge } from '@/shared/index.js';
+import type { CodexWorkerBridge, DshWorkerBridge } from '@/shared/index.js';
+
 import { codexAppServerRuntime } from './list/codex/codex-app-server.runtime.js';
+import { codexAppServerTransport } from './list/codex/codex-app-server.transport.js';
+import type { DshRuntimeProvider } from './list/dsh/dsh-runtime.provider.js';
+import { providerRegistry } from './provider.registry.js';
 
 export { sessionSynchronizerService } from './services/session-synchronizer.service.js';
 export { providerSkillsService } from './services/skills.service.js';
@@ -24,6 +28,12 @@ export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 
 // setCodexWorkerBridge: used by the server composition root to inject Worker
 // lifecycle callbacks without providers importing the workers module.
-export function setCodexWorkerBridge(bridge: CodexWorkerBridge | null): void {
+export function setCodexWorkerBridge(bridge: CodexWorkerBridge | null, mcpUrl?: string): void {
   codexAppServerRuntime.setWorkerBridge(bridge);
+  codexAppServerTransport.setWorkerMcpUrl(mcpUrl ?? null);
+}
+
+/** Server bootstrap injects DSH's Worker callbacks without a providers-to-workers runtime dependency. */
+export function setDshWorkerBridge(bridge: DshWorkerBridge | null): void {
+  (providerRegistry.resolveProvider('dsh').runtime as DshRuntimeProvider).setWorkerBridge(bridge);
 }

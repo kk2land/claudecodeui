@@ -111,6 +111,7 @@ function predictionReasonKey(reason: CodexComposerPredictionReason | undefined):
     case 'request_failed': return 'prediction.unavailableRequestFailed';
     case 'timeout': return 'prediction.unavailableTimeout';
     case 'unsupported': return 'prediction.unavailableUnsupported';
+    case 'worker_mcp': return 'prediction.unavailableWorkerMcp';
     case 'ineligible': return 'prediction.unavailableIneligible';
     case 'config_unavailable': return 'prediction.unavailableConfig';
     default: return 'prediction.unavailable';

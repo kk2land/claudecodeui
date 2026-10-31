@@ -13,7 +13,7 @@ import { rememberDshContextUsage } from '@/modules/providers/services/provider-t
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { sessionRuntimeDb } from '@/modules/database/index.js';
 import type { IProviderRuntime } from '@/shared/interfaces.js';
-import type { AnyRecord, DshConfiguration, ProviderPermissionDecision, ProviderRuntimeAction, ProviderRuntimeState, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/types.js';
+import type { AnyRecord, DshConfiguration, DshWorkerBridge, ProviderPermissionDecision, ProviderRuntimeAction, ProviderRuntimeState, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/types.js';
 import { AppError, createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
 import { appendFilesInputTag, appendImagesInputTag, isAllowedImageSourcePath, normalizeAttachmentDescriptors, resolveImageAbsolutePath } from '@/shared/image-attachments.js';
 
@@ -36,6 +36,7 @@ type DshOwner = {
   defaultModel?: string;
   approvalBypass?: boolean;
   mcpSignature?: string;
+  worker?: Awaited<ReturnType<DshWorkerBridge['prepareSession']>>;
   cliVersion?: string;
   processStopped?: boolean;
 };
@@ -47,6 +48,10 @@ export class DshRuntimeProvider implements IProviderRuntime {
   private readonly approvals = new Map<string, DshApproval>();
   // A handoff/stop excludes new sends and queue dispatch until teardown has actually finished.
   private readonly transitions = new Map<string, { phase: 'switching' | 'stopping'; done: Promise<void> }>();
+  // The Worker host scopes owners to this logical DSH instance. It survives ACP
+  // idle recycling, so the same token can be reused when a wake-up resumes.
+  private readonly runtimeInstanceId = `dsh:${randomUUID()}`;
+  private workerBridge: DshWorkerBridge | null = null;
 
   constructor(
     private readonly configuration: DshConfigurationProvider,
@@ -55,6 +60,11 @@ export class DshRuntimeProvider implements IProviderRuntime {
     private readonly synchronizer: Pick<DshSessionSynchronizer, 'synchronize'>,
     private readonly settings: Pick<typeof sessionRuntimeDb, 'getDsh' | 'saveDsh'> = sessionRuntimeDb,
   ) {}
+
+  /** The composition root installs the Worker bridge; providers never import workers. */
+  setWorkerBridge(bridge: DshWorkerBridge | null): void {
+    this.workerBridge = bridge;
+  }
 
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<void> {
     const id = String(options.sessionId || randomUUID());
@@ -78,6 +88,9 @@ export class DshRuntimeProvider implements IProviderRuntime {
 
   private async execute(owner: DshOwner, command: string, options: AnyRecord, context: ProviderRuntimeContext, previous?: DshOwner): Promise<void> {
     let success = false;
+    // A deferred Worker wake-up is a normal pause, not a provider failure. It
+    // releases the reservation without publishing an error or a terminal.
+    let deferred = false;
     try {
       if (previous) await this.release(previous);
       if (owner.aborted) return;
@@ -95,26 +108,48 @@ export class DshRuntimeProvider implements IProviderRuntime {
       // model's image support and persists the image in native session history.
       const prompt = appendFilesInputTag(appendImagesInputTag(command, images), options.files);
       const model = await context.resolveResumeModel(owner.id, options.model);
-      const mcpSignature = JSON.stringify(await this.servers(owner));
-      if (owner.child && owner.mcpSignature !== mcpSignature) {
-        await owner.child.close();
-        owner.child = undefined;
+      // Worker MCP is ACP-only. prepareSession is idempotent per application
+      // session and runtime instance, and a null/failed result keeps plain chat
+      // working without Worker tools. Headless never asks for or injects it.
+      if (owner.config.mode === 'acp') {
+        try {
+          owner.worker = await this.workerBridge?.prepareSession({
+            sessionId: owner.id,
+            projectPath: String(options.projectPath ?? options.cwd ?? owner.cwd),
+            userId: owner.writer.userId ?? null,
+            runtimeInstanceId: this.runtimeInstanceId,
+          }) ?? null;
+        } catch {
+          owner.worker = null;
+        }
+        if (owner.aborted) return;
+        // Only an explicit interactive user turn may clear a paused owner; an
+        // automatic wake-up must never resume Worker delivery on its own.
+        if (options.userTurn === true && options.workerWakeup !== true) {
+          await this.workerBridge?.activateSession(owner.id).catch(() => {});
+        }
+      } else {
+        owner.worker = null;
       }
+      const mcpSignature = JSON.stringify({ servers: await this.servers(owner), worker: owner.worker ?? null });
+      if (owner.child && owner.mcpSignature !== mcpSignature) await this.closeChild(owner);
       owner.mcpSignature = mcpSignature;
       if (owner.aborted) return;
       if (owner.config.mode === 'headless') await this.headless(owner, prompt, model, options);
       else await this.acp(owner, prompt, model, options);
       success = !owner.aborted;
     } catch (error) {
-      if (!owner.aborted) {
+      if (error instanceof AppError && error.code === 'WORKER_WAKE_DEFERRED') {
+        deferred = true;
+      } else if (!owner.aborted) {
         const message = error instanceof Error ? error.message : String(error);
         owner.writer.send(createNormalizedMessage({ kind: 'error', provider: 'dsh', sessionId: owner.id, content: message }));
         notifyRunFailed({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, error: message });
         // Never retry a prompt after a timeout or broken transport: delivery
         // may already have happened. Release the writer before any next run.
         await this.release(owner, false);
-        throw error;
       }
+      if (deferred || !owner.aborted) throw error;
     } finally {
       let exitCode = 1;
       try {
@@ -125,6 +160,8 @@ export class DshRuntimeProvider implements IProviderRuntime {
         if (this.owners.get(owner.id) === owner) {
           if (owner.config.mode === 'headless' || owner.aborted || !success) await this.release(owner);
           else {
+            // Idle recycling closes only this ACP process. Worker owners stay
+            // alive in the host and a later wake-up resumes the native session.
             owner.idle = setTimeout(() => { void this.release(owner).catch((error) => console.warn('[DSH] Idle cleanup failed:', error.message)); }, owner.config.idleMs);
             owner.idle.unref();
           }
@@ -135,9 +172,9 @@ export class DshRuntimeProvider implements IProviderRuntime {
         // next turn. Publish it only after teardown and this busy guard end.
         // No owner mutation or asynchronous cleanup may follow the terminal.
         owner.busy = false;
-        if (owner.processStopped) {
+        if (!deferred && owner.processStopped) {
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: 0, aborted: true }));
-        } else if (!owner.aborted) {
+        } else if (!deferred && !owner.aborted) {
           if (exitCode === 0) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode }));
         }
@@ -162,6 +199,30 @@ export class DshRuntimeProvider implements IProviderRuntime {
     return child;
   }
 
+  /** Closes one ACP generation and recycles its temporary patch directory. */
+  private async closeChild(owner: DshOwner): Promise<void> {
+    await owner.child?.close();
+    owner.child = undefined;
+    if (owner.directory) await rm(owner.directory, { recursive: true, force: true });
+    owner.directory = undefined;
+  }
+
+  /** Fences and cancels the Worker owner; any rejection or synchronous throw is unconfirmed. */
+  private async stopWorkerOwner(sessionId: string, reason: string): Promise<boolean> {
+    try {
+      return await this.workerBridge?.stopSession(sessionId, reason) ?? true;
+    } catch {
+      return false;
+    }
+  }
+
+  /** Stop joins cleanup while the dispatcher still receives normal wake-up deferral. */
+  private async waitForStoppedRun(owner: DshOwner): Promise<void> {
+    try { await owner.done; } catch (error) {
+      if (!(error instanceof AppError && error.code === 'WORKER_WAKE_DEFERRED')) throw error;
+    }
+  }
+
   private async servers(owner: DshOwner): Promise<AnyRecord[]> {
     const grouped = await this.mcp.listServers({ workspacePath: owner.cwd });
     const merged = new Map([...grouped.user, ...grouped.project].map((server) => [server.name, server]));
@@ -184,7 +245,10 @@ export class DshRuntimeProvider implements IProviderRuntime {
   private async acp(owner: DshOwner, prompt: string, model: string | undefined, options: AnyRecord): Promise<void> {
     const timeout = owner.config.timeoutMs;
     if (!owner.child) {
-      const child = await this.launch(owner);
+      const child = await this.launch(owner, owner.worker ? [{ insert: [{
+        id: 'cloudcli-workers-mcp', name: '@deepseek-ai/dsh-mcp-client',
+        config: { serverName: 'cloudcli_workers', transport: 'streamable-http', ...owner.worker },
+      }] }] : []);
       child.onFrame = (frame) => {
         if (frame.method === 'session/update' && frame.params?.sessionId === owner.nativeId && owner.busy && !owner.aborted) {
           for (const message of this.events.normalize(frame.params, owner.id)) {
@@ -250,6 +314,20 @@ export class DshRuntimeProvider implements IProviderRuntime {
       await child.request('session/set_config_option', { sessionId: owner.nativeId, configId: 'reasoning_effort', value: options.effort }, timeout);
     }
     if (owner.aborted) return;
+    // Consult the trusted final gate only after every model/initialization
+    // await, immediately before the native prompt exists. A false result
+    // leaves the host outbox pending without a failed run.
+    const deferTurn = typeof options.deferTurn === 'function'
+      ? options.deferTurn as () => boolean
+      : null;
+    if (deferTurn && !deferTurn()) {
+      throw new AppError('The Worker wake-up was deferred until the session is idle.', {
+        code: 'WORKER_WAKE_DEFERRED', statusCode: 409,
+      });
+    }
+    // Covers a user message queued or Stop pressed during asynchronous
+    // initialization; the trusted host callback confirms delivery now.
+    options.onTurnStarting?.();
     const result = await child.request('session/prompt', { sessionId: owner.nativeId, prompt: [{ type: 'text', text: prompt }] }, 0);
     if (!owner.aborted && result.stopReason !== 'end_turn') throw new Error(`DSH stopped: ${result.stopReason || 'unknown reason'}`);
   }
@@ -324,6 +402,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
         phase: (sessionId && this.transitions.get(sessionId)?.phase) || (owner?.busy ? running ? 'running' : 'starting' : 'idle'),
         queueHeld: saved?.queueHeld ?? false,
         supportsPermissionRequests: runtime === 'acp',
+        workerEnabled: runtime === 'acp' && Boolean(sessionId && this.workerBridge?.isSessionEnabled(sessionId)),
         diagnostics: {
           running, pid: running ? child!.child.pid! : null,
           startedAt: running ? child!.startedAt : null,
@@ -357,6 +436,14 @@ export class DshRuntimeProvider implements IProviderRuntime {
         throw new AppError('Only the DSH ACP process can be stopped from this panel.', { code: 'UNSUPPORTED_RUNTIME_CONTROL', statusCode: 409 });
       }
 
+      // Stop the associated Workers immediately, before native teardown or any
+      // other await. The host fences locally in stopSession, so a false or
+      // rejected result must keep the queue held instead of claiming success.
+      const stopWorkers = action.action === 'stop'
+        || (action.action === 'runtime' && action.runtime === 'headless' && state.runtime === 'acp');
+      const workerCleanup = stopWorkers
+        ? this.stopWorkerOwner(sessionId, action.action === 'stop' ? 'session-stop' : 'runtime-headless')
+        : Promise.resolve(true);
       // Defer cleanup until the gate is installed, including a stop during asynchronous startup.
       const done = Promise.resolve().then(async () => {
         if (action.action === 'stop') {
@@ -369,12 +456,25 @@ export class DshRuntimeProvider implements IProviderRuntime {
             if (owner.busy) {
               await owner.child?.close();
               // execute owns cleanup until startup/indexing finish, including patches created after stop.
-              await owner.done;
+              await this.waitForStoppedRun(owner);
             }
             await this.release(owner);
           }
+          if (!await workerCleanup) {
+            throw new AppError('DSH Worker cleanup was not confirmed. The session remains paused; retry the stop.', {
+              code: 'DSH_WORKER_STOP_UNCONFIRMED', statusCode: 409,
+            });
+          }
         } else {
           if (owner) await this.release(owner);
+          if (!await workerCleanup) {
+            // Keep the current transport and explicit pause: a Worker owner
+            // that did not confirm cancellation must not be handed to headless.
+            this.settings.saveDsh(sessionId, { runtime: state.runtime as DshConfiguration['mode'], queueHeld: true });
+            throw new AppError('DSH Worker cleanup was not confirmed. The runtime was not changed and the session remains paused.', {
+              code: 'DSH_WORKER_STOP_UNCONFIRMED', statusCode: 409,
+            });
+          }
           this.settings.saveDsh(sessionId, { runtime: action.runtime as DshConfiguration['mode'], queueHeld: state.queueHeld });
         }
       });
@@ -389,15 +489,30 @@ export class DshRuntimeProvider implements IProviderRuntime {
   }
 
   async abort(sessionId: string): Promise<boolean> {
+    // Stop is a synchronous host fence first; native interruption is
+    // independent. This also cancels Workers when ACP idle recycling already
+    // removed the local owner.
+    const workerCleanup = this.stopWorkerOwner(sessionId, 'session-stop');
     const owner = this.owners.get(sessionId);
-    if (!owner?.busy) return false;
+    if (!owner?.busy) {
+      const workersStopped = await workerCleanup;
+      if (!workersStopped) {
+        this.settings.saveDsh(sessionId, { runtime: this.management.getState(sessionId).runtime as DshConfiguration['mode'], queueHeld: true });
+      }
+      return workersStopped;
+    }
     owner.aborted = true;
     this.cancelApprovals(owner);
     if (owner.config.mode === 'acp' && owner.nativeId && owner.child && !owner.child.isClosed) {
       owner.child.notify('session/cancel', { sessionId: owner.nativeId });
       const kill = setTimeout(() => { void owner.child?.close(); }, owner.config.timeoutMs);
-      try { await owner.done; } finally { clearTimeout(kill); }
-    } else { await owner.child?.close(); await owner.done; }
+      try { await this.waitForStoppedRun(owner); } finally { clearTimeout(kill); }
+    } else { await owner.child?.close(); await this.waitForStoppedRun(owner); }
+    const workersStopped = await workerCleanup;
+    if (!workersStopped) {
+      this.settings.saveDsh(sessionId, { runtime: owner.config.mode, queueHeld: true });
+      return false;
+    }
     return true;
   }
 
@@ -408,8 +523,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
       if (owner.config.mode === 'acp' && !owner.busy && owner.nativeId && owner.child && !owner.child.isClosed) {
         try { await owner.child.request('session/close', { sessionId: owner.nativeId }, owner.config.timeoutMs); } catch { /* EOF and signals still reap an unresponsive peer. */ }
       }
-      await owner.child?.close();
-      if (owner.directory) await rm(owner.directory, { recursive: true, force: true });
+      await this.closeChild(owner);
     })();
     try { await owner.releasing; } finally {
       if (forget && this.owners.get(owner.id) === owner) this.owners.delete(owner.id);
@@ -419,6 +533,9 @@ export class DshRuntimeProvider implements IProviderRuntime {
   listActiveSessions() { return [...this.owners.values()].filter((owner) => owner.busy).map((owner) => ({ sessionId: owner.id, startedAt: owner.startedAt })); }
 
   async close(): Promise<void> {
-    await Promise.all([...this.owners.values()].map(async (owner) => { owner.aborted = true; await this.release(owner); await owner.done; }));
+    await Promise.all([...this.owners.values()].map(async (owner) => { owner.aborted = true; await this.release(owner); await this.waitForStoppedRun(owner); }));
+    // Closing the runtime cancels every Worker owner scoped to this logical DSH
+    // instance. A single ACP process exit is not a runtime lifetime boundary.
+    await this.workerBridge?.closeRuntime(this.runtimeInstanceId, 'DSH runtime closed.').catch(() => {});
   }
 }

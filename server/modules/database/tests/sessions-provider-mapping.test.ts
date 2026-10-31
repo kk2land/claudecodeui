@@ -43,6 +43,18 @@ test('disk-discovered sessions are keyed by the provider id for both columns', a
   });
 });
 
+test('equal Codex and DSH native ids map to distinct globally scoped application sessions', async () => {
+  await withIsolatedDatabase(() => {
+    const codex = sessionsDb.createSession('same-native-id', 'codex', '/workspace/shared');
+    const dsh = sessionsDb.createSession('same-native-id', 'dsh', '/workspace/shared');
+    assert.notEqual(codex, dsh);
+    assert.equal(sessionsDb.getSessionById(codex)?.provider, 'codex');
+    assert.equal(sessionsDb.getSessionById(dsh)?.provider, 'dsh');
+    assert.equal(sessionsDb.getSessionById(codex)?.provider_session_id, 'same-native-id');
+    assert.equal(sessionsDb.getSessionById(dsh)?.provider_session_id, 'same-native-id');
+  });
+});
+
 test('app sessions get the provider id assigned without creating a duplicate row', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-id-1', 'claude', '/workspace/demo', 'Initial CloudCLI message');

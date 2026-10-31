@@ -12,6 +12,9 @@ import type { Project, ProviderRuntimeState } from '@/shared/types';
 vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
   useProviderCapabilities: () => ({ dsh: { runtimeManagement: { modes: ['acp', 'headless'], stoppableModes: ['acp'] } } }),
 }));
+vi.mock('@/modules/plugins', () => ({
+  usePlugins: () => ({ plugins: [{ name: 'worker', enabled: false }] }),
+}));
 
 const PROJECT: Project = { projectId: 'project-1', displayName: 'Test', fullPath: '/tmp/project' };
 const STATE: ProviderRuntimeState = {

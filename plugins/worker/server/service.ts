@@ -397,6 +397,8 @@ export class WorkerService {
       return this.resultOf(existing.workerId, existing.runId);
     }
     const worker = this.ownedWorker(ownerId, input.workerId);
+    if (this.store.workerCleanedAt(worker.id))
+      throw new WorkerFailure("WORKSPACE_CLEANED", "worktree 已清理，请为后续任务创建新的 worker");
     const previous = this.store.latestRun(worker.id);
     if (!previous)
       throw new WorkerFailure("RUN_NOT_FOUND", "worker 尚无运行记录");

@@ -207,6 +207,12 @@ function ChatInterface({
     provider, sessionId: selectedSession?.id || currentSessionId,
     project: selectedProject, newSessionTrigger, onSessionEstablished: handleSessionEstablished,
   });
+  // DSH registers Worker tools on the ACP session, including after idle
+  // recycling; only then does a busy chat.send become a durable queue receipt.
+  // Headless, plain and non-Worker sessions keep the existing composer path.
+  const workerQueueEnabled = provider === 'dsh'
+    && runtimeControls.state?.runtime === 'acp'
+    && runtimeControls.state.workerEnabled === true;
 
   const codexModelProviders = useCodexModelProviders({
     enabled: provider === 'codex' && codexControls.state?.runtime !== 'sdk',
@@ -306,6 +312,7 @@ function ChatInterface({
     composerPredictionsUnsupported: codexControls.predictionsUnsupported === true
       && codexControls.state?.runtime !== 'sdk',
     prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
+    workerQueueEnabled,
     executionIdsRef,
     processingSessions,
     canAbortSession,

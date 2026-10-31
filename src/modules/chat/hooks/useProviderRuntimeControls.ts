@@ -3,6 +3,7 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react
 import { api, readApiJson } from '@/shared/api';
 import { readDraftText, writeDraftText } from '@/shared/chatDrafts';
 import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
+import { useSessionWorkerActivity } from '@/modules/chat/hooks/useSessionWorkerActivity';
 import type { LLMProvider, Project, ProviderRuntimeAction, ProviderRuntimeControls, ProviderRuntimeState, SessionEstablishedContext } from '@/shared/types';
 
 type Args = {
@@ -136,8 +137,20 @@ export function useProviderRuntimeControls({ provider, sessionId, project, newSe
     return session.establish() ? session.id : null;
   }, [scope, provider, ensureSession]);
 
+  const state = snapshots[scope] ?? null;
+  // DSH ACP owns Worker plugin runs for this exact session; headless and
+  // non-Worker sessions never query, and a session switch drops the old scope
+  // before its result could light the panel. Other providers keep their own
+  // native activity controls.
+  const hasActiveWorkers = useSessionWorkerActivity({
+    enabled: provider === 'dsh' && available,
+    native: state?.runtime === 'acp' && state.workerEnabled === true,
+    projectId: project?.projectId,
+    sessionId,
+  });
+
   return {
     sessionId, available, modes: capabilities?.modes ?? [], stoppableModes: capabilities?.stoppableModes ?? [],
-    state: snapshots[scope] ?? null, pending: pendingScopes.has(scope), error: errors[scope]?.message ?? null, control, prepareSend,
+    hasActiveWorkers, state, pending: pendingScopes.has(scope), error: errors[scope]?.message ?? null, control, prepareSend,
   };
 }

@@ -342,3 +342,37 @@ test("cleanup is refused while another worker uses the same cwd", async (t) => {
     /cloudcli-worker\//,
   );
 });
+
+test("a merged worktree is removed while native history stays and new resumes are rejected", async (t) => {
+  const root = temporaryRoot("worker-merged-cleanup-");
+  const { service, project } = createService(t, root);
+  git(project, ["init", "-b", "main"]);
+  git(project, ["config", "user.email", "worker@example.test"]);
+  git(project, ["config", "user.name", "Worker Test"]);
+  fs.writeFileSync(path.join(project, "file.txt"), "initial\n");
+  git(project, ["add", "."]);
+  git(project, ["commit", "-m", "initial"]);
+  const start = await service.start("owner-1", startInput({
+    workspace: { mode: "worktree" }, requestId: "merged-cleanup-start",
+  }));
+  const done = await waitStatus(service, start.worker.id, ["completed"]);
+  // Integration is the parent's responsibility; only the test parent commits and merges.
+  fs.writeFileSync(path.join(done.cwd, "file.txt"), "integrated\n");
+  git(done.cwd, ["add", "."]);
+  git(done.cwd, ["commit", "-m", "worker result"]);
+  git(project, ["merge", "--ff-only", done.workspace.branch!]);
+  await service.cleanup({ workerId: done.id });
+  assert.equal(fs.existsSync(done.cwd), false);
+  assert.equal(fs.readFileSync(path.join(project, "file.txt"), "utf8"), "integrated\n");
+  assert.match(git(project, ["branch", "--list", done.workspace.branch!]), /cloudcli-worker\//);
+  assert.equal(fs.existsSync(done.latestRun!.nativeSessionFile!), true);
+  assert.equal(service.get(done.id).runs.length, 1);
+  await assert.rejects(service.resume("owner-1", {
+    workerId: done.id, requestId: "after-cleanup", prompt: "new work",
+  }), (error: unknown) => (error as { code: string }).code === "WORKSPACE_CLEANED");
+  assert.equal(service.get(done.id).runs.length, 1);
+  const replay = await service.start("owner-1", startInput({
+    workspace: { mode: "worktree" }, requestId: "merged-cleanup-start",
+  }));
+  assert.equal(replay.run.id, start.run.id);
+});

@@ -25,6 +25,7 @@ function notification(overrides: Partial<WorkerNotification> = {}): WorkerNotifi
 
 function harness(options: {
   sessions?: Record<string, string>;
+  providers?: Record<string, 'codex' | 'dsh'>;
   claim?: (ids: string[], outbox: Map<string, WorkerNotification>) => Promise<unknown>;
 } = {}) {
   const outbox = new Map<string, WorkerNotification>();
@@ -43,9 +44,11 @@ function harness(options: {
   const goals = new Set<string>();
   const blocked = new Set<string>();
   const phases = new Map<string, string>();
+  const dshModes = new Map<string, 'acp' | 'headless'>();
+  const stateProviders: string[] = [];
   const sessions = new Map<string, { project_path: string; provider: string; projectId: string }>();
   for (const [sessionId, projectPath] of Object.entries(options.sessions ?? { 'session-1': '/repo' })) {
-    sessions.set(sessionId, { project_path: projectPath, provider: 'codex', projectId: `project-${projectPath.split('/').at(-1)}` });
+    sessions.set(sessionId, { project_path: projectPath, provider: options.providers?.[sessionId] ?? 'codex', projectId: `project-${projectPath.split('/').at(-1)}` });
   }
   const wakeCalls: Array<Record<string, unknown>> = [];
   const logs: Array<{ message: string; detail: unknown }> = [];
@@ -103,11 +106,15 @@ function harness(options: {
     resolveMcpUrl: () => 'http://127.0.0.1:3001/api/worker-mcp',
     runtime: {
       isQueueBlocked: (sessionId) => blocked.has(sessionId) || queueHeld.has(sessionId) || goals.has(sessionId),
-      getState: (_provider, sessionId) => ({
-        runtime: 'app-server', mode: 'default', phase: (phases.get(sessionId) ?? 'idle') as 'idle' | 'starting' | 'running' | 'stopping' | 'failed' | 'stopFailed', turnId: null,
-        goal: goals.has(sessionId) ? { threadId: 'thread', objective: 'goal', status: 'active', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0 } : null,
-        questions: [], queueHeld: queueHeld.has(sessionId),
-      }),
+      getState: (provider, sessionId) => {
+        assert(sessions.has(sessionId), 'a deleted parent must not reach runtime state lookup');
+        stateProviders.push(provider);
+        return {
+          runtime: provider === 'dsh' ? dshModes.get(sessionId) ?? 'acp' : 'app-server', mode: 'default', phase: (phases.get(sessionId) ?? 'idle') as 'idle' | 'starting' | 'running' | 'stopping' | 'failed' | 'stopFailed', turnId: null,
+          goal: goals.has(sessionId) ? { threadId: 'thread', objective: 'goal', status: 'active', tokenBudget: null, tokensUsed: 0, timeUsedSeconds: 0 } : null,
+          questions: [], queueHeld: queueHeld.has(sessionId),
+        };
+      },
       hasBackgroundWork: (sessionId) => background.has(sessionId),
     },
     hasActiveRun: (sessionId) => activeRuns.has(sessionId),
@@ -119,7 +126,7 @@ function harness(options: {
       },
     },
     drafts: { hasQueuedMessages: (sessionId) => drafts.has(sessionId) },
-    settings: { get: (sessionId) => ({ queueHeld: queueHeld.has(sessionId) }) },
+    settings: { get: (sessionId) => ({ queueHeld: sessions.get(sessionId)?.provider === 'codex' && queueHeld.has(sessionId) }) },
     runTurn: (input) => runTurnImpl(input as unknown as Record<string, unknown>),
     setTimeout: ((callback: () => void, delay = 0) => {
       const id = nextTimer++;
@@ -137,7 +144,9 @@ function harness(options: {
   service.initialize();
 
   return {
-    service, ipc, outbox, requests, claims, settlements, timers, wakeCalls, logs,
+    service, ipc, outbox, requests, claims, settlements, timers, wakeCalls, logs, stateProviders,
+    deleteSession(sessionId: string) { sessions.delete(sessionId); },
+    setDshMode(sessionId: string, mode: 'acp' | 'headless') { dshModes.set(sessionId, mode); },
     setActiveRun(sessionId: string, value: boolean) { if (value) activeRuns.add(sessionId); else activeRuns.delete(sessionId); },
     setQueueHeld(sessionId: string, value: boolean) { if (value) queueHeld.add(sessionId); else queueHeld.delete(sessionId); },
     setDrafts(sessionId: string, value: boolean) { if (value) drafts.add(sessionId); else drafts.delete(sessionId); },
@@ -164,6 +173,11 @@ function harness(options: {
       }
       return service.bridge.prepareSession({
         sessionId, projectPath: session.project_path, userId: 7, appServerInstanceId,
+      });
+    },
+    prepareDsh(sessionId = 'session-1', runtimeInstanceId = 'instance-1') {
+      return service.dshBridge.prepareSession({
+        sessionId, projectPath: sessions.get(sessionId)!.project_path, userId: 7, runtimeInstanceId,
       });
     },
     emitNotification(value: WorkerNotification) {
@@ -195,6 +209,120 @@ function harness(options: {
 async function tick(count = 20): Promise<void> {
   for (let index = 0; index < count; index++) await new Promise((resolve) => setImmediate(resolve));
 }
+
+test('DSH ACP restoration reuses owner authority during an automatic wake-up', async () => {
+  const h = harness({ providers: { 'session-1': 'dsh' } });
+  const first = await h.prepareDsh();
+  assert.deepEqual(first, {
+    url: 'http://127.0.0.1:3001/api/worker-mcp', headers: { Authorization: 'Bearer owner-token' },
+  });
+  assert.equal(await h.prepare(), null, 'the Codex bridge cannot register a DSH parent');
+  h.setRunTurn(async (input) => {
+    assert.deepEqual(await h.prepareDsh(), first, 'restarting ACP reuses its temporary credentials');
+    assert.equal((input.finalGuard as () => boolean)(), true, 'ACP setup must not invalidate the claimed batch');
+    h.wakeCalls.push(input);
+    return { started: true, error: null };
+  });
+  h.emitNotification(notification());
+  h.fireTimers();
+  await tick();
+  assert.equal(h.wakeCalls.length, 1);
+  assert.equal(h.requests.filter((request) => request.action === 'registerOwner').length, 1);
+  assert(h.stateProviders.length > 0);
+  assert(h.stateProviders.every((provider) => provider === 'dsh'));
+  assert.equal(h.settlements.at(-1)?.delivery, 'delivered');
+});
+
+test('DSH registration verifies the parent provider and project before issuing credentials', async () => {
+  const h = harness();
+  assert.equal(await h.prepareDsh(), null);
+  const dsh = harness({ providers: { 'session-1': 'dsh' } });
+  assert.equal(await dsh.service.dshBridge.prepareSession({
+    sessionId: 'session-1', projectPath: '/other', userId: 7, runtimeInstanceId: 'instance-1',
+  }), null);
+  assert.equal(h.requests.length + dsh.requests.length, 0);
+});
+
+test('deleting a DSH parent holds its pending results without a runtime lookup or another wake-up', async () => {
+  const h = harness({ providers: { 'session-1': 'dsh' } });
+  await h.prepareDsh();
+  assert.equal(h.service.dshBridge.isSessionEnabled('session-1'), true);
+  h.deleteSession('session-1');
+  assert.equal(h.service.dshBridge.isSessionEnabled('session-1'), false);
+  h.emitNotification(notification());
+  h.fireTimers();
+  await tick();
+  assert.equal(h.wakeCalls.length, 0);
+  assert.equal(h.stateProviders.length, 0);
+  assert.equal(h.settlements.at(-1)?.delivery, 'held');
+  assert.equal(h.timers.size, 0);
+});
+
+test('deleting a DSH parent during wake-up preparation revokes the final native prompt gate', async () => {
+  const h = harness({ providers: { 'session-1': 'dsh' } });
+  await h.prepareDsh();
+  h.setRunTurn(async (input) => {
+    h.deleteSession('session-1');
+    assert.equal((input.finalGuard as () => boolean)(), false);
+    return { started: false, error: 'The parent was deleted.' };
+  });
+  h.emitNotification(notification());
+  h.fireTimers();
+  await tick();
+  assert.equal(h.settlements.at(-1)?.delivery, 'held');
+  assert.equal(h.timers.size, 0);
+});
+
+for (const hold of ['queue', 'stopping', 'headless'] as const) {
+  test(`DSH ${hold} holds Worker delivery using its own runtime state`, async () => {
+    const h = harness({ providers: { 'session-1': 'dsh' } });
+    await h.prepareDsh();
+    if (hold === 'queue') h.setQueueHeld('session-1', true);
+    if (hold === 'stopping') h.setPhase('session-1', 'stopping');
+    if (hold === 'headless') h.setDshMode('session-1', 'headless');
+    h.emitNotification(notification());
+    h.fireTimers();
+    await tick();
+    assert.equal(h.wakeCalls.length, 0);
+    assert.equal(h.settlements.at(-1)?.delivery, 'held');
+  });
+}
+
+test('DSH user queue priority defers an outbox claim and resumes the same batch', async () => {
+  const h = harness({ providers: { 'session-1': 'dsh' } });
+  await h.prepareDsh();
+  h.setRunTurn(async (input) => {
+    h.setDrafts('session-1', true);
+    assert.equal((input.finalGuard as () => boolean)(), false);
+    return { started: false, error: 'User message has priority.' };
+  });
+  h.emitNotification(notification());
+  h.fireTimers();
+  await tick();
+  assert.equal(h.settlements.at(-1)?.delivery, 'pending');
+  h.setDrafts('session-1', false);
+  h.setRunTurn(async (input) => { h.wakeCalls.push(input); return { started: true, error: null }; });
+  h.fireTimers();
+  await tick();
+  assert.equal(h.wakeCalls.length, 1);
+  assert.deepEqual(h.claims, [['notification-1'], ['notification-1']]);
+});
+
+test('closing a DSH runtime leaves the Codex parent in the same project active', async () => {
+  const h = harness({
+    sessions: { 'session-1': '/repo', 'session-2': '/repo' }, providers: { 'session-2': 'dsh' },
+  });
+  await h.prepare();
+  await h.prepareDsh('session-2', 'dsh-runtime');
+  await h.service.dshBridge.closeRuntime('dsh-runtime', 'shutdown');
+  assert.deepEqual(h.requests.find((request) => request.action === 'closeInstance')?.payload,
+    { appServerInstanceId: 'dsh-runtime', reason: 'shutdown' });
+  h.emitNotification(notification({ id: 'dsh-result', ownerId: 'dsh-runtime:session-2' }));
+  h.emitNotification(notification());
+  h.fireTimers();
+  await tick();
+  assert.deepEqual(h.wakeCalls.map((call) => call.sessionId), ['session-1']);
+});
 
 test('prepareSession returns only the per-server MCP override and registers a verified owner', async () => {
   const h = harness();
@@ -362,7 +490,7 @@ test('two simultaneous results are merged into one wake turn with batch metadata
   assert.deepEqual(source.results.map((result) => result.workerId), ['worker-1', 'worker-2']);
   const content = String(h.wakeCalls[0].content);
   assert.match(content, /Automatic Worker execution result \(batch batch-1\)/);
-  assert.match(content, /Review the result with Codex/);
+  assert.match(content, /Review the result before continuing/);
   for (const result of source.results) {
     assert.match(content, new RegExp(`Worker: ${result.workerId}`));
   }

@@ -365,6 +365,7 @@ test('pending, empty, failed, rejected and timed-out predictions report visible 
     ['rejected', 'Codex rejected the suggestion request'],
     ['request_failed', 'The suggestion request failed'],
     ['timeout', 'No suggestion arrived in time'],
+    ['worker_mcp', 'Codex suggestions are unavailable while Worker tools are enabled for this session'],
   ];
   for (const [reason, expected] of cases) {
     const view = render(

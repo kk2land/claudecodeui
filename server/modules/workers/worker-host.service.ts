@@ -5,12 +5,15 @@ import type {
   CodexSessionState,
   CodexWorkerBridge,
   CodexWorkerPrepareSessionInput,
+  DshWorkerBridge,
+  ProviderRuntimeState,
   WorkerCancelFenceInput,
   WorkerNotification,
   WorkerOwner,
   WorkerWakeSource,
   WorkerWakeTurnInput,
 } from '@/shared/index.js';
+
 import type { WorkerIpcClient } from './worker-ipc.client.js';
 
 type SessionLookup = { project_path: string | null; provider: string } | null;
@@ -20,11 +23,16 @@ type WorkerHostDependencies = {
   ipc: WorkerIpcClient;
   /** True only while the bundled Worker plugin is enabled in plugin config. */
   isEnabled(): boolean;
-  /** Absolute MCP URL the Codex thread config should point at. */
+  /** Absolute MCP URL injected into provider-owned temporary configuration. */
   resolveMcpUrl(): string;
   runtime: {
     isQueueBlocked(sessionId: string): boolean;
-    getState?(provider: 'codex', sessionId: string): CodexSessionState | undefined;
+    getState?(provider: 'codex' | 'dsh', sessionId: string): {
+      runtime: string;
+      phase: CodexSessionState['phase'] | ProviderRuntimeState['phase'];
+      queueHeld?: boolean;
+      goal?: CodexSessionState['goal'];
+    } | undefined;
     hasBackgroundWork(sessionId: string): boolean;
   };
   hasActiveRun(sessionId: string): boolean;
@@ -42,6 +50,7 @@ type WorkerHostDependencies = {
 
 type RegisteredOwner = {
   owner: WorkerOwner;
+  provider: 'codex' | 'dsh';
   token: string;
   /** True only after the plugin has acknowledged this owner registration. */
   registered: boolean;
@@ -55,7 +64,7 @@ const IDLE_MERGE_MS = 500;
  * satisfies the shared `WorkerHostService` consumed by the MCP/control routes.
  *
  * Responsibilities are limited to the trusted boundary: verifying the real
- * session/project, registering owner tokens, forwarding Codex lifecycle
+ * session/project, registering owner tokens, forwarding provider lifecycle
  * cleanup, and waking the parent session with outbox results. Worker execution,
  * concurrency, logs, and persistence stay inside the plugin process.
  */
@@ -115,7 +124,8 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
   }
 
   function isCurrentOwner(entry: RegisteredOwner): boolean {
-    return owners.get(entry.owner.id) === entry;
+    return owners.get(entry.owner.id) === entry
+      && dependencies.sessions.getSessionById(entry.owner.parentSessionId)?.provider === entry.provider;
   }
 
   function candidatesFor(entry: RegisteredOwner): WorkerNotification[] {
@@ -181,18 +191,27 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     if (shuttingDown) return 'shutdown';
     if (!isCurrentOwner(entry)) return 'lost-authority';
     if (entry.owner.paused) return 'paused';
-    if (dependencies.settings.get(entry.owner.parentSessionId).queueHeld) return 'queueHeld';
-    const phase = dependencies.runtime.getState?.('codex', entry.owner.parentSessionId)?.phase;
+    if (isQueueHeld(entry)) return 'queueHeld';
+    const state = dependencies.runtime.getState?.(entry.provider, entry.owner.parentSessionId);
+    if (entry.provider === 'dsh' && state?.runtime !== 'acp') return 'unsupported-runtime';
+    const phase = state?.phase;
     if (phase === 'stopping' || phase === 'stopFailed') return phase;
     return null;
   }
 
+  function isQueueHeld(entry: RegisteredOwner): boolean {
+    return entry.provider === 'codex'
+      ? dependencies.settings.get(entry.owner.parentSessionId).queueHeld
+      : Boolean(dependencies.runtime.getState?.('dsh', entry.owner.parentSessionId)?.queueHeld);
+  }
+
   /** Normal parent work that must finish before a Worker result may wake it. */
   function busyReason(entry: RegisteredOwner): string | null {
+    if (!isCurrentOwner(entry)) return null;
     const sessionId = entry.owner.parentSessionId;
     if (dependencies.hasActiveRun(sessionId)) return 'active-run';
-    const state = dependencies.runtime.getState?.('codex', sessionId);
-    if (state && (state.phase === 'starting' || state.phase === 'running')) return state.phase;
+    const state = dependencies.runtime.getState?.(entry.provider, sessionId);
+    if (state && ['starting', 'running', 'switching'].includes(state.phase)) return state.phase;
     if (state?.goal?.status === 'active') return 'goal';
     if (dependencies.runtime.isQueueBlocked(sessionId)) return 'queue-blocked';
     if (dependencies.runtime.hasBackgroundWork(sessionId)) return 'background';
@@ -236,10 +255,10 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
   function finalGuard(entry: RegisteredOwner, appServerInstanceId: string): boolean {
     const sessionId = entry.owner.parentSessionId;
     return !shuttingDown
-      && owners.get(entry.owner.id) === entry
+      && isCurrentOwner(entry)
       && entry.owner.appServerInstanceId === appServerInstanceId
       && !entry.owner.paused
-      && !dependencies.settings.get(sessionId).queueHeld
+      && !isQueueHeld(entry)
       // A user turn queued after this batch was claimed has priority. Returning
       // false here makes the host settle the same batch back to pending; it is
       // a normal delay, not a native failure.
@@ -310,7 +329,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
       };
       const content = [
         `Automatic Worker execution result (batch ${source.batchId}).`,
-        'This is not user acceptance. Review the result with Codex before continuing.',
+        'This is not user acceptance. Review the result before continuing.',
         '',
         ...source.results.map((result) => [
           `Worker: ${result.workerId}`,
@@ -445,68 +464,80 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     return targets.length;
   }
 
-  const bridge: CodexWorkerBridge = {
-    async prepareSession(input: CodexWorkerPrepareSessionInput) {
-      if (!dependencies.isEnabled()) return null;
-      const session = dependencies.sessions.getSessionById(input.sessionId);
-      const projectPath = session?.project_path ? path.resolve(session.project_path) : null;
-      if (!session || session.provider !== 'codex' || !projectPath) return null;
-      // The owner may only assert the real project this app session belongs to.
-      if (path.resolve(input.projectPath) !== projectPath) return null;
-      const project = dependencies.projects.getProjectPath(projectPath);
-      if (!project) return null;
-      const ownerId = `${input.appServerInstanceId}:${input.sessionId}`;
-      const previousOwnerId = sessionOwners.get(input.sessionId);
-      const previous = previousOwnerId ? owners.get(previousOwnerId) : undefined;
-      const entry: RegisteredOwner = {
-        owner: {
-          id: ownerId,
-          parentSessionId: input.sessionId,
-          projectId: project.project_id,
-          projectPath,
-          userId: input.userId,
-          appServerInstanceId: input.appServerInstanceId,
-          paused: previous?.owner.paused ?? false,
-          ...(previous?.owner.pausedReason ? { pausedReason: previous.owner.pausedReason } : {}),
-        },
-        token: randomToken(),
-        registered: previous?.owner.id === ownerId ? previous.registered : false,
-      };
-      const rollback = () => {
-        if (owners.get(ownerId) === entry) owners.delete(ownerId);
-        if (previous && previous.owner.id === ownerId) owners.set(ownerId, previous);
-        if (previousOwnerId) sessionOwners.set(input.sessionId, previousOwnerId);
-        else sessionOwners.delete(input.sessionId);
-      };
+  async function prepareOwner(input: CodexWorkerPrepareSessionInput, provider: 'codex' | 'dsh'): Promise<RegisteredOwner | null> {
+    if (!dependencies.isEnabled()) return null;
+    const session = dependencies.sessions.getSessionById(input.sessionId);
+    const projectPath = session?.project_path ? path.resolve(session.project_path) : null;
+    if (!session || session.provider !== provider || !projectPath) return null;
+    // The owner may only assert the real project this app session belongs to.
+    if (path.resolve(input.projectPath) !== projectPath) return null;
+    const project = dependencies.projects.getProjectPath(projectPath);
+    if (!project) return null;
+    const ownerId = `${input.appServerInstanceId}:${input.sessionId}`;
+    const previousOwnerId = sessionOwners.get(input.sessionId);
+    const previous = previousOwnerId ? owners.get(previousOwnerId) : undefined;
+    // ACP process recycling must keep the same authority object and token:
+    // an in-flight outbox guard may already refer to this logical owner.
+    const reuse = provider === 'dsh' && previous?.owner.id === ownerId
+      && previous.owner.projectId === project.project_id && previous.owner.projectPath === projectPath
+      && previous.owner.userId === input.userId;
+    if (reuse && previous.registered && dependencies.ipc.isReady()) return previous;
+    const entry: RegisteredOwner = reuse ? previous : {
+      provider,
+      owner: {
+        id: ownerId,
+        parentSessionId: input.sessionId,
+        projectId: project.project_id,
+        projectPath,
+        userId: input.userId,
+        appServerInstanceId: input.appServerInstanceId,
+        paused: previous?.owner.paused ?? false,
+        ...(previous?.owner.pausedReason ? { pausedReason: previous.owner.pausedReason } : {}),
+      },
+      token: randomToken(),
+      registered: previous?.owner.id === ownerId ? previous.registered : false,
+    };
+    const rollback = () => {
+      if (owners.get(ownerId) === entry) owners.delete(ownerId);
+      if (previous && previous.owner.id === ownerId) owners.set(ownerId, previous);
+      if (previousOwnerId) sessionOwners.set(input.sessionId, previousOwnerId);
+      else sessionOwners.delete(input.sessionId);
+    };
 
-      // Publish before the first startup/registration await so a Stop during
-      // ensureReady still fences this exact provisional owner.
-      owners.set(ownerId, entry);
-      sessionOwners.set(input.sessionId, ownerId);
-      if (!await dependencies.ipc.ensureReady()) {
-        rollback();
-        return null;
+    // Publish before the first startup/registration await so a Stop during
+    // ensureReady still fences this exact provisional owner.
+    owners.set(ownerId, entry);
+    sessionOwners.set(input.sessionId, ownerId);
+    if (!await dependencies.ipc.ensureReady()) {
+      rollback();
+      return null;
+    }
+    if (!await registerOwner(entry)) {
+      rollback();
+      return null;
+    }
+    entry.registered = true;
+    if (entry.owner.paused) {
+      // The Stop may have fenced before the plugin acknowledged registration.
+      // Re-assert the preserved pause so core and local authority agree.
+      try {
+        await dependencies.ipc.request('setOwnerPaused', {
+          ownerId,
+          paused: true,
+          reason: entry.owner.pausedReason ?? 'stopped during registration',
+        });
+      } catch (error) {
+        log(`[Workers] Could not preserve pause for owner ${ownerId} after registration`, error);
       }
-      if (!await registerOwner(entry)) {
-        rollback();
-        return null;
-      }
-      entry.registered = true;
-      if (entry.owner.paused) {
-        // The Stop may have fenced before the plugin acknowledged registration.
-        // Re-assert the preserved pause so core and local authority agree.
-        try {
-          await dependencies.ipc.request('setOwnerPaused', {
-            ownerId,
-            paused: true,
-            reason: entry.owner.pausedReason ?? 'stopped during registration',
-          });
-        } catch (error) {
-          log(`[Workers] Could not preserve pause for owner ${ownerId} after registration`, error);
-        }
-      }
-      if (previous && previous.owner.id !== ownerId) removeOwner(previous);
-      return {
+    }
+    if (previous && previous.owner.id !== ownerId) removeOwner(previous);
+    return entry;
+  }
+
+  const bridge: CodexWorkerBridge = {
+    async prepareSession(input) {
+      const entry = await prepareOwner(input, 'codex');
+      return entry ? {
         // Per-server override: unrelated MCP servers configured by the user are
         // preserved instead of being replaced by a top-level server table.
         'mcp_servers.cloudcli_workers': {
@@ -514,7 +545,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
           http_headers: { Authorization: `Bearer ${entry.token}` },
           enabled: true,
         },
-      };
+      } : null;
     },
     async activateSession(sessionId: string) {
       const entry = ownerFor(sessionId);
@@ -544,8 +575,32 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     },
   };
 
+  const dshBridge: DshWorkerBridge = {
+    isSessionEnabled(sessionId) {
+      const entry = ownerFor(sessionId);
+      return !shuttingDown && dependencies.isEnabled() && entry?.provider === 'dsh'
+        && entry.registered && isCurrentOwner(entry);
+    },
+    async prepareSession(input) {
+      const entry = await prepareOwner({
+        sessionId: input.sessionId,
+        projectPath: input.projectPath,
+        userId: input.userId,
+        appServerInstanceId: input.runtimeInstanceId,
+      }, 'dsh');
+      return entry ? {
+        url: dependencies.resolveMcpUrl(),
+        headers: { Authorization: `Bearer ${entry.token}` },
+      } : null;
+    },
+    activateSession: bridge.activateSession,
+    stopSession: bridge.stopSession,
+    closeRuntime: bridge.closeAppServer,
+  };
+
   return {
     bridge,
+    dshBridge,
     fenceCancel,
     initialize() {
       unsubscribe.push(

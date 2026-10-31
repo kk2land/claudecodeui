@@ -178,8 +178,6 @@ test('a completed opted-in turn forks and runs a prediction turn, publishing the
   const fork = h.predictions('thread/fork')[0];
   assert.deepEqual(fork.params, {
     threadId: 'native-thread', experimentalPredictionMode: true, ephemeral: true, excludeTurns: true, threadSource: 'composer_predictions',
-    // A detached prediction fork must not inherit the Worker MCP server.
-    config: { 'mcp_servers.cloudcli_workers.enabled': false },
   });
   // Resolve the fork, which allows the prediction turn/start to be issued.
   h.resolve('thread/fork', 1, { thread: { id: 'fork-1' } });
@@ -206,6 +204,23 @@ test('prediction requests require per-turn opt-in and an ordinary successful tur
   const goal = harness();
   await goal.setup({}, 'completed', 'active');
   assert.equal(goal.calls.some((c) => c.method === 'thread/fork'), false);
+});
+
+test('a Worker-enabled parent reports prediction isolation as unsupported without fetching config or creating a fork', async () => {
+  let configCalls = 0;
+  const h = harness({ config: () => { configCalls++; return READY_CONFIG; } });
+  h.runtime.setWorkerBridge({
+    async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true, url: 'http://localhost/worker-mcp' } }; },
+    async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+  });
+  await h.setup();
+  assert.equal(h.state().workerEnabled, true);
+  assert.equal(h.state().prediction?.status, 'unavailable');
+  assert.equal(h.state().prediction?.reason, 'worker_mcp');
+  assert.equal(configCalls, 0);
+  assert.equal(h.predictions('thread/fork').length, 0);
+  assert.equal(h.predictions('thread/start').length, 1);
+  assert.equal(h.state().error, undefined);
 });
 
 test('plan mode and an ineligible provider never fork', async () => {

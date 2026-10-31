@@ -58,12 +58,18 @@ export class CodexAppServerTransport implements CodexRpcClient {
   // Stable for one child generation, reserved before spawn so thread config can
   // name the instance it belongs to. Cleared when that child exits.
   private connectionInstanceId: string | null = null;
+  private workerMcpUrl: string | null = null;
 
   constructor(private readonly options: {
     spawn?: () => ChildProcessWithoutNullStreams;
     timeoutMs?: number;
     stopTimeoutMs?: number;
   } = {}) {}
+
+  /** Providers' composition boundary supplies the disabled Worker declaration before lazy startup. */
+  setWorkerMcpUrl(url: string | null): void {
+    this.workerMcpUrl = url;
+  }
 
   onNotification(listener: (frame: CodexRpcFrame) => void) {
     this.notifications.add(listener);
@@ -199,7 +205,11 @@ export class CodexAppServerTransport implements CodexRpcClient {
       // This private connection owns every subscription. Release unsubscribed
       // threads promptly so SDK compatibility can resume their latest rollout.
       child = spawn(process.execPath, [launcher, 'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0',
-        '-c', `features.goals=${isCodexGoalEnabled()}`], {
+        '-c', `features.goals=${isCodexGoalEnabled()}`,
+        // A complete, disabled transport also makes prediction-only overrides
+        // valid when config.toml has no Worker entry. Owner tokens stay per thread.
+        ...(this.workerMcpUrl ? ['-c', `mcp_servers.cloudcli_workers.url=${JSON.stringify(this.workerMcpUrl)}`,
+          '-c', 'mcp_servers.cloudcli_workers.enabled=false'] : [])], {
         env: process.env,
         stdio: ['pipe', 'pipe', 'pipe'],
       });

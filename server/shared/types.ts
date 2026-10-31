@@ -113,6 +113,8 @@ export type ProviderRuntimeState = {
   phase: 'idle' | 'starting' | 'running' | 'switching' | 'stopping';
   queueHeld: boolean;
   supportsPermissionRequests: boolean;
+  /** True while this ACP parent has a registered Worker connection, including after idle process recycling. */
+  workerEnabled?: boolean;
   diagnostics: {
     running: boolean;
     pid: number | null;
@@ -729,6 +731,7 @@ export type CodexComposerPredictionReason =
   | 'request_failed'
   | 'timeout'
   | 'unsupported'
+  | 'worker_mcp'
   | 'ineligible'
   | 'config_unavailable';
 
@@ -1994,6 +1997,8 @@ export type ProviderRuntimeGateway = {
   /** Scheduling asks providers whether a session must keep its automatic queue on hold. */
   isQueueBlocked?(sessionId: string): boolean;
   getState?(provider: LLMProvider, sessionId: string): CodexSessionState | undefined;
+  /** Worker/chat orchestration reads application-owned runtime state without route-level session validation. */
+  getManagedState?(provider: LLMProvider, sessionId: string): ProviderRuntimeState | undefined;
   control?(provider: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter): Promise<CodexSessionState>;
   hasRuntime(provider: string): boolean;
   run(
@@ -2084,6 +2089,27 @@ export type {
 // ---------------------------
 
 //----------------- WORKER HOST BRIDGE ------------
+/**
+ * Application-owned Worker lifecycle used by the DSH adapter and Workers host.
+ * The runtime instance survives ACP idle process recycling. prepareSession is
+ * idempotent within that instance and application session, returning only a
+ * temporary HTTP MCP connection; it never edits a native profile. Explicit user
+ * turns may activate a paused owner, while automatic wake-ups may not.
+ */
+export type DshWorkerBridge = {
+  /** Registered ownership survives ACP process recycling; pause is tracked independently. */
+  isSessionEnabled(sessionId: string): boolean;
+  prepareSession(input: {
+    sessionId: string;
+    projectPath: string;
+    userId: string | number | null;
+    runtimeInstanceId: string;
+  }): Promise<{ url: string; headers: Record<string, string> } | null>;
+  activateSession(sessionId: string): Promise<void>;
+  stopSession(sessionId: string, reason: string): Promise<boolean>;
+  closeRuntime(runtimeInstanceId: string, reason: string): Promise<void>;
+};
+
 /** One claimed worker result merged into the single parent wake-up turn. */
 export type WorkerWakeResult = {
   workerId: string;
@@ -2145,6 +2171,7 @@ export type WorkerIpcTransport = {
  */
 export type WorkerHostService = {
   bridge: CodexWorkerBridge;
+  dshBridge: DshWorkerBridge;
   fenceCancel(input: WorkerCancelFenceInput): number;
   initialize(): void;
   restoreOwners(): Promise<void>;

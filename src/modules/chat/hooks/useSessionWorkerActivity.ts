@@ -18,20 +18,20 @@ type WorkerSnapshot = {
 };
 
 type Args = {
-  /** True only while Codex is the selected provider. */
+  /** True while a provider that can own Worker plugin runs is selected. */
   enabled: boolean;
-  /** False for the SDK runtime, which never owns Worker plugin runs. */
+  /** False for a transport that never owns Worker runs (Codex SDK, DSH headless or unregistered ACP). */
   native: boolean;
-  /** False while another workspace tab covers the chat; pauses polling without changing Codex controls. */
+  /** False while another workspace tab covers the chat; pauses polling without changing native controls. */
   chatActive?: boolean;
   projectId: string | null | undefined;
   sessionId: string | null;
 };
 
 /**
- * ChatInterface uses this to show a spinner while the current Codex session owns a
- * running Worker. It reuses the authenticated Worker plugin state endpoint and is
- * intentionally separate from Codex's own native turn activity.
+ * Codex and DSH runtime controls use this to show activity only for a Worker
+ * owned by the current session. It reuses the authenticated Worker plugin state
+ * endpoint and is intentionally separate from each provider's own turn activity.
  */
 export function useSessionWorkerActivity({ enabled, native, chatActive = true, projectId, sessionId }: Args): boolean {
   const { plugins } = usePlugins();

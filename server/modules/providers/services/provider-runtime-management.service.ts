@@ -14,7 +14,7 @@ function resolveManagement(provider: LLMProvider, sessionId: string | null) {
   return management;
 }
 
-/** Provider routes use this service to validate session ownership before reading or controlling a managed process. */
+/** Provider routes use this service to validate managed-process and queue operations at the HTTP boundary. */
 export const providerRuntimeManagementService = {
   getState(provider: LLMProvider, sessionId: string | null) {
     return resolveManagement(provider, sessionId).getState(sessionId);

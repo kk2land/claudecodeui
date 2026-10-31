@@ -1972,6 +1972,8 @@ export type ProviderRuntimeState = {
   phase: 'idle' | 'starting' | 'running' | 'switching' | 'stopping';
   queueHeld: boolean;
   supportsPermissionRequests: boolean;
+  /** True while the server has registered this ACP session for Worker tools, including after idle recycling. */
+  workerEnabled?: boolean;
   diagnostics: {
     running: boolean;
     pid: number | null;
@@ -1987,6 +1989,8 @@ export type ProviderRuntimeControls = {
   available: boolean;
   modes: string[];
   stoppableModes: string[];
+  /** Activity of Worker plugin runs owned by this session, independent of its ACP process. */
+  hasActiveWorkers?: boolean;
   state: ProviderRuntimeState | null;
   pending: boolean;
   error: string | null;
@@ -2042,6 +2046,7 @@ export type CodexComposerPredictionReason =
   | 'request_failed'
   | 'timeout'
   | 'unsupported'
+  | 'worker_mcp'
   | 'ineligible'
   | 'config_unavailable';
 

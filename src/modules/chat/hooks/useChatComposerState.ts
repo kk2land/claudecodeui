@@ -69,6 +69,13 @@ type UseChatComposerStateArgs = {
   composerPredictionsBlocked?: boolean;
   /** Managed providers share allocation and finish pending runtime changes before sending. */
   prepareSessionForSend?: (initialMessage: string) => Promise<string | null>;
+  /**
+   * Whether the selected provider's active transport has registered this
+   * session for Worker tools. A busy `chat.send` then goes to the server-owned
+   * durable queue and is answered with `chat_queued`; false keeps the existing
+   * local behavior for headless, plain and non-Worker sessions.
+   */
+  workerQueueEnabled?: boolean;
   executionIdsRef?: MutableRefObject<Map<string, string>>;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
@@ -256,6 +263,7 @@ export function useChatComposerState({
   composerPredictionsBlocked = false,
   composerPredictionsUnsupported = false,
   prepareSessionForSend,
+  workerQueueEnabled = false,
   executionIdsRef,
   processingSessions,
   canAbortSession,
@@ -1187,14 +1195,17 @@ export function useChatComposerState({
         ...(planTask ? { collaborationMode: 'plan' } : {}),
         attachments: uploadedAttachments,
       };
-      // Only the native app-server path with Worker configured can accept a
-      // normal `chat.send` into the server-owned queue while this composer sees
-      // no local run. Other providers, SDK compatibility and edit sends keep
-      // their existing receipt-free behavior.
-      const tracksWorkerQueueReceipt = provider === 'codex'
-        && codexControls?.state?.runtime === 'app-server'
-        && codexControls.state.workerEnabled === true
-        && !editingAnchorId;
+      // Only a native transport with Worker configured can accept a normal
+      // `chat.send` into the server-owned queue while this composer sees no
+      // local run. Codex keeps its own app-server check; DSH passes the
+      // equivalent ACP-and-worker-enabled flag. Other providers, headless
+      // sessions and edit sends keep their existing receipt-free behavior.
+      const tracksWorkerQueueReceipt = !editingAnchorId && (
+        workerQueueEnabled
+        || (provider === 'codex'
+          && codexControls?.state?.runtime === 'app-server'
+          && codexControls.state.workerEnabled === true)
+      );
       if (tracksWorkerQueueReceipt) {
         // Remember the exact prompt first so `chat_queued` can adopt the
         // server's ticket and a refusal can restore text and files.
@@ -1261,6 +1272,7 @@ export function useChatComposerState({
       queueMessage,
       recordSentMessage,
       resetCommandMenuState,
+      workerQueueEnabled,
       scrollToBottom,
       selectedProject,
       sendMessage,

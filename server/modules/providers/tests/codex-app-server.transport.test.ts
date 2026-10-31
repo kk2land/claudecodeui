@@ -42,7 +42,7 @@ function unwrappedEmptyRolloutMessage(file = '/Users/agent/.codex/sessions/2026/
   return `failed to read session metadata ${file}: rollout at ${file} is empty`;
 }
 
-test('production spawn explicitly disables Goals unless the env opt-in is true', async (t) => {
+test('production spawn preserves Goals flags and supplies a disabled Worker transport', async (t) => {
   const original = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
   try {
     for (const enabled of [false, true]) {
@@ -52,6 +52,7 @@ test('production spawn explicitly disables Goals unless the env opt-in is true',
       const spawn = t.mock.method(childProcess, 'spawn', () => h.child);
       syncBuiltinESMExports();
       const transport = new CodexAppServerTransport({ timeoutMs: 100 });
+      transport.setWorkerMcpUrl('http://127.0.0.1:3001/api/worker-mcp');
       h.onFrame((frame) => { if (frame.id !== undefined) h.reply({ id: frame.id, result: {} }); });
       try {
         await transport.request('ping');
@@ -59,6 +60,8 @@ test('production spawn explicitly disables Goals unless the env opt-in is true',
         assert.ok(args.includes(`features.goals=${enabled}`));
         assert.equal(args[args.indexOf(`features.goals=${enabled}`) - 1], '-c');
         assert.ok(args.includes('thread_unload_delay_secs=0'));
+        assert.ok(args.includes('mcp_servers.cloudcli_workers.url="http://127.0.0.1:3001/api/worker-mcp"'));
+        assert.ok(args.includes('mcp_servers.cloudcli_workers.enabled=false'));
       } finally {
         await transport.close();
         spawn.mock.restore();
@@ -526,7 +529,7 @@ test('closing during the retry wait ends the request with the original error and
 });
 
 test('default production transport reports the bundled CLI without spawning or sending RPC', async (t) => {
-  // A lazy `status` read must expose the bundled 0.163.0 identity so a mounted
+  // A lazy `status` read must expose the bundled 0.165.0 identity so a mounted
   // session can opt into predictions before the first send, while spawning
   // nothing and sending no RPC.
   const spawned = t.mock.method(childProcess, 'spawn', () => { throw new Error('must not spawn'); });
@@ -539,14 +542,14 @@ test('default production transport reports the bundled CLI without spawning or s
     assert.equal(status.startedAt, null);
     assert.equal(status.pendingRequests, 0);
     assert.ok(status.launcherPath && status.launcherPath.endsWith('codex.js'), 'bundled launcher path is known');
-    assert.equal(status.cliVersion, '0.163.0');
+    assert.equal(status.cliVersion, '0.165.0');
     assert.equal(spawned.mock.callCount(), 0, 'reading status must never spawn the process');
 
     // The runtime surfaces the same installed-build capability from that status.
     let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
     const runtime = new CodexAppServerRuntime(transport, { get: () => settings, update: (_, patch) => (settings = { ...settings, ...patch }) }, 100, () => {});
     assert.equal(runtime.getState('cold-session').predictionSupported, true);
-    assert.equal(runtime.getState('cold-session').diagnostics?.cliVersion, '0.163.0');
+    assert.equal(runtime.getState('cold-session').diagnostics?.cliVersion, '0.165.0');
     assert.equal(spawned.mock.callCount(), 0);
     await runtime.close();
   } finally {

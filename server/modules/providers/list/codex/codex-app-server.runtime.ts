@@ -682,6 +682,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.publish(session);
       return;
     }
+    // Native prediction forks inherit the parent's MCP credentials and reject
+    // config overrides. Keep Worker ownership out of every prediction fork.
+    if (session.state.workerEnabled) {
+      session.state.prediction = { sourceTurnId, status: 'unavailable', reason: 'worker_mcp' };
+      this.publish(session);
+      return;
+    }
     if (!this.predictionsEligible(session)) {
       session.state.prediction = { sourceTurnId, status: 'unavailable', reason: 'ineligible' };
       this.publish(session);

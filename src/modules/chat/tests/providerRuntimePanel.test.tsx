@@ -40,6 +40,24 @@ test('headless has no ACP stop button and explains its approval limit', () => {
   expect(screen.getByText(/no interactive approval channel/)).toBeTruthy();
 });
 
+test('an ACP Worker keeps Stop available after its process was recycled and explains why', () => {
+  const value = controls({ diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null } });
+  value.hasActiveWorkers = true;
+  render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
+  fireEvent.click(screen.getByRole('button', { name: 'DeepSeek Harness' }));
+  const stop = screen.getByRole('button', { name: 'Stop ACP' }) as HTMLButtonElement;
+  expect(stop.disabled).toBe(false);
+  expect(screen.getByText('A Worker is active in this session')).toBeTruthy();
+});
+
+test('an idle ACP session without Workers never enables Stop on its own', () => {
+  const value = controls({ diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null } });
+  render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);
+  fireEvent.click(screen.getByRole('button', { name: 'DeepSeek Harness' }));
+  expect((screen.getByRole('button', { name: 'Stop ACP' }) as HTMLButtonElement).disabled).toBe(true);
+  expect(screen.queryByText('A Worker is active in this session')).toBeNull();
+});
+
 test('active turns prevent switching but allow stopping, while transitions lock conflicting actions', () => {
   const value = controls({ phase: 'running' });
   const view = render(<ProviderRuntimePanel hasQueuedDraft controls={value} providerLabel="DeepSeek Harness" />);

@@ -101,7 +101,8 @@ function toolResult(result: unknown): Record<string, unknown> {
  * host service, host MCP proxy, SDK MCP client and fixture CLI. No model or
  * user configuration is touched.
  */
-test('worker entry, host IPC and the host MCP proxy deliver and hold real results', { timeout: 90_000 }, async (t) => {
+for (const provider of ['codex', 'dsh'] as const) {
+test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${provider} parents`, { timeout: 90_000 }, async (t) => {
   ensureBuiltEntry();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-e2e-'));
   const project = path.join(root, 'project');
@@ -169,7 +170,7 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
     paused: false,
   };
   const sessions = new Map([
-    ['session-1', { project_path: project, provider: 'codex' }],
+    ['session-1', { project_path: project, provider }],
   ]);
   const wakeCalls: Record<string, unknown>[] = [];
   let parentBusy = true;
@@ -181,6 +182,7 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
     runtime: {
       isQueueBlocked: () => false,
       hasBackgroundWork: () => false,
+      getState: () => ({ runtime: provider === 'dsh' ? 'acp' : 'app-server', phase: 'idle', queueHeld: false }),
     },
     hasActiveRun: () => parentBusy,
     sessions: { getSessionById: (sessionId) => sessions.get(sessionId) ?? null },
@@ -215,15 +217,19 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
     proxy.close(() => resolve());
   }));
 
-  const config = await host.bridge.prepareSession({
+  const config = provider === 'dsh' ? null : await host.bridge.prepareSession({
     sessionId: 'session-1',
     projectPath: project,
     userId: 7,
     appServerInstanceId: 'instance-1',
   });
-  const mcp = (config as {
+  const codexMcp = config ? (config as {
     'mcp_servers.cloudcli_workers': { url: string; http_headers: { Authorization: string } };
-  })['mcp_servers.cloudcli_workers'];
+  })['mcp_servers.cloudcli_workers'] : null;
+  const dshInput = { sessionId: 'session-1', projectPath: project, userId: 7, runtimeInstanceId: 'instance-1' };
+  const dshMcp = provider === 'dsh' ? await host.dshBridge.prepareSession(dshInput) : null;
+  const mcp = codexMcp ?? { url: dshMcp!.url, http_headers: { Authorization: dshMcp!.headers.Authorization } };
+  const lifecycle = provider === 'dsh' ? host.dshBridge : host.bridge;
   assert.equal(mcp.url, `http://127.0.0.1:${proxyPort}/api/worker-mcp`);
   assert.match(mcp.http_headers.Authorization, /^Bearer /);
 
@@ -252,6 +258,11 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
   assert.equal(waited.run.status, 'completed');
   assert.equal(waited.notifications.length, 1);
   const firstNotification = waited.notifications[0]!;
+  if (provider === 'dsh') {
+    assert.deepEqual(await host.dshBridge.prepareSession(dshInput), dshMcp, 'ACP recycling preserves the authenticated owner');
+    const context = toolResult(await client.callTool({ name: 'worker_context', arguments: {} })) as { owner: WorkerOwner };
+    assert.equal(context.owner.parentSessionId, 'session-1', 'the original MCP token remains valid after ACP recycling');
+  }
 
   // The real SQLite outbox keeps the result pending while the parent is busy.
   await new Promise((resolve) => setTimeout(resolve, 800));
@@ -298,7 +309,7 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
     })).json() as { workers: Array<{ id: string; latestRun: { status: string } | null }> };
     return current.workers.find((item) => item.id === stoppedWorker.worker.id)?.latestRun?.status;
   }, (status) => status === 'running', 10_000);
-  assert.equal(await host.bridge.stopSession('session-1', 'user-stop'), true);
+  assert.equal(await lifecycle.stopSession('session-1', 'user-stop'), true);
   const pausedStart = await client.callTool({
     name: 'worker_start',
     arguments: {
@@ -321,7 +332,7 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
   assert.equal(wakeCalls.length, 1);
 
   // Manual retry is the only path from held to a new automatic delivery.
-  await host.bridge.activateSession('session-1');
+  await lifecycle.activateSession('session-1');
   state = await (await fetch(`http://127.0.0.1:${ready}/state`, {
     headers: { authorization: 'Bearer plugin-ui-token' },
   })).json() as { notifications: WorkerNotification[] };
@@ -345,3 +356,4 @@ test('worker entry, host IPC and the host MCP proxy deliver and hold real result
   child.kill('SIGTERM');
   await new Promise<void>((resolve) => child.once('exit', () => resolve()));
 });
+}

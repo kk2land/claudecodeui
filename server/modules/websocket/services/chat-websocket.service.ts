@@ -19,6 +19,7 @@ import type {
   AuthenticatedWebSocketRequest,
   LLMProvider,
   ProviderRuntimeGateway,
+  ProviderRuntimeState,
   ProviderRuntimeWriter,
   QueuedChatMessage,
   WorkerWakeSource,
@@ -152,12 +153,28 @@ function isChatTurnBusy(
 }
 
 /**
+ * Reads the DSH Worker lifecycle that survives ACP idle process recycling.
+ *
+ * Used by the chat gateway's Worker-aware busy queue and stop path. Only an ACP
+ * parent with a registered Worker connection qualifies; headless sessions and
+ * ACP sessions without a Worker keep their previous chat behaviour.
+ */
+function readDshWorkerState(
+  runtime: ProviderRuntimeGateway,
+  sessionId: string,
+): ProviderRuntimeState | undefined {
+  const state = runtime.getManagedState?.('dsh', sessionId);
+  return state?.runtime === 'acp' && state.workerEnabled === true ? state : undefined;
+}
+
+/**
  * Persists a `chat.send` that lost the race with an already-running turn.
  *
- * This is deliberately limited to Codex app-server sessions whose last thread
- * setup accepted the Worker MCP config: only those sessions promise the user an
- * automatic, Worker-aware queue. Everything else keeps the existing
- * `RUN_IN_PROGRESS` behaviour for non-Codex providers and SDK sessions.
+ * This is deliberately limited to sessions that promise an automatic,
+ * Worker-aware queue: Codex app-server threads whose last setup accepted the
+ * Worker MCP config, and DSH ACP parents with a registered Worker connection.
+ * Everything else keeps the existing `RUN_IN_PROGRESS` behaviour for other
+ * providers, SDK sessions, DSH headless, and DSH without a Worker.
  *
  * The same attachment trust boundary as a normal send applies, and the turn is
  * appended behind every existing user message so a late send cannot jump the
@@ -174,15 +191,28 @@ function queueBusyChatSend(
 ): boolean {
   const { sessionId, provider } = resolved;
   const numericUserId = Number(userId);
-  if (provider !== 'codex' || !Number.isSafeInteger(numericUserId)) {
+  if (!Number.isSafeInteger(numericUserId)) {
     return false;
   }
-  const state = dependencies.runtime.getState?.('codex', sessionId);
-  if (state?.runtime !== 'app-server' || state.workerEnabled !== true) {
-    return false;
-  }
-  const codexSettings = sessionRuntimeDb.get(sessionId);
-  if (codexSettings.runtime !== 'app-server' || codexSettings.modelSelection?.model === null) {
+
+  // DSH state is application-owned and read from managed state; it is never
+  // placed in the Codex-specific `codexState` protocol field.
+  let dshWorkerState: ProviderRuntimeState | undefined;
+  if (provider === 'codex') {
+    const state = dependencies.runtime.getState?.('codex', sessionId);
+    if (state?.runtime !== 'app-server' || state.workerEnabled !== true) {
+      return false;
+    }
+    const codexSettings = sessionRuntimeDb.get(sessionId);
+    if (codexSettings.runtime !== 'app-server' || codexSettings.modelSelection?.model === null) {
+      return false;
+    }
+  } else if (provider === 'dsh') {
+    dshWorkerState = readDshWorkerState(dependencies.runtime, sessionId);
+    if (!dshWorkerState) {
+      return false;
+    }
+  } else {
     return false;
   }
 
@@ -198,18 +228,19 @@ function queueBusyChatSend(
 
   // An idle session still has to protect a waiting user FIFO, and an accepted
   // ticket must be reported without running again. Otherwise a normal send
-  // proceeds through dispatchRun.
-  const busy = isChatTurnBusy(sessionId, provider, dependencies.runtime);
+  // proceeds through dispatchRun. DSH reports its native turn through
+  // application-owned state because the Codex getState protocol is not reused.
+  const busy = isChatTurnBusy(sessionId, provider, dependencies.runtime)
+    || Boolean(dshWorkerState && ['starting', 'running', 'stopping', 'stopFailed'].includes(dshWorkerState.phase));
   const hasQueued = sessionDraftsDb.hasQueuedMessages(sessionId);
   const alreadySent = sessionDraftsDb.hasSentChatMessage(numericUserId, sessionId, clientMessageId);
   if (!busy && !hasQueued && !alreadySent) {
     return false;
   }
 
-  const errorExtra = () => ({
-    clientMessageId,
-    codexState: dependencies.runtime.getState?.('codex', sessionId),
-  });
+  const errorExtra = () => provider === 'codex'
+    ? { clientMessageId, codexState: dependencies.runtime.getState?.('codex', sessionId) }
+    : { clientMessageId };
 
   const attachmentCandidates = [
     ...normalizeAttachmentDescriptors(clientOptions.images),
@@ -639,12 +670,17 @@ async function handleChatAbort(
   const session = sessionsDb.getSessionById(sessionId);
   const provider = session?.provider as LLMProvider | undefined;
   const state = provider && dependencies.runtime.getState?.(provider, sessionId);
+  // A DSH ACP parent keeps its registered Worker connection across native
+  // turn/idle-process recycling. Stop must still reach that Worker host even
+  // when no native turn is running; a headless or Worker-less session does not
+  // qualify and keeps returning NO_ACTIVE_RUN.
+  const idleDshWorker = provider === 'dsh' ? readDshWorkerState(dependencies.runtime, sessionId) : undefined;
   if (typeof data.executionId === 'string' && run && run.executionId !== data.executionId && state?.goal?.status !== 'active') {
     sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId, ok: false,
       error: 'The previous run already ended. This task has a different execution id.', codexState: state });
     return;
   }
-  if (!provider || ((!run || run.status !== 'running') && state?.runtime !== 'app-server')) {
+  if (!provider || ((!run || run.status !== 'running') && state?.runtime !== 'app-server' && !idleDshWorker)) {
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
     return;
   }
@@ -872,10 +908,24 @@ export async function runDetachedChatTurn(
 
   const activeRun = chatRunRegistry.getRun(input.sessionId);
   const nativeState = dependencies.runtime.getState?.(provider, input.sessionId);
-  if (input.workerSource && (nativeState?.queueHeld || ['stopping', 'stopFailed'].includes(nativeState?.phase ?? ''))) {
+  // DSH exposes its application-owned lifecycle through managed state. A
+  // stopped/held or transitioning parent must keep automatic Worker wake-ups
+  // out; the Codex-specific getState shape is never fabricated for DSH.
+  // Scheduled messages keep their existing interruption strategy, so managed
+  // state is consulted only for an automatic Worker wake-up.
+  const dshState = provider === 'dsh' && input.workerSource
+    ? dependencies.runtime.getManagedState?.('dsh', input.sessionId)
+    : undefined;
+  const stoppedOrHeld = dshState
+    ? Boolean(dshState.queueHeld) || ['stopping', 'stopFailed'].includes(dshState.phase)
+    : Boolean(nativeState?.queueHeld) || ['stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
+  if (input.workerSource && stoppedOrHeld) {
     return { started: false, error: 'The session is stopping or holding its queue.' };
   }
-  if (activeRun?.status === 'running' || nativeState?.goal?.status === 'active' || ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '')) {
+  const activePhase = dshState
+    ? ['starting', 'stopping', 'stopFailed'].includes(dshState.phase)
+    : ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
+  if (activeRun?.status === 'running' || nativeState?.goal?.status === 'active' || activePhase) {
     if (!input.interruptActiveRun) {
       return { started: false, error: 'A run was already in progress for this session.' };
     }

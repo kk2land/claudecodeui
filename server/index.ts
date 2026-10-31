@@ -16,6 +16,7 @@ import {
     initializeSessionsWatcher,
     providerRuntimeService,
     setCodexWorkerBridge,
+    setDshWorkerBridge,
 } from '@/modules/providers/index.js';
 import { broadcastCodexRateLimits, chatRunRegistry, createWebSocketServer, onChatRunCompleted } from '@/modules/websocket/index.js';
 
@@ -95,7 +96,8 @@ const LOCAL_SERVER_MARKER_PATH = path.join(os.homedir(), '.cloudcli', 'local-ser
 const workerModule = createWorkerModule({ serverPort: SERVER_PORT });
 // Providers receive Worker lifecycle callbacks through composition only; they
 // never runtime-import the workers module.
-setCodexWorkerBridge(workerModule.host.bridge);
+setCodexWorkerBridge(workerModule.host.bridge, workerModule.mcpUrl);
+setDshWorkerBridge(workerModule.host.dshBridge);
 const queryClaude = providerRuntimeService.getRunner('claude');
 const queryCursor = providerRuntimeService.getRunner('cursor');
 const queryCodex = providerRuntimeService.getRunner('codex');

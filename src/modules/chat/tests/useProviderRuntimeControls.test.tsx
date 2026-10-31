@@ -5,10 +5,17 @@ import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRunt
 import { api } from '@/shared/api';
 import type { LLMProvider, Project, ProviderRuntimeState } from '@/shared/types';
 
+const { workerPlugin } = vi.hoisted(() => ({ workerPlugin: { enabled: false } }));
+vi.mock('@/modules/plugins', () => ({
+  usePlugins: () => ({ plugins: [{ name: 'worker', enabled: workerPlugin.enabled }] }),
+}));
 vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
   useProviderCapabilities: () => ({ dsh: { runtimeManagement: { modes: ['acp', 'headless'], stoppableModes: ['acp'] } } }),
 }));
-afterEach(() => { vi.restoreAllMocks(); });
+afterEach(() => {
+  workerPlugin.enabled = false;
+  vi.restoreAllMocks();
+});
 
 const project: Project = { projectId: 'project-1', displayName: 'Test', fullPath: '/tmp/project' };
 const state: ProviderRuntimeState = {
@@ -88,4 +95,68 @@ test('finishing a new-session action after navigation cannot navigate back to th
   await act(async () => { finish(response({ ...state, runtime: 'acp' })); await action; });
   expect(established).not.toHaveBeenCalled();
   expect(hook.result.current.state?.runtime).toBe('headless');
+});
+
+test('DSH ACP observes this session Worker activity and drops it on a session switch', async () => {
+  workerPlugin.enabled = true;
+  vi.spyOn(api.providers, 'runtimeState').mockImplementation(async () => response({ ...state, runtime: 'acp', workerEnabled: true }));
+  const workerState = vi.spyOn(api.plugins, 'workerState').mockImplementation(async (_projectId, sessionId) => Response.json({
+    workers: sessionId === 'session-1'
+      ? [{ parentSessionId: 'session-1', projectId: 'project-1', latestRun: { status: 'stopping' } }]
+      : [],
+  }));
+  const hook = renderHook(({ sessionId }: { sessionId: string }) => useProviderRuntimeControls({
+    provider: 'dsh', sessionId, project, onSessionEstablished: vi.fn(),
+  }), { initialProps: { sessionId: 'session-1' } });
+
+  await waitFor(() => expect(hook.result.current.hasActiveWorkers).toBe(true));
+  expect(workerState).toHaveBeenCalledWith('project-1', 'session-1', expect.objectContaining({ signal: expect.any(AbortSignal) }));
+
+  hook.rerender({ sessionId: 'session-2' });
+  expect(hook.result.current.hasActiveWorkers).toBe(false);
+  await waitFor(() => expect(workerState).toHaveBeenCalledWith('project-1', 'session-2', expect.any(Object)));
+  expect(hook.result.current.hasActiveWorkers).toBe(false);
+  hook.unmount();
+});
+
+test('headless and non-Worker ACP sessions never query Worker activity', async () => {
+  workerPlugin.enabled = true;
+  const workerState = vi.spyOn(api.plugins, 'workerState');
+  vi.spyOn(api.providers, 'runtimeState').mockResolvedValue(response({ ...state, runtime: 'headless', workerEnabled: false }));
+  const headless = renderHook(() => useProviderRuntimeControls({
+    provider: 'dsh', sessionId: 'session-1', project, onSessionEstablished: vi.fn(),
+  }));
+  await waitFor(() => expect(headless.result.current.state?.runtime).toBe('headless'));
+  await act(async () => { await Promise.resolve(); });
+  expect(workerState).not.toHaveBeenCalled();
+  expect(headless.result.current.hasActiveWorkers).toBe(false);
+  headless.unmount();
+
+  vi.spyOn(api.providers, 'runtimeState').mockResolvedValue(response({ ...state, runtime: 'acp', workerEnabled: false }));
+  const nonWorker = renderHook(() => useProviderRuntimeControls({
+    provider: 'dsh', sessionId: 'session-1', project, onSessionEstablished: vi.fn(),
+  }));
+  await waitFor(() => expect(nonWorker.result.current.state?.runtime).toBe('acp'));
+  await act(async () => { await Promise.resolve(); });
+  expect(workerState).not.toHaveBeenCalled();
+  expect(nonWorker.result.current.hasActiveWorkers).toBe(false);
+  nonWorker.unmount();
+});
+
+test('switching the DSH transport to headless clears Worker activity immediately', async () => {
+  workerPlugin.enabled = true;
+  vi.spyOn(api.providers, 'runtimeState').mockResolvedValue(response({ ...state, runtime: 'acp', workerEnabled: true }));
+  vi.spyOn(api.plugins, 'workerState').mockResolvedValue(Response.json({
+    workers: [{ parentSessionId: 'session-1', projectId: 'project-1', latestRun: { status: 'unknown' } }],
+  }));
+  vi.spyOn(api.providers, 'controlRuntime').mockResolvedValue(response({ ...state, runtime: 'headless', workerEnabled: false }));
+  const hook = renderHook(() => useProviderRuntimeControls({
+    provider: 'dsh', sessionId: 'session-1', project, onSessionEstablished: vi.fn(),
+  }));
+
+  await waitFor(() => expect(hook.result.current.hasActiveWorkers).toBe(true));
+  await act(async () => { await hook.result.current.control({ action: 'runtime', runtime: 'headless' }); });
+  expect(hook.result.current.state?.runtime).toBe('headless');
+  expect(hook.result.current.hasActiveWorkers).toBe(false);
+  hook.unmount();
 });

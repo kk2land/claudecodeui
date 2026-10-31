@@ -283,6 +283,7 @@
     "unavailableRequestFailed": "The suggestion request failed",
     "unavailableTimeout": "No suggestion arrived in time",
     "unavailableUnsupported": "Codex suggestions are not supported by the installed Codex version",
+    "unavailableWorkerMcp": "Codex suggestions are unavailable while Worker tools are enabled for this session",
     "unavailableIneligible": "Codex suggestions are not available for this account or model",
     "unavailableConfig": "Codex suggestions are unavailable right now"
   },

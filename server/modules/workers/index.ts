@@ -39,7 +39,7 @@ function createBundledWorkerTransport(): WorkerIpcTransport {
 
 /**
  * Composition root for the Worker host bridge. The server entrypoint injects
- * `bridge` into the Codex adapter and mounts `mcpRouter` before JWT routes;
+ * the bridges into the Codex/DSH adapters and mounts `mcpRouter` before JWT routes;
  * providers never import this module, which keeps the runtime graph acyclic.
  */
 export function createWorkerModule(options: {
@@ -47,18 +47,25 @@ export function createWorkerModule(options: {
   host?: string;
 }): {
   host: WorkerHostService;
+  mcpUrl: string;
   mcpRouter: ReturnType<typeof createWorkerMcpRouter>;
   controlRouter: ReturnType<typeof createWorkerControlRouter>;
   initialize(): void;
   shutdown(): Promise<void>;
 } {
   const hostName = options.host ?? '127.0.0.1';
+  const mcpUrl = `http://${hostName}:${options.serverPort}/api/worker-mcp`;
   const ipc = new WorkerIpcClient(createBundledWorkerTransport());
   const host = createWorkerHostService({
     ipc,
     isEnabled: () => isPluginEnabled(WORKER_PLUGIN),
-    resolveMcpUrl: () => `http://${hostName}:${options.serverPort}/api/worker-mcp`,
-    runtime: providerRuntimeService,
+    resolveMcpUrl: () => mcpUrl,
+    runtime: {
+      ...providerRuntimeService,
+      getState: (provider, sessionId) => provider === 'dsh'
+        ? providerRuntimeService.getManagedState(provider, sessionId)
+        : providerRuntimeService.getState(provider, sessionId),
+    },
     hasActiveRun: (sessionId) => chatRunRegistry.getRun(sessionId)?.status === 'running',
     sessions: sessionsDb,
     projects: projectsDb,
@@ -81,6 +88,7 @@ export function createWorkerModule(options: {
   const controlRouter = createWorkerControlRouter(host);
   return {
     host,
+    mcpUrl,
     mcpRouter,
     controlRouter,
     initialize: () => host.initialize(),

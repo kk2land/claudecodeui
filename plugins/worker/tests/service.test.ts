@@ -150,6 +150,21 @@ test("default quotas isolate dsh/pi, parents, and projects while sharing one exi
     await waitStatus(service, item.worker.id, ["completed"], 12000);
 });
 
+test("parents in the same project have independent quotas and request ids", async (t) => {
+  const root = temporaryRoot("worker-same-project-");
+  const { service, project } = createService(t, root, { TEST_SCENARIO: "sleep", TEST_DELAY_MS: "1500" });
+  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.registerOwner({ ...owner(project), id: "other-owner", parentSessionId: "other-parent" }, "other-token");
+  const first = await service.start("owner-1", startInput({ requestId: "same-request" }));
+  const queued = await service.start("owner-1", startInput({ requestId: "next-request" }));
+  const other = await service.start("other-owner", startInput({ requestId: "same-request" }));
+  assert.notEqual(first.worker.id, other.worker.id);
+  await waitStatus(service, first.worker.id, ["running"]);
+  await waitStatus(service, other.worker.id, ["running"]);
+  assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
+  assert.equal(service.get(first.worker.id).worker.projectId, service.get(other.worker.id).worker.projectId);
+});
+
 test("cancels a running group and holds the notification", async (t) => {
   const root = temporaryRoot("worker-cancel-");
   const pidFile = path.join(root, "pid");
