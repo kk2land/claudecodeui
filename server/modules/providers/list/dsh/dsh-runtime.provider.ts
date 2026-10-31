@@ -159,12 +159,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
         }
         if (this.owners.get(owner.id) === owner) {
           if (owner.config.mode === 'headless' || owner.aborted || !success) await this.release(owner);
-          else {
-            // Idle recycling closes only this ACP process. Worker owners stay
-            // alive in the host and a later wake-up resumes the native session.
-            owner.idle = setTimeout(() => { void this.release(owner).catch((error) => console.warn('[DSH] Idle cleanup failed:', error.message)); }, owner.config.idleMs);
-            owner.idle.unref();
-          }
+          else this.scheduleIdle(owner);
         }
         exitCode = success ? 0 : 1;
       } finally {
@@ -179,6 +174,33 @@ export class DshRuntimeProvider implements IProviderRuntime {
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode }));
         }
       }
+    }
+  }
+
+  /**
+   * Idle recycling closes only this ACP process. While this owner's Workers
+   * still run, keep the process and re-arm the same idle interval; explicit
+   * Stop, runtime handoff and close clear the timer through release().
+   */
+  private scheduleIdle(owner: DshOwner): void {
+    clearTimeout(owner.idle);
+    owner.idle = setTimeout(() => { void this.releaseIdleOwner(owner); }, owner.config.idleMs);
+    owner.idle.unref();
+  }
+
+  /** A Worker-lifecycle query or release failure must never escape the timer. */
+  private async releaseIdleOwner(owner: DshOwner): Promise<void> {
+    try {
+      if (this.owners.get(owner.id) !== owner || owner.busy || owner.aborted) return;
+      let active = false;
+      // A failed query must not pin the transport forever; normal recycling wins.
+      try { active = await this.workerBridge?.hasActiveWorkers(owner.id) ?? false; } catch { active = false; }
+      // A turn, Stop or shutdown can replace or abort the owner while the bridge answers.
+      if (this.owners.get(owner.id) !== owner || owner.busy || owner.aborted) return;
+      if (active) this.scheduleIdle(owner);
+      else await this.release(owner);
+    } catch (error) {
+      console.warn('[DSH] Idle cleanup failed:', error instanceof Error ? error.message : String(error));
     }
   }
 

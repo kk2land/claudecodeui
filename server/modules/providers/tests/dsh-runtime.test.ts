@@ -114,8 +114,10 @@ function bridgeHarness() {
   };
   let prepareError: Error | null = null;
   let stopResult: boolean | Promise<boolean> = true;
+  let activeWorkers: boolean | ((sessionId: string) => boolean | Promise<boolean>) = false;
   const bridge: DshWorkerBridge = {
     isSessionEnabled: () => connection !== null && prepareError === null,
+    async hasActiveWorkers(sessionId) { return typeof activeWorkers === 'function' ? activeWorkers(sessionId) : activeWorkers; },
     async prepareSession(input) {
       prepares.push(input as AnyRecord);
       calls.push({ method: 'prepare', sessionId: input.sessionId, runtimeInstanceId: input.runtimeInstanceId });
@@ -135,6 +137,7 @@ function bridgeHarness() {
     bridge, calls, prepares,
     setConnection(value: typeof connection) { connection = value; },
     setPrepareError(error: Error | null) { prepareError = error; },
+    setActiveWorkers(value: boolean | ((sessionId: string) => boolean | Promise<boolean>)) { activeWorkers = value; },
     setStopResult(value: boolean | Promise<boolean>) { stopResult = value; },
     patchFiles(calls: AnyRecord[]): string[] {
       return calls.flatMap(patchArgs);
@@ -264,6 +267,79 @@ test('cancelling an ACP idle handoff prevents a replacement prompt from starting
     assert.equal(await f.runtime.abort('app'), true);
     await running;
     assert.equal((await f.calls()).filter((call) => call.method === 'session/prompt').length, 1);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+  } finally { await f.close(); }
+});
+
+test('ACP idle recycling waits for this owner\'s active Worker and then resumes normal cleanup', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  h.setActiveWorkers((sessionId) => sessionId === 'app');
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' }, h.bridge);
+  try {
+    await f.run('hello', { userTurn: true });
+    // More than one idle interval passes while the Worker is active.
+    await delay(350);
+    let calls = await f.calls();
+    assert.equal(calls.some((call) => call.method === 'session/close'), false, 'active Workers keep the ACP process');
+    assert.equal(calls.filter((call) => call.method === 'initialize').length, 1);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+    // The bridge may still report active for the same owner; ending it restores recycling.
+    h.setActiveWorkers(false);
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/close'));
+    calls = await f.calls();
+    assert.equal(calls.filter((call) => call.method === 'initialize').length, 1);
+  } finally { await f.close(); }
+});
+
+test('ACP ignores another owner\'s active Workers when deciding its idle exit', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  h.setActiveWorkers((sessionId) => sessionId === 'other-session');
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' }, h.bridge);
+  try {
+    await f.run('hello', { userTurn: true });
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/close'));
+    assert.deepEqual(h.calls.filter((call) => call.method === 'stop'), []);
+    assert.equal(f.runtime.listActiveSessions().length, 0);
+  } finally { await f.close(); }
+});
+
+test('an idle Worker check that resolves after a new turn starts never releases that turn', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  let resolveCheck!: (active: boolean) => void;
+  let checks = 0;
+  h.setActiveWorkers(() => new Promise<boolean>((resolve) => { checks++; resolveCheck = resolve; }));
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '100' }, h.bridge);
+  try {
+    await f.run('hello');
+    await until(() => checks > 0);
+    // The idle callback is awaiting the bridge; a user turn now owns the process.
+    const running = f.run('wait');
+    resolveCheck(false);
+    await until(async () => (await f.calls()).some((call) => call.method === 'session/prompt' && call.params.prompt[0].text === 'wait'));
+    // The stale callback has had longer than one idle interval to mis-release.
+    await delay(150);
+    const calls = await f.calls();
+    assert.equal(calls.filter((call) => call.method === 'session/prompt').length, 2);
+    assert.equal(calls.some((call) => call.method === 'session/close'), false, 'the live turn keeps its ACP process');
+    assert.equal(calls.filter((call) => call.method === 'initialize').length, 1);
+    assert.equal(f.runtime.listActiveSessions().length, 1);
+    assert.equal(await f.runtime.abort('app'), true);
+    await running;
+  } finally { await f.close(); }
+});
+
+test('explicit Stop still closes ACP while this owner has an active Worker', { skip: process.platform === 'win32' }, async () => {
+  const h = bridgeHarness();
+  h.setActiveWorkers(true);
+  const f = await fixture('acp', null, undefined, { CLOUDCLI_DSH_IDLE_MS: '60000' }, h.bridge);
+  try {
+    await f.run('hello', { userTurn: true });
+    const stopping = f.runtime.management.control('app', { action: 'stop' });
+    const state = await stopping;
+    assert.equal(state.queueHeld, true);
+    assert.deepEqual(h.calls.filter((call) => call.method === 'stop').map((call) => call.sessionId), ['app']);
+    const calls = await f.calls();
+    assert(calls.some((call) => call.method === 'session/close'), 'Stop does not wait for the idle exemption');
     assert.equal(f.runtime.listActiveSessions().length, 0);
   } finally { await f.close(); }
 });

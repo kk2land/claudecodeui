@@ -199,6 +199,7 @@ const actions = new Set<WorkerIpcAction>([
   "listNotifications",
   "claimNotifications",
   "settleNotifications",
+  "hasActiveWorkers",
 ]);
 
 async function handleIpc(
@@ -246,6 +247,8 @@ async function handleIpc(
         payload.batchId as string,
         payload.delivery as WorkerNotificationDelivery,
       );
+    case "hasActiveWorkers":
+      return service.hasActiveWorkers(payload.ownerId as string);
   }
 }
 

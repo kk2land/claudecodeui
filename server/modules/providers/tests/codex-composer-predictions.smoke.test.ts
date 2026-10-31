@@ -161,6 +161,7 @@ async function verifyNativePrediction(t: TestContext, workerEnabled: boolean): P
         http_headers: { Authorization: 'Bearer fixture-parent' } } };
     },
     async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+    async hasActiveWorkers() { return false; },
   });
 
   let threadId: string | null = null;

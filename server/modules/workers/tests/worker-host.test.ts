@@ -38,6 +38,7 @@ function harness(options: {
   const timers = new Map<number, { callback: () => void; delay: number }>();
   let nextTimer = 1;
   const activeRuns = new Set<string>();
+  const activeWorkerOwners = new Set<string>();
   const queueHeld = new Set<string>();
   const drafts = new Set<string>();
   const background = new Set<string>();
@@ -89,6 +90,7 @@ function harness(options: {
         settlements.push({ batchId: String(payload.batchId), delivery: String(payload.delivery) });
         return { settled: true };
       }
+      if (action === 'hasActiveWorkers') return activeWorkerOwners.has(String(payload.ownerId));
       if (action === 'closeAll' && closeAllImpl) return await closeAllImpl();
       if (action === 'closeInstance' && closeInstanceImpl) return await closeInstanceImpl();
       return { workerIds: [], confirmed: true, settled: true };
@@ -150,6 +152,7 @@ function harness(options: {
     deleteSession(sessionId: string) { sessions.delete(sessionId); },
     setDshMode(sessionId: string, mode: 'acp' | 'headless') { dshModes.set(sessionId, mode); },
     setActiveRun(sessionId: string, value: boolean) { if (value) activeRuns.add(sessionId); else activeRuns.delete(sessionId); },
+    setActiveWorkerOwner(ownerId: string, value: boolean) { if (value) activeWorkerOwners.add(ownerId); else activeWorkerOwners.delete(ownerId); },
     setQueueHeld(sessionId: string, value: boolean) { if (value) queueHeld.add(sessionId); else queueHeld.delete(sessionId); },
     setDrafts(sessionId: string, value: boolean) { if (value) drafts.add(sessionId); else drafts.delete(sessionId); },
     setBackground(sessionId: string, value: boolean) { if (value) background.add(sessionId); else background.delete(sessionId); },
@@ -952,4 +955,20 @@ test('an earlier registered owner keeps Stop honest when pause is unconfirmed du
   await preparing;
   const register = h.requests.filter((request) => request.action === 'registerOwner').at(-1);
   assert.equal((register?.payload.owner as { paused: boolean }).paused, true);
+});
+
+test('Worker activity queries are scoped to the exact parent runtime owner', async () => {
+  const h = harness({ sessions: { 'session-1': '/repo', 'session-2': '/other' }, providers: { 'session-1': 'codex', 'session-2': 'dsh' } });
+  await h.prepare('session-1', 'instance-1');
+  await h.prepareDsh('session-2', 'instance-2');
+
+  h.setActiveWorkerOwner('instance-1:session-1', true);
+  assert.equal(await h.service.bridge.hasActiveWorkers('session-1'), true);
+  assert.equal(await h.service.dshBridge.hasActiveWorkers('session-2'), false);
+  h.setActiveWorkerOwner('instance-2:session-2', true);
+  assert.equal(await h.service.dshBridge.hasActiveWorkers('session-2'), true);
+
+  h.setActiveWorkerOwner('instance-1:session-1', false);
+  assert.equal(await h.service.bridge.hasActiveWorkers('session-1'), false);
+  assert.deepEqual(h.logs, []);
 });

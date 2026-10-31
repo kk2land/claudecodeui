@@ -186,6 +186,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   // Worker ownership belongs to this runtime, not to a proxy process that can
   // exit after an idle timeout. A later native resume keeps the same owner.
   private readonly workerRuntimeInstanceId = `codex:${randomUUID()}`;
+  // The proxy owns its own native idle timer; a loaded-list RPC during an
+  // active Worker run is the smallest protocol activity that refreshes it.
+  private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
+  private keepalivePending = false;
+  // Stop/close invalidate any in-flight check so it cannot send after teardown.
+  private keepaliveGeneration = 0;
+  private readonly keepaliveIntervalMs: number;
 
   constructor(
     private readonly client: CodexRpcClient = codexAppServerTransport,
@@ -209,6 +216,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       cliVersion?: () => string | null;
       /** Configured model directory, injectable so protocol tests never use real credentials. */
       modelProviders?: Pick<typeof codexModelProviderService, 'list' | 'models'>;
+      /** Worker keepalive cadence; 30s is well below the proxy's 10m default. */
+      keepaliveIntervalMs?: number;
     } = {},
   ) {
     this.configProvider = options.configProvider ?? new CodexPredictionConfigProvider();
@@ -218,6 +227,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.random = options.random ?? Math.random;
     this.readCliVersion = options.cliVersion ?? (() => this.client.status?.cliVersion ?? null);
     this.modelProviders = options.modelProviders ?? codexModelProviderService;
+    this.keepaliveIntervalMs = options.keepaliveIntervalMs ?? 30_000;
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
       client.onRequest((frame) => this.onRequest(frame)),
@@ -231,6 +241,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         // shutdown call stopWorkers; an idle proxy can disappear independently.
         for (const exited of this.stopExitWaiters) exited();
         for (const closed of this.threadClosures.values()) closed();
+        this.stopKeepalive();
         for (const session of this.sessions.values()) {
           const idleExit = cleanExit && session.state.phase === 'idle' && session.state.goal?.status !== 'active';
           if (stopped || session.state.phase !== 'idle' || session.state.goal?.status === 'active') this.settings.update(session.id, { queueHeld: true });
@@ -261,6 +272,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
 
   /** The provider router and shutdown use this only for an explicit lifecycle stop. */
   async stopWorkers(reason = 'Codex app-server stopped.'): Promise<void> {
+    this.stopKeepalive();
     // There may be no proxy to emit onExit while a run is resolving its model
     // or Worker config. Cancel that setup at the same boundary as a live exit.
     const sessionIds = new Set([...this.stopVersions.keys(), ...this.sessions.keys(), ...this.controls.keys()]);
@@ -374,6 +386,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       target.threadId = result.thread.id;
       // Only the native thread's accepted config proves Worker tools exist.
       target.state.workerEnabled = Boolean(workerConfig);
+      this.syncKeepalive();
       target.model = result.model || result.thread.model || target.model;
       target.modelProvider = typeof result.modelProvider === 'string' ? result.modelProvider : null;
       if (selection && target.modelProvider !== selection.modelProvider) {
@@ -518,6 +531,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (session.stopRequested) {
       if (session.stop || session.state.phase !== 'idle') throw new Error('The previous Codex stop has not been confirmed.');
       session.stopRequested = false;
+      // Stop cleared the timer; a confirmed explicit turn on the same loaded
+      // thread must resume keepalive before its next Worker becomes active.
+      this.syncKeepalive();
     }
     // Only an explicit user turn after confirmed cleanup re-activates Worker delivery.
     if (!workerWakeup && options.userTurn === true) {
@@ -816,6 +832,58 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   /** True when this connection may still accept RPCs, without starting one. */
   private connectionLive(): boolean {
     return !this.client.status || this.client.status.running;
+  }
+
+  /** One runtime-level timer, only while a Worker-enabled thread is loaded. */
+  private syncKeepalive(): void {
+    const eligible = [...this.sessions.values()].some((session) => session.state.workerEnabled
+      && !session.stopRequested && !['stopping', 'stopFailed'].includes(session.state.phase));
+    if (!eligible) this.stopKeepalive();
+    else this.startKeepalive();
+  }
+
+  private startKeepalive(): void {
+    if (this.keepaliveTimer || this.keepaliveIntervalMs <= 0) return;
+    const generation = ++this.keepaliveGeneration;
+    const timer = setInterval(() => { void this.refreshKeepalive(generation); }, this.keepaliveIntervalMs);
+    timer.unref?.();
+    this.keepaliveTimer = timer;
+  }
+
+  private stopKeepalive(): void {
+    this.keepaliveGeneration += 1;
+    if (this.keepaliveTimer) clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = null;
+    this.keepalivePending = false;
+  }
+
+  /**
+   * Sends one loaded-list RPC only when this runtime still has an active
+   * Worker and the existing app-server is ready. It never spawns a proxy,
+   * publishes UI state, or touches the parent's turn/phase/queue.
+   */
+  private async refreshKeepalive(generation: number): Promise<void> {
+    if (generation !== this.keepaliveGeneration || this.keepalivePending) return;
+    const sessions = [...this.sessions.values()].filter((session) => session.state.workerEnabled
+      && session.threadId && !session.stopRequested && !['stopping', 'stopFailed'].includes(session.state.phase));
+    if (!sessions.length) { this.stopKeepalive(); return; }
+    if (!this.connectionLive()) return;
+    this.keepalivePending = true;
+    try {
+      const active = await Promise.all(sessions.map((session) =>
+        this.workerBridge?.hasActiveWorkers(session.id).catch(() => false) ?? false));
+      // Stop/close, a proxy exit, or the last Worker may invalidate this check
+      // while the bridge is answering.
+      const stillEligible = sessions.some((session) => this.sessions.get(session.id) === session
+        && !session.stopRequested && !['stopping', 'stopFailed'].includes(session.state.phase));
+      if (generation !== this.keepaliveGeneration || !active.some(Boolean) || !stillEligible || !this.connectionLive()) return;
+      await this.client.request('thread/loaded/list', {});
+    } catch {
+      // A timeout or proxy exit is expected during idle recycling; the next
+      // tick re-checks Worker activity against the then-current connection.
+    } finally {
+      this.keepalivePending = false;
+    }
   }
 
   /**
@@ -1130,6 +1198,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         }
       }
       if (session.stop === combined) session.stop = null;
+      this.syncKeepalive();
       return nativeStopped && workersStopped;
     })();
     session.stop = combined;
@@ -1295,6 +1364,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       const nextBudget = action.tokenBudget ?? session.state.goal?.tokenBudget;
       if (action.operation === 'resume' && nextBudget != null && nextBudget <= (session.state.goal?.tokensUsed ?? 0)) throw new Error('Increase the goal budget before resuming.');
       session.stopRequested = false;
+      // Stop cleared the timer; an explicit Goal action on the same loaded
+      // thread is another confirmed resume path that must restore it.
+      this.syncKeepalive();
       // A new explicit Goal intent retires any pending/ready suggestion before
       // the async settings/model/goal RPCs run (a paused goal still counts).
       this.clearPrediction(session);
@@ -1461,10 +1533,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       this.sessions.delete(sessionId);
       this.failures.delete(sessionId);
       if (stopVersion === (this.stopVersions.get(sessionId) ?? 0)) this.settings.update(sessionId, { queueHeld });
+      this.syncKeepalive();
     }
   }
 
   async close(): Promise<void> {
+    this.stopKeepalive();
     // The host logs unconfirmed Worker cleanup; shutdown must still close the
     // native transport, predictions and subscriptions.
     await this.stopWorkers('Codex runtime closed.').catch(() => {});

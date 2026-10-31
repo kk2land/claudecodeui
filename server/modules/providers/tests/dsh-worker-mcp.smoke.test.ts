@@ -90,6 +90,7 @@ test('published DSH ACP calls the injected HTTP Worker MCP and resumes after idl
     async activateSession(id) { activated.push(id); },
     async stopSession(id) { stopped.push(id); return true; },
     async closeRuntime() {},
+    async hasActiveWorkers() { return false; },
   };
   runtime.setWorkerBridge(bridge);
   let nativeId: string | null = null;

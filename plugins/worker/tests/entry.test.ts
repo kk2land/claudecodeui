@@ -84,6 +84,11 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
   const listed = await request("listNotifications", {});
   assert.equal(listed.ok, true);
   assert.deepEqual(listed.value, []);
+  const active = await request("hasActiveWorkers", {
+    ownerId: "entry-owner",
+  });
+  assert.equal(active.ok, true);
+  assert.equal(active.value, false);
   const claimed = await request("claimNotifications", {
     ownerId: "entry-owner",
     eventIds: [],

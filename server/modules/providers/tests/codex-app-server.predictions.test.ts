@@ -216,6 +216,7 @@ test('a Worker-enabled parent keeps its owner while predictions use an isolated 
       return { 'mcp_servers.cloudcli_workers': { enabled: true, url: 'http://localhost/worker-mcp' } };
     },
     async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+    async hasActiveWorkers() { return false; },
   });
   await h.setup();
   await eventually(() => h.predictions('thread/fork').length === 1, 'isolated prediction fork');

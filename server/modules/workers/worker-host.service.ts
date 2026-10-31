@@ -589,6 +589,24 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
       }
       for (const entry of affected) removeOwner(entry);
     },
+    async hasActiveWorkers(sessionId: string) {
+      if (shuttingDown || !dependencies.isEnabled() || !dependencies.ipc.isReady()) return false;
+      // Ask only for the exact live owner of this parent session. Another
+      // parent's active Worker, or merely having MCP configured, never counts.
+      const entries = currentOwners().filter((entry) => entry.owner.parentSessionId === sessionId
+        && entry.registered && isCurrentOwner(entry));
+      if (!entries.length) return false;
+      try {
+        const active = await Promise.all(entries.map((entry) =>
+          dependencies.ipc.request('hasActiveWorkers', { ownerId: entry.owner.id })));
+        return active.some(Boolean);
+      } catch (error) {
+        // A transient plugin failure must not keep a transport alive or surface
+        // as an unhandled rejection from an idle/keepalive timer.
+        log(`[Workers] Could not inspect active Workers for ${sessionId}`, error);
+        return false;
+      }
+    },
   };
 
   const dshBridge: DshWorkerBridge = {
@@ -612,6 +630,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     activateSession: bridge.activateSession,
     stopSession: bridge.stopSession,
     closeRuntime: bridge.closeAppServer,
+    hasActiveWorkers: bridge.hasActiveWorkers,
   };
 
   return {

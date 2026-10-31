@@ -14,14 +14,18 @@ import type {
   SessionRuntimeSettings,
 } from '@/shared/index.js';
 
-function harness() {
+function harness(config: { keepaliveIntervalMs?: number } = {}) {
   const calls: Array<{ method: string; params: AnyRecord }> = [];
   let notify: (frame: CodexRpcFrame) => void = () => {};
   let exit: (error: Error, instanceId?: string) => void = () => {};
   let nextTurn = 1;
+  let running = true;
   const rpc: CodexRpcClient = {
     instanceId: 'transport-instance',
     ensureInstanceId: () => 'transport-instance',
+    get status() {
+      return { running, pid: running ? 1 : null, startedAt: running ? 1 : null, pendingRequests: 0, launcherPath: null, cliVersion: '0.163.0' };
+    },
     async request<T>(method: string, params: AnyRecord = {}) {
       calls.push({ method, params });
       switch (method) {
@@ -54,6 +58,7 @@ function harness() {
       list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] }),
       models: async (provider: string) => ({ modelProvider: provider, models: ['test-model'], expiresAt: Date.now() + 60_000 }),
     },
+    keepaliveIntervalMs: config.keepaliveIntervalMs,
   });
   const events: AnyRecord[] = [];
   const writer: ProviderRuntimeWriter = { send: (data) => events.push(data as AnyRecord), userId: null };
@@ -71,6 +76,8 @@ function harness() {
   const stoppedSessions: string[] = [];
   let stopImpl: (sessionId: string) => Promise<boolean> = async () => true;
   let closeImpl: () => Promise<void> = async () => {};
+  let activeWorkers: boolean | ((sessionId: string) => boolean) = false;
+  const hasActiveWorkerChecks: string[] = [];
   const bridge: CodexWorkerBridge = {
     async prepareSession(input) {
       bridgeCalls.push(`prepare:${input.appServerInstanceId}:${input.sessionId}`);
@@ -79,13 +86,19 @@ function harness() {
     async activateSession(sessionId) { bridgeCalls.push(`activate:${sessionId}`); },
     async stopSession(sessionId) { stoppedSessions.push(sessionId); return stopImpl(sessionId); },
     async closeAppServer(instanceId) { bridgeCalls.push(`close:${instanceId}`); await closeImpl(); },
+    async hasActiveWorkers(sessionId) {
+      hasActiveWorkerChecks.push(sessionId);
+      return typeof activeWorkers === 'function' ? activeWorkers(sessionId) : activeWorkers;
+    },
   };
   runtime.setWorkerBridge(bridge);
   return {
-    runtime, bridge, bridgeCalls, stoppedSessions, calls, events, writer, context, settingsDb,
+    runtime, bridge, bridgeCalls, stoppedSessions, calls, events, writer, context, settingsDb, hasActiveWorkerChecks,
     setPrepare(value: Record<string, unknown> | null) { prepareConfig = value; },
     setStopSession(impl: (sessionId: string) => Promise<boolean>) { stopImpl = impl; },
     setClose(impl: () => Promise<void>) { closeImpl = impl; },
+    setActiveWorkers(value: boolean | ((sessionId: string) => boolean)) { activeWorkers = value; },
+    setRunning(value: boolean) { running = value; },
     event: (frame: CodexRpcFrame) => notify(frame),
     exit: (error: Error, instanceId?: string) => exit(error, instanceId),
   };
@@ -360,5 +373,138 @@ test('a deferred Worker wake-up creates no native turn and no failed state', asy
   assert.equal(h.calls.some((call) => call.method === 'turn/start'), false);
   assert.equal(h.runtime.getState('session-1').phase, 'idle');
   assert.equal(h.events.some((event) => event.kind === 'error'), false);
+  await h.runtime.close();
+});
+
+async function delay(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+test('thread/loaded/list keepalive runs only for this session while its Worker is active and the proxy is ready', async () => {
+  const h = harness({ keepaliveIntervalMs: 20 });
+  const run = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await run;
+  const loaded = () => h.calls.filter((call) => call.method === 'thread/loaded/list');
+  const messagesAfterTurn = h.events.length;
+
+  // A loaded Worker-enabled thread alone is not activity.
+  await delay(60);
+  assert.equal(loaded().length, 0);
+  assert.equal(h.events.length, messagesAfterTurn, 'keepalive never publishes UI messages');
+
+  h.setActiveWorkers((sessionId) => sessionId === 'session-1');
+  await eventually(() => loaded().length > 0);
+  assert.ok(h.hasActiveWorkerChecks.every((sessionId) => sessionId === 'session-1'));
+  assert.deepEqual(loaded()[0].params, {});
+  assert.equal(h.events.length, messagesAfterTurn);
+
+  // Worker completion stops further proxy activity.
+  h.setActiveWorkers(false);
+  await delay(50);
+  const settled = loaded().length;
+  await delay(60);
+  assert.equal(loaded().length, settled);
+
+  // An exited proxy is never restarted merely by the timer.
+  h.setActiveWorkers(true);
+  h.setRunning(false);
+  const beforeExit = loaded().length;
+  await delay(60);
+  assert.equal(loaded().length, beforeExit);
+
+  await h.runtime.close();
+  h.setRunning(true);
+  h.setActiveWorkers(true);
+  await delay(50);
+  assert.equal(loaded().length, beforeExit, 'close releases the keepalive timer');
+});
+
+test('a persistent loaded thread resumes keepalive after Stop and a later user turn', async () => {
+  const h = harness({ keepaliveIntervalMs: 20 });
+  const first = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await first;
+  await h.runtime.abort('session-1');
+
+  const loaded = () => h.calls.filter((call) => call.method === 'thread/loaded/list');
+  const persistentContext = { ...h.context, resolveProviderSessionId: () => 'native-thread' };
+  const next = h.runtime.run('after Stop', { ...options, userTurn: true }, h.writer, persistentContext);
+  await eventually(() => h.calls.filter((call) => call.method === 'turn/start').length === 2);
+  // No Worker is active yet: the restored timer still sends no keepalive.
+  await delay(60);
+  assert.equal(loaded().length, 0);
+
+  h.setActiveWorkers(true);
+  for (let index = 0; index < 100 && loaded().length === 0; index++) await delay(10);
+  assert.ok(loaded().length > 0, 'a later Worker on the same loaded thread is kept alive');
+  assert.equal(h.calls.filter((call) => call.method === 'thread/start').length, 1);
+  assert.equal(h.calls.filter((call) => call.method === 'thread/resume').length, 0);
+
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-2', status: 'completed' } } });
+  await next;
+  await h.runtime.close();
+});
+
+test('a loaded thread resumes keepalive after Stop and an explicit Goal action', async () => {
+  const previousGoalSetting = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+  process.env.CLOUDCLI_CODEX_GOAL_ENABLED = 'true';
+  const h = harness({ keepaliveIntervalMs: 20 });
+  try {
+    const first = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+    await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+    h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+    await first;
+    await h.runtime.abort('session-1');
+
+    const loaded = () => h.calls.filter((call) => call.method === 'thread/loaded/list');
+    await h.runtime.control('session-1', { action: 'goal', operation: 'set', objective: 'continue the task' }, options, h.writer,
+      { ...h.context, resolveProviderSessionId: () => 'native-thread' });
+    await delay(60);
+    assert.equal(loaded().length, 0);
+
+    h.setActiveWorkers(true);
+    for (let index = 0; index < 100 && loaded().length === 0; index++) await delay(10);
+    assert.ok(loaded().length > 0, 'the Goal resume path restored the stopped keepalive timer');
+    assert.equal(h.calls.filter((call) => call.method === 'thread/start').length, 1);
+    assert.equal(h.calls.filter((call) => call.method === 'thread/resume').length, 0);
+  } finally {
+    await h.runtime.close();
+    if (previousGoalSetting === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
+    else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = previousGoalSetting;
+  }
+});
+
+test('explicit process Stop discards an in-flight Worker activity query and releases keepalive', async () => {
+  const h = harness({ keepaliveIntervalMs: 20 });
+  let queryStarted = false;
+  let releaseQuery!: (active: boolean) => void;
+  h.bridge.hasActiveWorkers = () => {
+    queryStarted = true;
+    return new Promise<boolean>((resolve) => { releaseQuery = resolve; });
+  };
+  const run = h.runtime.run('start Workers', { ...options, userTurn: true }, h.writer, h.context);
+  await eventually(() => h.calls.some((call) => call.method === 'turn/start'));
+  h.event({ method: 'turn/completed', params: { threadId: 'native-thread', turn: { id: 'turn-1', status: 'completed' } } });
+  await run;
+  const messagesAfterTurn = h.events.length;
+  const loaded = () => h.calls.filter((call) => call.method === 'thread/loaded/list');
+  for (let index = 0; index < 100 && !queryStarted; index++) await delay(10);
+  assert.equal(queryStarted, true, 'the keepalive tick reached the activity query');
+
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => {}, isStopping: () => false });
+  await router.control!('session-1', { action: 'stop-app-server' }, options, h.writer, h.context);
+  assert.equal(h.bridgeCalls.filter((call) => call.startsWith('close:')).length, 1);
+  assert.equal(h.settingsDb.get('session-1').queueHeld, true);
+
+  // The old generation returns active=true only after Stop cleared the timer;
+  // it must not send loaded/list, restart a proxy, or publish another message.
+  releaseQuery(true);
+  await delay(80);
+  assert.equal(loaded().length, 0);
+  assert.equal(h.calls.filter((call) => call.method === 'thread/start').length, 1);
+  assert.equal(h.events.length, messagesAfterTurn);
   await h.runtime.close();
 });

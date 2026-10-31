@@ -404,6 +404,7 @@ export type WorkerIpcRequestPayloads = {
   listNotifications: Record<string, never>;
   claimNotifications: { ownerId: string; eventIds: string[]; batchId: string };
   settleNotifications: { batchId: string; delivery: WorkerNotificationDelivery };
+  hasActiveWorkers: { ownerId: string };
 };
 
 /** Fixed IPC action names. */
@@ -418,6 +419,7 @@ export type WorkerIpcResponseValues = {
   listNotifications: WorkerNotification[];
   claimNotifications: { batchId: string; notifications: WorkerNotification[] };
   settleNotifications: { settled: true };
+  hasActiveWorkers: boolean;
 };
 
 /**
@@ -503,4 +505,9 @@ export type CodexWorkerBridge = {
   activateSession: (sessionId: string) => Promise<void>;
   stopSession: (sessionId: string, reason: string) => Promise<boolean>;
   closeAppServer: (appServerInstanceId: string, reason: string) => Promise<void>;
+  /**
+   * True while this runtime's owner has at least one non-terminal Worker run.
+   * Idle transport/proxy recycling consults it without changing Worker state.
+   */
+  hasActiveWorkers: (sessionId: string) => Promise<boolean>;
 };

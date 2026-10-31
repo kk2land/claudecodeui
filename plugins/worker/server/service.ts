@@ -1578,6 +1578,15 @@ export class WorkerService {
 
   //------------------ NOTIFICATIONS ----------------
 
+  /** Keepalive/close policy consults only this exact runtime owner, never another parent's work. */
+  hasActiveWorkers(ownerId: string): boolean {
+    const owner = this.requireOwner(ownerId);
+    return this.store
+      .workers({ projectId: owner.projectId, parentSessionId: owner.parentSessionId })
+      .some((worker) => worker.ownerId === ownerId
+        && Boolean(worker.latestRun && ACTIVE_REFERENCES.includes(worker.latestRun.status)));
+  }
+
   notifications(ownerId?: string): WorkerNotification[] {
     return this.store.notifications(ownerId);
   }

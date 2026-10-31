@@ -2122,6 +2122,8 @@ export type DshWorkerBridge = {
   activateSession(sessionId: string): Promise<void>;
   stopSession(sessionId: string, reason: string): Promise<boolean>;
   closeRuntime(runtimeInstanceId: string, reason: string): Promise<void>;
+  /** True while this DSH runtime's owner still has an active Worker run. */
+  hasActiveWorkers(sessionId: string): Promise<boolean>;
 };
 
 /** One claimed Worker reminder or result merged into the parent wake-up turn; `running` denotes a soft-budget reminder. */

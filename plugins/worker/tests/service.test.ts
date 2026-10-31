@@ -944,3 +944,21 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
   assert.equal(overridden.run.model, "explicit-resume");
   assert.equal(overridden.run.effort, "medium");
 });
+
+test("active Worker queries are scoped to one runtime owner and ignore terminal runs", async (t) => {
+  const root = temporaryRoot("worker-active-owner-");
+  const { service, project } = createService(t, root, {
+    TEST_SCENARIO: "sleep",
+    TEST_DELAY_MS: "300",
+  });
+  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.registerOwner({ ...owner(project), id: "owner-2", parentSessionId: "parent-2", appServerInstanceId: "app-2" }, "owner-2-token");
+  const first = await service.start("owner-1", startInput({ requestId: "active-1" }));
+  const queued = await service.start("owner-1", startInput({ requestId: "active-2" }));
+  assert.equal(service.hasActiveWorkers("owner-1"), true, "queued work is active too");
+  assert.equal(service.hasActiveWorkers("owner-2"), false, "another owner is never counted");
+  await waitStatus(service, first.worker.id, ["running"]);
+  assert.equal(service.hasActiveWorkers("owner-1"), true);
+  await waitStatus(service, queued.worker.id, ["completed"], 5000);
+  assert.equal(service.hasActiveWorkers("owner-1"), false);
+});
