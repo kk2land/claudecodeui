@@ -57,9 +57,8 @@ const dedupeProviderSkills = (skills: ProviderSkill[]): ProviderSkill[] => {
   });
 };
 
-const mapSkillToSlashCommand = (skill: ProviderSkill, provider: LLMProvider): SlashCommand => ({
+const mapSkillToSlashCommand = (skill: ProviderSkill): SlashCommand => ({
   name: skill.command,
-  displayName: provider === 'dsh' ? skill.name : undefined,
   description: skill.description,
   namespace: 'skill',
   path: skill.sourcePath,
@@ -130,7 +129,7 @@ export function useProjectSlashCommands(
           ? ((await skillsResponse.json()) as ProviderSkillsResponse)
           : null;
         const skillCommands = dedupeProviderSkills(skillsData?.data?.skills || [])
-          .map((skill) => mapSkillToSlashCommand(skill, provider));
+          .map(mapSkillToSlashCommand);
         const allCommands: SlashCommand[] = [
           ...((data.builtIn || []) as SlashCommand[]).map((command) => ({
             ...command,

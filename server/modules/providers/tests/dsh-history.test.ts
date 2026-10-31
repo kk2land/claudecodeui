@@ -107,7 +107,7 @@ test('native reader rejects unknown versions and paths escaping the configured r
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test('native history excludes skill catalogs from messages, totals, and pagination', async () => {
+test('native history excludes skill catalogs and injected instructions from messages, totals, and pagination', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-catalog-history-'));
   try {
     const directory = path.join(root, 'sessions', 'workspace', 'native-catalog');
@@ -119,7 +119,8 @@ test('native history excludes skill catalogs from messages, totals, and paginati
       { type: 'user/message', seq: 0, time: 1, surfaceOp: 'append', data: { id: 'human', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Hello.' }] } },
       catalog(1, false),
       catalog(2, true),
-      { type: 'user/message', seq: 3, time: 4, surfaceOp: 'append', data: { id: 'human-2', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Again.' }] } },
+      { type: 'user/message', seq: 3, time: 4, surfaceOp: 'append', data: { id: 'skill-body', role: 'user', source: { kind: 'skill-invocation', name: 'review-worker', form: 'instructions' }, content: [{ type: 'text', text: '<skill_content>Internal skill instructions.</skill_content>' }] } },
+      { type: 'user/message', seq: 4, time: 5, surfaceOp: 'append', data: { id: 'human-2', role: 'user', source: { kind: 'user' }, content: [{ type: 'text', text: 'Again.' }] } },
     ];
     await writeFile(path.join(directory, 'session.v4.jsonl'), rows.map((row) => JSON.stringify(row)).join('\n') + '\n');
     const store = new DshSessionStore(new DshConfigurationProvider({ DSH_HOME: root }));

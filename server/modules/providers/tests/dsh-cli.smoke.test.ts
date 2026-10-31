@@ -12,6 +12,7 @@ import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js
 import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
 import { DshSessionStore } from '@/modules/providers/list/dsh/dsh-session-store.provider.js';
 import { DshSessionsProvider } from '@/modules/providers/list/dsh/dsh-sessions.provider.js';
+import { DshSkillsProvider } from '@/modules/providers/list/dsh/dsh-skills.provider.js';
 import type { AnyRecord, DshRuntimeSettings, ProviderRuntimeContext } from '@/shared/types.js';
 import { getGlobalImageAssetsDir } from '@/shared/image-attachments.js';
 
@@ -35,13 +36,17 @@ rl.on('close',()=>process.exit(0));
 `;
 
 for (const mode of ['acp', 'headless'] as const) {
-  test(`published DSH CLI ${mode} reads uploaded images, runs native/MCP tools, resumes native history, and cleans up`, { skip: !bin, timeout: 60_000 }, async () => {
+  test(`published DSH CLI ${mode} loads skills, reads uploaded images, runs native/MCP tools, resumes native history, and cleans up`, { skip: !bin, timeout: 60_000 }, async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-cli-smoke-'));
     const home = path.join(root, 'home'), cwd = path.join(root, 'workspace');
     await mkdir(home); await mkdir(cwd);
     const file = path.join(cwd, 'fixture.txt'), mcpFile = path.join(root, 'local-mcp.mjs');
     await writeFile(file, 'DSH_LOCAL_TOOL_CONTENT\n');
     await writeFile(mcpFile, mcpActor);
+    const skillDirectory = path.join(cwd, '.dsh', 'skills', 'fixture-directory');
+    await mkdir(skillDirectory, { recursive: true });
+    await writeFile(path.join(skillDirectory, 'SKILL.md'),
+      '---\nname: native-invocation\ndescription: Local skill fixture\n---\n\nDSH_NATIVE_SKILL_INSTRUCTIONS\n');
     // Use the real upload root, outside the CLI's isolated home and workspace.
     await mkdir(getGlobalImageAssetsDir(), { recursive: true });
     const image = { path: path.join(getGlobalImageAssetsDir(), `${path.basename(root)}.png`), name: '截图.png', mimeType: 'image/png' };
@@ -121,7 +126,14 @@ for (const mode of ['acp', 'headless'] as const) {
       send: (message) => messages.push(message as AnyRecord), setSessionId: (id) => { nativeId = id; },
     }, context);
     try {
-      await run('Read fixture.txt and report its contents.', { images: [image] });
+      const skills = await new DshSkillsProvider(configuration).listSkills({ workspacePath: cwd });
+      const skill = skills.find((entry) => entry.name === 'native-invocation');
+      assert(skill);
+      assert.equal(skill.command, '/native-invocation');
+      const firstPrompt = `${skill.command} Read fixture.txt and report its contents.`;
+      await run(firstPrompt, { images: [image] });
+      assert(JSON.stringify(requests[0].messages).includes('DSH_NATIVE_SKILL_INSTRUCTIONS'),
+        'the native /name gesture injects the skill body before the model request');
       assert(nativeId);
       const originalId = nativeId;
       assert(messages.some((message) => message.kind === 'tool_use' && message.toolName === 'read'));
@@ -153,7 +165,7 @@ for (const mode of ['acp', 'headless'] as const) {
       const sessions = new DshSessionsProvider(new DshSessionStore(configuration), events);
       const history = await sessions.fetchHistory('local-app', { providerSessionId: originalId });
       assert.deepEqual(history.messages.filter((message) => message.role === 'user').map((message) => message.content), [
-        'Read fixture.txt and report its contents.', 'Continue the same conversation.', 'Resume after a process restart.',
+        firstPrompt, 'Continue the same conversation.', 'Resume after a process restart.',
       ]);
       assert.deepEqual(history.messages.find((message) => message.role === 'user')?.images, [{ path: image.path, name: image.name }]);
       assert.equal(history.messages.filter((message) => message.kind === 'tool_use').length, 3);

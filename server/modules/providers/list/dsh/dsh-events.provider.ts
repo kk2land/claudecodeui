@@ -35,7 +35,7 @@ export class DshEventsProvider {
       // They are prompt scaffolding, not human turns, and must not appear in
       // the transcript (or history counts/pagination). Identify them only by
       // their source, never by reminder-looking text.
-      if (message?.source?.kind === 'runtime-context' || message?.source?.kind === 'skill-catalog') return [];
+      if (message?.source?.kind === 'runtime-context' || message?.source?.kind === 'skill-catalog' || message?.source?.kind === 'skill-invocation') return [];
       return (message?.content ?? []).flatMap((block: AnyRecord, index: number) => {
         // Tool calls are surface blocks of the assistant message. The separate
         // tool/call lifecycle event is not part of the visible history fold.

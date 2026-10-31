@@ -78,8 +78,9 @@ test('DSH ACP usage_update drops malformed or incomplete readings', () => {
 for (const { name, source } of [
   { name: 'initial', source: { kind: 'skill-catalog', form: 'catalog', entries: [] } },
   { name: 'updated', source: { kind: 'skill-catalog', form: 'catalog', update: true, entries: [] } },
+  { name: 'invoked instructions', source: { kind: 'skill-invocation', name: 'review-worker', form: 'instructions' } },
 ]) {
-  test(`DSH drops ${name} skill-catalog user messages without taking the prompt shape into account`, () => {
+  test(`DSH drops ${name} skill context messages without taking the prompt shape into account`, () => {
     const text = '<system-reminder>\nA skill is a reusable set of task-specific instructions.\n\n<available_skills>\n- `demo`: Demo\n</available_skills>\n</system-reminder>';
     const rows = events.normalize({ type: 'user/message', data: { role: 'user', source, content: [{ type: 'text', text }] } }, 'session-1');
     assert.deepEqual(rows, []);

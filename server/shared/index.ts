@@ -33,6 +33,9 @@ export type {
   ProviderCurrentActiveModel,
   ProviderModelOption,
   ProviderModelsDefinition,
+  ProviderSkill,
+  ProviderSkillListOptions,
+  ProviderSkillSource,
   ProviderPermissionDecision,
   ProviderRunFunction,
   ProviderRuntimeContext,
@@ -89,6 +92,7 @@ export {
   createCompleteMessage,
   createNormalizedMessage,
   findApplicationRoot,
+  findProviderSkillMarkdownFiles,
   generateMessageId,
   getModuleDirectory,
   isCodexGoalEnabled,
@@ -103,3 +107,5 @@ export {
   truncateSubagentActivity,
   unifiedDiffToTexts,
 } from './utils.js';
+
+export { parseFrontMatter } from './frontmatter.js';

@@ -59,7 +59,7 @@ headless 将完整多行 prompt 写入 stdin，避免 shell 转义和命令行�
 - ACP 工具审批复用应用 UI，支持 allow-once、reject-once 和取消。不会把允许一次扩大为永久允许；任务结束后旧审批失效。
 - CloudCLI 管理的 MCP 声明保存到 `$DSH_HOME/cloudcli-mcp.json` 和 `<workspace>/.dsh/cloudcli-mcp.json`。同一服务进程按配置文件串行执行完整的读取、增删和写入，并以原子重命名发布结果；失败的更新不阻塞后续保存。ACP 将声明转换为标准配置；headless 通过临时 patch 挂载 MCP client。原生 profile 文件保持独立，已有原生 MCP 配置仍由 DSH 加载。
 - MCP 支持 stdio/HTTP；启动前将 stdio 命令从 PATH 或工作目录解析为 ACP 要求的绝对路径。
-- skills UI 管理默认 DSH/共享 agent 目录中的目录式 SKILL.md；选择 skill 插入普通指令，不模拟 ACP 原生 slash command。自定义 profile 的额外 skill roots、flat markdown 与特殊插件目录不在当前 UI 发现范围。
+- skills UI 管理默认 DSH/共享 agent 目录中的目录式 SKILL.md；选择 skill 插入原生 `/技能名`，经 ACP/headless 原样发送，由 DSH 加载并注入完整指令。自定义 profile 的额外 skill roots、flat markdown 与特殊插件目录不在当前 UI 发现范围。
 
 ## 能力边界
 
@@ -73,7 +73,7 @@ DSH 当前集成不开放原生 plan/steer、goal、elicitation、会话 fork、
 
 实施检查：相关后端回归、前端测试、build、typecheck、lint。真实上游模型调用需要部署环境中的凭据另行验证。
 
-`dsh-cli.smoke.test.ts` 另外使用实际发布的 `@deepseek-ai/dsh@0.2.1-rc.2` 进程与本地 HTTP 模型服务联调，不需要真实账户或付费推理。覆盖 ACP/headless 原生文件工具、stdio MCP 与环境传递、长文本 final、连续对话、重启恢复、原生压缩历史及清理。CLI 独立安装，不加入应用运行依赖；提供路径后运行：
+`dsh-cli.smoke.test.ts` 另外使用实际发布的 `@deepseek-ai/dsh@0.2.1-rc.2` 进程与本地 HTTP 模型服务联调，不需要真实账户或付费推理。覆盖 ACP/headless 原生技能调用、上传图片读取与持久化、图片模型能力检查、原生文件工具、stdio MCP 与环境传递、长文本 final、连续对话、重启恢复、原生压缩历史及清理。CLI 独立安装，不加入应用运行依赖；提供路径后运行：
 
 ```sh
 CLOUDCLI_DSH_SMOKE_BIN=/absolute/path/to/dsh \
@@ -82,5 +82,9 @@ node --import tsx --test server/modules/providers/tests/dsh-cli.smoke.test.ts
 ```
 
 未提供该变量时仅跳过需要外部 CLI 的 smoke 测试，其余 DSH 回归继续运行。
+
+`0.2.1-rc.2` 的原生附件存储有一项受限目录兼容性问题：`dsh-attachment-local` 的 `ensureDurableHome` 会从 `DSH_HOME` 向上逐级打开并 fsync 祖先目录，直到文件系统根目录。若隔离环境允许访问 `DSH_HOME` 子树，却禁止打开某个祖先目录，`read_image` 会在保存附件时返回该祖先路径的 `EPERM`；这时图片本身可能已经成功读取。图片来源白名单和模型能力校验均不能解决该错误。
+
+排查时可把 **smoke 测试的临时根目录** 放到祖先目录可访问的位置。例如 macOS 上在上述命令前加 `TMPDIR=/private/tmp`，测试仍将图片写入真实上传目录，只改变独立 CLI home 的位置。2026-10-31 已核实此配置下 ACP 与 headless 两项均通过，原有受限临时目录下两项均在附件目录同步时失败。这证明传图协议链路可用，不能视为上游目录兼容性问题已修复；实际服务的 `DSH_HOME` 若受到同类限制，仍需上游修复。生产附件存储应继续使用持久目录。
 
 根目录 AGENTS.md 继续约束 **main → codex-app-server** 的合并方向。后续改动保持 DSH 自有实现、必要共享注册及独立提交，合并 main 后验证 Codex app-server 和 DSH 两条执行链路。

@@ -177,13 +177,13 @@ describe('slash command menu keyboard selection', () => {
   });
 });
 
-it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their instruction on %s', async (selection) => {
-  const instruction = 'Use the skill at /home/triage/.agents/skills/task-tools/SKILL.md';
+it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their native invocation on %s', async (selection) => {
+  const command = '/cloudcli-project-schedules';
   listSkills.mockResolvedValue(jsonResponse({
     data: {
       skills: [{
         name: 'cloudcli-project-schedules',
-        command: instruction,
+        command,
         scope: 'user',
         description: 'Manage scheduled tasks',
       }],
@@ -208,7 +208,7 @@ it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their i
   act(() => result.current.handleCommandInputChange(input, input.length));
   await waitFor(() => {
     assert.equal(result.current.filteredCommands.length, 1);
-    assert.equal(result.current.filteredCommands[0].displayName, 'cloudcli-project-schedules');
+    assert.equal(result.current.filteredCommands[0].name, command);
   });
   act(() => {
     if (selection === 'click') {
@@ -218,9 +218,9 @@ it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their i
     }
   });
 
-  assert.equal(setInput.mock.calls[0][0], `${instruction} `);
+  assert.equal(setInput.mock.calls[0][0], `${command} `);
   assert.equal(onExecuteCommand.mock.calls.length, 0);
   assert.equal(result.current.showCommandMenu, false);
-  textarea.value = `${instruction} `;
-  await waitFor(() => assert.equal(textarea.selectionStart, `${instruction} `.length));
+  textarea.value = `${command} `;
+  await waitFor(() => assert.equal(textarea.selectionStart, `${command} `.length));
 });

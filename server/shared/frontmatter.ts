@@ -13,6 +13,7 @@ const frontmatterOptions = {
   },
 };
 
+/** Shared utilities and the providers module use this YAML parser without executable frontmatter engines. */
 export function parseFrontMatter(content: string) {
   return matter(content, frontmatterOptions);
 }
