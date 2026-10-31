@@ -40,13 +40,13 @@ const PREDICTION_CONFIG: CodexPredictionConfiguration = {
 };
 
 /**
- * End-to-end smoke over the real 0.163.0 binary with the production prediction
+ * End-to-end smoke over the bundled binary with the production prediction
  * executor: a normal opted-in parent turn completes, the runtime forks an
  * ephemeral prediction thread, runs an ordinary turn seeded with the configured
  * prompt, parses the JSON suggestion from a localhost Responses stub, and
  * unloads the fork — no account, no paid model, no network beyond 127.0.0.1.
  */
-test('real 0.163.0 app-server forks an ephemeral prediction, parses the JSON suggestion and unloads it', { timeout: 60_000 }, async (t) => {
+test('bundled app-server forks an ephemeral prediction, parses the JSON suggestion and unloads it', { timeout: 60_000 }, async (t) => {
   const require = createRequire(import.meta.url);
   let launcher: string;
   try { launcher = require.resolve('@openai/codex/bin/codex.js'); }
@@ -92,7 +92,9 @@ test('real 0.163.0 app-server forks an ephemeral prediction, parses the JSON sug
   await writeFile(path.join(root, 'config.toml'), `model="gpt-5.4"\nmodel_provider="smoke"\n[model_providers.smoke]\nname="smoke"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`);
 
   const env = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')), CODEX_HOME: root };
-  const transport = new CodexAppServerTransport({ spawn: () => spawn(process.execPath, [launcher, 'app-server', '-c', 'thread_unload_delay_secs=0'], {
+  const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
+  const transport = new CodexAppServerTransport({ spawn: () => spawn(binary || process.execPath,
+    [...(binary ? [] : [launcher]), 'app-server', '-c', 'thread_unload_delay_secs=0'], {
     stdio: ['pipe', 'pipe', 'pipe'], env,
   }), timeoutMs: 5000 });
 
@@ -147,9 +149,9 @@ test('real 0.163.0 app-server forks an ephemeral prediction, parses the JSON sug
     assert.equal(prediction?.status, 'ready', `prediction unavailable: ${JSON.stringify({ prediction, requests: requests.length })}`);
     assert.equal(prediction?.text, SUGGESTION, 'parsed JSON suggestion');
 
-    // The runtime recognized the real 0.163.0 binary and enabled the protocol.
+    // The runtime recognized the binary's handshake version and enabled the protocol.
     const state = runtime.getState('app-pred-smoke');
-    assert.equal(state.diagnostics?.cliVersion, '0.163.0');
+    assert.ok(state.diagnostics?.cliVersion);
     assert.equal(state.predictionSupported, true);
 
     // Exactly two model requests: the parent turn and one prediction turn.

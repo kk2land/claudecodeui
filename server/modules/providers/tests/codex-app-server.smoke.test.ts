@@ -74,7 +74,9 @@ test('pinned app-server steers, stops a real background process, forks and persi
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   await writeFile(path.join(root, 'config.toml'), `model="gpt-5.4"\nmodel_provider="smoke"\n[model_providers.smoke]\nname="smoke"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`);
-  const transport = new CodexAppServerTransport({ spawn: () => spawn(process.execPath, [launcher, 'app-server'], {
+  const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
+  const transport = new CodexAppServerTransport({ spawn: () => spawn(binary || process.execPath,
+    [...(binary ? [] : [launcher]), 'app-server'], {
     stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: root },
   }), timeoutMs: 5000 });
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
@@ -98,8 +100,8 @@ test('pinned app-server steers, stops a real background process, forks and persi
     assert.ok(events.some((event) => event.kind === 'complete' && event.aborted));
     await until(() => { try { process.kill(processId!, 0); return false; } catch { return true; } }, 'native background terminal cleanup');
     const snapshot = await transport.request('thread/read', { threadId, includeTurns: true });
-    assert.equal(snapshot.thread.cliVersion, '0.163.0');
-    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.163.0');
+    assert.equal(snapshot.thread.cliVersion, '0.165.0');
+    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.165.0');
     assert.equal(snapshot.thread.turns.at(-1)?.status, 'interrupted');
     const fork = await transport.request('thread/fork', { threadId, cwd: root });
     assert.notEqual(fork.thread.id, threadId); await stat(fork.thread.path);
@@ -120,7 +122,7 @@ test('pinned app-server steers, stops a real background process, forks and persi
     assert.equal(persisted.goal.objective, 'Local smoke goal');
     const rollout = await readFile(snapshot.thread.path, 'utf8');
     assert.ok(rollout.includes('first-input'));
-    // Codex 0.163 records the submitted user message as an `event_msg` whose
+    // Codex records the submitted user message as an `event_msg` whose
     // payload carries the client id directly; confirm that exact identity.
     const rows = rollout.split('\n').filter(Boolean).map((line) => JSON.parse(line));
     const input = rows.find((row) => row.payload?.client_id === 'first-input');
@@ -165,7 +167,9 @@ test('pinned native runtime reloads SDK additions after a confirmed runtime hand
   assert.ok(address && typeof address !== 'string');
   await writeFile(path.join(root, 'config.toml'), `model="gpt-5.4"\nmodel_provider="smoke"\n[model_providers.smoke]\nname="smoke"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`);
   const env = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')), CODEX_HOME: root };
-  const transport = new CodexAppServerTransport({ spawn: () => spawn(process.execPath, [launcher, 'app-server', '-c', 'thread_unload_delay_secs=0'], {
+  const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
+  const transport = new CodexAppServerTransport({ spawn: () => spawn(binary || process.execPath,
+    [...(binary ? [] : [launcher]), 'app-server', '-c', 'thread_unload_delay_secs=0'], {
     stdio: ['pipe', 'pipe', 'pipe'], env,
   }), timeoutMs: 5000 });
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
@@ -180,7 +184,7 @@ test('pinned native runtime reloads SDK additions after a confirmed runtime hand
   const writer = { send: () => {}, setSessionId: (id: string) => { threadId = id; } };
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => threadId, resolveResumeModel: async () => 'gpt-5.4',
     normalizeMessage: () => [], getProviderModels: async () => ({ DEFAULT: 'gpt-5.4', OPTIONS: [] }), isProviderInstalled: async () => true };
-  const sdk = new Codex({ env });
+  const sdk = new Codex({ env, ...(binary ? { codexPathOverride: binary } : {}) });
   const router = createCodexRuntimeRouter({ native: runtime, settings: settingsDb,
     stop: () => transport.stop(), isStopping: () => transport.isStopping, isCodexSession: () => true, sdk: {
     async run(command) {

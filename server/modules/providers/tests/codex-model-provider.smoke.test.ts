@@ -94,7 +94,7 @@ test('pinned Codex preserves model services across switching, forking, and indep
     await runtime.run('next-input', { ...options('one'), model: 'stale-queued-model' }, writer('one'), context);
     assert.equal(bindings.get('one'), originalThread);
     assert.equal(runtime.getState('one').activeModelSelection?.modelProvider, 'beta');
-    assert.equal(runtime.getState('one').diagnostics?.cliVersion, '0.163.0');
+    assert.equal(runtime.getState('one').diagnostics?.cliVersion, '0.165.0');
     assert.equal(runtime.getState('two').activeModelSelection?.modelProvider, 'alpha');
     await runtime.run('other-session-again', options('two'), writer('two'), context);
     assert.deepEqual(requests.map((request) => request.url), ['/alpha/responses', '/alpha/responses', '/beta/responses', '/alpha/responses']);
