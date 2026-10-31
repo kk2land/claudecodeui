@@ -21,14 +21,17 @@ DSH 可将同一个 skill 软链到 `${DSH_HOME:-$HOME/.dsh}/skills/cloudcli-wor
 
 宿主不会自动注入、复制或安装这个 skill。目标已存在时保留它，部署时核对并手动处理旧链接或目录。
 Worker 的通用规则、计划与合并后清理要求位于 `plugins/worker/CLOUDCLI-WORKERS.md`；运行
-`plugins/worker/install-codex-instructions.sh` 可把引用块写入 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md`。
+对应脚本安装全局引用块：
+
+- Codex：`plugins/worker/install-codex-instructions.sh`，写入 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md`。
+- DSH：`plugins/worker/install-dsh-instructions.sh`，写入 `${DSH_HOME:-$HOME/.dsh}/AGENTS.md`。
+
 脚本只维护 `<!-- cloudcli-workers:start -->` 与 `<!-- cloudcli-workers:end -->` 之间的内容，保留块外原文，
 重复运行不重复添加；目录或文件缺失时创建，脚本或文档搬移后重新运行会更新引用路径。脚本仅依赖 POSIX sh，
 不部署 skill，也不改动其他配置。
 
-使用 skill 前还须让主代理读取通用规则：Codex 运行上述安装脚本；DSH 则在项目 `AGENTS.md` 中添加
-“开始任务时，请先阅读并遵循 `/absolute/path/to/cloudcli/plugins/worker/CLOUDCLI-WORKERS.md`
-中的技能禁用规则与 CloudCLI Worker 使用说明（含计划阶段的分工要求）。”仅软链 skill 不会自动引入该文档。
+使用 skill 前还须让主代理读取通用规则；仅软链 skill 不会自动引入该文档。DSH 默认加载全局及项目
+`AGENTS.md`，如需仅对某个项目生效，也可在项目 `AGENTS.md` 中添加对上述文档的引用。
 
 MCP 连接由运行时临时注入，不在用户配置中预置：Codex app-server 通过 CLI `-c` 临时声明 Worker MCP URL
 并设 `enabled=false`，无需在 `config.toml` 预置；`thread/start` 与 `resume` 注入专属 owner 凭证，预测线程
