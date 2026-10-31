@@ -306,6 +306,9 @@ export default function ChatComposer({
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
   // Provider toolbars sit above the input, so their activity belongs inside it.
   const hasControlPanel = Boolean(codexControls || runtimeControls);
+  // A Worker run can outlive the main turn. On mobile its existing settings
+  // spinner lives in the closed sheet, so the always-visible toolbar mirrors it.
+  const hasActiveWorkers = codexControls?.hasActiveWorkers === true || runtimeControls?.hasActiveWorkers === true;
   // Keep status components mounted while idle so their exit animation can finish.
   const showFloatingActivity = !hasPendingPermissions && !hasControlPanel;
   const hasFloatingActivityIndicator = Boolean(activity && showFloatingActivity);
@@ -686,6 +689,17 @@ export default function ChatComposer({
               >
                 <PlusIcon />
               </PromptInputButton>
+              {hasActiveWorkers && (
+                <span
+                  role="status"
+                  aria-label={t('codex.workersActive')}
+                  title={t('codex.workersActive')}
+                  data-testid="mobile-worker-indicator"
+                  className="inline-flex shrink-0 items-center justify-center text-muted-foreground"
+                >
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                </span>
+              )}
               {isPlanMode && (
                 <span className="shrink-0 whitespace-nowrap px-1 text-xs font-medium text-primary">
                   {t('mobileComposer.plan', { defaultValue: 'Plan' })}

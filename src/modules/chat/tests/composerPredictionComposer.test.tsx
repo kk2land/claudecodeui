@@ -8,7 +8,7 @@ import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { resetChatDrafts } from '@/shared/chatDrafts';
 import { resetUserPreferences } from '@/shared/userSettings';
-import type { CodexControls, ComposerPredictionControls, Project, ProjectSession, ToolPermissionDecision } from '@/shared/types';
+import type { CodexControls, ComposerPredictionControls, Project, ProjectSession, ProviderRuntimeControls, ToolPermissionDecision } from '@/shared/types';
 
 /**
  * Renders the real ChatComposer with the real composer hook to prove the
@@ -41,7 +41,7 @@ const controls = (prediction?: CodexControls['state'] extends infer S ? S extend
 
 type HarnessOverrides = Partial<React.ComponentProps<typeof ChatComposer>>;
 
-function Harness({ codexControls, overrides }: { codexControls: CodexControls; overrides?: HarnessOverrides }) {
+function Harness({ codexControls, overrides }: { codexControls?: CodexControls; overrides?: HarnessOverrides }) {
   const send = vi.fn();
   const composer = useChatComposerState({
     selectedProject: PROJECT,
@@ -558,4 +558,87 @@ test('the inline schedule menu works inside the + sheet and schedules without su
   assert.equal(onSubmit.mock.calls.length, 0);
   assert.equal(screen.queryByRole('dialog'), null);
   assert.equal(textarea.value, 'send this later');
+});
+
+/* ─── Mobile Worker activity ──────────────────────────────────────── */
+
+const dshRuntime = (): ProviderRuntimeControls => ({
+  sessionId: 'dsh-session',
+  available: true,
+  modes: ['acp', 'headless'],
+  stoppableModes: ['acp'],
+  hasActiveWorkers: true,
+  pending: false,
+  error: null,
+  control: vi.fn().mockResolvedValue(undefined),
+  prepareSend: vi.fn().mockResolvedValue('dsh-session'),
+  state: {
+    runtime: 'acp', phase: 'idle', queueHeld: false, supportsPermissionRequests: true,
+    diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null },
+  },
+});
+
+/** The Worker spinner lives beside + so a compact or expanded idle composer still shows it. */
+test('mobile keeps the Codex Worker spinner beside + through the compact and expanded composer', async () => {
+  stubPhone();
+  const codex = { ...controls(), hasActiveWorkers: true };
+  render(<Harness codexControls={codex} />);
+
+  const textarea = await findTextarea();
+  assert.equal(textarea.placeholder, 'Ask Codex');
+  const indicator = screen.getByTestId('mobile-worker-indicator');
+  assert.equal(indicator.getAttribute('role'), 'status');
+  assert.equal(indicator.getAttribute('aria-label'), 'A Worker is active in this session');
+  assert.equal(indicator.getAttribute('title'), 'A Worker is active in this session');
+  assert.ok(indicator.querySelector('.animate-spin'));
+
+  const plus = screen.getByRole('button', { name: 'Add attachment or action' });
+  assert.ok(plus.querySelector('svg.lucide-plus'));
+
+  await act(async () => { textarea.focus(); });
+  assert.equal(textarea.getAttribute('rows'), '3');
+  assert.equal(textarea.placeholder, PLACEHOLDER);
+  assert.ok(screen.getByTestId('mobile-worker-indicator'));
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+  assert.ok(await screen.findByRole('dialog', { name: 'Add to message' }));
+});
+
+test('the mobile Worker spinner disappears when the Worker finishes or the session switches', async () => {
+  stubPhone();
+  const codex = { ...controls(), hasActiveWorkers: true };
+  const view = render(<Harness codexControls={codex} />);
+  await findTextarea();
+  assert.ok(screen.getByTestId('mobile-worker-indicator'));
+
+  view.rerender(<Harness codexControls={{ ...codex, sessionId: 'session-next', hasActiveWorkers: false }} />);
+  assert.equal(screen.queryByTestId('mobile-worker-indicator'), null);
+  assert.ok(screen.getByRole('button', { name: 'Add attachment or action' }));
+});
+
+test('DSH ACP shows the same mobile Worker spinner beside +', async () => {
+  stubPhone();
+  render(
+    <Harness
+      overrides={{ runtimeControls: dshRuntime(), providerLabel: 'DeepSeek Harness' }}
+    />,
+  );
+
+  const textarea = await findTextarea();
+  assert.equal(textarea.placeholder, 'Ask DeepSeek Harness');
+  const indicator = screen.getByTestId('mobile-worker-indicator');
+  assert.equal(indicator.getAttribute('aria-label'), 'A Worker is active in this session');
+  assert.ok(indicator.querySelector('.animate-spin'));
+  assert.ok(screen.getByRole('button', { name: 'Add attachment or action' }));
+});
+
+test('desktop keeps its existing settings spinner and gains no external duplicate', async () => {
+  vi.stubGlobal('innerWidth', 1024);
+  render(<Harness codexControls={{ ...controls(), hasActiveWorkers: true }} />);
+
+  await screen.findByRole('textbox', { name: PLACEHOLDER });
+  assert.equal(screen.queryByTestId('mobile-worker-indicator'), null);
+  const codexButton = screen.getAllByRole('button', { name: /Codex/ }).find((button) => button.querySelector('.animate-spin'));
+  assert.ok(codexButton);
+  assert.equal(screen.getByRole('status').textContent, 'A Worker is active in this session');
 });
