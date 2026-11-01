@@ -1,7 +1,7 @@
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
-import type { Project, ProjectSession, QuickSettingsTab, SlashCommand } from '@/shared/types';
+import type { Project, ProjectSession, QuickSettingsTab, SlashCommand, WorkerRunStatus } from '@/shared/types';
 
 //----------------- DEPLOYMENT MODE ------------
 
@@ -239,3 +239,25 @@ export const getQuickSettingsTabId = (tab: QuickSettingsTab): string => `quick-s
 
 /** DOM id of the tabpanel a quick settings tab controls; pairs with `getQuickSettingsTabId`. */
 export const getQuickSettingsTabPanelId = (tab: QuickSettingsTab): string => `quick-settings-tabpanel-${tab}`;
+
+// ---------------------------
+
+//----------------- WORKER ACTIVITY ------------
+
+/**
+ * Worker run statuses that still hold an execution slot, matching the Worker
+ * plugin's `WorkerOccupyingStatus` contract. `queued` and every terminal status
+ * leave the parent session idle. Private to `isWorkerRunActive`.
+ */
+const ACTIVE_WORKER_RUN_STATUSES = new Set<WorkerRunStatus>(['starting', 'running', 'stopping', 'unknown']);
+
+/**
+ * Whether a Worker run still occupies its parent session. `starting`, `running`,
+ * `stopping` and `unknown` are active; `queued` and every terminal status
+ * (`completed`, `failed`, `cancelled`, `interrupted`) are not. Shared by the
+ * sidebar's unscoped snapshot and the chat's scoped Worker control so both
+ * agree on when a Worker keeps its parent busy.
+ */
+export function isWorkerRunActive(status: unknown): boolean {
+  return typeof status === 'string' && ACTIVE_WORKER_RUN_STATUSES.has(status as WorkerRunStatus);
+}

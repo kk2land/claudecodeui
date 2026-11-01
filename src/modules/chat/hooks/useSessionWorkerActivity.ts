@@ -2,20 +2,11 @@ import { useEffect, useState } from 'react';
 
 import { usePlugins } from '@/modules/plugins';
 import { api } from '@/shared/api';
-
-/** Worker run statuses that still hold an execution slot; queued and terminal runs do not. */
-const ACTIVE_WORKER_STATUSES = new Set(['starting', 'running', 'stopping', 'unknown']);
+import { isWorkerRunActive } from '@/shared/utils';
+import type { WorkerActivitySnapshot } from '@/shared/types';
 
 /** How often the active chat refreshes its Worker plugin state while visible. */
 const WORKER_POLL_INTERVAL_MS = 2000;
-
-type WorkerSnapshot = {
-  workers?: Array<{
-    parentSessionId?: unknown;
-    projectId?: unknown;
-    latestRun?: { status?: unknown } | null;
-  }> | null;
-};
 
 type Args = {
   /** True while a provider that can own Worker plugin runs is selected. */
@@ -81,15 +72,14 @@ export function useSessionWorkerActivity({ enabled, native, chatActive = true, p
           publishActivity(false);
           return;
         }
-        const body = await response.json() as WorkerSnapshot;
+        const body = await response.json() as WorkerActivitySnapshot;
         if (!current) return;
         const workers = Array.isArray(body?.workers) ? body.workers : [];
         // The server already filtered by query, but a mismatched record must not
         // light this chat's button either.
         publishActivity(workers.some((worker) => worker.parentSessionId === sessionId
             && worker.projectId === projectId
-            && typeof worker.latestRun?.status === 'string'
-            && ACTIVE_WORKER_STATUSES.has(worker.latestRun.status)));
+            && isWorkerRunActive(worker.latestRun?.status)));
       } catch {
         // Aborts happen only on hide/unmount/scope change, where the result is
         // already irrelevant; real failures hide the indicator and retry later.

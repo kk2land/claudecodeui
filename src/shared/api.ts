@@ -630,6 +630,9 @@ export const api = {
       `/api/plugins/worker/rpc/state${query({ projectId, parentSessionId })}`,
       options,
     ),
+    // Unscoped snapshot used by the session list to aggregate every parent
+    // session whose Worker is still active, across projects.
+    workerStateAll: (options: ApiRequestOptions = {}) => get('/api/plugins/worker/rpc/state', options),
   },
 
   browserUse: {

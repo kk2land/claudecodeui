@@ -266,6 +266,26 @@ export type SessionActivitySnapshot = {
 
 // ---------------------------
 
+//----------------- WORKER ACTIVITY ------------
+
+/** One Worker run lifecycle status, matching the Worker plugin's `WorkerStatus` contract. */
+export type WorkerRunStatus = 'queued' | 'starting' | 'running' | 'stopping' | 'completed' | 'failed' | 'cancelled' | 'interrupted' | 'unknown';
+
+/**
+ * The subset of the Worker plugin's unscoped `GET /state` payload that list
+ * activity reads. Fields stay `unknown` because the payload crosses a plugin
+ * boundary before it is validated.
+ */
+export type WorkerActivitySnapshot = {
+  workers?: Array<{
+    parentSessionId?: unknown;
+    projectId?: unknown;
+    latestRun?: { status?: unknown } | null;
+  }> | null;
+};
+
+// ---------------------------
+
 //----------------- REALTIME TRANSPORT ------------
 
 /**

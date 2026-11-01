@@ -5,6 +5,7 @@ import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { useVersionCheck } from '@/shared/hooks/useVersionCheck';
 import { useUiPreferences, useSetUiPreference } from '@/shared/context/UiPreferencesContext';
 import { useSidebarController } from '@/modules/sidebar/hooks/useSidebarController';
+import { useSidebarSessionActivity } from '@/modules/sidebar/hooks/useSidebarSessionActivity';
 import { useTaskMaster, useTasksSettings } from '@/modules/task-master';
 import { usePaletteOps } from '@/modules/command-palette';
 import { useBackgroundSessionIdSet, useBusySessionIdSet } from '@/shared/context/SessionProtectionContext';
@@ -76,8 +77,12 @@ function Sidebar({
   const paletteOps = usePaletteOps();
   // Only membership is rendered here, so subscribing to the full activity map
   // would re-render the whole tree on every provider status frame.
-  const activeSessions = useBusySessionIdSet();
-  const backgroundSessionIds = useBackgroundSessionIdSet();
+  const busySessionIds = useBusySessionIdSet();
+  const backgroundBusySessionIds = useBackgroundSessionIdSet();
+  const { activeSessions, backgroundSessionIds } = useSidebarSessionActivity({
+    busySessionIds,
+    backgroundSessionIds: backgroundBusySessionIds,
+  });
 
   const {
     isSidebarCollapsed,
