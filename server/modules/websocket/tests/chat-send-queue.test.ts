@@ -290,6 +290,25 @@ test('an idle Worker-enabled session with a waiting FIFO queues a new send behin
   });
 });
 
+test('an explicit send preserves the paused queue when old messages still wait', async () => {
+  await harness('codex', async (h) => {
+    h.state.phase = 'idle';
+    h.state.turnId = null;
+    sessionRuntimeDb.update(h.sessionId, { queueHeld: true });
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, {
+      queuedMessages: [{ id: 'old-message', content: 'Keep this paused' }],
+    });
+
+    h.send({ type: 'chat.send', content: 'New request', options: { clientMessageId: 'new-request' } });
+    await settle();
+
+    assert.equal(h.socket.frames.at(-1)?.kind, 'chat_queued');
+    assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, true);
+    assert.equal(h.runs.length, 0);
+    assert.deepEqual(queuedDrafts(h.userId).map((message) => message.content), ['Keep this paused', 'New request']);
+  });
+});
+
 test('an accepted fallback ticket retried while idle is rejected instead of executed again', async () => {
   await harness('codex', async (h) => {
     h.state.phase = 'idle';

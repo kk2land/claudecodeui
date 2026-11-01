@@ -329,6 +329,47 @@ test('failed stop never completes the run and scheduled interruption cannot star
   });
 });
 
+test('an explicit prompt after Stop resumes an empty queue before the next Worker result', async () => {
+  await harness(async (h) => {
+    h.state.phase = 'idle';
+    h.state.turnId = null;
+    h.state.workerEnabled = true;
+    h.runtime.abort = async () => true;
+    h.runtime.getState = () => ({ ...h.state, queueHeld: sessionRuntimeDb.get(h.sessionId).queueHeld });
+
+    h.socket.emit('message', JSON.stringify({ type: 'chat.abort', sessionId: h.sessionId }));
+    await settle();
+    assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, true);
+    assert.equal(sessionDraftsDb.hasQueuedMessages(h.sessionId), false);
+
+    const resultTurn = {
+      sessionId: h.sessionId,
+      userId: h.userId,
+      content: 'Worker result',
+      workerSource: { batchId: 'batch-after-stop', results: [] },
+      finalGuard: () => !sessionRuntimeDb.get(h.sessionId).queueHeld,
+    };
+    assert.equal((await runDetachedChatTurn(resultTurn, { runtime: h.runtime })).started, false);
+    assert.equal(h.calls.length, 0, 'Stop still blocks automatic results until the user continues');
+
+    h.socket.emit('message', JSON.stringify({
+      type: 'chat.send', sessionId: h.sessionId, content: 'Continue with new work',
+      options: { composerPredictions: true },
+    }));
+    await settle();
+    assert.equal(h.calls.length, 1);
+    assert.equal(h.calls[0].options.userTurn, true);
+    assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, false);
+
+    const nextResultTurn = { ...resultTurn, workerSource: { batchId: 'new-worker-batch', results: [] } };
+    assert.equal((await runDetachedChatTurn(nextResultTurn, { runtime: h.runtime })).started, true);
+    assert.equal(h.calls.length, 2);
+    assert.equal(h.calls[1].options.workerWakeup, true);
+    assert.equal(h.calls[1].options.userTurn, false);
+    assert.deepEqual(h.calls[1].options.workerSource, nextResultTurn.workerSource);
+  });
+});
+
 test('Worker wake-up markers are rejected from chat JSON and restored only by the detached path', async () => {
   await harness(async (h) => {
     h.state.phase = 'idle'; h.state.turnId = null;

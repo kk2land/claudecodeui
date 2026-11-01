@@ -425,6 +425,13 @@ async function dispatchRun(
     return { started: false, error: 'A run is already in progress for this session.' };
   }
 
+  // An admitted user prompt resumes an empty queue after Stop. Saved messages
+  // still require explicit queue resume; automatic turns never clear the hold.
+  if (ws && codexSettings?.runtime === 'app-server' && codexSettings.queueHeld
+    && !sessionDraftsDb.hasQueuedMessages(sessionId)) {
+    sessionRuntimeDb.update(sessionId, { queueHeld: false });
+  }
+
   const clientOptions: AnyRecord = { ...(data.options ?? {}) };
   // Server-owned wake-up markers are never accepted from chat.send/edit JSON.
   // Only the detached dispatcher below re-adds them after a trusted check.
