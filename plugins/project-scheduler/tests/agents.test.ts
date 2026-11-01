@@ -152,7 +152,7 @@ test("DSH receives the last overlay disabling persistence and selecting the mode
     bin = path.join(directory, "dsh");
   fs.writeFileSync(
     bin,
-    '#!/usr/bin/env node\nconst fs=require("fs");const args=process.argv.slice(2);const index=args.lastIndexOf("--patch");const file=args[index+1];fs.writeFileSync("patch.json",JSON.stringify({file,args,patch:JSON.parse(fs.readFileSync(file,"utf8")),prompt:fs.readFileSync(0,"utf8")}));console.log(JSON.stringify({type:"text",text:"answer"}));console.log(JSON.stringify({type:"final",text:"answer",reason:{kind:"completed"}}));',
+    '#!/usr/bin/env node\nconst fs=require("fs");const args=process.argv.slice(2);const index=args.lastIndexOf("--patch");const file=args[index+1];fs.writeFileSync("patch.json",JSON.stringify({file,args,patch:JSON.parse(fs.readFileSync(file,"utf8")),prompt:fs.readFileSync(0,"utf8")}));console.log(JSON.stringify({type:"text",text:"answer"}));console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:"answer"}));',
     { mode: 0o700 },
   );
   environment(t, {
@@ -185,12 +185,12 @@ test("DSH receives the last overlay disabling persistence and selecting the mode
   assert.equal(fs.existsSync(call.file), false);
 });
 
-test("DSH zero exit with an error final still succeeds", async (t) => {
+test("AGENT_EXEC DSH zero exit with an error turn end still succeeds", async (t) => {
   const directory = fixture(t),
     bin = path.join(directory, "dsh");
   fs.writeFileSync(
     bin,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"final",text:"failed",reason:{kind:"error"}})));',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"error"}}));console.log(JSON.stringify({type:"final",text:"failed"}))});',
     { mode: 0o700 },
   );
   environment(t, { CLOUDCLI_DSH_BIN: bin, CLOUDCLI_DSH_PATCHES: "[]" });
@@ -207,7 +207,7 @@ test("non-zero exits fail even after a successful terminal event", async (t) => 
   fs.mkdirSync(codexRoot, { recursive: true });
   fs.writeFileSync(
     bin,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"final",text:"done",reason:{kind:"completed"}}));process.exitCode=2});',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:"done"}));process.exitCode=2});',
     { mode: 0o700 },
   );
   fakeCodex(
@@ -270,6 +270,7 @@ test("prompt outcomes require a successful terminal event and the final task rep
     code?: number;
     recovered?: boolean;
     previousReport?: boolean;
+    previousTerminal?: "completed" | "failed";
     success: boolean;
     reason?: RegExp;
     taskResult?: SchedulerTaskResult;
@@ -280,6 +281,7 @@ test("prompt outcomes require a successful terminal event and the final task rep
     { name: "nonzero", text: JSON.stringify(completed), terminal: "completed", code: 3, success: false, reason: /未以退出码 0 结束/, taskResult: completed },
     { name: "missing-terminal", text: JSON.stringify(completed), terminal: "missing", success: false, reason: /结果未确认：未收到 Agent 结束状态/, taskResult: completed },
     { name: "missing-report", terminal: "completed", success: false, reason: /结果未确认：未收到 Agent 最终任务结果/ },
+    { name: "empty-report", text: "", terminal: "completed", success: false, reason: /结果未确认：.*JSON/ },
     { name: "invalid-json", text: "权限不足，无法完成", terminal: "completed", success: false, reason: /结果未确认：.*JSON/ },
     { name: "invalid-status", text: '{"status":"maybe","summary":"不确定"}', terminal: "completed", success: false, reason: /结果未确认：.*状态/ },
     { name: "missing-summary", text: '{"status":"success"}', terminal: "completed", success: false, reason: /结果未确认：.*summary/ },
@@ -288,6 +290,8 @@ test("prompt outcomes require a successful terminal event and the final task rep
     { name: "last-report-wins", previousReport: true, text: JSON.stringify(failed), terminal: "completed", success: false, reason: /任务未完成：/, taskResult: failed },
     { name: "earlier-report-is-not-final", previousReport: true, text: "最终无法完成", terminal: "completed", success: false, reason: /结果未确认：/ },
     { name: "recovered-tool-error", recovered: true, text: JSON.stringify(completed), terminal: "completed", success: true, taskResult: completed },
+    { name: "new-turn-needs-own-terminal", previousTerminal: "completed", text: JSON.stringify(completed), terminal: "missing", success: false, reason: /结果未确认：未收到 Agent 结束状态/, taskResult: completed },
+    { name: "new-turn-recovers", previousTerminal: "failed", text: JSON.stringify(completed), terminal: "completed", success: true, taskResult: completed },
   ];
   for (const provider of ["codex", "dsh"] as const) {
     for (const scenario of cases) {
@@ -295,6 +299,9 @@ test("prompt outcomes require a successful terminal event and the final task rep
         const directory = fixture(t);
         const events: object[] = [];
         if (provider === "codex") {
+          if (scenario.previousTerminal) events.push(scenario.previousTerminal === "completed"
+            ? { type: "turn.completed" }
+            : { type: "turn.failed", error: { message: "previous request failed" } });
           events.push({ type: "turn.started" });
           if (scenario.previousReport)
             events.push({ type: "item.completed", item: { id: "previous", type: "agent_message", text: JSON.stringify(completed) } });
@@ -308,16 +315,20 @@ test("prompt outcomes require a successful terminal event and the final task rep
               ? { type: "turn.completed" }
               : { type: "turn.failed", error: { message: "request failed" } });
         } else {
+          if (scenario.previousTerminal) events.push({ type: "status", phase: "turn_end", turn: 0,
+            reason: scenario.previousTerminal === "completed" ? { kind: "completed" }
+              : { kind: "error", error: { message: "previous request failed", code: "REQUEST_FAILED" } } });
+          events.push({ type: "status", phase: "turn_start", turn: 1 });
           if (scenario.previousReport) events.push({ type: "text", text: JSON.stringify(completed) });
           if (scenario.recovered) events.push(
             { type: "error", message: "temporary request error, recovered" },
             { type: "tool_result", isError: true, content: "retry" },
           );
           if (scenario.terminal !== "missing")
-            events.push({ type: "final", text: scenario.text, reason: scenario.terminal === "completed"
+            events.push({ type: "status", phase: "turn_end", turn: 1, reason: scenario.terminal === "completed"
               ? { kind: "completed" }
               : { kind: "error", error: { message: "request failed", code: "REQUEST_FAILED" } } });
-          else events.push({ type: "text", text: scenario.text });
+          events.push({ type: "final", text: scenario.text });
         }
         const script = 'const fs=require("fs");fs.writeFileSync("prompt.txt",fs.readFileSync(0,"utf8"));' +
           "process.stdout.write(" + JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n") + ");" +
@@ -333,8 +344,7 @@ test("prompt outcomes require a successful terminal event and the final task rep
         const result = await execute({ provider, model: "default" }, directory, { requireTaskResult: true });
         assert.equal(result.code, scenario.code ?? 0);
         assert.equal(result.success, scenario.success);
-        assert.deepEqual(result.taskResult,
-          provider === "dsh" && scenario.terminal === "missing" ? undefined : scenario.taskResult);
+        assert.deepEqual(result.taskResult, scenario.taskResult);
         if (scenario.reason) assert.match(result.reason ?? "", scenario.reason);
         else assert.equal(result.reason, undefined);
         const prompt = fs.readFileSync(path.join(directory, "prompt.txt"), "utf8");

@@ -190,7 +190,7 @@ test("DSH patch carries reasoningEffort only with an explicit model route", asyn
   const bin = path.join(root, "dsh");
   fs.writeFileSync(
     bin,
-    '#!/usr/bin/env node\nconst fs=require("fs");const args=process.argv.slice(2);const file=args[args.lastIndexOf("--patch")+1];fs.writeFileSync("patch.json",JSON.stringify(JSON.parse(fs.readFileSync(file,"utf8"))));process.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"final",text:"ok",reason:{kind:"completed"}})));',
+    '#!/usr/bin/env node\nconst fs=require("fs");const args=process.argv.slice(2);const file=args[args.lastIndexOf("--patch")+1];fs.writeFileSync("patch.json",JSON.stringify(JSON.parse(fs.readFileSync(file,"utf8"))));process.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:"ok"}))});',
     { mode: 0o700 },
   );
   const previousBin = process.env.CLOUDCLI_DSH_BIN;

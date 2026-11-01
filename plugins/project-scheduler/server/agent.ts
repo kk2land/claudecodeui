@@ -275,6 +275,21 @@ export async function runAgent(
             terminal = { success: false, reason: eventReason };
           if (event.type === "turn.completed") terminal = { success: true };
         } else {
+          // DSH reports the outcome on status/turn_end; final carries the answer text.
+          if (event.type === "status" && event.phase === "turn_start") {
+            terminal = undefined;
+            finalText = undefined;
+          }
+          if (event.type === "status" && event.phase === "turn_end") {
+            const success = event.reason?.kind === "completed";
+            if (!success)
+              eventReason = String(
+                event.reason?.error?.message ??
+                event.reason?.kind ??
+                "DSH 缺少成功结束原因",
+              );
+            terminal = { success, reason: success ? undefined : eventReason };
+          }
           if (event.type === "text" && typeof event.text === "string") {
             output.stdout(event.text + "\n");
             lastDshText = event.text;
@@ -293,16 +308,6 @@ export async function runAgent(
                   ? event.text.slice(lastDshText.length)
                   : event.text) + "\n",
               );
-            if (event.reason?.kind !== "completed")
-              eventReason = String(
-                event.reason?.error?.message ??
-                event.reason?.kind ??
-                "DSH 缺少成功结束原因",
-              );
-            terminal = {
-              success: event.reason?.kind === "completed",
-              reason: event.reason?.kind === "completed" ? undefined : eventReason,
-            };
           }
           if (event.type === "error")
             eventReason = String(event.message ?? "DSH 执行失败");

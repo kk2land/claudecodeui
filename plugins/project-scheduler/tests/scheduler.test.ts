@@ -194,9 +194,10 @@ test("prompt task results persist with the real zero exit code and drive Telegra
   });
   const scenarios = [
     { id: "completed", text: '{"status":"success","summary":"报告已生成"}', kind: "completed", success: true },
-    { id: "task-failed", text: '{"status":"failed","summary":"接口权限不足"}', kind: "completed", success: false },
-    { id: "agent-failed", text: '{"status":"success","summary":"报告已生成"}', kind: "error", success: false },
-    { id: "unconfirmed", text: "无法确认结果", kind: "completed", success: false },
+    { id: "task-failed", text: '{"status":"failed","summary":"接口权限不足"}', kind: "completed", success: false, reason: /任务未完成：接口权限不足/ },
+    { id: "agent-failed", text: '{"status":"success","summary":"报告已生成"}', kind: "error", success: false, reason: /Agent 执行失败：request failed/ },
+    { id: "unconfirmed", text: "无法确认结果", kind: "completed", success: false, reason: /结果未确认：.*JSON/ },
+    { id: "missing-terminal", text: '{"status":"success","summary":"报告已生成"}', success: false, reason: /结果未确认：未收到 Agent 结束状态/ },
   ];
   f.config(scenarios.map(({ id }) => ({
     id, type: "prompt", cron: "0 0 0 1 1 *", prompt: "生成并验收报告",
@@ -206,15 +207,21 @@ test("prompt task results persist with the real zero exit code and drive Telegra
   const messages: string[] = [];
   const notifier = new TelegramNotifier(f.store, async (_settings, message) => { messages.push(message); });
   for (const scenario of scenarios) {
-    const event = { type: "final", text: scenario.text, reason: { kind: scenario.kind } };
+    const events: object[] = [{ type: "status", phase: "turn_start", turn: 1 }];
+    if (scenario.kind) events.push({ type: "status", phase: "turn_end", turn: 1,
+      reason: scenario.kind === "completed" ? { kind: "completed" }
+        : { kind: "error", error: { message: "request failed", code: "REQUEST_FAILED" } } });
+    events.push({ type: "final", text: scenario.text });
     fs.writeFileSync(bin,
-      '#!/usr/bin/env node\nrequire("fs").readFileSync(0,"utf8");console.log(' + JSON.stringify(JSON.stringify(event)) + ');',
+      '#!/usr/bin/env node\nrequire("fs").readFileSync(0,"utf8");process.stdout.write(' + JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n") + ');',
       { mode: 0o700 });
     const started = f.scheduler.start("p1", scenario.id, "manual");
     const run = await waitFor(() => f.store.run(started.id), (run) => Boolean(run?.endedAt));
     assert.equal(run?.status, scenario.success ? "success" : "failed");
     assert.equal(run?.exitCode, 0);
     assert.equal(run?.alertStatus, scenario.success ? "none" : "pending");
+    if (scenario.reason) assert.match(run?.reason ?? "", scenario.reason);
+    else assert.equal(run?.reason, null);
     if (scenario.id === "unconfirmed") {
       assert.equal(run?.taskResult, undefined);
       assert.match(run?.reason ?? "", /结果未确认/);
@@ -726,7 +733,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   const dsh = path.join(root, "dsh");
   fs.writeFileSync(
     dsh,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH}),reason:{kind:"completed"}})));',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH})}))});',
     { mode: 0o700 },
   );
   const script =

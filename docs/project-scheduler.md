@@ -119,8 +119,8 @@ AGENT_EXEC 保留自由文本输出，不强制任务结果 JSON。spawn 失败�
 或需要人工处理应报告 `failed` 并说明原因。建议在原提示词中写清验收条件。
 
 提示词任务仅在退出码为 0、Agent 正常结束且最终任务结果为 `success` 时记为成功。Codex 从本轮
-最后完成的 agent_message 读取结果并要求 turn.completed；DSH 从 final.text 读取结果并要求
-final.reason.kind 为 completed。Agent 明确失败或任务结果为 failed，即使退出码为 0 也记为失败。
+最后完成的 agent_message 读取结果并要求 turn.completed；DSH 从 final.text 读取结果，并要求
+status/turn_end 事件的 reason.kind 为 completed。Agent 明确失败或任务结果为 failed，即使退出码为 0 也记为失败。
 缺少结束事件、结果缺失或格式无效时记为失败，原因明确标注“结果未确认”。中间工具错误、临时
 error 事件或其他无效 JSON 行只作为诊断；恢复后最终满足成功条件仍可成功。
 

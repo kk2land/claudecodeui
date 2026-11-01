@@ -210,7 +210,6 @@ test("DSH sums each reported step once and ignores final summary totals", () => 
   assert.equal(
     accumulator.dsh({
       type: "final",
-      reason: { kind: "completed" },
       usage: {
         inputTokens: 30,
         outputTokens: 5,
@@ -373,7 +372,8 @@ test("runAgent reports DSH step usage and never counts its final summary twice",
       "console.log(JSON.stringify({type:'status',phase:'step_end',stepId:'a',usage:{inputTokens:6,outputTokens:1,cacheReadTokens:2,cacheWriteTokens:3}}));",
       "console.log(JSON.stringify({type:'status',phase:'step_end',stepId:'b',usage:{inputTokens:4,outputTokens:2,cacheReadTokens:1,cacheWriteTokens:0}}));",
       "console.log(JSON.stringify({type:'status',phase:'step_end',stepId:'a',usage:{inputTokens:6,outputTokens:1,cacheReadTokens:2,cacheWriteTokens:3}}));",
-      "console.log(JSON.stringify({type:'final',text:'done',reason:{kind:'completed'},usage:{inputTokens:10,outputTokens:3,cacheReadTokens:3,cacheWriteTokens:3}}));",
+      "console.log(JSON.stringify({type:'status',phase:'turn_end',reason:{kind:'completed'}}));",
+      "console.log(JSON.stringify({type:'final',text:'done',usage:{inputTokens:10,outputTokens:3,cacheReadTokens:3,cacheWriteTokens:3}}));",
       "});",
     ].join(""),
     { mode: 0o700 },
