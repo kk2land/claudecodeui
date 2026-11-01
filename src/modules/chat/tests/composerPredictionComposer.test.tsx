@@ -298,7 +298,10 @@ test('mobile idle is one short capsule line that expands in place on focus and k
   const textarea = await findTextarea();
   assert.equal(screen.getAllByRole('textbox').length, 1);
   assert.equal(textarea.getAttribute('rows'), '1');
-  assert.equal(textarea.placeholder, 'Ask Codex');
+  // A ready native suggestion is visible even in the idle capsule, while its
+  // accept/dismiss controls wait for the expanded frame.
+  assert.equal(textarea.placeholder, 'Explain the failing test.');
+  assert.equal(screen.queryByTestId('composer-prediction-hint'), null);
   assert.equal(textarea.getAttribute('aria-label'), PLACEHOLDER);
   assert.ok(screen.getByRole('button', { name: 'Add attachment or action' }));
   assert.ok(screen.getByRole('button', { name: 'Send' }));

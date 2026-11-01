@@ -395,15 +395,15 @@ export default function ChatComposer({
   // the user accepts it. `input === ''` mirrors the prediction hook's own
   // condition; any other text falls back to the ordinary placeholder.
   const composerSuggestionHint = input === '' ? composerPrediction?.suggestion ?? null : null;
-  // The capsule needs a short hint; the full placeholder stays the accessible
-  // name and returns as soon as the composer expands.
+  // The capsule needs a short hint unless a native suggestion is ready; the
+  // full placeholder stays the accessible name and returns as soon as the
+  // composer expands.
   const compactPlaceholder = t('mobileComposer.compactPlaceholder', {
     provider: providerLabel,
     defaultValue: 'Ask {{provider}}',
   });
-  const textareaPlaceholder = mobileCompact
-    ? compactPlaceholder
-    : composerSuggestionHint ?? placeholder;
+  const textareaPlaceholder = composerSuggestionHint
+    ?? (mobileCompact ? compactPlaceholder : placeholder);
 
   const selectedModelOption = availableModelOptions.find((option) => option.value === model);
   const modelLabel = selectedModelOption?.label || model || t('composer.selectServiceModel');
