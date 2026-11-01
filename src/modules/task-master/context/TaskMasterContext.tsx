@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api } from '@/shared/api';
+import { TASKMASTER_FEATURE_ENABLED } from '@/shared/constants';
 import { useAuth } from '@/modules/auth';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import type { Project, ServerEvent, TaskMasterProject, TaskMasterProjectInfo, TaskMasterTask } from '@/shared/types';
@@ -155,7 +156,7 @@ export function TaskMasterProvider({ children }: { children: React.ReactNode }) 
 
   const refreshCurrentProjectTaskMaster = useCallback(
     async (projectId: string) => {
-      if (!projectId || !user || !token) {
+      if (!TASKMASTER_FEATURE_ENABLED || !projectId || !user || !token) {
         return;
       }
 
@@ -194,6 +195,10 @@ export function TaskMasterProvider({ children }: { children: React.ReactNode }) 
 
   const setCurrentProject = useCallback(
     (project: TaskMasterProjectInput) => {
+      if (!TASKMASTER_FEATURE_ENABLED) {
+        return;
+      }
+
       const normalizedProject = project ? enrichProject(project as TaskMasterProject) : null;
       setCurrentProjectState(normalizedProject);
       setProjectTaskMaster(normalizedProject?.taskmaster ?? null);
@@ -233,6 +238,10 @@ export function TaskMasterProvider({ children }: { children: React.ReactNode }) 
   }, [refreshCurrentProjectTaskMaster]);
 
   const refreshTasks = useCallback(async () => {
+    if (!TASKMASTER_FEATURE_ENABLED) {
+      return;
+    }
+
     // TaskMaster tasks endpoint now lives under /api/taskmaster/tasks/:projectId.
     const projectId = currentProject?.projectId;
 
@@ -267,6 +276,10 @@ export function TaskMasterProvider({ children }: { children: React.ReactNode }) 
   }, [clearError, currentProject?.projectId, handleError, token, user]);
 
   const refreshMCPStatus = useCallback(async () => {
+    if (!TASKMASTER_FEATURE_ENABLED) {
+      return;
+    }
+
     if (!user || !token) {
       setMcpServerStatus(null);
       return;
@@ -292,6 +305,10 @@ export function TaskMasterProvider({ children }: { children: React.ReactNode }) 
   }, [clearError, handleError, token, user]);
 
   useEffect(() => {
+    if (!TASKMASTER_FEATURE_ENABLED) {
+      return;
+    }
+
     if (!isAuthLoading && user && token) {
       void refreshSelectedProjectTaskMaster();
       void refreshMCPStatus();
@@ -299,12 +316,20 @@ export function TaskMasterProvider({ children }: { children: React.ReactNode }) 
   }, [isAuthLoading, refreshMCPStatus, refreshSelectedProjectTaskMaster, token, user]);
 
   useEffect(() => {
+    if (!TASKMASTER_FEATURE_ENABLED) {
+      return;
+    }
+
     if (currentProject?.projectId && user && token) {
       void refreshTasks();
     }
   }, [currentProject?.projectId, refreshTasks, token, user]);
 
   useEffect(() => {
+    if (!TASKMASTER_FEATURE_ENABLED) {
+      return undefined;
+    }
+
     const handleEvent = (event: ServerEvent) => {
       const message = event as TaskMasterWebSocketMessage;
       if (!isTaskMasterMessage(message)) {

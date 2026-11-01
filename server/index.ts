@@ -364,6 +364,12 @@ async function startServer() {
         // Initialize authentication database
         await initializeDatabase();
 
+        // Browser Use is retired. Remove any MCP server injected by an older
+        // enabled setting so provider runtimes do not launch the closed tool.
+        await browserUseService.unregisterAgentMcp().catch((error) => {
+            console.warn('[WARN] Could not remove the retired Browser MCP server:', getErrorMessage(error));
+        });
+
         // Configure Web Push (VAPID keys)
         configureWebPush();
 

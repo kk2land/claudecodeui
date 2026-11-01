@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 
 import { api } from '@/shared/api';
+import { BROWSER_USE_FEATURE_ENABLED } from '@/shared/constants';
 
 /** Tracks whether the Browser Use workspace is enabled in server settings. */
 export function useBrowserUseEnabled() {
@@ -21,10 +22,16 @@ export function useBrowserUseEnabled() {
   }, []);
 
   useEffect(() => {
+    // Browser Use is retired for every role, so the old server-side
+    // `enabled: true` value must not trigger a settings request or mount the tab.
+    if (!BROWSER_USE_FEATURE_ENABLED) {
+      return;
+    }
+
     void loadBrowserUseSettings();
     window.addEventListener('browserUseSettingsChanged', loadBrowserUseSettings);
     return () => window.removeEventListener('browserUseSettingsChanged', loadBrowserUseSettings);
   }, [loadBrowserUseSettings]);
 
-  return browserUseEnabled;
+  return BROWSER_USE_FEATURE_ENABLED ? browserUseEnabled : false;
 }

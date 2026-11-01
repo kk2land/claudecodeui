@@ -5,6 +5,19 @@ import { browserUseService } from '@/modules/browser-use/browser-use.service.js'
 
 const router = express.Router();
 
+// Browser Use is retired for every instance role. Reject every operation here
+// so a direct request cannot read status, change settings, install the runtime
+// or start a browser session even when the old stored value was enabled.
+router.use((_req, res) => {
+  res.status(403).json({
+    success: false,
+    error: {
+      code: 'BROWSER_USE_DISABLED',
+      message: 'Browser Use is no longer available.',
+    },
+  });
+});
+
 /**
  * Stable machine-readable error codes for the browser-use API.
  *

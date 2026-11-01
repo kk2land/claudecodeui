@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '@/shared/api';
+import { TASKMASTER_FEATURE_ENABLED } from '@/shared/constants';
 import type { ServerEvent,
   AppTab,
   LLMProvider,
@@ -361,7 +362,9 @@ const renameSessionInProject = (project: Project, sessionIdToRename: string, sum
   return { ...project, sessions: nextSessions };
 };
 
-const VALID_TABS: Set<string> = new Set(['chat', 'files', 'shell', 'git', 'tasks', 'browser']);
+// Retired TaskMaster and Browser Use tabs are not valid restore targets, so a
+// persisted `activeTab` from before the closure falls back to chat.
+const VALID_TABS: Set<string> = new Set(['chat', 'files', 'shell', 'git']);
 
 const isValidTab = (tab: string): tab is AppTab => {
   return VALID_TABS.has(tab) || tab.startsWith('plugin:');
@@ -649,7 +652,7 @@ export function useProjectsState({
   // Hydrates TaskMaster details for the given `projectId`. The project
   // identifier comes directly from the DB-driven /api/projects response.
   const hydrateProjectTaskMaster = useCallback(async (projectId: string) => {
-    if (!projectId) {
+    if (!TASKMASTER_FEATURE_ENABLED || !projectId) {
       return;
     }
 

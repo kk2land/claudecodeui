@@ -4,7 +4,16 @@ import { render, waitFor } from '@testing-library/react';
 import { useEffect } from 'react';
 import { beforeEach, test, vi } from 'vitest';
 
+import type * as SharedConstants from '@/shared/constants';
 import type { ServerEvent } from '@/shared/types';
+
+// This file still covers the retained TaskMaster broadcast implementation.
+// Production permanently disables the feature; opt this test into the old
+// behavior explicitly instead of leaving the implementation untested.
+vi.mock('@/shared/constants', async (importOriginal) => ({
+  ...(await importOriginal<typeof SharedConstants>()),
+  TASKMASTER_FEATURE_ENABLED: true,
+}));
 
 /**
  * `taskmaster-project-updated` used to trigger two fetches: the per-project one

@@ -4,7 +4,6 @@ import { createProject, updateProjectDisplayName } from '@/modules/projects/serv
 import { createProjectCloneRouter } from '@/modules/projects/project-clone.routes.js';
 import { createPendingCloneRequests } from '@/modules/projects/services/project-clone-request.service.js';
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
-import { getProjectTaskMaster } from '@/modules/projects/services/projects-has-taskmaster.service.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
 import { getArchivedProjectsWithSessions, getProjectSessionsPage, getProjectsWithSessions } from '@/modules/projects/services/projects-with-sessions-fetch.service.js';
 import { deleteOrArchiveProject, restoreArchivedProject } from '@/modules/projects/services/project-delete.service.js';
@@ -153,13 +152,19 @@ router.use(
   }),
 );
 
+// TaskMaster is retired, so project metadata must not scan `.taskmaster` or
+// return task counts even when a caller reaches this endpoint directly.
 router.get(
   '/:projectId/taskmaster',
-  asyncHandler(async (req, res) => {
-    const projectId = typeof req.params.projectId === 'string' ? req.params.projectId : '';
-    const taskMasterDetails = await getProjectTaskMaster(projectId);
-    res.json(taskMasterDetails);
-  }),
+  (_req, res) => {
+    res.status(403).json({
+      success: false,
+      error: {
+        code: 'TASKMASTER_DISABLED',
+        message: 'TaskMaster is no longer available.',
+      },
+    });
+  },
 );
 
 router.put('/:projectId/rename', (req, res) => {

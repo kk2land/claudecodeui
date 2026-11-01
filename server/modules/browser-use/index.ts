@@ -1,10 +1,10 @@
 /**
- * Lazily starts the Browser Use MCP stdio entrypoint. Keeping this import lazy
- * ensures the entrypoint loads environment configuration before its runtime is
- * evaluated.
+ * The Browser Use MCP stdio entrypoint used to be started here. The feature is
+ * retired for every instance role, so the CLI command now reports the closure
+ * and exits instead of keeping an MCP process alive or exposing its tools.
  */
 export async function startBrowserUseMcp(): Promise<void> {
-  await import('./browser-use-mcp.js');
+  console.error('Browser Use is no longer available.');
 }
 
 // getBrowserUseRuntime: used by Browser Use services and environment-mode regression coverage.

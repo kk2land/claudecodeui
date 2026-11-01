@@ -4,8 +4,6 @@ import {
   GitBranch,
   Info,
   KeyRound,
-  ListChecks,
-  MonitorPlay,
   Palette,
   Plug,
 } from 'lucide-react';
@@ -59,12 +57,26 @@ export const SETTINGS_MAIN_TABS: SettingsMainTabMeta[] = [
   { id: 'appearance', label: 'Appearance', keywords: 'appearance theme dark light language', icon: Palette },
   { id: 'git', label: 'Git', keywords: 'git github commits', icon: GitBranch },
   { id: 'api', label: 'API Tokens', keywords: 'api tokens auth keys', icon: KeyRound },
-  { id: 'tasks', label: 'Tasks', keywords: 'tasks taskmaster', icon: ListChecks },
-  { id: 'browser', label: 'Browser', keywords: 'browser playwright chromium automation', icon: MonitorPlay },
   { id: 'notifications', label: 'Notifications', keywords: 'notifications alerts push', icon: Bell },
   { id: 'plugins', label: 'Plugins', keywords: 'plugins extensions integrations', icon: Plug },
   { id: 'about', label: 'About', keywords: 'about version info', icon: Info },
 ];
+
+/**
+ * Retired TaskMaster feature switch. TaskMaster is closed for every instance
+ * role; this constant exists so settings navigation, legacy localStorage reads,
+ * project metadata hydration and TaskMaster polling all agree without reading
+ * the old `tasksEnabled` preference. Do not turn it into a runtime or role flag.
+ */
+export const TASKMASTER_FEATURE_ENABLED = false;
+
+/**
+ * Retired Browser Use feature switch. Browser sessions, runtime installs, the
+ * settings tab and its MCP bridge stay closed for every instance role; the old
+ * server-side `browser_use_settings.enabled` value is ignored. Do not turn this
+ * into a runtime or role flag.
+ */
+export const BROWSER_USE_FEATURE_ENABLED = false;
 
 // ---------------------------
 

@@ -19,6 +19,13 @@ const MAX_SESSIONS_PER_OWNER = Number.parseInt(process.env.CLOUDCLI_BROWSER_USE_
 const SESSION_TTL_MS = Number.parseInt(process.env.CLOUDCLI_BROWSER_USE_SESSION_TTL_MS || String(30 * 60 * 1000), 10);
 const BROWSER_USE_SETTINGS_KEY = 'browser_use_settings';
 const BROWSER_USE_MCP_TOKEN_KEY = 'browser_use_mcp_token';
+/**
+ * Browser Use is retired for every instance role. The persisted
+ * `browser_use_settings.enabled` value is deliberately left untouched, but it is
+ * never allowed to enable sessions, runtime installs or provider MCP injection.
+ * Keep this a build-time constant rather than a role or user switch.
+ */
+const BROWSER_USE_FEATURE_ENABLED = false;
 
 type BrowserUseRuntime = ReturnType<typeof getBrowserUseRuntime>;
 type BrowserUseSessionStatus = 'ready' | 'stopped' | 'unavailable';
@@ -113,7 +120,7 @@ function readSettings(): BrowserUseSettings {
 
     const parsed = JSON.parse(raw) as Partial<BrowserUseSettings>;
     return {
-      enabled: parsed.enabled === true,
+      enabled: BROWSER_USE_FEATURE_ENABLED && parsed.enabled === true,
     };
   } catch (error: any) {
     console.warn('[Browser] Failed to read settings:', error?.message || error);
@@ -123,7 +130,7 @@ function readSettings(): BrowserUseSettings {
 
 function writeSettings(settings: BrowserUseSettings): BrowserUseSettings {
   const normalized = {
-    enabled: settings.enabled === true,
+    enabled: BROWSER_USE_FEATURE_ENABLED && settings.enabled === true,
   };
 
   appConfigDb.set(BROWSER_USE_SETTINGS_KEY, JSON.stringify(normalized));
@@ -447,6 +454,10 @@ export const browserUseService = {
   },
 
   async updateSettings(settings: Partial<BrowserUseSettings>) {
+    if (!BROWSER_USE_FEATURE_ENABLED) {
+      return { enabled: false };
+    }
+
     const current = readSettings();
     const nextSettings = {
       enabled: typeof settings.enabled === 'boolean' ? settings.enabled : current.enabled,
@@ -482,6 +493,10 @@ export const browserUseService = {
   },
 
   async registerAgentMcp() {
+    if (!BROWSER_USE_FEATURE_ENABLED) {
+      throw new Error('Browser Use is disabled.');
+    }
+
     const { command, args } = getMcpCommand();
     await Promise.all(LEGACY_MCP_SERVER_NAMES.map((name) => removeMcpServerFromAllProviders(name)));
     const results = await providerMcpService.addMcpServerToAllProviders({
@@ -510,6 +525,10 @@ export const browserUseService = {
   },
 
   async installRuntime() {
+    if (!BROWSER_USE_FEATURE_ENABLED) {
+      throw new Error('Browser Use is disabled.');
+    }
+
     const result = await installRuntime();
     return {
       ...result,

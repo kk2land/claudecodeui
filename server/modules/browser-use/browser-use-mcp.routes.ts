@@ -4,6 +4,19 @@ import { browserUseService } from '@/modules/browser-use/browser-use.service.js'
 
 const router = express.Router();
 
+// The agent MCP bridge is part of the retired Browser Use feature. Reject it
+// before token validation so a previously injected MCP server cannot drive a
+// browser session.
+router.use((_req, res) => {
+  res.status(403).json({
+    success: false,
+    error: {
+      code: 'BROWSER_USE_DISABLED',
+      message: 'Browser Use MCP is no longer available.',
+    },
+  });
+});
+
 function readBearerToken(header: unknown): string | null {
   if (typeof header !== 'string') {
     return null;
