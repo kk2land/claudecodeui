@@ -99,6 +99,8 @@ type ComposerPredictionStatusProps = {
    * reason falls back to the generic sentence.
    */
   unavailableReason?: CodexComposerPredictionReason;
+  /** Mobile shows feedback above the input and keeps the switch in its actions sheet. */
+  showToggle?: boolean;
   className?: string;
 };
 
@@ -119,13 +121,12 @@ function predictionReasonKey(reason: CodexComposerPredictionReason | undefined):
 }
 
 /**
- * Rendered by ChatComposer's footer as the small persisted toggle for native
- * suggestions plus, while the native request is outstanding or when it produced
- * none, a muted note. It is never an error surface: an unavailable prediction
- * says nothing about the conversation itself.
+ * ChatComposer uses this in its desktop footer and mobile actions sheet, with
+ * feedback also shown above the mobile input so an outstanding or empty result
+ * is visible without opening a menu.
  */
 export function ComposerPredictionStatus({
-  enabled, onChange, unsupported = false, pending = false, unavailable, unavailableReason, className,
+  enabled, onChange, unsupported = false, pending = false, unavailable, unavailableReason, showToggle = true, className,
 }: ComposerPredictionStatusProps) {
   const { t } = useTranslation('chat');
   if (unsupported) {
@@ -138,7 +139,7 @@ export function ComposerPredictionStatus({
   }
   return (
     <span className={cn('inline-flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground/60', className)}>
-      <button
+      {showToggle && <button
         type="button"
         aria-pressed={enabled}
         title={t('prediction.toggleHint')}
@@ -150,7 +151,7 @@ export function ComposerPredictionStatus({
       >
         <SparklesIcon className="h-3 w-3" aria-hidden="true" />
         {t(enabled ? 'prediction.toggleOn' : 'prediction.toggleOff')}
-      </button>
+      </button>}
       {enabled && pending && !unavailable && (
         <span data-testid="composer-prediction-pending" aria-live="polite" className="truncate">
           {t('prediction.pending')}

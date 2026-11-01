@@ -291,6 +291,34 @@ const mobileControls = (patch: Partial<NonNullable<CodexControls['state']>>): Co
   return { ...base, state: { ...base.state!, ...patch } };
 };
 
+test('mobile shows prediction progress and empty results without opening the actions sheet', async () => {
+  stubPhone();
+  const view = render(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'pending' })} />);
+  const textarea = await findTextarea();
+
+  assert.equal(screen.getByTestId('composer-prediction-pending').textContent, 'Waiting for a suggestion…');
+  assert.equal(screen.queryByRole('dialog'), null);
+  assert.equal(textarea.placeholder, 'Ask Codex');
+
+  await act(async () => { textarea.focus(); });
+  assert.ok(screen.getByTestId('composer-prediction-pending'));
+  assert.equal(screen.queryByRole('button', { name: 'Suggestions on' }), null);
+
+  view.rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'ready', text: 'Verify the timing.' })} />);
+  assert.equal(screen.queryByTestId('composer-prediction-pending'), null);
+  assert.equal(textarea.placeholder, 'Verify the timing.');
+  assert.equal(textarea.value, '');
+
+  view.rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-2', status: 'unavailable', reason: 'empty' })} />);
+  const unavailable = screen.getByTestId('composer-prediction-unavailable');
+  assert.equal(unavailable.textContent, 'Codex returned no suggestion this time');
+
+  view.rerender(<Harness codexControls={controls({ sourceTurnId: 'turn-3', status: 'unavailable', reason: 'timeout' })} />);
+  assert.equal(screen.getByTestId('composer-prediction-unavailable').textContent, 'No suggestion arrived in time');
+  await act(async () => { fireEvent.change(textarea, { target: { value: 'My follow-up' } }); });
+  assert.equal(screen.queryByTestId('composer-prediction-unavailable'), null);
+});
+
 test('mobile idle is one short capsule line that expands in place on focus and keeps a draft', async () => {
   stubPhone();
   const view = render(<Harness codexControls={controls({ sourceTurnId: 'turn-1', status: 'ready', text: 'Explain the failing test.' })} />);

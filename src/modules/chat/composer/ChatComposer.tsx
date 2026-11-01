@@ -509,6 +509,20 @@ export default function ChatComposer({
         onResolve={onResolveBackgroundSendPrompt}
       />
 
+      {isMobile && composerPrediction?.available && (composerPrediction.pending || composerPrediction.unavailable) && (
+        <div className="mx-auto mb-1 max-w-[54.25rem] px-3">
+          <ComposerPredictionStatus
+            enabled={composerPrediction.enabled}
+            onChange={composerPrediction.setEnabled}
+            showToggle={false}
+            pending={composerPrediction.pending}
+            unavailable={composerPrediction.unavailable}
+            unavailableReason={composerPrediction.unavailableReason}
+            className="max-w-full"
+          />
+        </div>
+      )}
+
       {isMobile && hasControlPanel && !hasPendingPermissions && (
         <div className="mx-auto max-w-[54.25rem]">
           <ActivityIndicator activity={activity} onAbort={onAbortSession} variant="inline" />
