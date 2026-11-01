@@ -216,6 +216,13 @@ function Scheduler({ host }: { host: SchedulerHost }) {
       setMessage(String(error));
     }
   };
+  const editProjectAlerts = (task: SchedulerTaskRow) => {
+    setEditor({
+      id: task.projectId,
+      name: task.projectName,
+      path: task.projectPath,
+    });
+  };
   const copyTaskId = async (taskId: string) => {
     let copied = false;
     try {
@@ -340,6 +347,8 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           settings={settings}
           initialTab={settingsTab}
           api={api}
+          tasks={tasks}
+          onEditProjectAlerts={editProjectAlerts}
           onBack={() => setView("tasks")}
           onSave={(value) => {
             setSettings(value);
@@ -348,25 +357,28 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           onError={setMessage}
         />
       ) : view === "detail" && currentTask ? (
-        <RunDetail
-          task={currentTask}
-          api={api}
-          retention={settings?.retentionDays ?? 30}
-          onBack={() => setView("tasks")}
-          onSettings={(tab) => {
-            setSettingsTab(tab);
-            setView("settings");
-          }}
-          onError={setMessage}
-          onRun={() =>
-            void operate(async () => {
-              const { run } = await api.run(currentTask);
-              setMessage(
-                labels[run.status] + (run.reason ? "：" + run.reason : ""),
-              );
-            })
-          }
-        />
+        <>
+          <ProjectAlertWarning tasks={[currentTask]} onEdit={editProjectAlerts} />
+          <RunDetail
+            task={currentTask}
+            api={api}
+            retention={settings?.retentionDays ?? 30}
+            onBack={() => setView("tasks")}
+            onSettings={(tab) => {
+              setSettingsTab(tab);
+              setView("settings");
+            }}
+            onError={setMessage}
+            onRun={() =>
+              void operate(async () => {
+                const { run } = await api.run(currentTask);
+                setMessage(
+                  labels[run.status] + (run.reason ? "：" + run.reason : ""),
+                );
+              })
+            }
+          />
+        </>
       ) : (
         <>
           <header className="cron-heading">
@@ -426,6 +438,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
               项运行中
             </span>
           </div>
+          <ProjectAlertWarning tasks={visible} onEdit={editProjectAlerts} />
           <table className="cron-table">
             <thead>
               <tr>
@@ -574,6 +587,49 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+/** Used by task lists, details and global settings to expose loaded project alert overrides. */
+function ProjectAlertWarning({
+  tasks,
+  onEdit,
+}: {
+  tasks: SchedulerTaskRow[];
+  onEdit(task: SchedulerTaskRow): void;
+}) {
+  const projects = new Map(
+    tasks
+      .filter((task) => task.definition.notify === false)
+      .map((task) => [task.projectId, task]),
+  );
+  if (!projects.size) return null;
+  return (
+    <div
+      className="cron-editor-banner cron-editor-warning cron-project-alert-warning"
+      role="alert"
+    >
+      <CircleAlert size={18} aria-hidden="true" />
+      <div>
+        <strong>项目 Telegram 告警已关闭</strong>
+        <p>
+          以下项目的全部定时任务失败时均不会发送 Telegram 告警，即使全局告警已开启。
+        </p>
+        <ul>
+          {[...projects.values()].map((task) => (
+            <li key={task.projectId}>
+              <span>{task.projectName}</span>
+              <button
+                aria-label={`修改 ${task.projectName} 的告警设置`}
+                onClick={() => onEdit(task)}
+              >
+                修改项目告警设置
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
     </div>
   );
 }
@@ -1089,6 +1145,8 @@ function SettingsPanel({
   settings,
   initialTab,
   api,
+  tasks,
+  onEditProjectAlerts,
   onBack,
   onSave,
   onError,
@@ -1096,6 +1154,8 @@ function SettingsPanel({
   settings: PublicSchedulerSettings;
   initialTab: SettingsTab;
   api: ReturnType<typeof schedulerApi>;
+  tasks: SchedulerTaskRow[];
+  onEditProjectAlerts(task: SchedulerTaskRow): void;
   onBack(): void;
   onSave(settings: PublicSchedulerSettings): void;
   onError(message: string): void;
@@ -1179,7 +1239,8 @@ function SettingsPanel({
       </div>
       {tab === "alerts" ? (
         <div className="cron-form">
-          <h3>Telegram · default</h3>
+          <h3>Telegram 全局告警</h3>
+          <ProjectAlertWarning tasks={tasks} onEdit={onEditProjectAlerts} />
           <label className="cron-checkbox">
             <input
               type="checkbox"
@@ -1194,24 +1255,24 @@ function SettingsPanel({
                 })
               }
             />
-            启用失败告警
+            启用全局 Telegram 失败告警
           </label>
           <label>
-            Bot token
+            机器人令牌（Bot Token）
             <input
               type="password"
               autoComplete="new-password"
               value={token}
               placeholder={
                 draft.telegram.botTokenConfigured
-                  ? "已配置，留空保持原 token"
-                  : "输入 Telegram bot token"
+                  ? "已配置，留空保留原令牌"
+                  : "输入 Telegram 机器人令牌"
               }
               onChange={(event) => setToken(event.target.value)}
             />
           </label>
           <label>
-            Chat ID
+            接收会话 ID（Chat ID）
             <input
               value={draft.telegram.chatId}
               onChange={(event) =>
@@ -1236,6 +1297,7 @@ function SettingsPanel({
             />
           </label>
           <p>
+            此处控制所有项目共用的告警渠道；项目中选择“关闭本项目告警”会单独停用该项目的通知。
             失败、启动失败、超时及意外中断发送告警。告警发送失败不会重新执行任务。
           </p>
         </div>

@@ -413,6 +413,8 @@ type RpcMode = {
   config?: Record<string, unknown>;
   /** Inventory rows returned by GET /tasks. */
   tasks?: Array<Record<string, unknown>>;
+  /** Global channel state, independent of each project's loaded notification preference. */
+  telegramEnabled?: boolean;
   /** Projects returned by GET /projects. */
   projects?: Array<Record<string, unknown>>;
   /**
@@ -469,7 +471,7 @@ async function mountPlugin(mode: RpcMode = {}) {
           maxConcurrentRuns: 4,
           timezone: "Asia/Shanghai",
           env: {},
-          telegram: { enabled: false, chatId: "", proxy: "", botTokenConfigured: false },
+          telegram: { enabled: mode.telegramEnabled ?? false, chatId: "", proxy: "", botTokenConfigured: false },
         };
       if (path === "/tasks") return { tasks: mode.tasks ?? [] };
       if (path.startsWith("/runs?"))
@@ -1349,6 +1351,90 @@ const USAGE_TASK = {
   activeRuns: [],
   lastRun: null,
 };
+
+test("DOM: disabled project alerts stay visible across scope, settings and task details", async () => {
+  const disabled = {
+    ...USAGE_TASK,
+    projectId: "project-b",
+    projectName: "项目 B",
+    projectPath: "/tmp/project-b",
+    definition: { ...USAGE_TASK.definition, name: "项目 B 任务" },
+  };
+  const mounted = await mountPlugin({
+    telegramEnabled: true,
+    tasks: [
+      { ...USAGE_TASK, definition: { ...USAGE_TASK.definition, notify: true } },
+      disabled,
+      { ...disabled, taskId: "second", definition: { ...disabled.definition, id: "second" } },
+    ],
+  });
+  try {
+    const root = mounted.container;
+    await waitFor(() => Boolean(findButton(root, "Usage")), "当前项目任务");
+    assert.equal(root.querySelector(".cron-project-alert-warning"), null);
+    button(root, "全部项目").click();
+    await waitFor(() => Boolean(root.querySelector(".cron-project-alert-warning")), "项目告警提示");
+    const warning = root.querySelector(".cron-project-alert-warning")!;
+    assert.equal(warning.getAttribute("role"), "alert");
+    assert.match(textOf(warning), /全部定时任务失败时均不会发送 Telegram 告警/);
+    assert.match(textOf(warning), /即使全局告警已开启/);
+    assert.match(textOf(warning), /项目 B/);
+    assert.equal(warning.querySelectorAll("li").length, 1);
+
+    button(root, "插件设置").click();
+    await waitFor(() => textOf(root).includes("Telegram 全局告警"), "全局告警设置");
+    assert.equal(root.querySelector<HTMLInputElement>('input[type="checkbox"]')!.checked, true);
+    assert.match(textOf(root.querySelector(".cron-project-alert-warning")), /项目 B/);
+    button(root, "返回任务列表").click();
+    await waitFor(() => Boolean(findButton(root, "项目 B 任务")), "全部项目任务");
+    button(root, "项目 B 任务").click();
+    await waitFor(() => Boolean(root.querySelector(".cron-definition")), "任务详情");
+    assert.match(textOf(root.querySelector(".cron-project-alert-warning")), /项目 B/);
+    button(root, "修改项目告警设置").click();
+    await waitFor(() => Boolean(byLabel(root, "项目 Telegram 失败告警")), "项目告警编辑器");
+    assert.equal(callsToPrefix(mounted, "/configuration?").at(-1)!.path, "/configuration?projectId=project-b");
+    assert.equal(callsTo(mounted, "/configuration/save").length, 0);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: Chinese project alert controls warn outside collapsed defaults and save the chosen policy", async () => {
+  const config = { ...JSON.parse(CONFIG), alerts: { telegram: false } };
+  const mounted = await mountPlugin({
+    config: {
+      project: { id: "project-a", name: "项目 A", path: "/tmp/project-a" },
+      text: JSON.stringify(config),
+      revision: "rev-1",
+      exists: true,
+    },
+  });
+  try {
+    const root = mounted.container;
+    await waitFor(() => Boolean(findButton(root, "编辑任务")), "任务列表");
+    button(root, "编辑任务").click();
+    await waitFor(() => Boolean(byLabel(root, "项目 Telegram 失败告警")), "告警配置");
+    const warning = root.querySelector('[role="alert"]')!;
+    assert.match(textOf(warning), /本项目全部定时任务失败都不会发送 Telegram 告警/);
+    assert.equal(warning.closest("details"), null);
+    const select = byLabel(root, "项目 Telegram 失败告警") as HTMLSelectElement;
+    assert.deepEqual([...select.options].map((option) => textOf(option)), ["跟随全局设置", "关闭本项目告警"]);
+    assert.equal(select.value, "false");
+    await selectValue(select, "default");
+    await waitFor(() => !textOf(root).includes("项目 Telegram 告警已关闭"), "恢复告警提示");
+    await selectValue(select, "false");
+    await waitFor(() => Boolean(root.querySelector('[role="alert"]')), "关闭告警提示");
+    await selectValue(select, "default");
+    await waitFor(() => !button(root, "保存并装载").disabled, "保存可用");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "告警配置保存");
+    const body = callsTo(mounted, "/configuration/save")[0]!.body as { projectId: string; text: string };
+    assert.equal(body.projectId, "project-a");
+    assert.deepEqual(JSON.parse(body.text), { ...config, alerts: { telegram: "default" } });
+  } finally {
+    mounted.unmount();
+  }
+});
 
 function usageRun(usage: unknown, id = "run-usage") {
   const now = new Date().toISOString();

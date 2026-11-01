@@ -765,6 +765,33 @@
   background: #33280f;
   color: #f0c987;
 }
+.cron-project-alert-warning {
+  margin: 14px 0;
+  border: 1px solid currentColor;
+  border-left-width: 4px;
+  border-radius: 6px;
+  align-items: flex-start;
+}
+.cron-project-alert-warning > div {
+  flex: 1;
+  min-width: 0;
+}
+.cron-project-alert-warning p {
+  margin: 6px 0;
+  color: inherit;
+}
+.cron-project-alert-warning ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.cron-project-alert-warning li {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 6px;
+}
 .cron-editor-conflict {
   flex-direction: column;
   align-items: stretch;

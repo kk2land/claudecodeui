@@ -777,6 +777,16 @@ export function ConfigurationEditor({
           </button>
         </div>
       )}
+      {telegram === false && (
+        <div className="cron-editor-banner cron-editor-warning" role="alert">
+          <AlertTriangle size={18} />
+          <span>
+            <strong>项目 Telegram 告警已关闭。</strong>
+            当前配置保存并装载后，本项目全部定时任务失败都不会发送 Telegram 告警，即使全局告警已开启。
+            请展开“项目默认配置”，将“Telegram 失败告警”改为“跟随全局设置”以恢复告警。
+          </span>
+        </div>
+      )}
       <fieldset className="cron-editor-content" disabled={saving}>
         {jsonMode || !parsed.ok ? (
           <div className="cron-editor-json">
@@ -803,7 +813,9 @@ export function ConfigurationEditor({
         ) : (
           <>
           <details className="cron-editor-defaults">
-            <summary>项目默认配置</summary>
+            <summary>
+              项目默认配置{telegram === false ? "（项目告警已关闭）" : ""}
+            </summary>
             <div className="cron-editor-defaults-grid">
               <label>
                 项目 IANA 时区
@@ -880,31 +892,23 @@ export function ConfigurationEditor({
                 </select>
               </label>
               <label>
-                alerts.telegram
+                Telegram 失败告警
                 <select
-                  value={
-                    telegram === undefined
-                      ? INHERIT
-                      : telegram === false
-                        ? "false"
-                        : "default"
-                  }
+                  aria-label="项目 Telegram 失败告警"
+                  value={telegram === false ? "false" : "default"}
                   onChange={(event) => {
-                    const value = event.target.value;
                     writePath(
                       ["alerts", "telegram"],
-                      value === INHERIT
-                        ? undefined
-                        : value === "false"
-                          ? false
-                          : "default",
+                      event.target.value === "false" ? false : "default",
                     );
                   }}
                 >
-                  <option value={INHERIT}>继承（default）</option>
-                  <option value="default">default（按插件告警）</option>
-                  <option value="false">false（关闭本任务告警）</option>
+                  <option value="default">跟随全局设置</option>
+                  <option value="false">关闭本项目告警</option>
                 </select>
+                <small>
+                  作用于本项目全部定时任务。跟随全局设置时，需在“插件设置 → 告警渠道”开启全局告警。
+                </small>
               </label>
             </div>
           </details>
