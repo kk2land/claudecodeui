@@ -212,7 +212,8 @@ export type WorkerUsage = {
 /**
  * Observable execution progress used by reminders and the UI. `steps` is null when the native
  * runner does not report validated steps; `phase` and `currentTool` are null until the runner
- * reports an actual running phase/tool. The soft reminder defaults to 600 seconds / 20 steps;
+ * reports an actual running phase/tool. The first soft reminder defaults to 600 seconds / 20
+ * steps; subsequent reviews use `WorkerSettings.softReminderSeconds` since the latest reminder.
  * `hardTimeoutAt` is null unless a hard timeout was configured.
  */
 export type WorkerRunProgress = {
@@ -220,6 +221,7 @@ export type WorkerRunProgress = {
   phase: string | null;
   currentTool: string | null;
   lastEventAt: string | null;
+  /** Most recent reminder creation time, or null before the first budget review. */
   softReminderSentAt: string | null;
   hardTimeoutAt: string | null;
 };
@@ -282,8 +284,9 @@ export type WorkerRecord = {
 
 /**
  * A persisted soft-budget reminder (`status: running`) or terminal result waiting for the host
- * to wake the parent session. Each run has at most one reminder and one result. Notifications
- * live in the plugin outbox and never consume the user's three-message queue.
+ * to wake the parent session. A running task can produce periodic reminders, with at most one
+ * undelivered reminder at a time and one terminal result per run. Notifications live in the
+ * plugin outbox and never consume the user's three-message queue.
  */
 export type WorkerNotification = {
   id: string;
@@ -315,7 +318,8 @@ export type WorkerDefaults = Record<WorkerType, WorkerDefault>;
 
 /**
  * Effective worker settings. Concurrency applies per `(parentSessionId, projectId, workerType)`
- * key. Soft reminder defaults are 600 seconds / 20 steps; no hard timeout is applied by default.
+ * key. The first soft reminder defaults to 600 seconds / 20 steps, followed by timed reviews
+ * every `softReminderSeconds`; no hard timeout is applied by default.
  */
 export type WorkerSettings = {
   concurrency: Record<WorkerType, number>;

@@ -1062,7 +1062,8 @@ export class WorkerService {
   ): void {
     const notifications = this.store.notifications().filter((item) => item.runId === run.id);
     const reminder = status === "running";
-    if (notifications.some((item) => (item.status === "running") === reminder)) return;
+    // Timed reviews may repeat; each run still has only one terminal result.
+    if (!reminder && notifications.some((item) => item.status !== "running")) return;
     // A result supersedes a reminder still waiting behind the parent's user queue.
     // Keep its history, but only the result should automatically wake that parent.
     if (!reminder) for (const item of notifications) {
@@ -1818,16 +1819,20 @@ export class WorkerService {
     for (const handle of this.handles.values()) {
       const run = this.store.run(handle.runId);
       if (!run || run.status !== "running") continue;
-      if (run.progress.softReminderSentAt) continue;
+      const reviewStartedAt = run.progress.softReminderSentAt ?? run.startedAt;
       const dueTime =
-        run.startedAt !== null &&
-        this.now() - Date.parse(run.startedAt) >= settings.softReminderSeconds * 1000;
+        reviewStartedAt !== null &&
+        this.now() - Date.parse(reviewStartedAt) >= settings.softReminderSeconds * 1000;
       // Progress writes are throttled; use validated live steps so a long tool
       // call after the threshold does not postpone its reminder until completion.
       const steps = handle.progress.steps || null;
       const dueSteps =
-        steps !== null && steps >= settings.softReminderSteps;
+        run.progress.softReminderSentAt === null && steps !== null && steps >= settings.softReminderSteps;
       if (!dueTime && !dueSteps) continue;
+      // Wait for delivery of the previous review instead of piling up wakeups
+      // behind a busy, paused, or unconfirmed parent session.
+      if (this.store.notifications().some((item) => item.runId === run.id
+        && item.status === "running" && item.delivery !== "delivered")) continue;
       run.progress.steps = steps;
       run.progress.softReminderSentAt = new Date(this.now()).toISOString();
       this.store.saveRun(run);

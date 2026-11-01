@@ -288,7 +288,7 @@ test("hard timeout fails the run with guardian evidence", async (t) => {
   assert.equal(service.notifications()[0]?.delivery, "pending");
 });
 
-for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget notifies once without cancelling and preserves the later result`, async (t) => {
+for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget deduplicates pending reviews without cancelling and preserves the result`, async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   const root = temporaryRoot("worker-reminder-");
   let now = Date.now();
@@ -313,7 +313,7 @@ for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget not
   if (trigger === "steps") assert.equal(service.get(started.worker.id).worker.latestRun?.progress.steps, 20);
   assert.equal(service.state().counts.total.running, 1, "a reminder still occupies its execution slot");
   t.mock.timers.tick(1000);
-  assert.equal(service.notifications().length, 1, "one reminder per run even when thresholds remain exceeded");
+  assert.equal(service.notifications().length, 1, "the outstanding reminder is not duplicated");
   if (trigger === "elapsed") service.ack("owner-1", [reminder.id]);
 
   const completed = await waitStatus(service, started.worker.id, ["completed"]);
@@ -323,6 +323,52 @@ for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget not
   assert.equal(service.notifications()[0]?.delivery, trigger === "elapsed" ? "delivered" : "held");
   const claimed = service.claimNotifications("owner-1", [], "result-batch");
   assert.deepEqual(claimed.notifications.map((item) => item.status), ["completed"]);
+});
+
+test("an early step reminder keeps timed reviews active while a tool is silent", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const root = temporaryRoot("worker-recurring-reminder-");
+  let now = Date.now();
+  const { service } = createService(t, root, {
+    TEST_SCENARIO: "sleep",
+    TEST_DELAY_MS: "3000",
+    TEST_STEPS_BEFORE_DELAY: "20",
+  }, { now: () => now });
+  const started = await service.start("owner-1", startInput());
+  await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
+    (log) => (log.match(/"phase":"step_end"/g) ?? []).length === 20);
+  t.mock.timers.tick(1000);
+  const first = service.notifications()[0]!;
+  service.ack("owner-1", [first.id]);
+
+  now += 599_999;
+  t.mock.timers.tick(1000);
+  assert.equal(service.notifications().length, 1, "step count must not cause repeated wakeups");
+  now += 1;
+  t.mock.timers.tick(1000);
+  const second = service.notifications()[1]!;
+  assert.equal(service.notifications().length, 2, "a silent tool must not suppress the next timed review");
+  assert.equal(second.runId, started.run.id);
+  assert.equal(second.status, "running");
+  assert.equal(service.get(started.worker.id).worker.latestRun?.status, "running");
+  assert.equal(service.get(started.worker.id).worker.latestRun?.progress.steps, 20);
+
+  service.claimNotifications("owner-1", [second.id], "reminder-batch");
+  now += 600_000;
+  t.mock.timers.tick(1000);
+  assert.equal(service.notifications().length, 2, "pending or claimed reminders must not accumulate");
+  service.settleNotifications("reminder-batch", "delivered");
+  t.mock.timers.tick(1000);
+  const third = service.notifications()[2]!;
+  assert.equal(third.status, "running");
+  assert.notEqual(third.id, second.id);
+
+  await waitStatus(service, started.worker.id, ["completed"]);
+  assert.deepEqual(service.notifications().map((item) => item.status), ["running", "running", "running", "completed"]);
+  assert.equal(service.notifications()[2]?.delivery, "held", "the result supersedes the outstanding reminder");
+  now += 600_000;
+  t.mock.timers.tick(1000);
+  assert.equal(service.notifications().length, 4, "finished runs stop producing reminders");
 });
 
 test("credentials stay in the child process and out of run records", async (t) => {

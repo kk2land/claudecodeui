@@ -595,6 +595,14 @@ for (const provider of ['codex', 'dsh'] as const) {
     assert.match(content, /Confirm cancellation before worker_resume/);
     assert.match(content, /same workerId and a revised prompt/);
     assert.equal(h.settlements.at(-1)?.delivery, 'delivered');
+    h.emitNotification(notification({ id: 'notification-2', status: 'running', summary: 'Task soft budget reached (1200s elapsed).' }));
+    h.fireTimers();
+    await tick();
+    assert.equal(h.wakeCalls.length, 2, 'a later checkpoint must wake the same parent for the same run');
+    assert.deepEqual(h.wakeCalls[1].workerSource, {
+      batchId: 'batch-1', results: [{ workerId: 'worker-1', runId: 'run-1', status: 'running', summary: 'Task soft budget reached (1200s elapsed).' }],
+    });
+    assert.equal(h.settlements.filter((settle) => settle.delivery === 'delivered').length, 2);
     await h.service.shutdown();
   });
 
