@@ -972,3 +972,53 @@ test('Worker activity queries are scoped to the exact parent runtime owner', asy
   assert.equal(await h.service.bridge.hasActiveWorkers('session-1'), false);
   assert.deepEqual(h.logs, []);
 });
+
+test('unsettled Worker rounds ignore only the exact batch being handled', async () => {
+  const h = harness({ sessions: { 'session-1': '/repo', 'session-2': '/other' } });
+  await h.prepare('session-1', 'instance-1');
+  await h.prepare('session-2', 'instance-2');
+
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1'), false);
+  h.setActiveWorkerOwner('instance-1:session-1', true);
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1'), true);
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-2'), false);
+  h.setActiveWorkerOwner('instance-1:session-1', false);
+
+  h.outbox.set('notification-1', notification());
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1'), true,
+    'a pending sibling result keeps the round open');
+
+  // Only the exact batch this automatic turn is handling is ignored. Without
+  // that batch id a user turn cannot bypass an already claimed notification.
+  h.outbox.set('notification-1', notification({ batchId: 'batch-1' }));
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1'), true,
+    'a claimed batch still blocks a user turn');
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1', 'batch-1'), false,
+    'the turn\'s own claimed batch does not block itself');
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1', 'batch-2'), true,
+    'another claimed batch still blocks this turn');
+
+  h.outbox.set('notification-2', notification({ id: 'notification-2', ownerId: 'instance-2:session-2' }));
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1', 'batch-1'), false,
+    'another parent session never blocks this one');
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-2'), true);
+
+  // A known owner with a stopped transport has an unknown round, not a
+  // settled one.
+  h.ipc.running = false;
+  assert.equal(await h.service.bridge.hasUnsettledWorkers!('session-1'), true);
+  h.ipc.running = true;
+  assert.deepEqual(h.logs, []);
+});
+
+test('a rejected IPC query rejects the unsettled Worker lookup instead of reporting settled', async () => {
+  const h = harness();
+  await h.prepare('session-1', 'instance-1');
+  const request = h.ipc.request;
+  h.ipc.request = async (action: string, payload: Record<string, unknown>) => {
+    if (action === 'listNotifications') throw new Error('worker IPC unavailable');
+    return await request.call(h.ipc, action, payload);
+  };
+  await assert.rejects(h.service.bridge.hasUnsettledWorkers!('session-1'), /worker IPC unavailable/);
+  h.ipc.request = request;
+});

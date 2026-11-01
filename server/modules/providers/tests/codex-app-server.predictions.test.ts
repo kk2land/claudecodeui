@@ -10,6 +10,7 @@ import type {
   CodexRpcFrame,
   CodexPredictionConfigResult,
   CodexPredictionConfiguration,
+  CodexWorkerBridge,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
   SessionRuntimeSettings,
@@ -53,6 +54,7 @@ function harness(opts: {
   cliVersion?: string | null;
   goal?: () => AnyRecord | null;
   goalSet?: Promise<AnyRecord>;
+  bridge?: CodexWorkerBridge;
 } = {}) {
   let goalState: AnyRecord | null = null;
   const calls: Array<{ method: string; params: AnyRecord }> = [];
@@ -114,6 +116,7 @@ function harness(opts: {
       },
     },
   );
+  if (opts.bridge) runtime.setWorkerBridge(opts.bridge);
 
   const events: AnyRecord[] = [];
   const writer: ProviderRuntimeWriter = {
@@ -481,4 +484,203 @@ test('a goal read reporting paused cannot resurrect an already-cleared ready pre
   await h.runtime.control('app-session', { action: 'goal', operation: 'get' }, h.options, h.writer, h.context);
   assert.equal(h.state().goal?.status, 'paused');
   assert.equal(h.state().prediction, undefined, 'a paused goal read must not revive the old suggestion');
+});
+
+/** Runs one automatic Worker result turn through the real parent turn RPC contract. */
+async function workerWake(
+  h: ReturnType<typeof harness>,
+  beforeComplete?: () => void,
+  batchId?: string,
+): Promise<void> {
+  const starts = h.calls.filter((call) => call.method === 'turn/start').length;
+  const options: AnyRecord = {
+    ...h.options,
+    workerWakeup: true,
+    userTurn: false,
+    workerSource: { batchId: batchId ?? `wake-batch-${starts + 1}`, results: [] },
+  };
+  delete options.composerPredictions;
+  const running = h.runtime.run('Worker result', options, h.writer, h.context);
+  await eventually(() => h.calls.filter((call) => call.method === 'turn/start').length > starts,
+    'the automatic Worker result turn starts');
+  const turnId = `wake-${starts + 1}`;
+  h.resolve('turn/start', starts + 1, { turn: { id: turnId } });
+  await eventually(() => h.state().turnId === turnId, 'the automatic turn id');
+  beforeComplete?.();
+  h.event('turn/completed', { turn: { id: turnId, status: 'completed' } });
+  await running;
+}
+
+test('a Worker round withholds predictions until every sibling and the final result turn settle', async () => {
+  const state = { active: true, pending: false };
+  const queried: string[] = [];
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return state.active; },
+      async hasUnsettledWorkers(sessionId) { queried.push(sessionId); return state.active || state.pending; },
+    },
+  });
+
+  // The dispatch turn ends while its first Worker still runs.
+  await h.setup();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.state().workerEnabled, true);
+  assert.equal(h.predictions('thread/fork').length, 0, 'a dispatch turn must not fork while its Worker runs');
+  assert.deepEqual([...new Set(queried)], ['app-session']);
+
+  // One Worker finished; its sibling still runs.
+  state.pending = true;
+  await workerWake(h);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'the first sibling result must not fork');
+
+  // A soft-budget progress reminder is not the end of the round either.
+  state.pending = false;
+  await workerWake(h);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'a progress reminder must not fork');
+
+  // The last Worker finished, but its result has not been claimed yet.
+  state.active = false;
+  state.pending = true;
+  await workerWake(h);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'an unclaimed result still belongs to the round');
+
+  // The result turn dispatches a follow-up Worker, so this is not final either.
+  state.pending = false;
+  await workerWake(h, () => { state.active = true; });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'a follow-up Worker keeps the round open');
+
+  // The follow-up round has ended and its final result turn completes.
+  state.active = false;
+  await workerWake(h);
+  await eventually(() => h.predictions('thread/fork').length === 1, 'the final result turn forks once');
+  assert.equal(h.predictions('thread/fork').length, 1, 'the settled round produces exactly one prediction');
+  assert.equal(h.state().prediction?.status, 'pending');
+});
+
+test('automatic result turns inherit a disabled per-turn opt-in', async () => {
+  const state = { active: false, pending: false };
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return state.active; },
+      async hasUnsettledWorkers() { return state.active || state.pending; },
+    },
+  });
+  await h.setup({ composerPredictions: false });
+  await workerWake(h);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'a disabled opt-in never forks, even for a wake-up');
+  assert.equal(h.state().prediction, undefined);
+});
+
+test('another session Worker round never blocks this parent prediction', async () => {
+  const queried: string[] = [];
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return false; },
+      async hasUnsettledWorkers(sessionId) { queried.push(sessionId); return false; },
+    },
+  });
+  await h.setup();
+  await eventually(() => h.predictions('thread/fork').length === 1, 'this parent still predicts');
+  assert.deepEqual([...new Set(queried)], ['app-session']);
+});
+
+test('a deferred prediction cannot be revived by a newer user turn', async () => {
+  const gate = deferred<boolean>();
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return false; },
+      hasUnsettledWorkers() { return gate.promise; },
+    },
+  });
+  await h.setup();
+  assert.equal(h.predictions('thread/fork').length, 0, 'the Worker lookup still holds the prediction');
+
+  // A new, opted-out user turn replaces the completed turn before the lookup answers.
+  const starts = h.calls.filter((call) => call.method === 'turn/start').length;
+  const next = h.runtime.run('next', { ...h.options, composerPredictions: false }, h.writer, h.context);
+  await eventually(() => h.calls.filter((call) => call.method === 'turn/start').length > starts,
+    'the replacement turn starts');
+  h.resolve('turn/start', starts + 1, { turn: { id: 'next-turn' } });
+  await eventually(() => h.state().turnId === 'next-turn', 'the replacement turn id');
+  h.event('turn/completed', { turn: { id: 'next-turn', status: 'completed' } });
+  await next;
+
+  gate.resolve(false);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'the replaced turn never resurrects its prediction');
+  assert.equal(h.state().prediction, undefined);
+});
+
+test('only the automatic turn\'s own batch is excluded from pending notifications', async () => {
+  const pendingBatches = new Set(['batch-claimed']);
+  const seen: Array<string | undefined> = [];
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return false; },
+      async hasUnsettledWorkers(_sessionId, handlingBatchId) {
+        seen.push(handlingBatchId);
+        return [...pendingBatches].some((batchId) => batchId !== handlingBatchId);
+      },
+    },
+  });
+
+  // A user turn has no handling batch and cannot bypass a claimed notification.
+  await h.setup();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'a user turn cannot bypass a claimed result');
+  assert.deepEqual(seen, [undefined]);
+
+  // The automatic turn handling that exact claimed batch is not blocked by it.
+  await workerWake(h, undefined, 'batch-claimed');
+  await eventually(() => h.predictions('thread/fork').length === 1, 'the own-batch turn predicts');
+  assert.deepEqual(seen, [undefined, 'batch-claimed']);
+});
+
+test('a different claimed batch keeps a Worker result turn deferred', async () => {
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return false; },
+      async hasUnsettledWorkers(_sessionId, handlingBatchId) {
+        return 'batch-other' !== handlingBatchId;
+      },
+    },
+  });
+  await h.setup();
+  await workerWake(h, undefined, 'batch-this');
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0,
+    'another claimed batch is not this turn\'s result');
+});
+
+test('a rejected Worker settlement lookup never forks and does not fail the parent turn', async () => {
+  const h = harness({
+    bridge: {
+      async prepareSession() { return { 'mcp_servers.cloudcli_workers': { enabled: true } }; },
+      async activateSession() {}, async stopSession() { return true; }, async closeAppServer() {},
+      async hasActiveWorkers() { return false; },
+      async hasUnsettledWorkers() { throw new Error('worker IPC unavailable'); },
+    },
+  });
+  await h.setup();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(h.predictions('thread/fork').length, 0, 'an unknown Worker round must not fork');
+  assert.equal(h.state().phase, 'idle');
+  assert.equal(h.events.some((event) => event.kind === 'error'), false);
 });

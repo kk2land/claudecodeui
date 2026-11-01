@@ -46,6 +46,12 @@ type NativeTurn = {
   /** This run's chat.send opted into a native composer prediction for its turn. */
   composerPredictions: boolean;
   /**
+   * Trusted outbox batch this automatic Worker turn is handling. Captured from
+   * `workerSource` for this exact turn so a later options mutation cannot make
+   * another claimed batch look like the one being processed.
+   */
+  workerBatchId?: string;
+  /**
    * The input this adapter submitted for the turn, and the ID sent with it.
    * Native user items may arrive without `clientId`; correlation uses this
    * record so the first input keeps the composer's identity. Absent for turns
@@ -94,6 +100,8 @@ type NativeSession = {
   turn: NativeTurn | null;
   /** Outstanding composer-prediction request; cleared by every invalidation point. */
   prediction: NativePredictionRequest | null;
+  /** Last explicit turn's opt-in, inherited by this session's automatic Worker result turns. */
+  composerPredictionsOptIn: boolean;
   // Fresh threads have no readable turns until native execution accepts input.
   historyReady: boolean;
   completedTurns: Set<string>;
@@ -352,7 +360,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session = {
       id: sessionId, threadId: providerId, writer, context, options, startedAt: Date.now(),
       state: { ...this.getState(sessionId), runtime: 'app-server', phase: 'starting', error: undefined }, model: '', modelProvider: null,
-      setup: null, goalMutation: null, turn: null, prediction: null, historyReady: Boolean(providerId), completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
+      setup: null, goalMutation: null, turn: null, prediction: null, composerPredictionsOptIn: false, historyReady: Boolean(providerId), completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
     };
     this.failures.delete(sessionId);
     this.sessions.set(sessionId, session);
@@ -456,10 +464,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session.model = selection?.model ?? await context.resolveResumeModel(session.id, session.options.model) ?? session.model;
   }
 
-  private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null, composerPredictions = false): NativeTurn {
+  private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null, composerPredictions = false, workerBatchId?: string): NativeTurn {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
-    const turn: NativeTurn = { id, writer, done, finish, terminal: false, items: new Map(), composerPredictions };
+    const turn: NativeTurn = { id, writer, done, finish, terminal: false, items: new Map(), composerPredictions, workerBatchId };
     // Anything still pending belongs to the turn this one replaces, including
     // a suggestion already shown for it.
     this.clearPrediction(session);
@@ -562,7 +570,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         code: 'WORKER_WAKE_DEFERRED', statusCode: 409,
       });
     }
-    const turn = this.newTurn(session, writer, null, options.composerPredictions === true);
+    // An automatic Worker result turn is still the same user-authorized round:
+    // it follows the last explicit opt-in instead of hard-coding the option.
+    // Every non-wake turn records the choice captured with it for later wakes.
+    if (!workerWakeup) session.composerPredictionsOptIn = options.composerPredictions === true;
+    // Only the trusted Worker source may identify the batch this turn settles.
+    const workerBatchId = workerWakeup && typeof options.workerSource?.batchId === 'string'
+      ? options.workerSource.batchId
+      : undefined;
+    const turn = this.newTurn(session, writer, null,
+      workerWakeup ? session.composerPredictionsOptIn : options.composerPredictions === true, workerBatchId);
     this.publish(session);
     try {
       // Recorded before the RPC but inside the guarded block: item notifications
@@ -664,9 +681,41 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     // run promise and can never fail, delay or extend the user's turn.
     if (turn.composerPredictions && success && !session.stopRequested && !error
       && session.state.goal?.status !== 'active' && this.sessions.get(session.id) === session) {
-      this.requestPrediction(session, turn.id);
+      this.requestPredictionAfterWorkers(session, turn);
     }
     turn.finish();
+  }
+
+  /**
+   * Holds one prediction until this parent's Worker round is settled.
+   *
+   * A dispatch turn ends while its Workers still run, and a single finished
+   * Worker or soft reminder can wake the parent before its siblings finish.
+   * Neither may produce a suggestion: only when the owner has no non-terminal
+   * run and no pending result outside the batch this turn is handling does the
+   * final result-handling turn predict. A follow-up Worker dispatched by that
+   * turn keeps the same deferral.
+   *
+   * Ordinary chats without Worker ownership have no bridge to consult and
+   * keep the original synchronous timing.
+   */
+  private requestPredictionAfterWorkers(session: NativeSession, turn: NativeTurn): void {
+    if (!turn.id) return;
+    const bridge = this.workerBridge;
+    if (!session.state.workerEnabled || !bridge?.hasUnsettledWorkers) {
+      this.requestPrediction(session, turn.id);
+      return;
+    }
+    void bridge.hasUnsettledWorkers(session.id, turn.workerBatchId).then((unsettled) => {
+      // A Worker lookup is asynchronous: a new turn, Stop, runtime close or
+      // goal change in that gap must not resurrect this finished turn's hint.
+      if (unsettled || this.sessions.get(session.id) !== session || session.turn !== turn
+        || session.stopRequested || session.state.goal?.status === 'active') return;
+      this.requestPrediction(session, turn.id);
+    }).catch(() => {
+      // An unavailable or rejected Worker query leaves the round unknown. No
+      // suggestion is safer than treating an unknown round as settled.
+    });
   }
 
   /**

@@ -607,6 +607,30 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
         return false;
       }
     },
+    async hasUnsettledWorkers(sessionId: string, handlingBatchId?: string) {
+      if (shuttingDown || !dependencies.isEnabled()) return false;
+      const entries = currentOwners().filter((entry) => entry.owner.parentSessionId === sessionId
+        && entry.registered && isCurrentOwner(entry));
+      if (!entries.length) return false;
+      // A known owner with an unavailable transport has an unknown round, not
+      // a settled one. Reporting it unsettled keeps the prediction deferred.
+      if (!dependencies.ipc.isReady()) return true;
+      const ownerIds = new Set(entries.map((entry) => entry.owner.id));
+      // Let an IPC rejection reach the adapter's single prediction boundary;
+      // swallowing it here would turn an unknown round into a settled one.
+      const [active, listed] = await Promise.all([
+        Promise.all(entries.map((entry) =>
+          dependencies.ipc.request('hasActiveWorkers', { ownerId: entry.owner.id }))),
+        dependencies.ipc.request('listNotifications', {}),
+      ]);
+      if (active.some(Boolean)) return true;
+      // Any pending result or reminder belongs to this Worker round except the
+      // claimed batch the automatic turn asking is already handling. A user
+      // turn passes no batch, so even other claimed batches still block it.
+      return listed.some((notification) => ownerIds.has(notification.ownerId)
+        && notification.delivery === 'pending'
+        && notification.batchId !== handlingBatchId);
+    },
   };
 
   const dshBridge: DshWorkerBridge = {

@@ -510,4 +510,12 @@ export type CodexWorkerBridge = {
    * Idle transport/proxy recycling consults it without changing Worker state.
    */
   hasActiveWorkers: (sessionId: string) => Promise<boolean>;
+  /**
+   * True while this parent still has a non-terminal Worker run or a pending
+   * result/reminder notification that this turn is not already handling.
+   * `handlingBatchId` is the trusted outbox batch of the automatic result turn
+   * asking; only that batch's claimed notifications are ignored. A user turn
+   * passes none, so every pending notification still blocks its prediction.
+   */
+  hasUnsettledWorkers?: (sessionId: string, handlingBatchId?: string) => Promise<boolean>;
 };
