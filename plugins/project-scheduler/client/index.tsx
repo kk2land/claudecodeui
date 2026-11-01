@@ -866,6 +866,12 @@ function RunDetail({
               "尚无运行记录"
             )}
           </div>
+          {run?.taskResult && (
+            <div className="cron-log-note" aria-label="任务结果">
+              <strong>Agent 任务报告：</strong>
+              {run.taskResult.summary}
+            </div>
+          )}
           <pre ref={output} className="cron-output">
             {logInfo.expired
               ? "日志已超过保留期限并被清理，最近一次结果摘要仍保留。"

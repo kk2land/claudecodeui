@@ -1435,3 +1435,38 @@ test("DOM: missing usage renders dashes instead of a fabricated zero", async () 
     mounted.unmount();
   }
 });
+
+test("DOM: prompt reports and unconfirmed results remain distinct from a zero exit code", async (t) => {
+  const scenarios = [
+    { status: "success", reason: null, taskResult: { status: "success", summary: "报告已生成并验收" } },
+    { status: "failed", reason: "任务未完成：目标接口权限不足", taskResult: { status: "failed", summary: "目标接口权限不足" } },
+    { status: "failed", reason: "结果未确认：Agent 最终答复不是有效的任务结果 JSON" },
+    { status: "failed", reason: "Agent 执行失败：request failed", taskResult: { status: "success", summary: "Agent 声称报告已生成" } },
+    { status: "success", reason: null },
+  ];
+  for (const scenario of scenarios) {
+    await t.test(scenario.reason ?? scenario.taskResult?.summary ?? "legacy result", async () => {
+      const mounted = await mountPlugin({
+        tasks: [USAGE_TASK],
+        runs: [{ ...usageRun(undefined), ...scenario }],
+      });
+      try {
+        const root = mounted.container;
+        await waitFor(() => Boolean(findButton(root, "Usage")), "任务列表");
+        button(root, "Usage").click();
+        await waitFor(() => Boolean(root.querySelector(".cron-meta")), "运行结果");
+        assert.match(textOf(root.querySelector(".cron-meta")), /退出码 0/);
+        assert.match(textOf(root.querySelector(".cron-meta")), scenario.status === "success" ? /成功/ : /失败/);
+        const report = root.querySelector('[aria-label="任务结果"]');
+        if (scenario.taskResult) {
+          assert.ok(report);
+          assert.ok(textOf(report).includes(scenario.taskResult.summary));
+          assert.match(textOf(report), /Agent 任务报告/);
+        } else assert.equal(report, null);
+        if (scenario.reason) assert.ok(textOf(root).includes(scenario.reason));
+      } finally {
+        mounted.unmount();
+      }
+    });
+  }
+});
