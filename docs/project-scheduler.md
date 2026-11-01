@@ -1,6 +1,9 @@
 # 项目定时任务插件
 
-基于 codex-app-server，实现于 codex-app-server-cron。插件随应用分发，在设置 → 插件中独立启停。
+基于 codex-app-server，实现于 codex-app-server-cron。插件随应用分发，默认不可用且不显示在插件列表。
+在宿主环境中设置 `CLOUDCLI_ENABLE_PROJECT_SCHEDULER=true` 后，重启后端并刷新浏览器，
+即可在设置 → 插件中看到并独立启停。只有精确值 `true` 才会开放；未设置或其他值均关闭，
+已有的插件启用设置不能绕过此开关，关闭时不会启动调度器。
 进入项目的「定时任务」页签；右上角「插件设置」提供告警渠道、执行环境、运行与日志。
 
 ## 配置与装载

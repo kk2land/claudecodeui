@@ -207,6 +207,7 @@ function ServerDot({ running, t }: { running: boolean; t: any }) {
 /* ─── Plugin Card ───────────────────────────────────────────────────────── */
 type PluginCardProps = {
   plugin: Plugin;
+  canManage: boolean;
   index: number;
   onToggle: (enabled: boolean) => void;
   onUpdate: () => void;
@@ -219,6 +220,7 @@ type PluginCardProps = {
 
 function PluginCard({
   plugin,
+  canManage,
   index,
   onToggle,
   onUpdate,
@@ -298,7 +300,7 @@ function PluginCard({
 
           {/* Controls */}
           <div className="flex flex-shrink-0 items-center gap-2">
-            {!plugin.builtin && <button
+            {canManage && !plugin.builtin && <button
               onClick={onUpdate}
               disabled={updating || !plugin.repoUrl}
               title={plugin.repoUrl ? t('pluginSettings.pullLatest') : t('pluginSettings.noGitRemote')}
@@ -312,7 +314,7 @@ function PluginCard({
               )}
             </button>}
 
-            {!plugin.builtin && <button
+            {canManage && !plugin.builtin && <button
               onClick={onUninstall}
               title={confirmingUninstall ? t('pluginSettings.confirmUninstall') : t('pluginSettings.uninstallPlugin')}
               aria-label={t('pluginSettings.uninstallPlugin')}
@@ -463,7 +465,7 @@ function PluginRecommendationCard({
 /** Rendered by the settings module as its Plugins tab, for installing, updating and toggling plugins. */
 export default function PluginSettingsTab() {
   const { t } = useTranslation('settings');
-  const { plugins, loading, installPlugin, uninstallPlugin, updatePlugin, togglePlugin } =
+  const { plugins, canManagePlugins, loading, installPlugin, uninstallPlugin, updatePlugin, togglePlugin } =
     usePlugins();
 
   const [gitUrl, setGitUrl] = useState('');
@@ -537,12 +539,12 @@ export default function PluginSettingsTab() {
 
   const officialPlugins = plugins.filter(isOfficialPlugin);
   const otherPlugins = plugins.filter((plugin) => !isOfficialPlugin(plugin));
-  const officialRecommendations = OFFICIAL_PLUGIN_RECOMMENDATIONS.filter(
+  const officialRecommendations = canManagePlugins ? OFFICIAL_PLUGIN_RECOMMENDATIONS.filter(
     (recommendation) => !isRecommendationInstalled(recommendation),
-  );
-  const unofficialRecommendations = UNOFFICIAL_PLUGIN_RECOMMENDATIONS.filter(
+  ) : [];
+  const unofficialRecommendations = canManagePlugins ? UNOFFICIAL_PLUGIN_RECOMMENDATIONS.filter(
     (recommendation) => !isRecommendationInstalled(recommendation),
-  );
+  ) : [];
   const hasOfficialSection = officialPlugins.length > 0 || officialRecommendations.length > 0;
   const hasOtherSection = otherPlugins.length > 0 || unofficialRecommendations.length > 0;
 
@@ -558,6 +560,7 @@ export default function PluginSettingsTab() {
       <PluginCard
         key={plugin.name}
         plugin={plugin}
+        canManage={canManagePlugins}
         index={index}
         onToggle={(enabled) => void handleToggle(enabled)}
         onUpdate={() => void handleUpdate(plugin.name)}
@@ -582,6 +585,7 @@ export default function PluginSettingsTab() {
         </p>
       </div>
 
+      {canManagePlugins && (<>
       {/* Install from Git — compact */}
       <div className="flex items-center gap-0 overflow-hidden rounded-lg border border-border bg-card">
         <span className="flex-shrink-0 pl-3 pr-1 text-muted-foreground/40">
@@ -624,6 +628,8 @@ export default function PluginSettingsTab() {
           {t('pluginSettings.securityWarning')}
         </span>
       </p>
+
+      </>)}
 
       {/* Plugin sections */}
       {loading ? (

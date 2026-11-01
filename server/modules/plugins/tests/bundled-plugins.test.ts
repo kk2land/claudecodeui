@@ -15,10 +15,41 @@ import {
 } from "../bundled-plugins.service.js";
 import { createPluginsService } from "../plugins.service.js";
 
+test("scheduler is unavailable unless explicitly allowed, even with a saved enabled setting", async (t) => {
+  const previousScheduler = process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER;
+  t.after(() => {
+    if (previousScheduler === undefined) delete process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER;
+    else process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER = previousScheduler;
+  });
+  const service = createPluginsService({
+    scanPlugins: getBundledPlugins,
+    readConfig: () => ({ "project-scheduler": { enabled: true } }),
+    getServerPort: () => undefined,
+    startServer: async () => assert.fail("disabled scheduler must not start"),
+    saveConfig: () => assert.fail("disabled scheduler settings must not change"),
+    isServerRunning: () => false,
+    canManagePlugins: () => true,
+  } as unknown as Parameters<typeof createPluginsService>[0]);
+
+  for (const value of [undefined, "", "false", "1", "TRUE"]) {
+    if (value === undefined) delete process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER;
+    else process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER = value;
+
+    assert.deepEqual(service.list().plugins.map((plugin) => plugin.name), ["worker"]);
+    assert.equal(getBundledPlugin(), null);
+    assert.equal(getBundledPluginDirectory("project-scheduler"), null);
+    assert.deepEqual(bundledPluginEnvironment("project-scheduler"), {});
+    assert.deepEqual(bundledPluginHeaders("project-scheduler"), {});
+    await assert.rejects(service.setEnabled("project-scheduler", true), { code: "PLUGIN_NOT_FOUND" });
+    await assert.rejects(service.prepareRpc("project-scheduler"), { code: "PLUGIN_NOT_FOUND" });
+  }
+});
+
 test("bundled metadata is public but launch context and project allowlist are private", (t) => {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), "bundled-cron-"));
   const previousDatabase = process.env.DATABASE_PATH,
-    previousCodex = process.env.CODEX_HOME;
+    previousCodex = process.env.CODEX_HOME,
+    previousScheduler = process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER;
   const sentinelNames = [
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -30,6 +61,7 @@ test("bundled metadata is public but launch context and project allowlist are pr
   const previousSentinels = new Map(sentinelNames.map((name) => [name, process.env[name]]));
   process.env.DATABASE_PATH = path.join(directory, "auth.db");
   process.env.CODEX_HOME = path.join(directory, "codex");
+  process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER = "true";
   for (const name of sentinelNames) process.env[name] = `sentinel-${name.toLowerCase()}`;
   t.mock.method(projectsDb, "getProjectPaths", () => [
     {
@@ -45,6 +77,8 @@ test("bundled metadata is public but launch context and project allowlist are pr
     else process.env.DATABASE_PATH = previousDatabase;
     if (previousCodex === undefined) delete process.env.CODEX_HOME;
     else process.env.CODEX_HOME = previousCodex;
+    if (previousScheduler === undefined) delete process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER;
+    else process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER = previousScheduler;
     for (const [name, value] of previousSentinels) {
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
@@ -113,6 +147,7 @@ test("bundled update/uninstall are rejected before stopping the managed server",
     stopServer: async () => {
       stopped = true;
     },
+    canManagePlugins: () => true,
   } as unknown as Parameters<typeof createPluginsService>[0];
   const service = createPluginsService(dependencies);
   await assert.rejects(

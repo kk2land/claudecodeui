@@ -37,6 +37,15 @@ const installedPlugin: Plugin = {
   repoUrl: 'https://git.example.test/acme/private-demo',
 };
 
+const workerPlugin: Plugin = {
+  ...installedPlugin,
+  name: 'worker',
+  displayName: 'Worker',
+  builtin: true,
+  dirName: 'worker',
+  repoUrl: null,
+};
+
 // `api.plugins.*` calls the global fetch, so stubbing it drives the real
 // PluginsProvider and settings tab without module mocks.
 function stubPluginsApi(replies: Record<string, StubbedReply>) {
@@ -71,7 +80,7 @@ describe('Settings > Plugins shows why a git install or update failed', () => {
 
   it('shows the message of a failed install and keeps the settings view', async () => {
     stubPluginsApi({
-      '/api/plugins': { status: 200, body: { plugins: [] } },
+      '/api/plugins': { status: 200, body: { plugins: [], canManagePlugins: true } },
       '/api/plugins/install': { status: 422, body: envelope('PLUGIN_GIT_AUTH_REQUIRED', AUTH_MESSAGE) },
     });
     renderPluginSettings();
@@ -86,7 +95,7 @@ describe('Settings > Plugins shows why a git install or update failed', () => {
 
   it('shows the message of a failed update on the plugin card', async () => {
     stubPluginsApi({
-      '/api/plugins': { status: 200, body: { plugins: [installedPlugin] } },
+      '/api/plugins': { status: 200, body: { plugins: [installedPlugin], canManagePlugins: true } },
       '/api/plugins/private-demo/update': {
         status: 422,
         body: envelope('PLUGIN_GIT_REPO_NOT_FOUND', UPDATE_MESSAGE),
@@ -98,6 +107,25 @@ describe('Settings > Plugins shows why a git install or update failed', () => {
 
     expect(await screen.findByText(UPDATE_MESSAGE)).toBeTruthy();
     expect(screen.getByText('Private Demo')).toBeTruthy();
+  });
+
+  it('keeps the allowed builtin toggle and hides third-party plugin entry points for a normal role', async () => {
+    stubPluginsApi({
+      // The backend already filters the normal-role catalog; this is its
+      // ordinary response, not an unfiltered list.
+      '/api/plugins': { status: 200, body: { plugins: [workerPlugin], canManagePlugins: false } },
+    });
+    renderPluginSettings();
+
+    expect(await screen.findByText('Worker')).toBeTruthy();
+    expect(screen.getByRole('checkbox', { name: 'Disable Worker' })).toBeTruthy();
+    expect(screen.queryByText('Private Demo')).toBeNull();
+    expect(screen.queryByLabelText('Plugin git repository URL')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Install' })).toBeNull();
+    expect(screen.queryByText('Project Stats')).toBeNull();
+    expect(screen.queryByText('Workspace Scheduled Prompts')).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Pull latest from git' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Uninstall plugin' })).toBeNull();
   });
 });
 
@@ -113,7 +141,7 @@ describe('PluginsContext reads the structured error envelope of every plugin cal
   it('shows the message of a failed uninstall', async () => {
     const message = 'Plugin directory is busy';
     stubPluginsApi({
-      '/api/plugins': { status: 200, body: { plugins: [installedPlugin] } },
+      '/api/plugins': { status: 200, body: { plugins: [installedPlugin], canManagePlugins: true } },
       '/api/plugins/private-demo': { status: 409, body: envelope('PLUGIN_BUSY', message, { path: 'private-demo' }) },
     });
     renderPluginSettings();
@@ -129,7 +157,7 @@ describe('PluginsContext reads the structured error envelope of every plugin cal
   it('shows the message of a failed enable/disable toggle', async () => {
     const message = 'Plugin server could not be stopped';
     stubPluginsApi({
-      '/api/plugins': { status: 200, body: { plugins: [installedPlugin] } },
+      '/api/plugins': { status: 200, body: { plugins: [installedPlugin], canManagePlugins: true } },
       '/api/plugins/private-demo/enable': { status: 500, body: envelope('PLUGIN_STOP_FAILED', message, { pid: 42 }) },
     });
     renderPluginSettings();

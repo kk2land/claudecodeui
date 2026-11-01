@@ -28,6 +28,7 @@ type PluginDependencies = {
   isServerRunning(pluginName: string): boolean;
   joinPath(...parts: string[]): string;
   logError(message: string, error: unknown): void;
+  canManagePlugins(): boolean;
   internalHeaders?(pluginName: string): Record<string, string>;
 };
 
@@ -56,6 +57,14 @@ function normalizePluginManifest(value: unknown): PluginManifest {
 
 /** Creates plugin-management workflows around loader and process adapters. */
 export function createPluginsService(dependencies: PluginDependencies) {
+  function assertCanManagePlugins(): void {
+    if (dependencies.canManagePlugins()) return;
+    throw new AppError('Plugin management is restricted to the super instance role', {
+      code: 'PLUGIN_MANAGEMENT_FORBIDDEN',
+      statusCode: 403,
+    });
+  }
+
   async function startServerIfAvailable(plugin: PluginManifest): Promise<void> {
     if (!plugin.server || dependencies.isServerRunning(plugin.name)) return;
     const pluginDirectory = dependencies.getPluginDirectory(plugin.name);
@@ -74,6 +83,7 @@ export function createPluginsService(dependencies: PluginDependencies) {
           ...plugin,
           serverRunning: plugin.server ? dependencies.isServerRunning(plugin.name) : false,
         })),
+        canManagePlugins: dependencies.canManagePlugins(),
       };
     },
     getManifest(pluginName: string) {
@@ -107,6 +117,7 @@ export function createPluginsService(dependencies: PluginDependencies) {
       return { success: true, name: pluginName, enabled };
     },
     async install(urlInput: unknown) {
+      assertCanManagePlugins();
       const url = typeof urlInput === 'string' ? urlInput.trim() : '';
       if (!url || (!url.startsWith('https://') && !url.startsWith('git@'))) {
         throw new AppError('URL must start with https:// or git@', { code: 'INVALID_PLUGIN_URL', statusCode: 400 });
@@ -117,6 +128,7 @@ export function createPluginsService(dependencies: PluginDependencies) {
     },
     async update(pluginName: string) {
       validatePluginName(pluginName);
+      assertCanManagePlugins();
       if (this.getManifest(pluginName).builtin) throw new AppError('Bundled plugins are updated with CloudCLI', { code: 'BUNDLED_PLUGIN_MANAGED', statusCode: 400 });
       const wasRunning = dependencies.isServerRunning(pluginName);
       if (wasRunning) await dependencies.stopServer(pluginName);
@@ -156,6 +168,7 @@ export function createPluginsService(dependencies: PluginDependencies) {
     },
     async uninstall(pluginName: string) {
       validatePluginName(pluginName);
+      assertCanManagePlugins();
       if (this.getManifest(pluginName).builtin) throw new AppError('Bundled plugins can be disabled, not uninstalled', { code: 'BUNDLED_PLUGIN_MANAGED', statusCode: 400 });
       if (dependencies.isServerRunning(pluginName)) await dependencies.stopServer(pluginName);
       await dependencies.uninstall(pluginName);

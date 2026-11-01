@@ -25,11 +25,14 @@ const fixtureHome = await mkdtemp(path.join(os.tmpdir(), 'plugin-git-home-'));
 const gitConfigPath = path.join(fixtureHome, 'gitconfig');
 await writeFile(gitConfigPath, '');
 const savedEnvironment = Object.fromEntries(
-  ['HOME', 'USERPROFILE', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'SSH_ASKPASS']
+  ['HOME', 'USERPROFILE', 'GIT_CONFIG_GLOBAL', 'GIT_CONFIG_NOSYSTEM', 'GIT_TERMINAL_PROMPT', 'GIT_ASKPASS', 'SSH_ASKPASS', 'CLOUDCLI_ROLE']
     .map((name) => [name, process.env[name]]),
 );
 process.env.HOME = fixtureHome;
 process.env.USERPROFILE = fixtureHome;
+// These fixtures drive management routes and update an installed plugin, so
+// they run as the super role instead of relaxing the normal-role defaults.
+process.env.CLOUDCLI_ROLE = 'super';
 process.env.GIT_CONFIG_GLOBAL = gitConfigPath;
 process.env.GIT_CONFIG_NOSYSTEM = '1';
 delete process.env.GIT_TERMINAL_PROMPT;

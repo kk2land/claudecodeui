@@ -15,7 +15,7 @@ function dependencies(overrides: Partial<Dependencies> = {}): Dependencies {
     uninstall: async () => undefined, startServer: async () => 4000,
     stopServer: async () => undefined, getServerPort: () => undefined,
     isServerRunning: () => false, joinPath: (...parts) => parts.join('/'),
-    logError: () => undefined, ...overrides,
+    logError: () => undefined, canManagePlugins: () => true, ...overrides,
   };
 }
 

@@ -7,6 +7,8 @@ import type { Plugin } from '@/shared/types';
 
 type PluginsContextValue = {
   plugins: Plugin[];
+  /** Whether this instance may install, update or uninstall third-party plugins; only the super role can. Allowed plugins stay toggleable for every role. */
+  canManagePlugins: boolean;
   loading: boolean;
   pluginsError: string | null;
   refreshPlugins: () => Promise<void>;
@@ -29,6 +31,9 @@ export function usePlugins() {
 /** Mounted by the app root so the plugins and project-workspace modules can read and mutate installed plugins through usePlugins. */
 export function PluginsProvider({ children }: { children: ReactNode }) {
   const [plugins, setPlugins] = useState<Plugin[]>([]);
+  // Server-reported instance capability; third-party management controls stay
+  // hidden unless the list endpoint says the super role is active.
+  const [canManagePlugins, setCanManagePlugins] = useState(false);
   const [loading, setLoading] = useState(true);
   const [pluginsError, setPluginsError] = useState<string | null>(null);
 
@@ -38,6 +43,7 @@ export function PluginsProvider({ children }: { children: ReactNode }) {
       if (res.ok) {
         const data = await res.json();
         setPlugins(data.plugins || []);
+        setCanManagePlugins(data.canManagePlugins === true);
         setPluginsError(null);
       } else {
         let errorMessage = `Failed to fetch plugins (${res.status})`;
@@ -128,8 +134,8 @@ export function PluginsProvider({ children }: { children: ReactNode }) {
   // Built once per change: an inline object would re-render every consumer on
   // any render of this provider.
   const value = useMemo(
-    () => ({ plugins, loading, pluginsError, refreshPlugins, installPlugin, uninstallPlugin, updatePlugin, togglePlugin }),
-    [installPlugin, loading, plugins, pluginsError, refreshPlugins, togglePlugin, uninstallPlugin, updatePlugin],
+    () => ({ plugins, canManagePlugins, loading, pluginsError, refreshPlugins, installPlugin, uninstallPlugin, updatePlugin, togglePlugin }),
+    [canManagePlugins, installPlugin, loading, plugins, pluginsError, refreshPlugins, togglePlugin, uninstallPlugin, updatePlugin],
   );
 
   return (

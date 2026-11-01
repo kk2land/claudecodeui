@@ -13,6 +13,7 @@ import {
 import { createPluginsRouter } from './plugins.routes.js';
 import { createPluginsService } from './plugins.service.js';
 import { bundledPluginHeaders } from './bundled-plugins.service.js';
+import { isSuperPluginRole } from './plugin-access.service.js';
 
 const pluginsService = createPluginsService({
   scanPlugins, readConfig: getPluginsConfig, saveConfig: savePluginsConfig,
@@ -28,6 +29,7 @@ const pluginsService = createPluginsService({
   getServerPort: getPluginPort, isServerRunning: isPluginRunning,
   joinPath: path.join,
   logError: (message, error) => console.error(message, error),
+  canManagePlugins: isSuperPluginRole,
   internalHeaders: bundledPluginHeaders,
 });
 

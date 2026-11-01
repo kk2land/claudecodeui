@@ -5,6 +5,7 @@ import path from 'path';
 import spawn from 'cross-spawn';
 
 import { scanPlugins, getPluginsConfig, getPluginDir } from './plugin-registry.service.js';
+import { isPluginAllowedForRole } from './plugin-access.service.js';
 import { bundledPluginEnvironment, isBundledPlugin, syncBundledPluginContext } from './bundled-plugins.service.js';
 
 // Map<pluginName, { process, port }>
@@ -250,6 +251,7 @@ export function stopPluginServer(name) {
  * Get the port a running plugin server is listening on.
  */
 export function getPluginPort(name) {
+  if (!isPluginAllowedForRole(name)) return null;
   return runningPlugins.get(name)?.port ?? null;
 }
 
@@ -289,7 +291,7 @@ function scheduleRestart(name, directory, entry, delay = 1000) {
 
 /** Used by the Worker bridge and MCP proxy to honor the user's plugin enable switch. */
 export function isPluginEnabled(name) {
-  return getPluginsConfig()[name]?.enabled !== false;
+  return isPluginAllowedForRole(name) && getPluginsConfig()[name]?.enabled !== false;
 }
 
 /**

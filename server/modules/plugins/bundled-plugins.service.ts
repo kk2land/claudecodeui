@@ -51,6 +51,7 @@ type BundledManifest = Record<string, unknown> & {
 };
 
 function readBundledManifest(name: string, directory: string): BundledManifest | null {
+  if (name === "project-scheduler" && process.env.CLOUDCLI_ENABLE_PROJECT_SCHEDULER !== "true") return null;
   try {
     const manifest = JSON.parse(
       fs.readFileSync(path.join(directory, "manifest.json"), "utf8"),
@@ -67,7 +68,7 @@ function readBundledManifest(name: string, directory: string): BundledManifest |
   }
 }
 
-/** Used by the registry to expose every packaged builtin without copying code into a user's plugin directory. */
+/** Used by the registry to expose available packaged builtins without copying code into a user's plugin directory. */
 export function getBundledPlugins(): BundledManifest[] {
   return BUNDLED_PLUGINS.flatMap((entry) => readBundledManifest(entry.name, entry.directory) ?? []);
 }

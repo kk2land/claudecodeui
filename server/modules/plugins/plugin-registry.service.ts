@@ -6,6 +6,7 @@ import os from 'os';
 import { spawn } from 'cross-spawn';
 
 import { getBundledPlugins, getBundledPluginDirectory } from './bundled-plugins.service.js';
+import { isPluginAllowedForRole } from './plugin-access.service.js';
 import {
   createPluginGitError, createPluginGitSpawnError, getPluginGitSpawnOptions, stopPluginGitOnServerExit,
 } from './plugin-git.service.js';
@@ -149,9 +150,10 @@ function runBuildIfNeeded(dir, packageJsonPath, onSuccess, onError) {
   });
 }
 
-export function scanPlugins() {
-  const pluginsDir = getPluginsDir();
-  const config = getPluginsConfig();
+export function scanPlugins(
+  pluginsDir = getPluginsDir(),
+  config = getPluginsConfig(),
+) {
   const plugins = [];
 
   let entries;
@@ -163,6 +165,7 @@ export function scanPlugins() {
 
   const seenNames = new Set();
   for (const bundled of getBundledPlugins()) {
+    if (!isPluginAllowedForRole(bundled.name)) continue;
     plugins.push({ ...bundled, permissions: [], enabled: config[bundled.name]?.enabled !== false });
     seenNames.add(bundled.name);
   }
@@ -182,6 +185,7 @@ export function scanPlugins() {
         console.warn(`[Plugins] Skipping ${entry.name}: ${validation.error}`);
         continue;
       }
+      if (!isPluginAllowedForRole(manifest.name)) continue;
 
       // Skip duplicate manifest names
       if (seenNames.has(manifest.name)) {
@@ -234,6 +238,7 @@ export function scanPlugins() {
 }
 
 export function getPluginDir(name) {
+  if (!isPluginAllowedForRole(name)) return null;
   const bundled = getBundledPluginDirectory(name);
   if (bundled) return bundled;
   const plugins = scanPlugins();
