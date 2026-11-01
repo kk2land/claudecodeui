@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { ProjectScheduler } from "../server/scheduler.js";
 import { SchedulerStore } from "../server/store.js";
+import { TelegramNotifier } from "../server/telegram.js";
 import { appendLog, readLog } from "../server/logs.js";
 import {
   parseTasks,
@@ -130,7 +131,7 @@ test("stdout/stderr are captured separately and stderr does not imply failure", 
   assert.match(f.scheduler.log(run.id, "stderr", 0).text, /diagnostic/);
 });
 
-test("agent zero exit without a final event records success and no failure alert", async (t) => {
+test("prompt zero exit without a final event records an unconfirmed result and an alert", async (t) => {
   const f = fixture(t);
   f.store.saveSettings({
     ...f.store.settings(),
@@ -167,10 +168,67 @@ test("agent zero exit without a final event records success and no failure alert
     () => f.store.run(run.id),
     (run) => Boolean(run?.endedAt),
   );
-  assert.equal(done?.status, "success");
+  assert.equal(done?.status, "failed");
   assert.equal(done?.exitCode, 0);
-  assert.equal(done?.alertStatus, "none");
+  assert.equal(done?.alertStatus, "pending");
+  assert.match(done?.reason ?? "", /结果未确认/);
   assert.match(f.scheduler.log(run.id, "stdout", 0).text, /answer/);
+});
+
+test("prompt task results persist with the real zero exit code and drive Telegram delivery", async (t) => {
+  const f = fixture(t);
+  f.store.saveSettings({
+    ...f.store.settings(),
+    telegram: { enabled: true, botToken: "123:test", chatId: "1", proxy: "" },
+  });
+  const bin = path.join(f.root, "dsh");
+  const previous = process.env.CLOUDCLI_DSH_BIN;
+  const previousPatches = process.env.CLOUDCLI_DSH_PATCHES;
+  process.env.CLOUDCLI_DSH_BIN = bin;
+  process.env.CLOUDCLI_DSH_PATCHES = "[]";
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLOUDCLI_DSH_BIN;
+    else process.env.CLOUDCLI_DSH_BIN = previous;
+    if (previousPatches === undefined) delete process.env.CLOUDCLI_DSH_PATCHES;
+    else process.env.CLOUDCLI_DSH_PATCHES = previousPatches;
+  });
+  const scenarios = [
+    { id: "completed", text: '{"status":"success","summary":"报告已生成"}', kind: "completed", success: true },
+    { id: "task-failed", text: '{"status":"failed","summary":"接口权限不足"}', kind: "completed", success: false },
+    { id: "agent-failed", text: '{"status":"success","summary":"报告已生成"}', kind: "error", success: false },
+    { id: "unconfirmed", text: "无法确认结果", kind: "completed", success: false },
+  ];
+  f.config(scenarios.map(({ id }) => ({
+    id, type: "prompt", cron: "0 0 0 1 1 *", prompt: "生成并验收报告",
+    agent: { provider: "dsh", model: "default" },
+  })));
+  f.scheduler.load(undefined, false, true);
+  const messages: string[] = [];
+  const notifier = new TelegramNotifier(f.store, async (_settings, message) => { messages.push(message); });
+  for (const scenario of scenarios) {
+    const event = { type: "final", text: scenario.text, reason: { kind: scenario.kind } };
+    fs.writeFileSync(bin,
+      '#!/usr/bin/env node\nrequire("fs").readFileSync(0,"utf8");console.log(' + JSON.stringify(JSON.stringify(event)) + ');',
+      { mode: 0o700 });
+    const started = f.scheduler.start("p1", scenario.id, "manual");
+    const run = await waitFor(() => f.store.run(started.id), (run) => Boolean(run?.endedAt));
+    assert.equal(run?.status, scenario.success ? "success" : "failed");
+    assert.equal(run?.exitCode, 0);
+    assert.equal(run?.alertStatus, scenario.success ? "none" : "pending");
+    if (scenario.id === "unconfirmed") {
+      assert.equal(run?.taskResult, undefined);
+      assert.match(run?.reason ?? "", /结果未确认/);
+    } else assert.deepEqual(run?.taskResult, JSON.parse(scenario.text));
+    assert.deepEqual(f.store.definitions().find((row) => row.taskId === scenario.id)?.lastRun?.taskResult, run?.taskResult);
+    const before = messages.length;
+    await notifier.flush();
+    assert.equal(messages.length, before + (scenario.success ? 0 : 1));
+    if (!scenario.success) {
+      assert.match(messages.at(-1)!, /退出码：0/);
+      assert.ok(messages.at(-1)!.includes(run!.reason!));
+      assert.equal(f.store.run(started.id)?.alertStatus, "sent");
+    }
+  }
 });
 
 test("timeout kills an execution and records a distinct terminal result", async (t) => {
@@ -668,7 +726,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   const dsh = path.join(root, "dsh");
   fs.writeFileSync(
     dsh,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"final",text:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH,reason:{kind:"completed"}})));',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH}),reason:{kind:"completed"}})));',
     { mode: 0o700 },
   );
   const script =
@@ -727,7 +785,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   });
   scheduler.load(undefined, false, true);
   const scriptRun = scheduler.start("p", "script", "manual");
-  await wait(scriptRun.id);
+  assert.equal((await wait(scriptRun.id))?.status, "success");
   // Script, its AGENT_EXEC child, and the prompt all see the global value; task.env wins for BOTH.
   assert.match(
     scheduler.log(scriptRun.id, "stdout", 0).text,
@@ -735,7 +793,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   );
   // DSH prompt tasks receive the same global variables, and their task env wins.
   const promptRun = scheduler.start("p", "prompt", "manual");
-  await wait(promptRun.id);
+  assert.equal((await wait(promptRun.id))?.status, "success");
   assert.match(
     scheduler.log(promptRun.id, "stdout", 0).text,
     /dsh:global-1\/task-prompt/,
@@ -746,7 +804,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
     env: { GLOBAL_ONLY: "global-2", BOTH: "global" },
   });
   const next = scheduler.start("p", "prompt", "manual");
-  await wait(next.id);
+  assert.equal((await wait(next.id))?.status, "success");
   assert.match(
     scheduler.log(next.id, "stdout", 0).text,
     /dsh:global-2\/task-prompt/,

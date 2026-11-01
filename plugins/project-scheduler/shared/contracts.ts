@@ -79,6 +79,15 @@ export type SchedulerTask = {
   notify: boolean;
 };
 /**
+ * Final result reported by a prompt task and validated by the agent boundary. The worker and
+ * scheduler persist it for the run detail view; it describes the task outcome independently of
+ * the native process exit code. A reported success does not override a process or agent failure.
+ */
+export type SchedulerTaskResult = {
+  status: "success" | "failed";
+  summary: string;
+};
+/**
  * Provider-reported token totals for one scheduler run, summed across every agent invocation the
  * run made (a prompt plus any script `AGENT_EXEC` calls). A metric is `null` when no invocation
  * reported it, so unknown is never displayed as zero. Cache semantics differ per provider:
@@ -116,6 +125,8 @@ export type SchedulerRun = {
   workerPid: number | null;
   /** Absent on runs recorded before usage accounting, and on runs without any agent call. */
   usage?: SchedulerTokenUsage | null;
+  /** Absent on legacy runs, script runs, and prompt runs without a valid final task result. */
+  taskResult?: SchedulerTaskResult;
   alertStatus: "none" | "pending" | "sent" | "failed";
   alertError: string | null;
   alertAttempts: number;

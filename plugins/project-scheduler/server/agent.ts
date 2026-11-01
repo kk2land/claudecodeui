@@ -6,7 +6,11 @@ import { StringDecoder } from "node:string_decoder";
 import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import spawn from "cross-spawn";
-import type { SchedulerAgent, SchedulerTokenUsage } from "../shared/contracts.js";
+import type {
+  SchedulerAgent,
+  SchedulerTaskResult,
+  SchedulerTokenUsage,
+} from "../shared/contracts.js";
 import { USAGE_DIRECTORY_ENV, UsageAccumulator, UsageSidecar } from "./usage.js";
 
 /** Used by prompt workers and AGENT_EXEC; resolves the host dependency rather than a global CLI. */
@@ -79,9 +83,9 @@ export function resolveCodexBinary(
 }
 
 /**
- * Used by both execution entrypoints to normalize streamed provider output and decide the run
- * result from the process exit status. Events are output and failure diagnostics only; they must
- * not turn a normal zero exit into a failure.
+ * Used by prompt workers and AGENT_EXEC to normalize streamed provider output. Prompt workers
+ * require a successful agent terminal event and a valid final task result as well as a zero exit.
+ * AGENT_EXEC keeps its process-exit policy and free-form output unless explicitly opted in.
  */
 export async function runAgent(
   agent: SchedulerAgent,
@@ -95,12 +99,13 @@ export async function runAgent(
     /** Called with the invocation totals whenever more provider usage has been observed. */
     usage?(usage: SchedulerTokenUsage | null): void;
   },
-  isolated = true,
+  options: { isolated?: boolean; requireTaskResult?: boolean } = {},
 ): Promise<{
   code: number | null;
   success: boolean;
   reason?: string;
   usage: SchedulerTokenUsage | null;
+  taskResult?: SchedulerTaskResult;
 }> {
   const accumulator = new UsageAccumulator();
   // AGENT_EXEC inherits this directory from the worker, so every invocation gets its own sidecar.
@@ -190,16 +195,18 @@ export async function runAgent(
     const child = spawn(command, args, {
       cwd,
       env,
-      detached: isolated && process.platform !== "win32",
+      detached: options.isolated !== false && process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe"],
     });
     output.child(child);
     const decoder = new StringDecoder("utf8");
     const stderrDecoder = new StringDecoder("utf8");
-    // A spawn failure or an intentionally aborted oversized event must stay a failure even if the
-    // process happens to exit zero. Event errors are diagnostics for non-zero exits only.
+    // Terminal events determine prompt outcomes; intermediate errors remain diagnostics because
+    // the agent can recover from a failed tool call or request before completing the task.
     let internalFault: string | undefined,
       eventReason: string | undefined,
+      terminal: { success: boolean; reason?: string } | undefined,
+      finalText: string | undefined,
       buffer = "",
       lastDshText = "";
     const printed = new Map<string, { length: number; digest: string }>();
@@ -234,13 +241,20 @@ export async function runAgent(
         )
           publish();
         if (agent.provider === "codex") {
+          if (event.type === "turn.started") {
+            terminal = undefined;
+            finalText = undefined;
+          }
           if (event.item) {
             emitCodexText(event.item as Record<string, unknown>);
             if (
               event.type === "item.completed" &&
               event.item.type === "agent_message"
-            )
+            ) {
+              finalText =
+                typeof event.item.text === "string" ? event.item.text : undefined;
               output.stdout("\n");
+            }
             if (
               event.type === "item.started" &&
               event.item.type === "command_execution"
@@ -257,6 +271,9 @@ export async function runAgent(
             eventReason = String(
               event.error?.message ?? event.message ?? "Codex 执行失败",
             );
+          if (event.type === "turn.failed")
+            terminal = { success: false, reason: eventReason };
+          if (event.type === "turn.completed") terminal = { success: true };
         } else {
           if (event.type === "text" && typeof event.text === "string") {
             output.stdout(event.text + "\n");
@@ -269,6 +286,7 @@ export async function runAgent(
               "[" + event.type + "] " + JSON.stringify(event) + "\n",
             );
           if (event.type === "final") {
+            finalText = typeof event.text === "string" ? event.text : undefined;
             if (typeof event.text === "string" && event.text !== lastDshText)
               output.stdout(
                 (lastDshText && event.text.startsWith(lastDshText)
@@ -277,8 +295,14 @@ export async function runAgent(
               );
             if (event.reason?.kind !== "completed")
               eventReason = String(
-                event.reason?.kind ?? "DSH 缺少成功结束原因",
+                event.reason?.error?.message ??
+                event.reason?.kind ??
+                "DSH 缺少成功结束原因",
               );
+            terminal = {
+              success: event.reason?.kind === "completed",
+              reason: event.reason?.kind === "completed" ? undefined : eventReason,
+            };
           }
           if (event.type === "error")
             eventReason = String(event.message ?? "DSH 执行失败");
@@ -307,7 +331,18 @@ export async function runAgent(
     child.stdin?.on("error", () => {
       /* close/error below determines the run result */
     });
-    child.stdin?.end(prompt);
+    child.stdin?.end(
+      options.requireTaskResult
+        ? `${prompt}
+
+[定时任务结果约定]
+完成任务并核对原提示词中的验收条件后，最终答复必须仅输出一个 JSON 对象，不要加 Markdown 代码围栏或其他文字：
+{"status":"success","summary":"实际完成的任务与验收结果"}
+status 只能是 success 或 failed，summary 必须是非空字符串。
+只有任务目标和验收条件全部完成才能报告 success；权限不足、部分完成、无法验证或需要人工处理时报告 failed，并在 summary 中说明原因。
+进程正常结束不代表任务已完成。`
+        : prompt,
+    );
     const code = await new Promise<number | null>((resolve) => {
       child.once("error", (error) => {
         internalFault = error.message;
@@ -318,16 +353,59 @@ export async function runAgent(
     if (tail) line(tail);
     const stderrTail = stderrDecoder.end();
     if (stderrTail) output.stderr(stderrTail);
-    // The exit status is authoritative: a normal zero exit succeeds even without a terminal
-    // event, while null or non-zero exits fail with the streamed event reason when available.
-    if (internalFault) return { code, success: false, reason: internalFault, usage: reported };
-    if (code === 0) return { code, success: true, usage: reported };
-    return {
-      code,
-      success: false,
-      reason: eventReason ?? "Agent 进程未以退出码 0 结束",
-      usage: reported,
-    };
+    let taskResult: SchedulerTaskResult | undefined;
+    let resultError = "结果未确认：未收到 Agent 最终任务结果";
+    if (options.requireTaskResult && finalText !== undefined) {
+      // This is the only validation of the model's result; IPC and storage carry the typed value.
+      try {
+        const value: unknown = JSON.parse(finalText);
+        if (
+          value &&
+          typeof value === "object" &&
+          "status" in value &&
+          (value.status === "success" || value.status === "failed") &&
+          "summary" in value &&
+          typeof value.summary === "string" &&
+          value.summary.trim()
+        )
+          taskResult = { status: value.status, summary: value.summary.trim() };
+        else
+          resultError = "结果未确认：任务结果必须包含 success/failed 状态和非空 summary";
+      } catch {
+        resultError = "结果未确认：Agent 最终答复不是有效的任务结果 JSON";
+      }
+    }
+    const details = { code, usage: reported, ...(taskResult ? { taskResult } : {}) };
+    if (internalFault)
+      return { ...details, success: false, reason: internalFault };
+    if (code !== 0)
+      return {
+        ...details,
+        success: false,
+        reason: eventReason ?? "Agent 进程未以退出码 0 结束",
+      };
+    if (options.requireTaskResult) {
+      if (!terminal)
+        return {
+          ...details,
+          success: false,
+          reason: "结果未确认：未收到 Agent 结束状态",
+        };
+      if (!terminal.success)
+        return {
+          ...details,
+          success: false,
+          reason: "Agent 执行失败：" + terminal.reason,
+        };
+      if (!taskResult) return { ...details, success: false, reason: resultError };
+      if (taskResult.status === "failed")
+        return {
+          ...details,
+          success: false,
+          reason: "任务未完成：" + taskResult.summary,
+        };
+    }
+    return { ...details, success: true };
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });
   }

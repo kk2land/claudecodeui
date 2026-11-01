@@ -6,7 +6,7 @@ import path from "node:path";
 import { runAgent, resolveCodexBinary } from "../server/agent.js";
 import { TelegramNotifier } from "../server/telegram.js";
 import { SchedulerStore } from "../server/store.js";
-import type { SchedulerAgent, SchedulerRun } from "../shared/contracts.js";
+import type { SchedulerAgent, SchedulerRun, SchedulerTaskResult } from "../shared/contracts.js";
 
 function environment(t: TestContext, changes: Record<string, string>): void {
   const before = Object.fromEntries(
@@ -42,7 +42,11 @@ function fakeCodex(directory: string, code: string): string {
   fs.writeFileSync(bin, "#!/usr/bin/env node\n" + code, { mode: 0o700 });
   return bin;
 }
-async function execute(agent: SchedulerAgent, cwd: string) {
+async function execute(
+  agent: SchedulerAgent,
+  cwd: string,
+  options: Parameters<typeof runAgent>[4] = {},
+) {
   let stdout = "",
     stderr = "",
     events = "";
@@ -57,7 +61,7 @@ async function execute(agent: SchedulerAgent, cwd: string) {
       events += text;
     },
     child: () => {},
-  });
+  }, options);
   return { ...result, stdout, stderr, events };
 }
 
@@ -254,6 +258,91 @@ test("a spawn failure fails with the spawn error", async (t) => {
   assert.notEqual(result.code, 0);
   assert.equal(result.success, false);
   assert.ok(result.reason);
+});
+
+test("prompt outcomes require a successful terminal event and the final task report", async (t) => {
+  const completed: SchedulerTaskResult = { status: "success", summary: "日报已生成并核对日期" };
+  const failed: SchedulerTaskResult = { status: "failed", summary: "目标接口权限不足，日报未生成" };
+  const cases: Array<{
+    name: string;
+    text?: string;
+    terminal: "completed" | "failed" | "missing";
+    code?: number;
+    recovered?: boolean;
+    previousReport?: boolean;
+    success: boolean;
+    reason?: RegExp;
+    taskResult?: SchedulerTaskResult;
+  }> = [
+    { name: "completed", text: JSON.stringify(completed), terminal: "completed", success: true, taskResult: completed },
+    { name: "task-failed", text: JSON.stringify(failed), terminal: "completed", success: false, reason: /任务未完成：目标接口权限不足/, taskResult: failed },
+    { name: "agent-failed", text: JSON.stringify(completed), terminal: "failed", success: false, reason: /Agent 执行失败：request failed/, taskResult: completed },
+    { name: "nonzero", text: JSON.stringify(completed), terminal: "completed", code: 3, success: false, reason: /未以退出码 0 结束/, taskResult: completed },
+    { name: "missing-terminal", text: JSON.stringify(completed), terminal: "missing", success: false, reason: /结果未确认：未收到 Agent 结束状态/, taskResult: completed },
+    { name: "missing-report", terminal: "completed", success: false, reason: /结果未确认：未收到 Agent 最终任务结果/ },
+    { name: "invalid-json", text: "权限不足，无法完成", terminal: "completed", success: false, reason: /结果未确认：.*JSON/ },
+    { name: "invalid-status", text: '{"status":"maybe","summary":"不确定"}', terminal: "completed", success: false, reason: /结果未确认：.*状态/ },
+    { name: "missing-summary", text: '{"status":"success"}', terminal: "completed", success: false, reason: /结果未确认：.*summary/ },
+    { name: "blank-summary", text: '{"status":"success","summary":"  "}', terminal: "completed", success: false, reason: /结果未确认：.*summary/ },
+    { name: "array-report", text: '[{"status":"success","summary":"done"}]', terminal: "completed", success: false, reason: /结果未确认：/ },
+    { name: "last-report-wins", previousReport: true, text: JSON.stringify(failed), terminal: "completed", success: false, reason: /任务未完成：/, taskResult: failed },
+    { name: "earlier-report-is-not-final", previousReport: true, text: "最终无法完成", terminal: "completed", success: false, reason: /结果未确认：/ },
+    { name: "recovered-tool-error", recovered: true, text: JSON.stringify(completed), terminal: "completed", success: true, taskResult: completed },
+  ];
+  for (const provider of ["codex", "dsh"] as const) {
+    for (const scenario of cases) {
+      await t.test(provider + ": " + scenario.name, async (t) => {
+        const directory = fixture(t);
+        const events: object[] = [];
+        if (provider === "codex") {
+          events.push({ type: "turn.started" });
+          if (scenario.previousReport)
+            events.push({ type: "item.completed", item: { id: "previous", type: "agent_message", text: JSON.stringify(completed) } });
+          if (scenario.recovered) events.push(
+            { type: "error", message: "temporary request error, recovered" },
+            { type: "item.completed", item: { type: "command_execution", exit_code: 1, aggregated_output: "retry" } },
+          );
+          events.push({ type: "item.completed", item: { id: "final", type: "agent_message", text: scenario.text } });
+          if (scenario.terminal !== "missing")
+            events.push(scenario.terminal === "completed"
+              ? { type: "turn.completed" }
+              : { type: "turn.failed", error: { message: "request failed" } });
+        } else {
+          if (scenario.previousReport) events.push({ type: "text", text: JSON.stringify(completed) });
+          if (scenario.recovered) events.push(
+            { type: "error", message: "temporary request error, recovered" },
+            { type: "tool_result", isError: true, content: "retry" },
+          );
+          if (scenario.terminal !== "missing")
+            events.push({ type: "final", text: scenario.text, reason: scenario.terminal === "completed"
+              ? { kind: "completed" }
+              : { kind: "error", error: { message: "request failed", code: "REQUEST_FAILED" } } });
+          else events.push({ type: "text", text: scenario.text });
+        }
+        const script = 'const fs=require("fs");fs.writeFileSync("prompt.txt",fs.readFileSync(0,"utf8"));' +
+          "process.stdout.write(" + JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n") + ");" +
+          "process.exitCode=" + (scenario.code ?? 0);
+        if (provider === "codex") {
+          fakeCodex(directory, script);
+          environment(t, { CLOUDCLI_HOST_ROOT: directory });
+        } else {
+          const bin = path.join(directory, "dsh");
+          fs.writeFileSync(bin, "#!/usr/bin/env node\n" + script, { mode: 0o700 });
+          environment(t, { CLOUDCLI_DSH_BIN: bin, CLOUDCLI_DSH_PATCHES: "[]" });
+        }
+        const result = await execute({ provider, model: "default" }, directory, { requireTaskResult: true });
+        assert.equal(result.code, scenario.code ?? 0);
+        assert.equal(result.success, scenario.success);
+        assert.deepEqual(result.taskResult,
+          provider === "dsh" && scenario.terminal === "missing" ? undefined : scenario.taskResult);
+        if (scenario.reason) assert.match(result.reason ?? "", scenario.reason);
+        else assert.equal(result.reason, undefined);
+        const prompt = fs.readFileSync(path.join(directory, "prompt.txt"), "utf8");
+        assert.match(prompt, /quotes: " \$HOME ;/);
+        assert.match(prompt, /\[定时任务结果约定\]/);
+      });
+    }
+  }
 });
 
 test("notification outbox retries only delivery and persists its terminal result", async (t) => {

@@ -12,7 +12,11 @@ import {
   sameUsage,
   usageDirectory,
 } from "./usage.js";
-import type { SchedulerTask, SchedulerTokenUsage } from "../shared/contracts.js";
+import type {
+  SchedulerTask,
+  SchedulerTaskResult,
+  SchedulerTokenUsage,
+} from "../shared/contracts.js";
 
 let child: ChildProcess | undefined,
   killTimer: NodeJS.Timeout | undefined,
@@ -114,17 +118,28 @@ process.on(
           process.send?.({ type: "child", pid: child.pid });
         if (stopping) stop();
       };
-      let result: { code: number | null; success: boolean; reason?: string };
+      let result: {
+        code: number | null;
+        success: boolean;
+        reason?: string;
+        taskResult?: SchedulerTaskResult;
+      };
       if (task.type === "prompt")
-        result = await runAgent(task.agent, task.prompt!, task.cwd, {
-          stdout: (text) => projectOutput("stdout", text),
-          stderr: (text) => projectOutput("stderr", text),
-          event: (text) => {
-            appendLog(message.directory!, "events", Buffer.from(text));
+        result = await runAgent(
+          task.agent,
+          task.prompt!,
+          task.cwd,
+          {
+            stdout: (text) => projectOutput("stdout", text),
+            stderr: (text) => projectOutput("stderr", text),
+            event: (text) => {
+              appendLog(message.directory!, "events", Buffer.from(text));
+            },
+            child: onChild,
+            usage: publishUsage,
           },
-          child: onChild,
-          usage: publishUsage,
-        });
+          { requireTaskResult: true },
+        );
       else {
         onChild(
           spawn(task.command!, task.args, {

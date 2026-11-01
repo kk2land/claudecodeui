@@ -27,6 +27,7 @@ import type {
   SchedulerProject,
   SchedulerRun,
   SchedulerTask,
+  SchedulerTaskResult,
 } from "../shared/contracts.js";
 
 function alive(pid: number | null): boolean {
@@ -390,7 +391,12 @@ export class ProjectScheduler {
     item.run.workerPid = worker.pid ?? null;
     this.store.saveRun(item.run);
     let result:
-      | { code: number | null; success: boolean; reason?: string }
+      | {
+          code: number | null;
+          success: boolean;
+          reason?: string;
+          taskResult?: SchedulerTaskResult;
+        }
       | undefined;
     let spawnError: string | undefined;
     worker.stdout?.on("data", (chunk: Buffer) => {
@@ -418,6 +424,7 @@ export class ProjectScheduler {
         success: boolean;
         reason?: string;
         usage?: unknown;
+        taskResult?: SchedulerTaskResult;
       }) => {
         if (message.type === "child") item.commandPid = message.pid;
         if (message.type === "result") result = message;
@@ -443,6 +450,7 @@ export class ProjectScheduler {
         spawnError ??
           result?.reason ??
           (result ? undefined : "运行 worker 意外退出"),
+        result?.taskResult,
       );
       item.finish?.();
     });
@@ -464,6 +472,7 @@ export class ProjectScheduler {
     code: number | null,
     success: boolean,
     reason?: string,
+    taskResult?: SchedulerTaskResult,
   ): void {
     // A worker may crash during its grace period; do not cancel the host fallback
     // until the remaining command group has also received the forced stop.
@@ -473,6 +482,7 @@ export class ProjectScheduler {
     this.active.delete(item.run.id);
     item.run.status = item.stopped ?? (success ? "success" : "failed");
     item.run.exitCode = code;
+    if (taskResult) item.run.taskResult = taskResult;
     item.run.endedAt = new Date().toISOString();
     item.run.reason =
       item.stopped === "timed_out"

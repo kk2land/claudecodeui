@@ -24,7 +24,7 @@ try {
       event: () => {},
       child: () => {},
     },
-    false,
+    { isolated: false },
   );
   if (!result.success && result.reason)
     process.stderr.write(result.reason + "\n");

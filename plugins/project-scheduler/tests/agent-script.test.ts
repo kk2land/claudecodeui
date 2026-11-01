@@ -98,6 +98,7 @@ test("run usage aggregates prompt and every script AGENT_EXEC invocation", async
       "#!/usr/bin/env node\nconst prompt=require('fs').readFileSync(0,'utf8');",
       // Each fake model call reports one completed turn with a prompt-specific figure.
       "const n=prompt.includes('second')?20:10;",
+      "console.log(JSON.stringify({type:'item.completed',item:{id:'answer',type:'agent_message',text:JSON.stringify({status:'success',summary:'任务与用量统计完成'})}}));",
       "console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:n,output_tokens:n/10,cached_input_tokens:n/2}}));",
       "process.stdout.write('answer '+prompt+'\\n');",
     ].join(""),
@@ -192,6 +193,7 @@ test("run usage aggregates prompt and every script AGENT_EXEC invocation", async
     scheduler.start("p", "prompt", "manual").id,
   );
   assert.equal(promptFinished.status, "success");
+  assert.deepEqual(promptFinished.taskResult, { status: "success", summary: "任务与用量统计完成" });
   assert.deepEqual(promptFinished.usage, {
     inputTokens: 20,
     outputTokens: 2,
