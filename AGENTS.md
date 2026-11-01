@@ -26,6 +26,12 @@ See [DeepSeek Harness provider plan](docs/deepseek-harness-provider-plan.md) for
 
 The DSH provider supports ACP and headless transports only. Do not add a DSH SDK runtime, native steer, or native plan mode. Inputs submitted during a run use the existing application queue. Preserve the existing Codex features independently.
 
+## Service restarts
+
+- Codex may restart the `dev` service (`localhost:3000`) as needed for testing.
+- Leave non-`dev` service restarts, including `tap` on port `3001`, to the user. Do not stop or restart those services during builds, deployment, or verification unless the user explicitly requests that specific restart.
+- For non-`dev` deployments, prepare the code and build artifacts, then report that the build is ready for the user to restart the service. A general request to deploy does not authorize a non-`dev` restart.
+
 ## Local manual testing
 
 Use this flow when a change needs to be verified in a real browser:
