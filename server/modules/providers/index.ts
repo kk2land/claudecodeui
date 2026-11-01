@@ -25,6 +25,10 @@ export { sessionsService } from './services/sessions.service.js';
 // existing authenticated chat websocket.
 export { codexRateLimitsService } from './list/codex/codex-rate-limits.service.js';
 
+// reapOrphanedOpenCodeServers: used by the server entrypoint at startup to stop
+// OpenCode turn servers a killed CloudCLI process left running.
+export { reapOrphanedOpenCodeServers } from './list/opencode/opencode-runtime.provider.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 

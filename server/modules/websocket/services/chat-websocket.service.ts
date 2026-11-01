@@ -693,6 +693,8 @@ async function handleChatAbort(
   }
   if (state?.runtime === 'app-server') sessionRuntimeDb.update(sessionId, { queueHeld: true });
   const success = await dependencies.runtime.abort(provider, sessionId);
+  // Scoped to the run that was stopped: a stop can take a round trip, and a
+  // new run of the session may have started by the time it returns.
   if (success && run) chatRunRegistry.completeRunIfCurrent(run, { exitCode: 0, aborted: true });
   sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId,
     ok: success, error: success ? undefined : 'Stop has not been confirmed. Retry to check the running task.',
