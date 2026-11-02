@@ -5,7 +5,11 @@ import test from "node:test";
 import { WorkerStore } from "../server/store.js";
 import { WorkerService } from "../server/service.js";
 import { appendLog } from "../server/logs.js";
-import type { WorkerRecord, WorkerRun } from "../shared/contracts.js";
+import type {
+  WorkerRecord,
+  WorkerRun,
+  WorkerStartInput,
+} from "../shared/contracts.js";
 import {
   createService,
   environment,
@@ -765,6 +769,8 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   } as never);
   const normalized = service.settings();
   assert.equal(normalized.defaultWorkerType, "dsh");
+  assert.deepEqual(normalized.enabled, { dsh: true, pi: true, codex: true });
+  assert.deepEqual(normalized.roles, { dsh: [], pi: [], codex: [] });
   assert.deepEqual(normalized.defaults, {
     dsh: { model: null, effort: null },
     pi: { model: null, effort: null },
@@ -784,6 +790,12 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     concurrency: { dsh: 6, pi: 1, codex: 2 },
     retentionDays: 7,
     defaultWorkerType: "pi",
+    enabled: { dsh: true, pi: true, codex: false },
+    roles: {
+      dsh: ["testing", "development"],
+      pi: ["plan_review"],
+      codex: ["code_review"],
+    },
     defaults: {
       dsh: { model: "dsh-model", effort: "high" },
       pi: { model: "  pi-model  ", effort: "low" },
@@ -795,6 +807,12 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     },
   });
   assert.equal(saved.defaultWorkerType, "pi");
+  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: false });
+  assert.deepEqual(saved.roles, {
+    dsh: ["testing", "development"],
+    pi: ["plan_review"],
+    codex: ["code_review"],
+  });
   assert.deepEqual(saved.defaults, {
     dsh: { model: "dsh-model", effort: "high" },
     pi: { model: "pi-model", effort: "low" },
@@ -869,6 +887,27 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   );
   assert.deepEqual(service.settings(), saved);
 
+  for (const invalid of [
+    { enabled: { dsh: true, pi: true } },
+    { enabled: { dsh: true, pi: true, codex: "false" } },
+    { roles: { dsh: [], pi: [] } },
+    { roles: { dsh: [], pi: ["unknown-role"], codex: [] } },
+    { roles: { dsh: [7], pi: [], codex: [] } },
+    { defaultWorkerType: "codex" },
+    { enabled: { dsh: true, pi: false, codex: true } },
+    { enabled: { dsh: false, pi: false, codex: false } },
+  ]) {
+    assert.throws(
+      () =>
+        service.updateSettings({
+          concurrency: { dsh: 9, pi: 9 },
+          ...invalid,
+        } as never),
+      /enabled|roles|defaultWorkerType/,
+    );
+    assert.deepEqual(service.settings(), saved);
+  }
+
   const alternate = path.join(root, "alternate-workspace");
   for (const extraArgs of [
     ["-C", alternate],
@@ -907,6 +946,8 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   // A legacy concurrency-only update preserves the new fields, including custom Codex values.
   const updated = service.updateSettings({ concurrency: { dsh: 2, pi: 4 } });
   assert.equal(updated.defaultWorkerType, "pi");
+  assert.deepEqual(updated.enabled, saved.enabled);
+  assert.deepEqual(updated.roles, saved.roles);
   assert.deepEqual(updated.defaults, saved.defaults);
   assert.deepEqual(updated.codex, saved.codex);
   assert.equal(updated.concurrency.codex, 2);
@@ -1010,6 +1051,198 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
   assert.equal(replayed.worker.id, first.id);
   assert.equal(replayed.run.id, first.latestRun?.id);
   assert.equal(service.get(first.id).runs.length, 1);
+});
+
+test("task roles route omitted types through enabled matches, default, and fixed order", async (t) => {
+  const root = temporaryRoot("worker-role-selection-");
+  const { service } = createService(t, root);
+  const started: string[] = [];
+  const start = async (taskRole?: WorkerStartInput["taskRole"], type?: WorkerStartInput["type"]) => {
+    const result = await service.start(
+      "owner-1",
+      startInput({ type, taskRole, requestId: "role-" + started.length }),
+    );
+    started.push(result.worker.id);
+    return result.worker.type;
+  };
+
+  // The only matching enabled type wins even when it is not the configured default.
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "dsh",
+    enabled: { dsh: true, pi: true, codex: true },
+    roles: { dsh: ["testing"], pi: ["plan_review"], codex: ["testing"] },
+  });
+  assert.equal(await start("plan_review"), "pi");
+  assert.equal(await start(undefined), "dsh");
+
+  // Multiple matches prefer the default type.
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "pi",
+    roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
+  });
+  assert.equal(await start("testing"), "pi");
+
+  // Without a matching default, candidates keep the fixed dsh -> pi -> codex order.
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "codex",
+    roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
+  });
+  assert.equal(await start("testing"), "dsh");
+
+  // Disabled matches are excluded before default/order selection.
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "pi",
+    enabled: { dsh: false, pi: true, codex: true },
+    roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
+  });
+  assert.equal(await start("testing"), "pi");
+  await assert.rejects(
+    () => start("testing", "dsh"),
+    /该 worker 类型已禁用/,
+  );
+
+  // No role match and no role both fall back to the default. An explicit enabled type wins even
+  // when the supplied role matches other types and not the explicitly selected type.
+  assert.equal(await start("code_review"), "pi");
+  assert.equal(await start("testing", "codex"), "codex");
+
+  for (const workerId of started)
+    await waitStatus(service, workerId, ["completed"]);
+  assert.equal(service.state().workers.length, started.length);
+});
+
+test("disabling a type keeps accepted queued work but rejects new starts and resumes", async (t) => {
+  const root = temporaryRoot("worker-role-disable-");
+  const { service } = createService(t, root, {
+    TEST_SCENARIO: "sleep",
+    TEST_DELAY_MS: "300",
+  });
+  service.updateSettings({
+    concurrency: { dsh: 1, pi: 1 },
+    defaultWorkerType: "dsh",
+    enabled: { dsh: true, pi: true, codex: true },
+    roles: { dsh: ["testing"], pi: [], codex: [] },
+  });
+  const running = await service.start("owner-1", startInput({ requestId: "disable-running" }));
+  await waitStatus(service, running.worker.id, ["running"]);
+  const queued = await service.start("owner-1", startInput({ requestId: "disable-queued" }));
+  assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
+
+  service.updateSettings({
+    concurrency: { dsh: 1, pi: 1 },
+    defaultWorkerType: "pi",
+    enabled: { dsh: false, pi: true, codex: true },
+  });
+  // Work accepted before the change still runs and completes.
+  await waitStatus(service, running.worker.id, ["completed"]);
+  await waitStatus(service, queued.worker.id, ["completed"]);
+
+  await assert.rejects(
+    () => service.start("owner-1", startInput({ type: "dsh", requestId: "disable-new" })),
+    /该 worker 类型已禁用/,
+  );
+  // An omitted type no longer matches the disabled role type and falls back to the default.
+  const fallback = await service.start(
+    "owner-1",
+    startInput({ type: undefined, taskRole: "testing", requestId: "disable-fallback" }),
+  );
+  assert.equal(fallback.worker.type, "pi");
+  const resumeInput = {
+    workerId: running.worker.id,
+    prompt: "continue",
+    requestId: "disable-resume",
+  };
+  await assert.rejects(
+    () => service.resume("owner-1", resumeInput),
+    /该 worker 类型已禁用/,
+  );
+  assert.equal(service.get(running.worker.id).runs.length, 1);
+
+  service.updateSettings({
+    concurrency: { dsh: 1, pi: 1 },
+    defaultWorkerType: "dsh",
+    enabled: { dsh: true, pi: true, codex: true },
+  });
+  const resumed = await service.resume("owner-1", resumeInput);
+  assert.equal(resumed.worker.type, "dsh");
+  await waitStatus(service, resumed.worker.id, ["completed"]);
+  assert.equal(service.get(running.worker.id).runs.length, 2);
+
+  // A replay of the already accepted resume returns its original run even while disabled.
+  service.updateSettings({
+    concurrency: { dsh: 1, pi: 1 },
+    defaultWorkerType: "pi",
+    enabled: { dsh: false, pi: true, codex: true },
+  });
+  const replayedResume = await service.resume("owner-1", resumeInput);
+  assert.equal(replayedResume.run.id, resumed.run.id);
+  assert.equal(service.get(running.worker.id).runs.length, 2);
+});
+
+test("task roles are part of start replay identity and settings changes keep replayed work", async (t) => {
+  const root = temporaryRoot("worker-role-replay-");
+  const { service } = createService(t, root);
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "dsh",
+    enabled: { dsh: true, pi: true, codex: true },
+    roles: { dsh: ["code_review"], pi: [], codex: [] },
+  });
+  const input = startInput({
+    type: undefined,
+    taskRole: "code_review",
+    requestId: "role-replay",
+  });
+  const started = await service.start("owner-1", input);
+  assert.equal(started.worker.type, "dsh");
+  assert.equal(started.worker.taskRole, "code_review");
+
+  // Later configuration changes, including disabling the original type, never reinterpret the
+  // accepted request.
+  service.updateSettings({
+    concurrency: { dsh: 3, pi: 3 },
+    defaultWorkerType: "pi",
+    enabled: { dsh: false, pi: true, codex: true },
+    roles: { dsh: [], pi: ["code_review"], codex: [] },
+  });
+  const replayed = await service.start("owner-1", input);
+  assert.equal(replayed.worker.id, started.worker.id);
+  assert.equal(replayed.run.id, started.run.id);
+  assert.equal(replayed.worker.type, "dsh");
+
+  // The same requestId with a different role is a conflict, not a second worker.
+  await assert.rejects(
+    () =>
+      service.start(
+        "owner-1",
+        startInput({
+          type: undefined,
+          taskRole: "testing",
+          requestId: "role-replay",
+        }),
+      ),
+    /requestId 已用于不同的请求内容或操作/,
+  );
+  assert.equal(service.get(started.worker.id).runs.length, 1);
+
+  // Records created before roles existed still omit the field and replay normally on an
+  // enabled type while dsh remains disabled.
+  const legacy = await service.start(
+    "owner-1",
+    startInput({ type: "pi", requestId: "legacy-without-role" }),
+  );
+  assert.equal(legacy.worker.taskRole, undefined);
+  assert.equal("taskRole" in (service.store.worker(legacy.worker.id) as object), false);
+  const legacyReplay = await service.start(
+    "owner-1",
+    startInput({ type: "pi", requestId: "legacy-without-role" }),
+  );
+  assert.equal(legacyReplay.worker.id, legacy.worker.id);
+  assert.equal(service.get(legacy.worker.id).runs.length, 1);
 });
 
 test("queued runs keep accepted defaults and resume retains recorded selection", async (t) => {

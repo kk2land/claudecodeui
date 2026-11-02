@@ -279,6 +279,16 @@
   background: var(--worker-amber-soft);
   border-color: transparent;
 }
+.worker-role {
+  display: inline-block;
+  margin-left: 5px;
+  padding: 1px 7px;
+  border-radius: 999px;
+  font-size: 11px;
+  background: var(--worker-soft);
+  border: 1px solid var(--worker-border);
+  color: var(--worker-muted);
+}
 .worker-badge {
   display: inline-flex;
   align-items: center;
@@ -484,6 +494,23 @@
 .worker-checkbox input {
   margin-top: 3px;
 }
+.worker-form label.worker-checkbox {
+  display: flex !important;
+  flex-wrap: nowrap;
+  align-items: flex-start;
+  gap: 7px;
+}
+.worker-form label.worker-checkbox > input {
+  flex: 0 0 auto;
+  width: 14px;
+  height: 14px;
+  margin: 2px 0 0;
+  padding: 0;
+}
+.worker-form label.worker-checkbox > span {
+  flex: 1 1 0;
+  min-width: 0;
+}
 .worker-form {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -534,6 +561,22 @@
 .worker-fieldset-codex {
   grid-column: 1 / -1;
   grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+}
+.worker-roles {
+  display: grid;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px solid var(--worker-border);
+  border-radius: 6px;
+}
+.worker-roles-label {
+  color: var(--worker-muted);
+  font-size: 12px;
+}
+.worker-roles small {
+  display: block;
+  color: var(--worker-muted);
+  font-size: 11px;
 }
 .worker-form p {
   grid-column: 1 / -1;

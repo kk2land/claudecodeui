@@ -15,6 +15,8 @@ import type {
 export const DEFAULT_SETTINGS: WorkerSettings = {
   concurrency: { dsh: 3, pi: 3, codex: 3 },
   defaultWorkerType: "dsh",
+  enabled: { dsh: true, pi: true, codex: true },
+  roles: { dsh: [], pi: [], codex: [] },
   defaults: {
     dsh: { model: null, effort: null },
     pi: { model: null, effort: null },
@@ -138,10 +140,13 @@ export class WorkerStore {
     const stored = JSON.parse(row.body) as Partial<WorkerSettings>;
     // Older rows only lack the whole codex field or the codex entry in the maps; explicit empty
     // Codex env/args objects are valid and preserved as stored.
+    // Older rows predate enabled/roles and lack the whole maps or individual entries.
     return {
       ...fallback,
       ...stored,
       concurrency: { ...fallback.concurrency, ...(stored.concurrency ?? {}) },
+      enabled: { ...fallback.enabled, ...(stored.enabled ?? {}) },
+      roles: { ...fallback.roles, ...(stored.roles ?? {}) },
       defaults: { ...fallback.defaults, ...(stored.defaults ?? {}) },
       codex: stored.codex ?? fallback.codex,
     };

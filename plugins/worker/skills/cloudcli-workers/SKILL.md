@@ -17,7 +17,7 @@ description: 通过 MCP 委派或管理 CloudCLI Worker 子任务。用于明确
 
 ## 计划记录与交接
 
-- 决定委派后，先调用一次 `worker_context` 确认真实父会话、项目、并发、状态及 `plan`；同轮复用，仅范围变化或恢复上下文时刷新。已有计划须结合实际 Worker 状态核对，不能把计划中的进度当作运行事实。
+- 决定委派后，先调用一次 `worker_context` 确认真实父会话、项目、并发、状态、可用类型/角色（`settings.enabled`/`roles`）及 `plan`；同轮复用，仅范围变化或恢复上下文时刷新。已有计划须结合实际 Worker 状态核对，不能把计划中的进度当作运行事实。
 - 每个父会话与项目维护一份 Markdown 计划：任务编号与目标、依赖、工作区与修改范围、验收条件、Worker/Run 标识、进度与验收证据、产物交接说明。新目标按章节追加，已完成部分保留简短结论与必要证据。
 - 通过 `worker_plan_save({ content })` 保存完整文档，替换原内容。仅在计划调整、派发、验收、阻塞或返工时更新，不随每次查询写入；计划保存与派发均遵守当前模式和授权。
 - 主会话确认前置任务已验收，且所需产物已进入下游 cwd 或基线后，再派发或续接。记录产物位置和确认依据；保存依赖不负责自动调度，`completed` 和 `worker_ack` 均不代表验收通过。
@@ -29,7 +29,7 @@ description: 通过 MCP 委派或管理 CloudCLI Worker 子任务。用于明确
 2. 分工覆盖全部交付物（含共享接口、串行步骤、收尾修复），每项指定 Worker；主代理仅列协调、review、集成和验收，并记录 worker/run 标识。仅按当前模式与授权派发已就绪任务，依赖满足后再派发。
 3. 交接提示词自包含目标、验收、背景、约束、`writePaths`（相对 cwd；纯分析任务须为 `[]`，表示只读）、中途交付、检查与停止条件。
 4. `worker_start` 显式选择 `workspace.mode`：`existing` 共享目录且写入不重叠；`worktree` 隔离，可指定 `baseRef`。脏源默认拒绝；仅已授权、确认不依赖未提交改动并记录基线后传 `allowDirtySource: true`。
-5. 每次启动/续接用新 `requestId`，仅同一操作与载荷的重试复用；同一目标不重复派发，写入冲突用 worktree 或串行。接受请求后把实际 worker/run 标识写回计划。`type` 可选 `dsh`/`pi`/`codex`；`type`/`model`/`provider`/`effort` 仅传用户明确选择，未指定省略；reasoning 映射 `effort`，组合以 MCP schema 和服务端反馈为准。
+5. 每次启动/续接用新 `requestId`，仅同一操作与载荷的重试复用；同一目标不重复派发，写入冲突用 worktree 或串行。接受请求后把实际 worker/run 标识写回计划。仅 `worker_start` 新建任务时按主要交付物标注单一 `taskRole`（`testing`/`development`/`ui_design`/`plan_review`/`code_review`），不按提示词关键词猜测；`worker_resume` 沿用原类型，不传 `taskRole`。`ui_design` 仅限界面布局、视觉与交互，技术方案、架构和任务拆分由主代理完成，`plan_review` 只审核已有方案。`type`/`model`/`provider`/`effort` 仅传用户明确选择，未指定省略；省略 `type` 时由插件按已启用类型与角色配置匹配，显式 `type` 须已启用；reasoning 映射 `effort`，组合以 MCP schema 和服务端反馈为准。
 6. 按本轮交付设置合理的 `timeoutSeconds`，长工作按可验收阶段续接；确需 `null` 时在交接中说明原因和停止条件。提示词须给出命令预算：长命令后台执行，单次同步等待不超过 60 秒；测试已报超时而进程未退出时，停止该任务自己的进程并保留日志，不等它自行退出。
 
 ## 运行与验收

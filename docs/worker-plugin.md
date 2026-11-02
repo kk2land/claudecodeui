@@ -81,6 +81,14 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 查询或验收时，按需用 `worker_list` 定位、`worker_get` 读取目标结果；已有响应足够就复用，通知 ID 批量
 `worker_ack`。证据不足时再增量读取相关日志；局部检查通过后，仅有新改动、失败或未决问题时重跑。
 
+主会话为每次新任务按其主要交付物标注单一 `taskRole`，不根据提示词关键词猜测：`testing`（测试）、
+`development`（开发）、`ui_design`（UI 设计）、`plan_review`（方案审核）、`code_review`（代码审核）。
+角色只用于倾向匹配，不是硬限制：显式 `type` 可覆盖，未匹配时回退默认类型。省略 `type` 时，只在已启用且 `roles` 包含该角色的类型中选择：默认类型优先，
+否则按 `dsh`→`pi`→`codex`；无匹配或未提供 `taskRole` 时回退默认类型。显式 `type` 优先但必须已启用。满载
+仍按原有 FIFO 排队；`worker_resume` 保持原类型，不用角色重新匹配；同一 `requestId` 的幂等重放保持原结果。
+`ui_design` 只负责界面布局、视觉样式和交互设计；技术方案、架构设计、任务拆分和实施计划由主会话完成。
+`plan_review` 只审核主会话已有产物，方案决策与修订仍由主会话负责。
+
 每个 run 首次达到软预算（默认 600 秒或 20 步）时生成运行提醒，以 `status: running` 写入 outbox；
 此后每隔 `softReminderSeconds`（默认 600 秒）继续提醒，即使 Worker 正在等待没有新事件的长命令。
 此前提醒已投递后才能生成下一条，避免忙碌、暂停或投递不确定时堆积通知；运行记录中的 `softReminderSentAt`
@@ -95,7 +103,9 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 停止该任务自己的进程并保留日志。同一失败已在未修改基线上复现后，记录限制并继续剩余交付，不再重复完整测试。
 
 父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi/Codex 占额与排队数、阶段、耗时、软提醒、
-模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。页面只读状态并执行取消、暂停、恢复、清理和
+模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。列表与详情显示任务记录的角色，历史记录缺少
+角色时详情显示未指定，列表不额外展示。设置页可按类型开关启用并多选倾向任务；关闭的类型保留原有
+模型、角色等配置，重新开启后继续使用。页面只读状态并执行取消、暂停、恢复、清理和
 通知重试；不展示宿主认证令牌或 MCP 控制令牌。用户自行配置的 Codex 环境变量可在设置页编辑。
 没有会话时禁用会话视图，没有项目时仅保留全部视图。
 
@@ -127,9 +137,14 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 [Worker skill](../plugins/worker/skills/cloudcli-workers/SKILL.md) 和
 [协作案例与模板](../plugins/worker/skills/cloudcli-workers/references/workflows.md)。
 
-## 默认类型、模型、reasoning 与 Codex 启动参数
+## 启用、角色、默认类型、模型、reasoning 与 Codex 启动参数
 
-Worker 设置可指定新的 worker 启动请求省略类型时使用的默认类型，以及 DSH/Pi/Codex 各自的默认模型和
+Worker 设置可按类型启用或停用，并为每种类型多选倾向任务。关闭某个类型只阻止之后新建和续接请求；
+已接受、包括已排队的运行继续。角色和默认设置的修改只影响之后新建的任务。默认类型必须保持启用且至少启用
+一种类型；编辑中关闭当前默认类型时，界面提示先选择其他已启用类型并阻止保存，服务端对最终快照作同样校验。
+关闭类型不会清空其模型、角色等配置，重新启用后继续使用。
+
+Worker 设置可指定未指定类型且没有角色匹配时的回退默认类型，以及 DSH/Pi/Codex 各自的默认模型和
 effort。Codex 另有每次 `codex exec` 原生调用共用的额外环境变量与命令行参数。并发额度的修改会立即参与
 排队调度；默认类型、模型和 effort 只用于之后的新 worker，不会改写已有记录或已接受/排队 run 已确定的值，
 也不会重新套用到续接。Codex 额外环境变量与命令行参数在每次 Codex 启动和续接时读取。
@@ -140,6 +155,8 @@ effort。Codex 另有每次 `codex exec` 原生调用共用的额外环境变量
     {
       "concurrency": { "dsh": 3, "pi": 3, "codex": 3 },
       "defaultWorkerType": "dsh",
+      "enabled": { "dsh": true, "pi": true, "codex": true },
+      "roles": { "dsh": [], "pi": [], "codex": [] },
       "defaults": {
         "dsh": { "model": null, "effort": null },
         "pi": { "model": null, "effort": null },
@@ -156,8 +173,11 @@ effort。Codex 另有每次 `codex exec` 原生调用共用的额外环境变量
     }
 
 `PUT /settings` 要求 `concurrency.dsh`、`concurrency.pi` 为正整数；`concurrency.codex`、`defaultWorkerType`、
-`defaults`、`codex` 和 `retentionDays` 可省略。旧客户端仅提交 DSH/Pi 并发时，已保存的 Codex 并发、
-`defaults.codex`、`defaultWorkerType`、`defaults`、`codex` 启动参数和保留天数都保持不变。`codex` 对象若
+`enabled`、`roles`、`defaults`、`codex` 和 `retentionDays` 可省略。旧客户端仅提交 DSH/Pi 并发时，已保存的 Codex 并发、
+`defaults.codex`、`defaultWorkerType`、`enabled`、`roles`、`defaults`、`codex` 启动参数和保留天数都保持不变。
+`enabled` 与 `roles` 按整个 map 可选：提供时必须同时包含 `dsh`、`pi`、`codex`，未提供则保留已存值；但
+`defaultWorkerType` 最终必须引用已启用的类型，且至少启用一种类型。`roles` 只接受任务角色目录中的值。
+`codex` 对象若
 提供，必须同时包含 `env` 和 `extraArgs`，并整对象替换原设置；`env` 必须为字符串到字符串的对象，
 `extraArgs` 必须为字符串数组。提供 `defaults` 时必须同时包含 `dsh` 与 `pi`，可额外包含 `codex`；
 `model`/`effort` 为字符串或 `null`，空白字符串按清除处理。非法类型、错误的值类型、缺失的必需类型对象、
@@ -166,7 +186,7 @@ effort。Codex 另有每次 `codex exec` 原生调用共用的额外环境变量
 工作目录只能由 `worker_start.workspace` 确定。
 
 旧设置 JSON 在读取时补齐缺少的 `defaultWorkerType: "dsh"`、全为 `null` 的 DSH/Pi defaults、Codex 并发
-`3`、全为 `null` 的 `defaults.codex`，以及默认 `codex: { "env": { "CODEX_PROXY_BYPASS": "1" },
+`3`、全为 `null` 的 `defaults.codex`、`enabled` 全为 `true`、`roles` 全为 `[]`，以及默认 `codex: { "env": { "CODEX_PROXY_BYPASS": "1" },
 "extraArgs": ["-c", "model_provider=magpie"] }` 和 `retentionDays: 1`；原有字段保持不变。
 
 Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名键以设置值覆盖继承值；`{}` 显式清除预填
@@ -191,8 +211,10 @@ Worker 引用的原生会话会跳过。DSH 即使尚无文件路径也按已记
 
 新 worker 启动请求的参数优先级为：请求中显式给出的非空值 > 所选类型的插件默认值 > 现有后端环境回退
 （仅 Pi：`CODEX_PI_MODEL`、`CODEX_PI_THINKING`）> 原生 CLI 自身默认。Codex 的 `extraArgs` 和
-`model_provider` 配置也会影响原生调用，但显式 model/provider/effort 仍优先。省略 `type` 时选择
-`defaultWorkerType`；显式 `dsh`/`pi`/`codex` 总是优先。provider 仍只来自请求、Pi 的
+`model_provider` 配置也会影响原生调用，但显式 model/provider/effort 仍优先。省略 `type` 时按启用与角色
+配置选择：只在已启用且 `roles` 包含请求 `taskRole` 的类型中，优先 `defaultWorkerType`，否则按
+`dsh`→`pi`→`codex`；无匹配或未提供 `taskRole` 时用 `defaultWorkerType`。显式 `dsh`/`pi`/`codex` 总是优先但
+必须已启用。provider 仍只来自请求、Pi 的
 `CODEX_PI_PROVIDER` 或 Codex 的显式参数/配置，没有插件级 provider 默认。插件在接受请求时把最终
 type/model/provider/effort 快照到 run；之后修改默认不会改变已排队 run 已接受的值，原生 argv 与 DSH
 model patch 也使用该快照。Codex 每次 start/resume 另外读取当前 `settings.codex` 环境与 argv。
@@ -203,6 +225,7 @@ effort 留空表示沿用执行器现有配置，不会覆盖 Pi 的环境配置
 
 续接（`worker_resume`）保持原 worker 类型、cwd、home 和原生会话身份；未显式覆盖的 model/provider/effort
 沿用上一次 run 的记录值，即使插件默认或环境此后已变化，也不会重新套用新默认。显式覆盖仍按原有校验生效。
+`worker_resume` 不使用 `taskRole` 重新选择类型；若原类型已禁用，新的续接请求保留原类型但按启用规则拒绝。
 Codex 续接使用记录的 `thread_id` 执行 `codex exec resume --json`，但每次仍读取当前 `settings.codex` 的额外
 环境和参数。并发额度仍按 `(parentSessionId, projectId, workerType)` 独立计算，默认类型、模型设置或
 Codex 启动参数不改变额度与排队语义。

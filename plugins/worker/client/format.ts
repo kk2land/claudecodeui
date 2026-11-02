@@ -5,9 +5,11 @@ import type {
   WorkerSettings,
   WorkerStateQuery,
   WorkerStatus,
+  WorkerTaskRole,
   WorkerType,
   WorkerUsage,
 } from "../shared/contracts.js";
+import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerPluginContext } from "./api.js";
 
 /** The three view scopes supported by the panel. */
@@ -47,6 +49,11 @@ export const DELIVERY_LABELS: Record<WorkerNotificationDelivery, string> = {
   held: "暂缓",
   unknown: "未知",
 };
+
+/** Task-role labels come from the single shared catalog. */
+export const TASK_ROLE_LABELS = Object.fromEntries(
+  WORKER_TASK_ROLES.map((role) => [role.value, role.label]),
+) as Record<WorkerTaskRole, string>;
 
 /**
  * Filters the panel to the current host session/project. A scope that cannot be satisfied is

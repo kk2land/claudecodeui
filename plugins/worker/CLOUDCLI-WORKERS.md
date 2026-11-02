@@ -29,6 +29,12 @@
 - 基线，以及局部验证项和需要返回的证据。
 - 可并行项。MCP 排队没有 `dependsOn`，并发排队不能表达依赖。
 
+派发新建任务时由主代理按任务的主要交付物标注单一 `taskRole`（测试、开发、UI设计、方案审核、代码审核），
+不根据提示词关键词猜测；`worker_resume` 沿用原类型，不传 `taskRole`。`ui_design` 仅限界面布局、视觉样式与交互，技术方案、架构设计和任务拆分由主代理
+完成；`plan_review` 只审核主代理已有方案，决策与修订仍由主代理负责。`type`/`model`/`provider`/`effort`
+仍只在用户明确选择时传入，其余省略，由插件按已启用类型和角色配置匹配。`worker_context` 可读取
+`settings.enabled`/`settings.roles`；旧调用缺少 `taskRole` 时仍按默认类型兼容。
+
 允许在当前父会话与项目的 Markdown 计划中记录任务、依赖、验收进度和 worker/run 标识。主会话通过
 `worker_context` 读取，通过 `worker_plan_save` 保存完整记录；保存不会启动任务或自动验收。
 派发前由主会话确认前置任务已验收，且产物已进入下游工作区。计划调整、派发、验收、阻塞或返工时更新记录。

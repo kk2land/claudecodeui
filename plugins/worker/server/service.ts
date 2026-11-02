@@ -44,6 +44,7 @@ import type {
   WorkerType,
 } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
+import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 
 const STATUSES: WorkerStatus[] = [
   "queued",
@@ -225,6 +226,30 @@ export class WorkerService {
       (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 1)
     )
       throw new WorkerFailure("INVALID_SETTINGS", "retentionDays 必须是正整数");
+    if (input.enabled !== undefined) {
+      const value = input.enabled;
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 dsh、pi、codex 的布尔值");
+      if (["dsh", "pi", "codex"].some((type) => typeof value[type as WorkerType] !== "boolean"))
+        throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 dsh、pi、codex 的布尔值");
+    }
+    if (input.roles !== undefined) {
+      const value = input.roles;
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 dsh、pi、codex 的 role 数组");
+      for (const type of ["dsh", "pi", "codex"] as const) {
+        const entries = value[type];
+        if (
+          !Array.isArray(entries) ||
+          entries.some(
+            (role) =>
+              typeof role !== "string" ||
+              !WORKER_TASK_ROLES.some((item) => item.value === role),
+          )
+        )
+          throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 dsh、pi、codex 的 role 数组");
+      }
+    }
     const current = this.store.settings();
     // Validate the complete candidate before mutating or saving anything, so an invalid field
     // never partially persists. Codex errors never echo configured env values.
@@ -264,6 +289,8 @@ export class WorkerService {
         codex: codexConcurrency ?? current.concurrency.codex,
       },
       defaultWorkerType: input.defaultWorkerType ?? current.defaultWorkerType,
+      enabled: input.enabled ?? current.enabled,
+      roles: input.roles ?? current.roles,
       defaults:
         input.defaults === undefined
           ? current.defaults
@@ -271,6 +298,8 @@ export class WorkerService {
       codex,
       retentionDays: input.retentionDays ?? current.retentionDays,
     };
+    if (!settings.enabled[settings.defaultWorkerType])
+      throw new WorkerFailure("INVALID_SETTINGS", "defaultWorkerType 必须为已启用的类型");
     this.store.saveSettings(settings);
     this.pruneHistory();
     void this.dispatch();
@@ -353,7 +382,19 @@ export class WorkerService {
     // Resolve mutable settings only after replay lookup: an omitted type must not reinterpret a
     // request whose original run already exists.
     const settings = this.store.settings();
-    const type = input.type ?? settings.defaultWorkerType;
+    let type = settings.defaultWorkerType;
+    if (input.type !== undefined) {
+      if (!settings.enabled[input.type])
+        throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用");
+      type = input.type;
+    } else if (input.taskRole !== undefined) {
+      const taskRole = input.taskRole;
+      const candidates = (["dsh", "pi", "codex"] as const).filter(
+        (workerType) =>
+          settings.enabled[workerType] && settings.roles[workerType].includes(taskRole),
+      );
+      if (!candidates.includes(type) && candidates.length) type = candidates[0]!;
+    }
     const selection = this.startSelection(type, input, settings.defaults[type]);
     this.validateSelection(type, selection);
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, settings);
@@ -397,6 +438,7 @@ export class WorkerService {
       id,
       type,
       taskName: input.taskName.trim(),
+      taskRole: input.taskRole,
       ownerId,
       parentSessionId: owner.parentSessionId,
       projectId: owner.projectId,
@@ -457,6 +499,9 @@ export class WorkerService {
       return this.resultOf(existing.workerId, existing.runId);
     }
     const worker = this.ownedWorker(ownerId, input.workerId);
+    const settings = this.store.settings();
+    if (!settings.enabled[worker.type])
+      throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用，不能续接");
     if (this.store.workerCleanedAt(worker.id))
       throw new WorkerFailure("WORKSPACE_CLEANED", "worktree 已清理，请为后续任务创建新的 worker");
     const previous = this.store.latestRun(worker.id);
@@ -474,7 +519,6 @@ export class WorkerService {
       );
     const selection = this.resumeSelection(input, previous);
     this.validateSelection(worker.type, selection);
-    const settings = this.store.settings();
     const runId = randomUUID();
     const timeoutSeconds =
       input.timeoutSeconds === undefined
@@ -609,6 +653,7 @@ export class WorkerService {
     return {
       taskName: input.taskName.trim(),
       type: input.type,
+      taskRole: input.taskRole,
       prompt: input.prompt,
       workspace: {
         mode: input.workspace.mode,

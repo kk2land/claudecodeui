@@ -24,6 +24,7 @@ import {
   STATUS_LABELS,
   TYPE_LABELS,
   DELIVERY_LABELS,
+  TASK_ROLE_LABELS,
   budgetState,
   canCancel,
   canCleanup,
@@ -55,11 +56,14 @@ import type {
   WorkerSettingsInput,
   WorkerStateSnapshot,
   WorkerStatus,
+  WorkerTaskRole,
   WorkerType,
 } from "../shared/contracts.js";
+import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import styles from "./worker.css";
 
 const roots = new WeakMap<HTMLElement, Root>();
+const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex"];
 
 const STATUS_TONE: Record<WorkerStatus, string> = {
   queued: "queued",
@@ -223,6 +227,11 @@ function WorkerRow({
         <span className={"worker-type worker-type-" + worker.type}>
           {TYPE_LABELS[worker.type]}
         </span>
+        {worker.taskRole ? (
+          <span className="worker-role">
+            {TASK_ROLE_LABELS[worker.taskRole]}
+          </span>
+        ) : null}
         <small>
           {run?.model ?? "默认模型"}
           {run?.provider ? " / " + run.provider : ""}
@@ -573,6 +582,12 @@ function DetailView({
           <dl>
             <dt>类型</dt>
             <dd>{TYPE_LABELS[worker.type]}</dd>
+            <dt>任务角色</dt>
+            <dd>
+              {worker.taskRole
+                ? TASK_ROLE_LABELS[worker.taskRole]
+                : "未指定"}
+            </dd>
             <dt>模型 / 推理强度</dt>
             <dd>
               {run?.model ?? "默认模型"}
@@ -711,6 +726,59 @@ function envText(env: Record<string, string>): string {
     .join("\n");
 }
 
+function TypePolicy({
+  type,
+  enabled,
+  roles,
+  onEnabled,
+  onToggleRole,
+}: {
+  type: WorkerType;
+  enabled: boolean;
+  roles: WorkerTaskRole[];
+  onEnabled(value: boolean): void;
+  onToggleRole(role: WorkerTaskRole): void;
+}) {
+  const label = TYPE_LABELS[type];
+  return (
+    <>
+      <label className="worker-checkbox worker-form-wide">
+        <input
+          type="checkbox"
+          aria-label={"启用 " + label}
+          checked={enabled}
+          onChange={(event) => onEnabled(event.target.checked)}
+        />
+        启用 {label}
+      </label>
+      <small className="worker-form-wide">
+        关闭后仅阻止之后新建和续接；已接受的运行中和排队任务继续。
+      </small>
+      <div
+        className="worker-form-wide worker-roles"
+        role="group"
+        aria-label={label + " 倾向任务（可多选）"}
+      >
+        <span className="worker-roles-label">倾向任务（可多选）</span>
+        {WORKER_TASK_ROLES.map((role) => (
+          <label className="worker-checkbox" key={role.value}>
+            <input
+              type="checkbox"
+              aria-label={label + " 任务角色 " + role.label}
+              checked={roles.includes(role.value)}
+              onChange={() => onToggleRole(role.value)}
+            />
+            <span>
+              {role.label}
+              <small>{role.description}</small>
+            </span>
+          </label>
+        ))}
+      </div>
+    </>
+  );
+}
+
 function SettingsView({
   settings,
   api,
@@ -730,6 +798,12 @@ function SettingsView({
   const [defaultType, setDefaultType] = useState<WorkerType>(
     settings.defaultWorkerType,
   );
+  const [enabled, setEnabled] = useState<Record<WorkerType, boolean>>({
+    ...settings.enabled,
+  });
+  const [roles, setRoles] = useState<Record<WorkerType, WorkerTaskRole[]>>({
+    ...settings.roles,
+  });
   const [dshModel, setDshModel] = useState(settings.defaults.dsh.model ?? "");
   const [dshEffort, setDshEffort] = useState(
     settings.defaults.dsh.effort ?? "",
@@ -787,9 +861,11 @@ function SettingsView({
       codexArgsError = codexArgsMessage;
     }
   }
+  const enabledCount = WORKER_TYPES.filter((type) => enabled[type]).length;
   const valid = validNumber(dsh) && validNumber(pi) && validNumber(codex) &&
     validNumber(retentionDays) &&
     (!dshEffort.trim() || !!dshModelValue) &&
+    enabledCount > 0 && enabled[defaultType] &&
     !codexEnvError && !codexArgsError;
   const validationMessage = !validNumber(dsh) || !validNumber(pi) || !validNumber(codex)
     ? "并发必须是大于 0 的整数。"
@@ -797,13 +873,26 @@ function SettingsView({
       ? "保留天数必须是大于 0 的整数。"
       : dshEffort.trim() && !dshModelValue
         ? "DSH reasoning 需要同时配置 DSH 默认模型。"
-        : codexEnvError || codexArgsError;
+        : enabledCount === 0
+          ? "至少需要启用一种 Worker 类型。"
+          : !enabled[defaultType]
+            ? "默认 Worker 类型 " + TYPE_LABELS[defaultType] + " 已关闭，请先选择其他已启用的默认类型再保存。"
+            : codexEnvError || codexArgsError;
+  const toggleRole = (type: WorkerType, role: WorkerTaskRole) =>
+    setRoles((current) => ({
+      ...current,
+      [type]: current[type].includes(role)
+        ? current[type].filter((item) => item !== role)
+        : [...current[type], role],
+    }));
   const save = async () => {
     if (!valid) return;
     const body: WorkerSettingsInput = {
       concurrency: { dsh: Number(dsh), pi: Number(pi), codex: Number(codex) },
       retentionDays: Number(retentionDays),
       defaultWorkerType: defaultType,
+      enabled,
+      roles,
       defaults: {
         dsh: {
           model: dshModelValue || null,
@@ -828,6 +917,8 @@ function SettingsView({
       setPi(String(value.concurrency.pi));
       setCodex(String(value.concurrency.codex));
       setDefaultType(value.defaultWorkerType);
+      setEnabled({ ...value.enabled });
+      setRoles({ ...value.roles });
       setDshModel(value.defaults.dsh.model ?? "");
       setDshEffort(value.defaults.dsh.effort ?? "");
       setPiModel(value.defaults.pi.model ?? "");
@@ -852,8 +943,8 @@ function SettingsView({
         <div>
           <h2>Worker 设置</h2>
           <p>
-            并发额度修改会立即影响排队调度；默认类型、模型和 reasoning 用于之后的新
-            worker；Codex 额外环境变量与命令行参数用于每次 Codex 启动和续接
+            启用开关只阻止之后新建和续接；角色、默认类型、模型和 reasoning 用于之后的新
+            worker，不会改写已有任务。Codex 额外环境变量与命令行参数用于每次 Codex 启动和续接
           </p>
         </div>
       </header>
@@ -867,13 +958,27 @@ function SettingsView({
               setDefaultType(event.target.value as WorkerType)
             }
           >
-            <option value="dsh">DSH</option>
-            <option value="pi">Pi</option>
-            <option value="codex">Codex</option>
+            {WORKER_TYPES.map((type) => (
+              <option key={type} value={type} disabled={!enabled[type]}>
+                {TYPE_LABELS[type]}
+              </option>
+            ))}
           </select>
+          <small>
+            默认类型必须已启用；满载仍按原有 FIFO 排队。
+          </small>
         </label>
         <fieldset className="worker-fieldset">
           <legend>DSH</legend>
+          <TypePolicy
+            type="dsh"
+            enabled={enabled.dsh}
+            roles={roles.dsh}
+            onEnabled={(value) =>
+              setEnabled((current) => ({ ...current, dsh: value }))
+            }
+            onToggleRole={(role) => toggleRole("dsh", role)}
+          />
           <label>
             默认模型
             <input
@@ -908,6 +1013,15 @@ function SettingsView({
         </fieldset>
         <fieldset className="worker-fieldset">
           <legend>Pi</legend>
+          <TypePolicy
+            type="pi"
+            enabled={enabled.pi}
+            roles={roles.pi}
+            onEnabled={(value) =>
+              setEnabled((current) => ({ ...current, pi: value }))
+            }
+            onToggleRole={(role) => toggleRole("pi", role)}
+          />
           <label>
             默认模型
             <input
@@ -942,6 +1056,15 @@ function SettingsView({
         </fieldset>
         <fieldset className="worker-fieldset worker-fieldset-codex">
           <legend>Codex</legend>
+          <TypePolicy
+            type="codex"
+            enabled={enabled.codex}
+            roles={roles.codex}
+            onEnabled={(value) =>
+              setEnabled((current) => ({ ...current, codex: value }))
+            }
+            onToggleRole={(role) => toggleRole("codex", role)}
+          />
           <label>
             默认模型
             <input
@@ -1021,7 +1144,9 @@ function SettingsView({
         </label>
         <p>
           并发为正整数，按类型独立计算；启动中、运行中、停止中和状态未知的 run 都占用额度；
-          超过额度的请求按 FIFO 排队。模型或 reasoning 留空表示沿用执行器现有配置。
+          超过额度的请求按 FIFO 排队。每个类型可多选倾向任务，匹配角色时优先使用，没有匹配使用默认类型；
+          关闭的类型保留原配置，重新开启后继续使用。模型或 reasoning
+          留空表示沿用执行器现有配置。
           DSH reasoning 需要同时配置模型。同一原生会话只允许一个调用。软提醒默认{" "}
           {settings.softReminderSeconds} 秒 / {settings.softReminderSteps} 步，硬超时
           {settings.hardTimeoutSeconds === null
@@ -1288,18 +1413,35 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
         </div>
       ) : null}
       {view === "settings" && settings ? (
-        <SettingsView
-          settings={settings}
-          api={api}
-          onBack={() => setView("list")}
-          onSaved={(value) => {
-            setSnapshot((current) =>
-              current ? { ...current, settings: value } : current,
-            );
-            setMessage("Worker 设置已保存");
-          }}
-          onError={setError}
-        />
+        settings.enabled && settings.roles ? (
+          <SettingsView
+            settings={settings}
+            api={api}
+            onBack={() => setView("list")}
+            onSaved={(value) => {
+              setSnapshot((current) =>
+                current ? { ...current, settings: value } : current,
+              );
+              setMessage("Worker 设置已保存");
+            }}
+            onError={setError}
+          />
+        ) : (
+          <>
+            <button className="worker-back" onClick={() => setView("list")}>
+              <ArrowLeft size={14} /> 返回列表
+            </button>
+            <header className="worker-heading">
+              <div>
+                <h2>Worker 设置</h2>
+              </div>
+            </header>
+            <p className="worker-hint" role="alert">
+              Worker 插件服务版本较旧，暂不支持类型开关和倾向任务，请重启当前
+              CloudCLI 服务后重试。
+            </p>
+          </>
+        )
       ) : view === "detail" && selectedWorker ? (
         detail && detail.worker.id === selectedId ? (
           <DetailView

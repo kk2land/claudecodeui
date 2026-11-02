@@ -3,13 +3,25 @@ import { z } from "zod";
 import type { WorkerService } from "./service.js";
 import type { WorkerOwner, WorkerStartInput } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
+import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
+import type { WorkerTaskRole } from "../shared/task-roles.js";
 
 const timeoutSeconds = z.number().int().positive().nullable().optional();
+const taskRoleValues = WORKER_TASK_ROLES.map((role) => role.value) as [
+  WorkerTaskRole,
+  ...WorkerTaskRole[],
+];
 
 const startShape = {
   taskName: z.string(),
-  // Omitted selects the plugin's configured defaultWorkerType; explicit dsh/pi/codex wins.
+  // Omitted selects by taskRole among enabled types, then the configured default type.
   type: z.enum(["dsh", "pi", "codex"]).optional(),
+  taskRole: z
+    .enum(taskRoleValues)
+    .optional()
+    .describe(
+      "任务角色：testing 测试、development 开发、ui_design UI设计、plan_review 方案审核、code_review 代码审核。省略 type 时仅匹配已启用且接受该角色的类型；无匹配或未提供 role 时使用默认类型。UI设计仅负责界面、视觉和交互",
+    ),
   prompt: z.string(),
   workspace: z.object({
     mode: z.enum(["worktree", "existing"]),
@@ -126,7 +138,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "异步启动一个 DSH、Pi 或 Codex 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
+      description: "异步启动一个 DSH、Pi 或 Codex 子任务；省略 type 时按 taskRole 自动匹配已启用类型，无匹配或未提供 taskRole 时回退默认类型，显式 type 必须已启用。UI设计角色只负责界面、视觉和交互，技术方案与架构由主会话产出，方案审核只审核已有方案。必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
       inputSchema: startShape,
     },
     async (input) => {

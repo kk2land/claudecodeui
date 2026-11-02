@@ -218,6 +218,8 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     settings: {
       concurrency: { dsh: 3, pi: 3, codex: 3 },
       defaultWorkerType: "dsh",
+      enabled: { dsh: true, pi: true, codex: true },
+      roles: { dsh: [], pi: [], codex: [] },
       defaults: {
         dsh: { model: null, effort: null },
         pi: { model: null, effort: null },
@@ -295,6 +297,8 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         return {
           concurrency: { dsh: 4, pi: 2, codex: 5 },
           defaultWorkerType: "pi",
+          enabled: { dsh: true, pi: true, codex: true },
+          roles: { dsh: [], pi: [], codex: [] },
           defaults: {
             dsh: { model: "dsh-default", effort: "high" },
             pi: { model: "pi-default", effort: "low" },
@@ -495,6 +499,85 @@ test("DOM: per-worker cancel sends only that worker id", async () => {
   }
 });
 
+test("DOM: older settings response shows an upgrade notice and recovers when state refreshes", async () => {
+  const oldSnapshot = snapshot();
+  const oldSettings = oldSnapshot.settings as Record<string, unknown>;
+  delete oldSettings.enabled;
+  delete oldSettings.roles;
+  const newSnapshot = snapshot();
+  let upgraded = false;
+  const mounted = await mountPlugin({
+    state: () => (upgraded ? newSnapshot : oldSnapshot),
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("任务一"),
+      "旧版列表",
+    );
+    button(mounted.container, "Worker 设置").click();
+    await waitFor(
+      () =>
+        textOf(mounted.container).includes(
+          "Worker 插件服务版本较旧，暂不支持类型开关和倾向任务",
+        ),
+      "旧版设置提示",
+    );
+    assert.equal(byLabel(mounted.container, "启用 DSH"), null);
+    assert.equal(byLabel(mounted.container, "DSH 任务角色 测试"), null);
+    assert.equal(findButton(mounted.container, "保存设置"), undefined);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+
+    // The old service still supports the existing list and detail flows.
+    button(mounted.container, "返回列表").click();
+    await waitFor(
+      () => textOf(mounted.container).includes("任务一"),
+      "返回旧版列表",
+    );
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("本次运行"),
+      "旧版任务详情",
+    );
+    button(mounted.container, "返回列表").click();
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "查看 任务一")),
+      "退出旧版详情",
+    );
+
+    // A later state response with the full maps enables the new settings UI.
+    button(mounted.container, "Worker 设置").click();
+    await waitFor(
+      () => Boolean(findButton(mounted.container, "返回列表")),
+      "再次打开旧版设置",
+    );
+    upgraded = true;
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "启用 DSH")),
+      "新版设置恢复",
+      5000,
+    );
+    assert.ok(byLabel(mounted.container, "DSH 任务角色 测试"));
+    assert.ok(findButton(mounted.container, "保存设置"));
+    await waitFor(
+      () => !button(mounted.container, "保存设置").disabled,
+      "新版设置可保存",
+    );
+    button(mounted.container, "保存设置").click();
+    await waitFor(
+      () => callsTo(mounted, "/settings").length === 1,
+      "新版设置保存",
+    );
+    const saved = callsTo(mounted, "/settings")[0]!.body as {
+      enabled: Record<string, boolean>;
+      roles: Record<string, string[]>;
+    };
+    assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: true });
+    assert.deepEqual(saved.roles, { dsh: [], pi: [], codex: [] });
+  } finally {
+    mounted.unmount();
+  }
+});
+
 test("DOM: settings load, validate and save defaults, concurrency and retention", async () => {
   const mounted = await mountPlugin();
   try {
@@ -601,6 +684,8 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
       concurrency: { dsh: 4, pi: 2, codex: 3 },
       retentionDays: 7,
       defaultWorkerType: "pi",
+      enabled: { dsh: true, pi: true, codex: true },
+      roles: { dsh: [], pi: [], codex: [] },
       defaults: {
         dsh: { model: "dsh-default", effort: "high" },
         pi: { model: "pi-default", effort: "low" },
@@ -637,6 +722,8 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
       concurrency: { dsh: 4, pi: 2, codex: 5 },
       retentionDays: 7,
       defaultWorkerType: "pi",
+      enabled: { dsh: true, pi: true, codex: true },
+      roles: { dsh: [], pi: [], codex: [] },
       defaults: {
         dsh: { model: "dsh-default", effort: "high" },
         pi: { model: "pi-default", effort: null },
@@ -650,6 +737,258 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
         extraArgs: ["-c", "model_provider=magpie", "--search"],
       },
     });
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: type enable switches and roles save, retain disabled config and require an enabled default", async () => {
+  // The saved settings must survive leaving and re-entering the settings view.
+  const persisted = snapshot();
+  const mounted = await mountPlugin({
+    state: () => persisted,
+    settings: (body) => {
+      const value = {
+        ...(body as object),
+        softReminderSeconds: 600,
+        softReminderSteps: 20,
+        hardTimeoutSeconds: null,
+      };
+      persisted.settings = value as typeof persisted.settings;
+      return value;
+    },
+  });
+  try {
+    await waitFor(() => {
+      const entry = findButton(mounted.container, "Worker 设置");
+      return entry !== undefined && !entry.disabled;
+    }, "设置入口");
+    button(mounted.container, "Worker 设置").click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "启用 DSH")), "启用开关");
+    let dshEnabled = byLabel(
+      mounted.container,
+      "启用 DSH",
+    ) as HTMLInputElement;
+    const piEnabled = byLabel(mounted.container, "启用 Pi") as HTMLInputElement;
+    const codexEnabled = byLabel(
+      mounted.container,
+      "启用 Codex",
+    ) as HTMLInputElement;
+    assert.equal(dshEnabled.checked, true);
+    assert.equal(piEnabled.checked, true);
+    assert.equal(codexEnabled.checked, true);
+    let defaultType = byLabel(
+      mounted.container,
+      "默认 Worker 类型",
+    ) as HTMLSelectElement;
+    let dshOption = [...defaultType.options].find(
+      (option) => option.value === "dsh",
+    )!;
+    assert.equal(dshOption.disabled, false);
+    let dshModel = byLabel(
+      mounted.container,
+      "DSH 默认模型",
+    ) as HTMLInputElement;
+    let dshTesting = byLabel(
+      mounted.container,
+      "DSH 任务角色 测试",
+    ) as HTMLInputElement;
+    let dshCodeReview = byLabel(
+      mounted.container,
+      "DSH 任务角色 代码审核",
+    ) as HTMLInputElement;
+    assert.equal(dshTesting.checked, false);
+    await typeInto(dshModel, "dsh-model");
+    dshTesting.click();
+    dshCodeReview.click();
+    await waitFor(
+      () => dshTesting.checked && dshCodeReview.checked,
+      "多选角色",
+    );
+
+    // Disabling keeps every configured field and role in the draft.
+    dshEnabled.click();
+    await waitFor(() => !dshEnabled.checked, "关闭 DSH");
+    assert.equal(dshModel.value, "dsh-model");
+    assert.equal(dshTesting.checked, true);
+    assert.equal(dshCodeReview.checked, true);
+    await waitFor(() => dshOption.disabled, "默认类型选项被禁用");
+    await waitFor(
+      () =>
+        textOf(mounted.container).includes(
+          "默认 Worker 类型 DSH 已关闭，请先选择其他已启用的默认类型",
+        ),
+      "默认类型无效提示",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+
+    // The UI never swaps the default automatically; the user must choose another enabled type.
+    await typeInto(defaultType, "pi");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "默认可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存请求");
+    assert.deepEqual(callsTo(mounted, "/settings")[0]!.body, {
+      concurrency: { dsh: 3, pi: 3, codex: 3 },
+      retentionDays: 1,
+      defaultWorkerType: "pi",
+      enabled: { dsh: false, pi: true, codex: true },
+      roles: { dsh: ["testing", "code_review"], pi: [], codex: [] },
+      defaults: {
+        dsh: { model: "dsh-model", effort: null },
+        pi: { model: null, effort: null },
+        codex: { model: null, effort: null },
+      },
+      codex: {
+        env: { CODEX_PROXY_BYPASS: "1" },
+        extraArgs: ["-c", "model_provider=magpie"],
+      },
+    });
+    await waitFor(
+      () => !dshEnabled.checked && dshTesting.checked,
+      "保存后回填关闭状态与角色",
+    );
+    assert.equal(dshModel.value, "dsh-model");
+    await waitFor(() => {
+      const saveButton = findButton(mounted.container, "保存设置");
+      return saveButton !== undefined && !saveButton.disabled;
+    }, "首次保存完成");
+
+    // Leaving and re-entering settings reads the persisted snapshot, not just local state.
+    button(mounted.container, "返回列表").click();
+    await waitFor(() => {
+      const entry = findButton(mounted.container, "Worker 设置");
+      return entry !== undefined && !entry.disabled;
+    }, "返回列表");
+    button(mounted.container, "Worker 设置").click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "启用 DSH")), "重新进入设置");
+    dshEnabled = byLabel(mounted.container, "启用 DSH") as HTMLInputElement;
+    dshModel = byLabel(mounted.container, "DSH 默认模型") as HTMLInputElement;
+    dshTesting = byLabel(
+      mounted.container,
+      "DSH 任务角色 测试",
+    ) as HTMLInputElement;
+    dshCodeReview = byLabel(
+      mounted.container,
+      "DSH 任务角色 代码审核",
+    ) as HTMLInputElement;
+    defaultType = byLabel(
+      mounted.container,
+      "默认 Worker 类型",
+    ) as HTMLSelectElement;
+    dshOption = [...defaultType.options].find(
+      (option) => option.value === "dsh",
+    )!;
+    assert.equal(dshEnabled.checked, false);
+    assert.equal(dshTesting.checked, true);
+    assert.equal(dshCodeReview.checked, true);
+    assert.equal(dshModel.value, "dsh-model");
+    assert.equal(defaultType.value, "pi");
+    assert.equal(dshOption.disabled, true);
+
+    // Re-enabling keeps the previously configured roles and model.
+    dshEnabled.click();
+    await waitFor(() => dshEnabled.checked, "重新启用 DSH");
+    assert.equal(dshTesting.checked, true);
+    assert.equal(dshCodeReview.checked, true);
+    assert.equal(dshOption.disabled, false);
+    assert.equal(button(mounted.container, "保存设置").disabled, false);
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 2, "重新启用保存");
+    const second = callsTo(mounted, "/settings")[1]!.body as {
+      enabled: Record<string, boolean>;
+      roles: Record<string, string[]>;
+    };
+    assert.deepEqual(second.enabled, { dsh: true, pi: true, codex: true });
+    assert.deepEqual(second.roles, {
+      dsh: ["testing", "code_review"],
+      pi: [],
+      codex: [],
+    });
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: at least one worker type must stay enabled", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await waitFor(() => {
+      const entry = findButton(mounted.container, "Worker 设置");
+      return entry !== undefined && !entry.disabled;
+    }, "设置入口");
+    button(mounted.container, "Worker 设置").click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "启用 DSH")), "启用开关");
+    for (const label of ["启用 DSH", "启用 Pi", "启用 Codex"])
+      (byLabel(mounted.container, label) as HTMLInputElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("至少需要启用一种 Worker 类型"),
+      "全部关闭提示",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+    (byLabel(mounted.container, "启用 DSH") as HTMLInputElement).click();
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "恢复启用");
+    assert.equal(
+      textOf(mounted.container).includes("至少需要启用一种 Worker 类型"),
+      false,
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: list and detail show recorded task roles and handle legacy records without a role", async () => {
+  const ui = worker({ taskRole: "ui_design", taskName: "界面任务" });
+  const legacy = worker({ id: "worker-legacy", taskName: "历史任务" });
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: [ui, legacy],
+        counts: {
+          dsh: counts({ running: 2 }),
+          pi: counts(),
+          codex: counts(),
+          total: counts({ running: 2 }),
+        },
+      }),
+    detail: (workerId) =>
+      workerId === "worker-legacy"
+        ? {
+            worker: legacy,
+            runs: [run({ workerId: "worker-legacy" })],
+          }
+        : { worker: ui, runs: [run()] },
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("界面任务"),
+      "列表角色",
+    );
+    assert.ok(textOf(mounted.container).includes("UI设计"));
+    // A legacy record stays quiet in the list instead of showing an empty role.
+    assert.equal(textOf(mounted.container).includes("未指定"), false);
+    (byLabel(mounted.container, "查看 界面任务") as HTMLButtonElement).click();
+    await waitFor(
+      () => Boolean(mounted.container.querySelector(".worker-detail-grid")),
+      "角色详情",
+    );
+    assert.ok(
+      textOf(mounted.container.querySelector(".worker-detail-grid")).includes(
+        "UI设计",
+      ),
+    );
+    button(mounted.container, "返回列表").click();
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "查看 历史任务")),
+      "返回列表",
+    );
+    (byLabel(mounted.container, "查看 历史任务") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("任务角色"),
+      "历史任务详情",
+    );
+    assert.ok(textOf(mounted.container).includes("未指定"));
   } finally {
     mounted.unmount();
   }
@@ -815,6 +1154,8 @@ test("DOM: Codex settings validate env/argv, submit the Codex payload and allow 
       concurrency: { dsh: 3, pi: 3, codex: 4 },
       retentionDays: 1,
       defaultWorkerType: "codex",
+      enabled: { dsh: true, pi: true, codex: true },
+      roles: { dsh: [], pi: [], codex: [] },
       defaults: {
         dsh: { model: null, effort: null },
         pi: { model: null, effort: null },
@@ -850,6 +1191,8 @@ test("DOM: Codex settings validate env/argv, submit the Codex payload and allow 
       concurrency: { dsh: 3, pi: 3, codex: 4 },
       retentionDays: 1,
       defaultWorkerType: "codex",
+      enabled: { dsh: true, pi: true, codex: true },
+      roles: { dsh: [], pi: [], codex: [] },
       defaults: {
         dsh: { model: null, effort: null },
         pi: { model: null, effort: null },

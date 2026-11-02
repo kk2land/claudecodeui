@@ -7,6 +7,10 @@
  * the process boundary.
  */
 
+import type { WorkerTaskRole } from "./task-roles.js";
+
+export type { WorkerTaskRole };
+
 //----------------- WORKER IDENTITY AND STATUS ------------
 
 /**
@@ -117,10 +121,18 @@ export type WorkerStartInput = {
   /** Short user-visible label for the worker. */
   taskName: string;
   /**
-   * Native runner for this worker. Omitted selects `WorkerSettings.defaultWorkerType`; an explicit
-   * value always wins over the configured default.
+   * Native runner for this worker. An explicit value always wins, but it must be enabled. When
+   * omitted, the type is chosen only from enabled types whose `roles` include `taskRole` (see
+   * `WorkerSettings.roles`); among those candidates `defaultWorkerType` wins, otherwise the
+   * first in `dsh`/`pi`/`codex` order. `defaultWorkerType` is used only when no role was
+   * supplied or no enabled type matches it.
    */
   type?: WorkerType;
+  /**
+   * Requested task role; one of `WORKER_TASK_ROLES`. A role only narrows which type an omitted
+   * `type` selects, so it applies to new workers only: a resume keeps the worker's recorded type.
+   */
+  taskRole?: WorkerTaskRole;
   prompt: string;
   workspace: WorkerStartWorkspace;
   /**
@@ -289,6 +301,8 @@ export type WorkerRecord = {
   id: string;
   type: WorkerType;
   taskName: string;
+  /** Task role recorded at creation; absent on workers created before roles existed. */
+  taskRole?: WorkerTaskRole;
   ownerId: string;
   parentSessionId: string;
   projectId: string;
@@ -359,11 +373,27 @@ export type WorkerCodexSettings = {
  * Effective worker settings. Concurrency applies per `(parentSessionId, projectId, workerType)`
  * key. The first soft reminder defaults to 600 seconds / 20 steps, followed by timed reviews
  * every `softReminderSeconds`; no hard timeout is applied by default.
+ *
+ * `enabled` gates both newly accepted starts and newly accepted resumes; a run that was already
+ * accepted, including queued work, is unchanged. `roles` only routes the type of a new worker
+ * and never changes an existing worker or resume. A replayed request returns its original
+ * record instead of reading these settings again.
  */
 export type WorkerSettings = {
   concurrency: Record<WorkerType, number>;
-  /** Type selected by a start request that omits `type`; initially `dsh`. */
+  /**
+   * Fallback for a start request with no task role or no matching enabled type, and preferred
+   * among multiple role matches. Must be enabled; defaults to `dsh`.
+   */
   defaultWorkerType: WorkerType;
+  /** Whether each type may be used for new starts and resumes; initially true for every type. */
+  enabled: Record<WorkerType, boolean>;
+  /**
+   * Task roles each type accepts. A type with no roles here simply does not participate in role
+   * matching; only when no enabled type matches the requested role does an omitted `type` fall
+   * back to `defaultWorkerType`. Initially `[]` for every type.
+   */
+  roles: Record<WorkerType, WorkerTaskRole[]>;
   /** Model and effort defaults for each type; initially null for all three types. */
   defaults: WorkerDefaults;
   /** Codex exec launch settings; required here and replaced as a whole by a settings update. */
@@ -382,10 +412,16 @@ export type WorkerSettings = {
  * contain both `dsh` and `pi`; a supplied `codex` object must include both `env` and `extraArgs`
  * and replaces the whole setting. Blank or null model/effort values clear that configured
  * default. `retentionDays` must be a positive integer.
+ *
+ * `enabled` and `roles` are whole-setting optional: when a map is supplied it must contain all
+ * three of `dsh`, `pi`, and `codex`; when omitted the stored value is kept. A supplied
+ * `defaultWorkerType` must reference a type that is enabled afterwards.
  */
 export type WorkerSettingsInput = {
   concurrency: { dsh: number; pi: number } & { codex?: number };
   defaultWorkerType?: WorkerType;
+  enabled?: Record<WorkerType, boolean>;
+  roles?: Record<WorkerType, WorkerTaskRole[]>;
   defaults?: { dsh: WorkerDefault; pi: WorkerDefault } & { codex?: WorkerDefault };
   codex?: WorkerCodexSettings;
   retentionDays?: number;

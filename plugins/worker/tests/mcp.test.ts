@@ -108,6 +108,8 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   service.updateSettings({
     concurrency: { dsh: 3, pi: 3 },
     defaultWorkerType: "dsh",
+    enabled: { dsh: true, pi: true, codex: true },
+    roles: { dsh: [], pi: ["code_review"], codex: [] },
     defaults: {
       dsh: { model: "mcp-default-model", effort: "medium" },
       pi: { model: null, effort: null },
@@ -134,13 +136,25 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
     "dsh",
   );
   const contextSettings = (context as {
-    settings: { concurrency: unknown; defaults: unknown; codex?: unknown };
+    settings: {
+      concurrency: unknown;
+      defaults: unknown;
+      enabled: unknown;
+      roles: unknown;
+      codex?: unknown;
+    };
   }).settings;
   assert.deepEqual(contextSettings.concurrency, { dsh: 3, pi: 3, codex: 3 });
   assert.deepEqual(contextSettings.defaults, {
     dsh: { model: "mcp-default-model", effort: "medium" },
     pi: { model: null, effort: null },
     codex: { model: null, effort: null },
+  });
+  assert.deepEqual(contextSettings.enabled, { dsh: true, pi: true, codex: true });
+  assert.deepEqual(contextSettings.roles, {
+    dsh: [],
+    pi: ["code_review"],
+    codex: [],
   });
   assert.equal("codex" in contextSettings, false);
   const serializedContext = JSON.stringify(context);
@@ -234,6 +248,36 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   assert.equal(defaultWaited.run.model, "mcp-default-model");
   assert.equal(defaultWaited.run.effort, "medium");
   assert.equal(service.get(defaulted.worker.id).worker.type, "dsh");
+
+  const roleStarted = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: {
+        ...omitted,
+        taskRole: "code_review",
+        requestId: "mcp-role-start",
+      },
+    }),
+  ) as { worker: { id: string; type: string; taskRole?: string } };
+  assert.equal(roleStarted.worker.type, "pi");
+  assert.equal(roleStarted.worker.taskRole, "code_review");
+  const roleWaited = text(
+    await client.callTool({
+      name: "worker_wait",
+      arguments: { workerId: roleStarted.worker.id, timeoutSeconds: 10 },
+    }),
+  ) as { run: { status: string } };
+  assert.equal(roleWaited.run.status, "completed");
+  const rejectedRole = await client.callTool({
+    name: "worker_start",
+    arguments: {
+      ...omitted,
+      taskRole: "architecture",
+      requestId: "mcp-invalid-role",
+    },
+  });
+  assert.equal(rejectedRole.isError, true);
+  assert.equal(service.state().workers.length, 3);
 
   const intruder = service.registerOwner(
     {
