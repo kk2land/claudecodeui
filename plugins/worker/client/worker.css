@@ -6,6 +6,7 @@
   --worker-muted: #697381;
   --worker-border: #e5e8ed;
   --worker-blue: #315fe8;
+  --worker-blue-hover: #254dcc;
   --worker-blue-soft: #eef3ff;
   --worker-green: #24734e;
   --worker-green-soft: #eaf6ef;
@@ -33,6 +34,7 @@
   --worker-muted: #9ba4b2;
   --worker-border: #30353e;
   --worker-blue: #9eb8ff;
+  --worker-blue-hover: #b6caff;
   --worker-blue-soft: #26324a;
   --worker-green: #81c9a2;
   --worker-green-soft: #1e3329;
@@ -81,6 +83,10 @@
   background: var(--worker-blue);
   border-color: var(--worker-blue);
   color: var(--worker-bg);
+}
+.worker-plugin .worker-primary:hover:not(:disabled) {
+  background: var(--worker-blue-hover);
+  border-color: var(--worker-blue-hover);
 }
 .worker-plugin .worker-danger {
   color: var(--worker-red);
