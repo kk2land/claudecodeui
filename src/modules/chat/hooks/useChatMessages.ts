@@ -48,7 +48,8 @@ type CachedMessageProjection = {
 const projectionCache = new WeakMap<NormalizedMessage, CachedMessageProjection>();
 
 /**
- * Parses a background-agent `<task-notification>` block.
+ * Parses background-agent notifications, including the Worker host's persisted
+ * wake-up format. Native providers record both kinds as user-role messages.
  *
  * The harness injects these as user-role messages when a background task stops.
  * Newer notifications carry extra fields (`<tool-use-id>`, `<note>`, `<usage>`,
@@ -58,6 +59,19 @@ const projectionCache = new WeakMap<NormalizedMessage, CachedMessageProjection>(
  * notification plus, when present, the agent's markdown result.
  */
 function parseTaskNotification(content: string): ParsedTaskNotification | null {
+  // Match the host envelope and result fields, not an ordinary mention of Workers.
+  // This also covers existing history, whose native user role cannot be changed.
+  const worker = /^(Automatic Worker (?:progress reminder \/ )?execution result \(batch [\w-]+\)\.)\nThis is not user acceptance\. Review the result before continuing\.\n[\s\S]*?\n(Worker: [^\n]+\nRun: [^\n]+\nStatus: (?:running|completed|failed|cancelled|interrupted|unknown)\nSummary: [\s\S]*)$/.exec(content);
+  if (worker) {
+    const statuses = [...worker[2].matchAll(/^Status: (running|completed|failed|cancelled|interrupted|unknown)$/gm)];
+    return {
+      summary: worker[1],
+      status: statuses.find((match) => match[1] !== 'completed')?.[1] ?? 'completed',
+      // Runtime instructions stay in the model prompt; show the actual results.
+      result: worker[2],
+    };
+  }
+
   if (!content.trimStart().startsWith('<task-notification>')) {
     return null;
   }

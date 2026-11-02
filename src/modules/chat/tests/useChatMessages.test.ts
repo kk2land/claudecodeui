@@ -21,6 +21,58 @@ function message(
   };
 }
 
+for (const provider of ['codex', 'dsh'] as const) {
+  for (const status of ['completed', 'running', 'failed', 'cancelled', 'interrupted', 'unknown']) {
+    test(`${provider} renders a Worker ${status} wake-up as a task notification and result`, () => {
+      const title = `Automatic Worker ${status === 'running' ? 'progress reminder / ' : ''}execution result (batch batch-1).`;
+      const result = `Worker: worker-1\nRun: run-1\nStatus: ${status}\nSummary: First line\nMore details.`;
+      const content = [
+        title,
+        'This is not user acceptance. Review the result before continuing.',
+        ...(status === 'running' ? ['Read worker_get for the current run before acting.'] : []),
+        '', result,
+      ].join('\n');
+      const live = message('worker-live', { provider, role: 'user', content });
+      const history = message('worker-history', { provider, role: 'user', content });
+
+      for (const source of [live, history]) {
+        const rows = normalizedToChatMessages([source]);
+        assert.equal(rows.length, 2);
+        assert.equal(rows[0].type, 'assistant');
+        assert.equal(rows[0].isTaskNotification, true);
+        assert.equal(rows[0].taskNotificationStatus, status);
+        assert.equal(rows[0].content, title);
+        assert.equal(rows[1].type, 'assistant');
+        assert.equal(rows[1].content, result);
+        assert.ok(rows.every((row) => !row.content?.includes('Review the result before continuing.')));
+      }
+    });
+  }
+}
+
+test('keeps every result in a merged Worker batch and reports an unfinished status', () => {
+  const result = [
+    'Worker: worker-1\nRun: run-1\nStatus: completed\nSummary: Done.',
+    'Worker: worker-2\nRun: run-2\nStatus: running\nSummary: Still working.',
+  ].join('\n');
+  const content = `Automatic Worker progress reminder / execution result (batch batch-1).\nThis is not user acceptance. Review the result before continuing.\n\n${result}`;
+  const rows = normalizedToChatMessages([message('batch', { provider: 'codex', role: 'user', content })]);
+  assert.equal(rows[0].taskNotificationStatus, 'running');
+  assert.equal(rows[1].content, result);
+});
+
+test('ordinary messages mentioning Worker results keep their author and content', () => {
+  for (const content of [
+    'Please fix Automatic Worker execution result rendering.',
+    'Automatic Worker execution result (batch batch-1).\nThis is my own message.',
+    'Automatic Worker execution result (batch batch-1).\nThis is not user acceptance. Review the result before continuing.\n\nNo result fields.',
+  ]) {
+    const [row] = normalizedToChatMessages([message('human', { provider: 'codex', role: 'user', content })]);
+    assert.equal(row.type, 'user');
+    assert.equal(row.content, content);
+  }
+});
+
 test('preserves historical UI message identity when only the stream record changes', () => {
   const first = message('first', { content: 'First answer' });
   const second = message('second', { content: 'Second answer' });
