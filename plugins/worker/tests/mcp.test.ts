@@ -8,7 +8,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { createWorkerMcpServer } from "../server/mcp.js";
 import type { WorkerService } from "../server/service.js";
-import type { WorkerNotification, WorkerRecord, WorkerRun } from "../shared/contracts.js";
+import type { WorkerNotification, WorkerPlan, WorkerRecord, WorkerRun } from "../shared/contracts.js";
 import { createService, startInput, temporaryRoot, waitFor } from "./helpers.js";
 
 function text(result: unknown): unknown {
@@ -59,7 +59,7 @@ async function mcpServer(
   };
 }
 
-test("real MCP handshake exposes 11 tools and executes worker tools", async (t) => {
+test("real MCP handshake exposes 12 tools and executes worker tools", async (t) => {
   const { service, project } = createService(t, temporaryRoot("worker-mcp-"));
   const owner = service.registerOwner(
     {
@@ -92,6 +92,7 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
       "worker_get",
       "worker_list",
       "worker_logs",
+      "worker_plan_save",
       "worker_recover",
       "worker_resume",
       "worker_start",
@@ -108,6 +109,18 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
   });
   const context = text(await client.callTool({ name: "worker_context", arguments: {} }));
   assert.equal((context as { owner: { id: string } }).owner.id, "mcp-owner");
+  assert.equal((context as { plan: WorkerPlan | null }).plan, null);
+  const content = "# 协作计划\n\n- W1：执行后待主会话验收\n- W2：依赖 W1，等待产物交接\n";
+  const plan = text(await client.callTool({ name: "worker_plan_save", arguments: { content } })) as WorkerPlan;
+  assert.equal(plan.content, content);
+  assert.ok(Number.isFinite(Date.parse(plan.updatedAt)));
+  assert.deepEqual(service.state().workers, []);
+  assert.deepEqual(service.notifications(), []);
+  for (const invalid of [{}, { content: 42 }, { content: " \n\t" }]) {
+    const rejected = await client.callTool({ name: "worker_plan_save", arguments: invalid });
+    assert.equal(rejected.isError, true);
+    assert.deepEqual(service.context(owner.id).plan, plan);
+  }
   assert.deepEqual(
     (context as { settings: { defaultWorkerType: string; defaults: unknown } })
       .settings.defaultWorkerType,
@@ -159,7 +172,8 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
   );
   const afterCompletion = text(
     await client.callTool({ name: "worker_context", arguments: {} }),
-  ) as { notifications: { id: string }[] };
+  ) as { notifications: { id: string }[]; plan: WorkerPlan };
+  assert.deepEqual(afterCompletion.plan, plan, "completion does not accept or rewrite the saved plan");
   assert.deepEqual(
     afterCompletion.notifications.map((item) => item.id),
     waited.notifications.map((item) => item.id),
@@ -223,6 +237,11 @@ test("real MCP handshake exposes 11 tools and executes worker tools", async (t) 
     requestInit: { headers: { authorization: "Bearer other-token" } },
   });
   await other.connect(otherTransport);
+  const otherContext = text(await other.callTool({ name: "worker_context", arguments: {} })) as { plan: WorkerPlan | null };
+  assert.equal(otherContext.plan, null);
+  await other.callTool({ name: "worker_plan_save", arguments: { content: "# Other parent's plan" } });
+  const originalContext = text(await client.callTool({ name: "worker_context", arguments: {} })) as { plan: WorkerPlan };
+  assert.deepEqual(originalContext.plan, plan);
   const denied = await other.callTool({
     name: "worker_get",
     arguments: { workerId: started.worker.id },

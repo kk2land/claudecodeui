@@ -5,6 +5,7 @@ import type {
   WorkerNotification,
   WorkerNotificationDelivery,
   WorkerOwner,
+  WorkerPlan,
   WorkerRecord,
   WorkerRun,
   WorkerSettings,
@@ -28,7 +29,7 @@ type WorkerRow = { body: string; cleaned_at: string | null };
 type RunRow = { body: string };
 type OwnerRow = { body: string };
 
-/** SQLite persistence for workers, runs, settings, idempotency keys, and the notification outbox. */
+/** SQLite persistence for workers, runs, plans, settings, idempotency keys, and the notification outbox. */
 export class WorkerStore {
   private readonly db: Database.Database;
   constructor(readonly directory: string) {
@@ -75,6 +76,13 @@ export class WorkerStore {
         PRIMARY KEY(owner_id, request_id)
       );
       CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS plans (
+        parent_session_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        content TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY(parent_session_id, project_id)
+      );
     `);
     const requestColumns = new Set(
       (
@@ -95,6 +103,25 @@ export class WorkerStore {
 
   transaction<T>(work: () => T): T {
     return this.db.transaction(work)();
+  }
+
+  /** Reads the logical session's plan for WorkerService.context, independently of run history. */
+  plan(parentSessionId: string, projectId: string): WorkerPlan | null {
+    const row = this.db
+      .prepare("SELECT content, updated_at AS updatedAt FROM plans WHERE parent_session_id=? AND project_id=?")
+      .get(parentSessionId, projectId) as WorkerPlan | undefined;
+    return row ?? null;
+  }
+
+  /** Replaces the complete plan accepted by WorkerService without touching execution records. */
+  savePlan(parentSessionId: string, projectId: string, plan: WorkerPlan): void {
+    this.db
+      .prepare(`
+        INSERT INTO plans(parent_session_id,project_id,content,updated_at) VALUES(?,?,?,?)
+        ON CONFLICT(parent_session_id,project_id)
+        DO UPDATE SET content=excluded.content, updated_at=excluded.updated_at
+      `)
+      .run(parentSessionId, projectId, plan.content, plan.updatedAt);
   }
 
   settings(): WorkerSettings {

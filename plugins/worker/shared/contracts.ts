@@ -50,6 +50,18 @@ export type WorkerError = {
   message: string;
 };
 
+//----------------- COLLABORATION PLAN ------------
+
+/**
+ * The parent-maintained Markdown plan for one logical parent session and project. Dependencies,
+ * acceptance evidence, and Worker/Run references are prose, not scheduler inputs. The plan
+ * survives owner generation changes and run retention; updatedAt is a server-issued ISO timestamp.
+ */
+export type WorkerPlan = {
+  content: string;
+  updatedAt: string;
+};
+
 //----------------- WORKSPACE AND REQUESTS ------------
 
 /** How a worker's working directory is resolved. Existing directories are never created here. */

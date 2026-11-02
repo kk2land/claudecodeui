@@ -53,12 +53,29 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_context",
     {
-      description: "获取当前父会话的 owner、并发设置、活动任务与待确认通知摘要；派发后通常交还回合，由运行提醒或终态通知唤醒后检查进展或验收",
+      description: "获取当前父会话的 owner、已保存计划、并发设置、活动任务与待确认通知摘要；计划须结合实际 Worker 状态核对，派发后由运行提醒或终态通知唤醒后检查进展或验收",
       inputSchema: {},
     },
     async () => {
       try {
         return result(service.context(ownerId));
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "worker_plan_save",
+    {
+      description: "保存当前父会话与项目的完整 Markdown 计划，替换原内容；记录任务、依赖、Worker/Run 关联和验收进度，仅更新记录，不派发任务或自动验收",
+      inputSchema: {
+        content: z.string().refine((content) => content.trim().length > 0, "计划内容不能为空"),
+      },
+    },
+    async ({ content }) => {
+      try {
+        return result(service.savePlan(ownerId, content));
       } catch (error) {
         return failure(error);
       }

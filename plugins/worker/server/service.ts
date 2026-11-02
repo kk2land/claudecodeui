@@ -28,6 +28,7 @@ import type {
   WorkerNotification,
   WorkerNotificationDelivery,
   WorkerOwner,
+  WorkerPlan,
   WorkerRecord,
   WorkerRecoverInput,
   WorkerResumeInput,
@@ -1131,6 +1132,7 @@ export class WorkerService {
     });
     return {
       owner,
+      plan: this.store.plan(owner.parentSessionId, owner.projectId),
       settings: snapshot.settings,
       counts: snapshot.counts,
       activeWorkers: snapshot.workers.filter((worker) =>
@@ -1138,6 +1140,14 @@ export class WorkerService {
       ),
       notifications: snapshot.notifications,
     };
+  }
+
+  /** Saves Markdown validated by the MCP boundary; ownership comes from the authenticated caller. */
+  savePlan(ownerId: string, content: string): WorkerPlan {
+    const owner = this.requireOwner(ownerId);
+    const plan: WorkerPlan = { content, updatedAt: new Date(this.now()).toISOString() };
+    this.store.savePlan(owner.parentSessionId, owner.projectId, plan);
+    return plan;
   }
 
   notificationsForWorker(

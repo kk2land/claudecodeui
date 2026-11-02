@@ -5,7 +5,7 @@ import test from "node:test";
 import type { TestContext } from "node:test";
 import { WorkerService } from "../server/service.js";
 import type { WorkerNotification, WorkerRecord, WorkerRun, WorkerStatus } from "../shared/contracts.js";
-import { createService, startInput, temporaryRoot, waitStatus } from "./helpers.js";
+import { createService, owner, startInput, temporaryRoot, waitStatus } from "./helpers.js";
 
 const DAY = 86_400_000;
 const NOW = Date.parse("2026-10-31T00:00:00.000Z");
@@ -122,6 +122,10 @@ test("default daily retention expires terminal history at the boundary and prote
   const active = (["queued", "starting", "running", "stopping", "unknown"] as const).map(
     (status) => seed(service, status, null, status),
   );
+  service.registerOwner(owner(service.store.directory), "plan-token");
+  const beforePlan = service.state();
+  const plan = service.savePlan("owner-1", "# 验收记录\n\n已完成任务的结论独立于运行日志保留。\n");
+  assert.deepEqual(service.state(), beforePlan, "saving a plan leaves existing runs and notifications untouched");
   t.mock.timers.tick(59_999);
   assert.ok(service.store.run(expired[0]!.run.id));
   t.mock.timers.tick(1);
@@ -143,6 +147,7 @@ test("default daily retention expires terminal history at the boundary and prote
     assert.ok(service.store.request("scope", run.id));
   }
   assert.equal(service.notifications().length, 1);
+  assert.deepEqual(service.context("owner-1").plan, plan);
 });
 
 test("shortening retention prunes immediately while preserving a worker's newer run", (t) => {

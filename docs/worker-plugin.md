@@ -2,7 +2,7 @@
 
 支持 Codex app-server 与 DSH ACP 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH 或 Pi 子任务执行，
 并在独立进程中记录运行、原始事件与结果。插件负责执行与记录；任务拆分、review 和 Git 集成仍由父会话
-与用户授权的主代理负责，不提供自动 Git 集成或 DAG。
+与用户授权的主代理负责。插件保存主会话维护的计划与依赖记录，不提供自动依赖调度或 Git 集成。
 
 ## 启用与 skill 部署
 
@@ -61,7 +61,8 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 再放行依赖，避免少量共享接口把其余独立实现串行化。
 
 决定委派且满足 skill/MCP 启用条件后，先调用一次 `worker_context` 确认真实父会话、项目和可用状态；
-同一轮内复用，仅范围变化或需要刷新时再查。每次 `worker_start` 都必须显式选择工作区：
+同一轮内复用，仅范围变化或需要恢复上下文时再查；返回的 `plan` 可用于恢复计划，并须结合实际 Worker 状态核对。
+每次 `worker_start` 都必须显式选择工作区：
 
 - `worktree`：插件创建隔离 worktree，并在接受请求时解析 Git 基线（默认 `HEAD`）。源目录脏默认拒绝；
   只有明确传 `allowDirtySource: true` 才放行。
@@ -95,6 +96,34 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。页面只读状态并执行取消、暂停、恢复、清理和
 通知重试；不展示任何凭证。没有会话时禁用会话视图，没有项目时仅保留全部视图。
+
+## 计划与验收记录
+
+每个父会话与项目维护一份 Markdown 计划。插件在现有 `worker.db` 中独立保存内容和更新时间，
+不在项目工作区写入计划文件。`worker_context` 的 `plan` 首次为 `null`，保存后返回：
+
+    {
+      "content": "# 当前目标\n\n- W1：接口待验收\n- W2：依赖 W1，等待产物交接\n",
+      "updatedAt": "2026-11-02T00:00:00.000Z"
+    }
+
+`worker_plan_save({ content })` 接收非空白字符串，保留 Markdown 原文，替换当前完整计划并返回
+`{ content, updatedAt }`。会话与项目身份取自已认证的 owner，调用方不填写；同一父会话重新连接或
+更换运行时 owner 后仍可读取原计划，不同父会话或项目相互隔离。
+
+计划记录任务编号与目标、依赖、工作区和修改范围、验收条件、Worker/Run 关联、进度与验收证据及产物交接。
+新目标按章节追加，已完成部分保留简短结论。仅在计划调整、派发、验收、阻塞或返工时保存，
+无需随每次查询写入。主会话确认前置任务已验收，并确认所需产物实际进入下游 cwd 或基线后，才调用现有
+`worker_start` 或 `worker_resume`；请求接受后把实际 Worker/Run 标识写回计划。
+
+计划只是主会话维护的记录，不是运行状态来源：保存不启动或取消任务、不改变排队、不产生运行通知，
+也不自动判断依赖或验收。`completed` 和 `worker_ack` 均不代表验收通过，主会话检查实际 diff 和验证
+证据后更新结论。保存与派发均遵守当前模式和授权。
+
+计划随插件实例数据保留，不参与运行日志的到期清理；计划中的历史标识不保证对应 Worker 或日志仍可访问。
+保存前须保留仍需跟踪的任务与验收结论。恢复工作流、拆分案例及提示词模板见
+[Worker skill](../plugins/worker/skills/cloudcli-workers/SKILL.md) 和
+[协作案例与模板](../plugins/worker/skills/cloudcli-workers/references/workflows.md)。
 
 ## 默认类型、模型与 reasoning
 
@@ -256,14 +285,15 @@ worker 记录。原生会话、分支和工作目录不会被自动删除；记�
 ## 数据与边界
 
 插件数据位于宿主分配的插件数据目录（通常为 `CLOUDCLI_PLUGIN_DATA_DIR`，按宿主数据库路径隔离），包含
-运行记录、outbox 与实例会话目录 `sessions/dsh`、`sessions/pi`。日志与结果可能含敏感内容，只能通过受保护的 UI REST 与 MCP 读取；MCP token
-不进入 CLI 环境，host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自动改写用户全局配置与认证
+运行记录、计划、outbox 与实例会话目录 `sessions/dsh`、`sessions/pi`。日志与结果可能含敏感内容，只能通过
+受保护的 UI REST 与 MCP 读取；计划仅通过所属父会话的 MCP 读取与保存。MCP token 不进入 CLI 环境，
+host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自动改写用户全局配置与认证
 数据；安装脚本仅在用户主动运行时维护上述引用块。执行器按既有方式读取配置和认证，Worker 原生会话使用独立存储。
 
 `plugins/worker/shared/contracts.ts` 是插件、宿主桥接与 UI 共用的纯类型契约；宿主从
 `server/shared/index.ts` 重导出实际使用部分，插件模块直接从该文件导入，禁止重复定义。跨进程使用：
 
-- MCP 工具：`worker_context`、`worker_list`、`worker_start`、`worker_resume`、`worker_get`、
+- MCP 工具：`worker_context`、`worker_plan_save`、`worker_list`、`worker_start`、`worker_resume`、`worker_get`、
   `worker_logs`、`worker_wait`、`worker_ack`、`worker_cancel`、`worker_recover`、`worker_cleanup`。
 - UI 只通过宿主现有 RPC 代理访问插件受保护 REST，不接触 IPC。
 
