@@ -543,33 +543,84 @@
 .worker-form-wide {
   grid-column: 1 / -1;
 }
-.worker-fieldset {
-  display: grid;
-  gap: 10px;
+.worker-type-settings {
   min-width: 0;
-  margin: 0;
-  padding: 12px;
   border: 1px solid var(--worker-border);
-  border-radius: 6px;
+  border-radius: 8px;
+  background: var(--worker-bg);
 }
-.worker-fieldset legend {
-  padding: 0 4px;
-  font-size: 12px;
+.worker-type-settings > summary {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 13px 14px;
+  border-radius: 8px;
+  cursor: pointer;
+  list-style: none;
+}
+.worker-type-settings > summary::-webkit-details-marker {
+  display: none;
+}
+.worker-type-settings > summary:hover {
+  background: var(--worker-soft);
+}
+.worker-type-identity,
+.worker-type-overview {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.worker-type-identity {
+  flex-shrink: 0;
+}
+.worker-type-identity strong {
+  min-width: 42px;
   font-weight: 600;
+}
+.worker-type-overview {
+  flex: 1;
+  justify-content: flex-end;
+  min-width: 0;
+  font-size: 11.5px;
   color: var(--worker-muted);
 }
-.worker-fieldset-codex {
-  grid-column: 1 / -1;
-  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+.worker-type-overview > span:last-child {
+  white-space: nowrap;
+}
+.worker-type-model {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.worker-type-chevron {
+  flex-shrink: 0;
+  color: var(--worker-muted);
+}
+.worker-type-settings[open] > summary .worker-type-chevron {
+  transform: rotate(90deg);
+}
+.worker-type-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
+  gap: 12px;
+  padding: 14px;
+  border-top: 1px solid var(--worker-border);
+}
+.worker-type-fields > label,
+.worker-type-fields input,
+.worker-type-fields textarea {
+  min-width: 0;
 }
 .worker-roles {
   display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
   gap: 6px;
   padding: 8px 10px;
   border: 1px solid var(--worker-border);
   border-radius: 6px;
 }
 .worker-roles-label {
+  grid-column: 1 / -1;
   color: var(--worker-muted);
   font-size: 12px;
 }
@@ -664,5 +715,14 @@
   .worker-table {
     display: block;
     overflow-x: auto;
+  }
+}
+@media (max-width: 540px) {
+  .worker-type-settings > summary {
+    gap: 8px;
+    padding: 12px;
+  }
+  .worker-type-model {
+    display: none;
   }
 }

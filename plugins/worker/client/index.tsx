@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bell,
+  ChevronRight,
   CircleCheck,
   Clock3,
   FileText,
@@ -726,6 +727,44 @@ function envText(env: Record<string, string>): string {
     .join("\n");
 }
 
+function TypeSettings({
+  type,
+  enabled,
+  isDefault,
+  model,
+  concurrency,
+  children,
+}: {
+  type: WorkerType;
+  enabled: boolean;
+  isDefault: boolean;
+  model: string;
+  concurrency: string;
+  children: React.ReactNode;
+}) {
+  return (
+    <details className="worker-type-settings worker-form-wide">
+      <summary aria-label={TYPE_LABELS[type] + " 设置"}>
+        <span className="worker-type-identity">
+          <strong>{TYPE_LABELS[type]}</strong>
+          <span className={"worker-badge " + (enabled ? "worker-ok" : "worker-muted")}>
+            {enabled ? "已启用" : "已关闭"}
+          </span>
+          {isDefault ? <span className="worker-badge worker-active">默认</span> : null}
+        </span>
+        <span className="worker-type-overview">
+          <span className="worker-type-model" title={model.trim() || "沿用执行器模型"}>
+            {model.trim() || "沿用执行器模型"}
+          </span>
+          <span>并发 {concurrency}</span>
+        </span>
+        <ChevronRight size={16} className="worker-type-chevron" aria-hidden="true" />
+      </summary>
+      <div className="worker-type-fields">{children}</div>
+    </details>
+  );
+}
+
 function TypePolicy({
   type,
   enabled,
@@ -968,8 +1007,13 @@ function SettingsView({
             默认类型必须已启用；满载仍按原有 FIFO 排队。
           </small>
         </label>
-        <fieldset className="worker-fieldset">
-          <legend>DSH</legend>
+        <TypeSettings
+          type="dsh"
+          enabled={enabled.dsh}
+          isDefault={defaultType === "dsh"}
+          model={dshModel}
+          concurrency={dsh}
+        >
           <TypePolicy
             type="dsh"
             enabled={enabled.dsh}
@@ -1010,9 +1054,14 @@ function SettingsView({
               onChange={(event) => setDsh(event.target.value)}
             />
           </label>
-        </fieldset>
-        <fieldset className="worker-fieldset">
-          <legend>Pi</legend>
+        </TypeSettings>
+        <TypeSettings
+          type="pi"
+          enabled={enabled.pi}
+          isDefault={defaultType === "pi"}
+          model={piModel}
+          concurrency={pi}
+        >
           <TypePolicy
             type="pi"
             enabled={enabled.pi}
@@ -1053,9 +1102,14 @@ function SettingsView({
               onChange={(event) => setPi(event.target.value)}
             />
           </label>
-        </fieldset>
-        <fieldset className="worker-fieldset worker-fieldset-codex">
-          <legend>Codex</legend>
+        </TypeSettings>
+        <TypeSettings
+          type="codex"
+          enabled={enabled.codex}
+          isDefault={defaultType === "codex"}
+          model={codexModel}
+          concurrency={codex}
+        >
           <TypePolicy
             type="codex"
             enabled={enabled.codex}
@@ -1126,7 +1180,7 @@ function SettingsView({
               留空表示不加额外参数；显式模型、provider 与 effort 优先于这些参数。
             </small>
           </label>
-        </fieldset>
+        </TypeSettings>
         <label className="worker-form-wide">
           日志和运行记录保留天数
           <input
