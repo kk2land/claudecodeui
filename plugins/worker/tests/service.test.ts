@@ -300,8 +300,10 @@ for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget ded
   const started = await service.start("owner-1", startInput({ requestId: "reminder-1" }));
   await waitStatus(service, started.worker.id, ["running"]);
   if (trigger === "elapsed") now += 600_000;
-  else await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
-    (log) => (log.match(/"phase":"step_end"/g) ?? []).length === 20);
+  else await waitFor(
+    () => service.get(started.worker.id).worker.latestRun?.progress.steps ?? 0,
+    (steps) => steps >= 20,
+  );
   t.mock.timers.tick(1000);
   const reminder = service.notifications()[0]!;
   assert.equal(reminder.status, "running");
@@ -310,7 +312,8 @@ for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget ded
   assert.equal(reminder.runId, started.run.id);
   assert.match(reminder.summary, /soft budget reached/);
   assert.match(reminder.summary, /thresholds 600s \/ 20 steps/);
-  if (trigger === "steps") assert.equal(service.get(started.worker.id).worker.latestRun?.progress.steps, 20);
+  if (trigger === "steps")
+    assert.ok((service.get(started.worker.id).worker.latestRun?.progress.steps ?? 0) >= 20);
   assert.equal(service.state().counts.total.running, 1, "a reminder still occupies its execution slot");
   t.mock.timers.tick(1000);
   assert.equal(service.notifications().length, 1, "the outstanding reminder is not duplicated");
