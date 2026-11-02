@@ -126,6 +126,7 @@ function CountsBar({ counts }: { counts: WorkerStateSnapshot["counts"] }) {
     <section className="worker-counts" aria-label="按类型统计">
       <CountCell label="DSH" counts={counts.dsh} />
       <CountCell label="Pi" counts={counts.pi} />
+      <CountCell label="Codex" counts={counts.codex} />
       <CountCell label="全部" counts={counts.total} emphasize />
     </section>
   );
@@ -464,7 +465,7 @@ function RecoverForm({
           rows={3}
           value={notes}
           onChange={(event) => setNotes(event.target.value)}
-          placeholder="例如：ps 未发现 dsh 进程；原生会话文件最后一条事件为 turn_end/cancelled"
+          placeholder="例如：ps 未发现对应原生 CLI 进程；原生会话文件最后一条事件为 turn_end/cancelled"
         />
       </label>
       <label className="worker-checkbox">
@@ -474,7 +475,7 @@ function RecoverForm({
           checked={confirmed}
           onChange={(event) => setConfirmed(event.target.checked)}
         />
-        我已核实 {worker.type === "dsh" ? "DSH" : "Pi"} 会话及子进程已停止
+        我已核实 {TYPE_LABELS[worker.type]} 会话及子进程已停止
       </label>
       <button
         className="worker-danger"
@@ -617,7 +618,7 @@ function DetailView({
               <code>{run ? run.home : "—"}</code> /{" "}
               <code>{run ? run.sessionsRoot : "—"}</code>
             </dd>
-            <dt>Token</dt>
+            <dt>{worker.type === "codex" ? "Token（会话累计）" : "Token"}</dt>
             <dd>{formatTokens(run?.usage ?? null)}</dd>
             <dt>退出码</dt>
             <dd>{run?.exitCode ?? "—"}</dd>
@@ -704,6 +705,12 @@ function NotificationList({
   );
 }
 
+function envText(env: Record<string, string>): string {
+  return Object.entries(env)
+    .map(([key, value]) => key + "=" + value)
+    .join("\n");
+}
+
 function SettingsView({
   settings,
   api,
@@ -719,6 +726,7 @@ function SettingsView({
 }) {
   const [dsh, setDsh] = useState(String(settings.concurrency.dsh));
   const [pi, setPi] = useState(String(settings.concurrency.pi));
+  const [codex, setCodex] = useState(String(settings.concurrency.codex));
   const [defaultType, setDefaultType] = useState<WorkerType>(
     settings.defaultWorkerType,
   );
@@ -728,6 +736,16 @@ function SettingsView({
   );
   const [piModel, setPiModel] = useState(settings.defaults.pi.model ?? "");
   const [piEffort, setPiEffort] = useState(settings.defaults.pi.effort ?? "");
+  const [codexModel, setCodexModel] = useState(
+    settings.defaults.codex.model ?? "",
+  );
+  const [codexEffort, setCodexEffort] = useState(
+    settings.defaults.codex.effort ?? "",
+  );
+  const [codexEnv, setCodexEnv] = useState(envText(settings.codex.env));
+  const [codexArgs, setCodexArgs] = useState(
+    JSON.stringify(settings.codex.extraArgs, null, 2),
+  );
   const [retentionDays, setRetentionDays] = useState(String(settings.retentionDays));
   const [busy, setBusy] = useState(false);
   const validNumber = (value: string) => {
@@ -735,12 +753,55 @@ function SettingsView({
     return Number.isSafeInteger(parsed) && parsed > 0;
   };
   const dshModelValue = dshModel.trim();
-  const valid = validNumber(dsh) && validNumber(pi) && validNumber(retentionDays) &&
-    (!dshEffort.trim() || !!dshModelValue);
+  const codexEnvValue: Record<string, string> = {};
+  let codexEnvError = "";
+  for (const [index, line] of codexEnv.split(/\r?\n/).entries()) {
+    if (!line.trim()) continue;
+    const separator = line.indexOf("=");
+    if (separator < 0) {
+      codexEnvError = "额外环境变量第 " + (index + 1) + " 行需要 KEY=VALUE。";
+      break;
+    }
+    const key = line.slice(0, separator).trim();
+    if (!key) {
+      codexEnvError = "额外环境变量第 " + (index + 1) + " 行的 KEY 不能为空。";
+      break;
+    }
+    // Only the first `=` separates; spaces and later `=` stay in the value.
+    codexEnvValue[key] = line.slice(separator + 1);
+  }
+  const codexArgsValue: string[] = [];
+  let codexArgsError = "";
+  const codexArgsMessage =
+    '额外命令行参数必须是 JSON 字符串数组，每个元素就是一个命令行参数，例如 ["-c", "model_provider=magpie"]。';
+  if (codexArgs.trim()) {
+    try {
+      const parsed: unknown = JSON.parse(codexArgs);
+      if (
+        Array.isArray(parsed) &&
+        parsed.every((item): item is string => typeof item === "string")
+      )
+        codexArgsValue.push(...parsed);
+      else codexArgsError = codexArgsMessage;
+    } catch {
+      codexArgsError = codexArgsMessage;
+    }
+  }
+  const valid = validNumber(dsh) && validNumber(pi) && validNumber(codex) &&
+    validNumber(retentionDays) &&
+    (!dshEffort.trim() || !!dshModelValue) &&
+    !codexEnvError && !codexArgsError;
+  const validationMessage = !validNumber(dsh) || !validNumber(pi) || !validNumber(codex)
+    ? "并发必须是大于 0 的整数。"
+    : !validNumber(retentionDays)
+      ? "保留天数必须是大于 0 的整数。"
+      : dshEffort.trim() && !dshModelValue
+        ? "DSH reasoning 需要同时配置 DSH 默认模型。"
+        : codexEnvError || codexArgsError;
   const save = async () => {
     if (!valid) return;
     const body: WorkerSettingsInput = {
-      concurrency: { dsh: Number(dsh), pi: Number(pi) },
+      concurrency: { dsh: Number(dsh), pi: Number(pi), codex: Number(codex) },
       retentionDays: Number(retentionDays),
       defaultWorkerType: defaultType,
       defaults: {
@@ -752,7 +813,12 @@ function SettingsView({
           model: piModel.trim() || null,
           effort: piEffort.trim() || null,
         },
+        codex: {
+          model: codexModel.trim() || null,
+          effort: codexEffort.trim() || null,
+        },
       },
+      codex: { env: codexEnvValue, extraArgs: codexArgsValue },
     };
     setBusy(true);
     try {
@@ -760,11 +826,16 @@ function SettingsView({
       onSaved(value);
       setDsh(String(value.concurrency.dsh));
       setPi(String(value.concurrency.pi));
+      setCodex(String(value.concurrency.codex));
       setDefaultType(value.defaultWorkerType);
       setDshModel(value.defaults.dsh.model ?? "");
       setDshEffort(value.defaults.dsh.effort ?? "");
       setPiModel(value.defaults.pi.model ?? "");
       setPiEffort(value.defaults.pi.effort ?? "");
+      setCodexModel(value.defaults.codex.model ?? "");
+      setCodexEffort(value.defaults.codex.effort ?? "");
+      setCodexEnv(envText(value.codex.env));
+      setCodexArgs(JSON.stringify(value.codex.extraArgs, null, 2));
       setRetentionDays(String(value.retentionDays));
     } catch (error) {
       onError(String(error));
@@ -781,8 +852,8 @@ function SettingsView({
         <div>
           <h2>Worker 设置</h2>
           <p>
-            并发额度修改会立即影响排队调度；默认类型、模型和 reasoning 仅用于之后的新
-            worker 启动请求
+            并发额度修改会立即影响排队调度；默认类型、模型和 reasoning 用于之后的新
+            worker；Codex 额外环境变量与命令行参数用于每次 Codex 启动和续接
           </p>
         </div>
       </header>
@@ -798,6 +869,7 @@ function SettingsView({
           >
             <option value="dsh">DSH</option>
             <option value="pi">Pi</option>
+            <option value="codex">Codex</option>
           </select>
         </label>
         <fieldset className="worker-fieldset">
@@ -868,6 +940,70 @@ function SettingsView({
             />
           </label>
         </fieldset>
+        <fieldset className="worker-fieldset worker-fieldset-codex">
+          <legend>Codex</legend>
+          <label>
+            默认模型
+            <input
+              type="text"
+              aria-label="Codex 默认模型"
+              placeholder="留空沿用 Codex 配置和额外参数"
+              value={codexModel}
+              onChange={(event) => setCodexModel(event.target.value)}
+            />
+          </label>
+          <label>
+            Reasoning
+            <input
+              type="text"
+              aria-label="Codex 默认 reasoning"
+              placeholder="留空沿用 Codex 配置和额外参数"
+              value={codexEffort}
+              onChange={(event) => setCodexEffort(event.target.value)}
+            />
+          </label>
+          <label>
+            并发
+            <input
+              type="number"
+              min="1"
+              step="1"
+              aria-label="Codex 并发"
+              value={codex}
+              onChange={(event) => setCodex(event.target.value)}
+            />
+          </label>
+          <label className="worker-form-wide">
+            额外环境变量（每行一个 KEY=VALUE）
+            <textarea
+              rows={3}
+              aria-label="Codex 额外环境变量"
+              spellCheck={false}
+              placeholder={"EXAMPLE_KEY=example value\nHTTPS_PROXY=http://127.0.0.1:7890"}
+              value={codexEnv}
+              onChange={(event) => setCodexEnv(event.target.value)}
+            />
+            <small>
+              覆盖继承环境中的同名变量；按首个 = 分割，值中的空格和后续 = 保留。
+              留空表示不注入额外变量。
+            </small>
+          </label>
+          <label className="worker-form-wide">
+            额外命令行参数（JSON 数组）
+            <textarea
+              rows={3}
+              aria-label="Codex 额外命令行参数"
+              spellCheck={false}
+              placeholder={'["-c", "model_provider=magpie"]'}
+              value={codexArgs}
+              onChange={(event) => setCodexArgs(event.target.value)}
+            />
+            <small>
+              每个数组元素就是一个命令行参数，不是一段 shell 命令。
+              留空表示不加额外参数；显式模型、provider 与 effort 优先于这些参数。
+            </small>
+          </label>
+        </fieldset>
         <label className="worker-form-wide">
           日志和运行记录保留天数
           <input
@@ -895,11 +1031,7 @@ function SettingsView({
         </p>
         {!valid ? (
           <p className="worker-error" role="alert">
-            {!validNumber(dsh) || !validNumber(pi)
-              ? "并发必须是大于 0 的整数。"
-              : !validNumber(retentionDays)
-                ? "保留天数必须是大于 0 的整数。"
-                : "DSH reasoning 需要同时配置 DSH 默认模型。"}
+            {validationMessage}
           </p>
         ) : null}
         <button
@@ -1079,9 +1211,13 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
     () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "pi") : emptyCounts()),
     [liveSnapshot],
   );
+  const codexCounts = useMemo(
+    () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "codex") : emptyCounts()),
+    [liveSnapshot],
+  );
   const counts = useMemo(
-    () => totalCounts(dshCounts, piCounts),
-    [dshCounts, piCounts],
+    () => totalCounts([dshCounts, piCounts, codexCounts]),
+    [dshCounts, piCounts, codexCounts],
   );
   const settings = liveSnapshot?.settings ?? null;
   const loading = !liveSnapshot && !error;
@@ -1197,7 +1333,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
           <header className="worker-heading">
             <div>
               <h2>子任务 Worker</h2>
-              <p>DSH 与 Pi 子任务由插件执行并记录；执行成功不等于验收。</p>
+              <p>DSH、Pi 与 Codex 子任务由插件执行并记录；执行成功不等于验收。</p>
             </div>
             <div className="worker-actions">
               <button
@@ -1264,6 +1400,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
           <CountsBar counts={liveSnapshot?.counts ?? {
             dsh: dshCounts,
             pi: piCounts,
+            codex: codexCounts,
             total: counts,
           }} />
           {!context.project ? (
@@ -1324,7 +1461,8 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
             <span>
               <PlugZap size={13} /> 并发键 (父会话, 项目, 类型)：DSH{" "}
               {settings?.concurrency.dsh ?? "—"} / Pi{" "}
-              {settings?.concurrency.pi ?? "—"}
+              {settings?.concurrency.pi ?? "—"} / Codex{" "}
+              {settings?.concurrency.codex ?? "—"}
             </span>
             <span>
               排队按 FIFO；同一原生会话只允许一个调用；清理仅限插件创建且干净、已停止的

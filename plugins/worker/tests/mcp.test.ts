@@ -99,6 +99,12 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       "worker_wait",
     ],
   );
+  const codexEnvSecret = "{{SECRET_xk2p9vqa}}";
+  const codexArgSecret = "{{SECRET_hs8m4trc}}";
+  const codex = {
+    env: { SECRET_TOKEN: codexEnvSecret, CODEX_PROXY_BYPASS: "1" },
+    extraArgs: ["-c", "model_provider=magpie", "--token", codexArgSecret],
+  };
   service.updateSettings({
     concurrency: { dsh: 3, pi: 3 },
     defaultWorkerType: "dsh",
@@ -106,6 +112,7 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       dsh: { model: "mcp-default-model", effort: "medium" },
       pi: { model: null, effort: null },
     },
+    codex,
   });
   const context = text(await client.callTool({ name: "worker_context", arguments: {} }));
   assert.equal((context as { owner: { id: string } }).owner.id, "mcp-owner");
@@ -126,13 +133,22 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       .settings.defaultWorkerType,
     "dsh",
   );
-  assert.deepEqual(
-    (context as { settings: { defaults: unknown } }).settings.defaults,
-    {
-      dsh: { model: "mcp-default-model", effort: "medium" },
-      pi: { model: null, effort: null },
-    },
-  );
+  const contextSettings = (context as {
+    settings: { concurrency: unknown; defaults: unknown; codex?: unknown };
+  }).settings;
+  assert.deepEqual(contextSettings.concurrency, { dsh: 3, pi: 3, codex: 3 });
+  assert.deepEqual(contextSettings.defaults, {
+    dsh: { model: "mcp-default-model", effort: "medium" },
+    pi: { model: null, effort: null },
+    codex: { model: null, effort: null },
+  });
+  assert.equal("codex" in contextSettings, false);
+  const serializedContext = JSON.stringify(context);
+  assert.equal(serializedContext.includes(codexEnvSecret), false);
+  assert.equal(serializedContext.includes(codexArgSecret), false);
+  assert.deepEqual(service.context(owner.id).settings, contextSettings);
+  assert.deepEqual(service.state().settings.codex, codex);
+  assert.deepEqual(service.settings().codex, codex);
   const { type: _omittedType, ...omitted } = startInput({
     requestId: "mcp-start",
     taskName: "mcp task",
@@ -256,7 +272,7 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   await assert.rejects(unauthorized.connect(badTransport));
 });
 
-for (const type of ["dsh", "pi"] as const) test(`MCP corrects a slow ${type} task by cancelling and resuming its original session`, async (t) => {
+for (const type of ["dsh", "pi", "codex"] as const) test(`MCP corrects a slow ${type} task by cancelling and resuming its original session`, async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   let now = Date.now();
   const { service, env, data } = createService(t, temporaryRoot("worker-mcp-correction-"), {

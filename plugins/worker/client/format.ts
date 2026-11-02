@@ -38,6 +38,7 @@ export const STATUS_LABELS: Record<WorkerStatus, string> = {
 export const TYPE_LABELS: Record<WorkerType, string> = {
   dsh: "DSH",
   pi: "Pi",
+  codex: "Codex",
 };
 
 export const DELIVERY_LABELS: Record<WorkerNotificationDelivery, string> = {
@@ -131,14 +132,14 @@ export function runningCount(counts: WorkerCountsByStatus): number {
   return counts.starting + counts.running;
 }
 
-/** Total across both types, derived locally so a filtered list still sums correctly. */
+/** Total across all worker types, derived locally so a filtered list still sums correctly. */
 export function totalCounts(
-  dsh: WorkerCountsByStatus,
-  pi: WorkerCountsByStatus,
+  counts: WorkerCountsByStatus[],
 ): WorkerCountsByStatus {
   const total = emptyCounts();
-  for (const status of Object.keys(total) as WorkerStatus[])
-    total[status] = dsh[status] + pi[status];
+  for (const item of counts)
+    for (const status of Object.keys(total) as WorkerStatus[])
+      total[status] += item[status];
   return total;
 }
 

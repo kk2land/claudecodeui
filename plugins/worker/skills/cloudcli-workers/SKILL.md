@@ -29,7 +29,7 @@ description: 通过 MCP 委派或管理 CloudCLI Worker 子任务。用于明确
 2. 分工覆盖全部交付物（含共享接口、串行步骤、收尾修复），每项指定 Worker；主代理仅列协调、review、集成和验收，并记录 worker/run 标识。仅按当前模式与授权派发已就绪任务，依赖满足后再派发。
 3. 交接提示词自包含目标、验收、背景、约束、`writePaths`（相对 cwd；纯分析任务须为 `[]`，表示只读）、中途交付、检查与停止条件。
 4. `worker_start` 显式选择 `workspace.mode`：`existing` 共享目录且写入不重叠；`worktree` 隔离，可指定 `baseRef`。脏源默认拒绝；仅已授权、确认不依赖未提交改动并记录基线后传 `allowDirtySource: true`。
-5. 每次启动/续接用新 `requestId`，仅同一操作与载荷的重试复用；同一目标不重复派发，写入冲突用 worktree 或串行。接受请求后把实际 worker/run 标识写回计划。`type`/`model`/`effort` 仅传用户明确选择，未指定省略；reasoning 映射 `effort`，组合以 MCP schema 和服务端反馈为准。
+5. 每次启动/续接用新 `requestId`，仅同一操作与载荷的重试复用；同一目标不重复派发，写入冲突用 worktree 或串行。接受请求后把实际 worker/run 标识写回计划。`type` 可选 `dsh`/`pi`/`codex`；`type`/`model`/`provider`/`effort` 仅传用户明确选择，未指定省略；reasoning 映射 `effort`，组合以 MCP schema 和服务端反馈为准。
 6. 按本轮交付设置合理的 `timeoutSeconds`，长工作按可验收阶段续接；确需 `null` 时在交接中说明原因和停止条件。提示词须给出命令预算：长命令后台执行，单次同步等待不超过 60 秒；测试已报超时而进程未退出时，停止该任务自己的进程并保留日志，不等它自行退出。
 
 ## 运行与验收

@@ -8,8 +8,8 @@ const timeoutSeconds = z.number().int().positive().nullable().optional();
 
 const startShape = {
   taskName: z.string(),
-  // Omitted selects the plugin's configured defaultWorkerType; explicit dsh/pi always wins.
-  type: z.enum(["dsh", "pi"]).optional(),
+  // Omitted selects the plugin's configured defaultWorkerType; explicit dsh/pi/codex wins.
+  type: z.enum(["dsh", "pi", "codex"]).optional(),
   prompt: z.string(),
   workspace: z.object({
     mode: z.enum(["worktree", "existing"]),
@@ -126,7 +126,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "异步启动一个 DSH 或 Pi 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
+      description: "异步启动一个 DSH、Pi 或 Codex 子任务；省略 type 使用插件默认类型，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
       inputSchema: startShape,
     },
     async (input) => {

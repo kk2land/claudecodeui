@@ -4,7 +4,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
+  codexEnvironment,
   nativeHome,
+  parseCodex,
   parseDsh,
   parsePi,
   prepareLaunch,
@@ -343,4 +345,222 @@ test("Pi protocol accepts retry success and rejects wrong id/cwd or unfinished s
     parsePi(eventsFile(root, invalidContent), "session-pi", cwd, file).success,
     false,
   );
+});
+
+test("Codex home and sessions root follow CODEX_HOME and stay isolated per run", () => {
+  const root = temporaryRoot("worker-native-codex-home-");
+  const env = { CODEX_HOME: path.join(root, "custom-home") };
+  const homes = nativeHome("codex", path.join(root, "data"), env);
+  assert.equal(homes.home, path.join(root, "custom-home"));
+  assert.equal(homes.sessionsRoot, path.join(root, "custom-home", "sessions"));
+  assert.deepEqual(nativeHome("codex", path.join(root, "data"), {}), {
+    home: path.join(os.homedir(), ".codex"),
+    sessionsRoot: path.join(os.homedir(), ".codex", "sessions"),
+  });
+});
+
+test("Codex env merges before plugin control tokens are removed", () => {
+  assert.deepEqual(
+    codexEnvironment(
+      {
+        PATH: "/bin",
+        CLOUDCLI_PLUGIN_TOKEN: "control-token",
+      },
+      {
+        env: { CUSTOM: "value", CLOUDCLI_PLUGIN_OTHER: "control-value" },
+        extraArgs: [],
+      },
+    ),
+    { PATH: "/bin", CUSTOM: "value" },
+  );
+});
+
+test("Codex launch uses exec json, configured args, explicit overrides, and stdin", () => {
+  const root = temporaryRoot("worker-native-codex-launch-");
+  const runDirectory = path.join(root, "run");
+  fs.mkdirSync(runDirectory, { recursive: true });
+  const home = path.join(root, "codex-home");
+  const current = run(root, {
+    home,
+    sessionsRoot: path.join(home, "sessions"),
+    model: "explicit-model",
+    provider: "explicit-provider",
+    effort: "high",
+  });
+  const launch = prepareLaunch({
+    type: "codex",
+    run: current,
+    cwd: path.join(root, "project"),
+    prompt: "hello",
+    previous: null,
+    dataDirectory: path.join(root, "data"),
+    runDirectory,
+    executable: "/bin/fake-codex",
+    baseEnvironment: {
+      PATH: "/bin",
+      CODEX_PROXY_BYPASS: "1",
+      CUSTOM: "value",
+    },
+    codexExtraArgs: [
+      "-c",
+      "model_provider=configured",
+      "--model",
+      "args-model",
+      "-m",
+      "args-short",
+    ],
+    dshPatch: "",
+  });
+  assert.deepEqual(launch.argv, [
+    "/bin/fake-codex",
+    "exec",
+    "--json",
+    "-c",
+    "model_provider=configured",
+    "--model",
+    "explicit-model",
+    "-c",
+    'model_provider="explicit-provider"',
+    "-c",
+    'model_reasoning_effort="high"',
+    "-",
+  ]);
+  assert.equal(launch.cwd, path.join(root, "project"));
+  assert.equal(launch.prompt, "hello");
+  assert.equal(launch.env.CODEX_HOME, home);
+  assert.equal(launch.env.CODEX_PROXY_BYPASS, "1");
+  assert.equal(launch.env.CUSTOM, "value");
+  assert.equal(launch.argv.includes("args-model"), false);
+  assert.equal(launch.argv.includes("args-short"), false);
+  assert.equal(launch.sessionFile, null);
+  assert.equal(launch.expectedSessionId, null);
+});
+
+test("Codex resume keeps the thread id and places every option before resume", () => {
+  const root = temporaryRoot("worker-native-codex-resume-");
+  const home = path.join(root, "codex-home");
+  const current = run(root, {
+    home,
+    sessionsRoot: path.join(home, "sessions"),
+    nativeSessionId: "thread-1",
+  });
+  const launch = prepareLaunch({
+    type: "codex",
+    run: current,
+    cwd: path.join(root, "project"),
+    prompt: "again",
+    previous: current,
+    dataDirectory: path.join(root, "data"),
+    runDirectory: path.join(root, "run"),
+    executable: "/bin/fake-codex",
+    baseEnvironment: { PATH: "/bin" },
+    codexExtraArgs: ["--sandbox", "read-only"],
+    dshPatch: "",
+  });
+  assert.deepEqual(launch.argv.slice(1), [
+    "exec",
+    "--json",
+    "--sandbox",
+    "read-only",
+    "resume",
+    "thread-1",
+    "-",
+  ]);
+  assert.equal(launch.expectedSessionId, "thread-1");
+  assert.equal(launch.env.CODEX_HOME, home);
+});
+
+test("Codex JSONL parser reports final text and input-plus-output usage", () => {
+  const root = temporaryRoot("worker-native-codex-parse-");
+  const file = path.join(root, "events.log");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      JSON.stringify({ type: "turn.started" }),
+      JSON.stringify({
+        type: "error",
+        message: "Reconnecting... 1/5 (stream disconnected before completion)",
+      }),
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "answer" },
+      }),
+      JSON.stringify({
+        type: "turn.completed",
+        usage: {
+          input_tokens: 11,
+          cached_input_tokens: 4,
+          cache_write_input_tokens: 2,
+          output_tokens: 5,
+          reasoning_output_tokens: 3,
+        },
+      }),
+    ].join("\n") + "\n",
+  );
+  assert.deepEqual(parseCodex(file, "thread-1"), {
+    success: true,
+    nativeSessionId: "thread-1",
+    nativeSessionFile: null,
+    finalText: "answer",
+    usage: { inputTokens: 11, outputTokens: 5, totalTokens: 16 },
+    error: null,
+  });
+});
+
+test("Codex failures retain a confirmed thread id but reject a different resume id", () => {
+  const root = temporaryRoot("worker-native-codex-failure-");
+  const file = path.join(root, "events.log");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      JSON.stringify({ type: "turn.failed", error: { message: "boom" } }),
+    ].join("\n") + "\n",
+  );
+  const failed = parseCodex(file, "thread-1");
+  assert.equal(failed.success, false);
+  assert.equal(failed.nativeSessionId, "thread-1");
+  assert.equal(failed.error, "boom");
+  const wrong = parseCodex(file, "thread-2");
+  assert.equal(wrong.success, false);
+  assert.equal(wrong.nativeSessionId, null);
+  assert.match(wrong.error ?? "", /thread_id/);
+});
+
+test("Codex keeps a reconnect error only when no successful completion follows", () => {
+  const root = temporaryRoot("worker-native-codex-recoverable-");
+  const file = path.join(root, "events.log");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      JSON.stringify({ type: "error", message: "Reconnecting... 1/5" }),
+    ].join("\n") + "\n",
+  );
+  const failed = parseCodex(file, "thread-1");
+  assert.equal(failed.success, false);
+  assert.equal(failed.error, "Reconnecting... 1/5");
+  assert.equal(failed.nativeSessionId, "thread-1");
+});
+
+test("Codex protocol errors are not cleared by a later completed turn", () => {
+  const root = temporaryRoot("worker-native-codex-protocol-");
+  const file = path.join(root, "events.log");
+  fs.writeFileSync(
+    file,
+    [
+      JSON.stringify({ type: "thread.started", thread_id: "thread-1" }),
+      "null",
+      "not-json",
+      JSON.stringify({
+        type: "item.completed",
+        item: { type: "agent_message", text: "answer" },
+      }),
+      JSON.stringify({ type: "turn.completed", usage: { input_tokens: 1, output_tokens: 1 } }),
+    ].join("\n") + "\n",
+  );
+  const failed = parseCodex(file, "thread-1");
+  assert.equal(failed.success, false);
+  assert.match(failed.error ?? "", /无效 Codex 事件/);
 });

@@ -11,6 +11,7 @@ import type {
   WorkerIpcSuccessResponse,
   WorkerNotificationDelivery,
   WorkerOwner,
+  WorkerSettingsInput,
 } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
 
@@ -109,8 +110,7 @@ app.put(
   "/settings",
   uiOnly,
   route((req) => {
-    const body = (req.body ?? {}) as { concurrency?: { dsh: number; pi: number } };
-    return service.updateSettings(body as { concurrency: { dsh: number; pi: number } });
+    return service.updateSettings((req.body ?? {}) as WorkerSettingsInput);
   }),
 );
 

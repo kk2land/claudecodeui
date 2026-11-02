@@ -212,14 +212,20 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     counts: {
       dsh: counts({ running: 1 }),
       pi: counts(),
+      codex: counts(),
       total: counts({ running: 1 }),
     },
     settings: {
-      concurrency: { dsh: 3, pi: 3 },
+      concurrency: { dsh: 3, pi: 3, codex: 3 },
       defaultWorkerType: "dsh",
       defaults: {
         dsh: { model: null, effort: null },
         pi: { model: null, effort: null },
+        codex: { model: null, effort: null },
+      },
+      codex: {
+        env: { CODEX_PROXY_BYPASS: "1" },
+        extraArgs: ["-c", "model_provider=magpie"],
       },
       softReminderSeconds: 600,
       softReminderSteps: 20,
@@ -250,6 +256,7 @@ type Mode = {
   state?: (path: string) => Promise<unknown> | unknown;
   detail?: (workerId: string) => unknown;
   logs?: (workerId: string, path: string) => unknown;
+  settings?: (body: unknown) => unknown;
 };
 
 async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
@@ -283,19 +290,26 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         return { text: "", nextCursor: null, done: true };
       }
       if (pathAndQuery === "/cancel") return { workerIds: ["worker-1"] };
-      if (pathAndQuery === "/settings")
+      if (pathAndQuery === "/settings") {
+        if (mode.settings) return mode.settings(body);
         return {
-          concurrency: { dsh: 4, pi: 2 },
+          concurrency: { dsh: 4, pi: 2, codex: 5 },
           defaultWorkerType: "pi",
           defaults: {
             dsh: { model: "dsh-default", effort: "high" },
             pi: { model: "pi-default", effort: "low" },
+            codex: { model: "codex-default", effort: "medium" },
+          },
+          codex: {
+            env: { SERVER_KEY: "server value = kept", CODEX_PROXY_BYPASS: "1" },
+            extraArgs: ["-c", "model_provider=magpie", "--search"],
           },
           softReminderSeconds: 600,
           softReminderSteps: 20,
           hardTimeoutSeconds: null,
           retentionDays: 7,
         };
+      }
       if (pathAndQuery === "/recover" || pathAndQuery === "/cleanup")
         return { ok: true };
       if (pathAndQuery === "/notifications/retry")
@@ -492,6 +506,7 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
     await waitFor(() => Boolean(byLabel(mounted.container, "DSH 并发")), "设置面板");
     const dsh = byLabel(mounted.container, "DSH 并发") as HTMLInputElement;
     const pi = byLabel(mounted.container, "Pi 并发") as HTMLInputElement;
+    const codex = byLabel(mounted.container, "Codex 并发") as HTMLInputElement;
     const retentionDays = byLabel(
       mounted.container,
       "日志和运行记录保留天数",
@@ -527,11 +542,39 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
       mounted.container,
       "Pi 默认 reasoning",
     ) as HTMLInputElement;
+    const codexModel = byLabel(
+      mounted.container,
+      "Codex 默认模型",
+    ) as HTMLInputElement;
+    const codexEffort = byLabel(
+      mounted.container,
+      "Codex 默认 reasoning",
+    ) as HTMLInputElement;
+    const codexEnv = byLabel(
+      mounted.container,
+      "Codex 额外环境变量",
+    ) as HTMLTextAreaElement;
+    const codexArgs = byLabel(
+      mounted.container,
+      "Codex 额外命令行参数",
+    ) as HTMLTextAreaElement;
     assert.equal(defaultType.value, "dsh");
+    assert.deepEqual(
+      [...defaultType.options].map((option) => option.value),
+      ["dsh", "pi", "codex"],
+    );
     assert.equal(dshModel.value, "");
     assert.equal(piEffort.tagName, "INPUT");
     assert.equal(piEffort.type, "text");
     assert.equal(piEffort.value, "");
+    assert.equal(codex.value, "3");
+    assert.equal(codexModel.value, "");
+    assert.equal(codexEffort.value, "");
+    assert.equal(codexEnv.value, "CODEX_PROXY_BYPASS=1");
+    assert.equal(
+      codexArgs.value,
+      JSON.stringify(["-c", "model_provider=magpie"], null, 2),
+    );
 
     await typeInto(dsh, "0");
     await waitFor(
@@ -555,18 +598,35 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存请求");
     assert.deepEqual(callsTo(mounted, "/settings")[0]!.body, {
-      concurrency: { dsh: 4, pi: 2 },
+      concurrency: { dsh: 4, pi: 2, codex: 3 },
       retentionDays: 7,
       defaultWorkerType: "pi",
       defaults: {
         dsh: { model: "dsh-default", effort: "high" },
         pi: { model: "pi-default", effort: "low" },
+        codex: { model: null, effort: null },
+      },
+      codex: {
+        env: { CODEX_PROXY_BYPASS: "1" },
+        extraArgs: ["-c", "model_provider=magpie"],
       },
     });
-    await waitFor(() => defaultType.value === "pi", "保存后回填默认类型");
+    await waitFor(() => codex.value === "5", "保存后回填 Codex 并发");
+    assert.equal(defaultType.value, "pi");
     assert.equal(piModel.value, "pi-default");
     assert.equal(dshEffort.value, "high");
     assert.equal(retentionDays.value, "7");
+    assert.equal(codex.value, "5");
+    assert.equal(codexModel.value, "codex-default");
+    assert.equal(codexEffort.value, "medium");
+    assert.equal(
+      codexEnv.value,
+      "SERVER_KEY=server value = kept\nCODEX_PROXY_BYPASS=1",
+    );
+    assert.equal(
+      codexArgs.value,
+      JSON.stringify(["-c", "model_provider=magpie", "--search"], null, 2),
+    );
 
     // Whitespace-only reasoning is saved as null, same as DSH.
     await typeInto(piEffort, "   ");
@@ -574,14 +634,233 @@ test("DOM: settings load, validate and save defaults, concurrency and retention"
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 2, "空白 reasoning 保存");
     assert.deepEqual(callsTo(mounted, "/settings")[1]!.body, {
-      concurrency: { dsh: 4, pi: 2 },
+      concurrency: { dsh: 4, pi: 2, codex: 5 },
       retentionDays: 7,
       defaultWorkerType: "pi",
       defaults: {
         dsh: { model: "dsh-default", effort: "high" },
         pi: { model: "pi-default", effort: null },
+        codex: { model: "codex-default", effort: "medium" },
+      },
+      codex: {
+        env: {
+          SERVER_KEY: "server value = kept",
+          CODEX_PROXY_BYPASS: "1",
+        },
+        extraArgs: ["-c", "model_provider=magpie", "--search"],
       },
     });
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: all three worker types have distinct labels and aggregate counts", async () => {
+  const records = [
+    worker({ id: "worker-dsh", type: "dsh", taskName: "DSH 任务" }),
+    worker({
+      id: "worker-pi",
+      type: "pi",
+      taskName: "Pi 任务",
+      latestRun: run({ id: "run-pi", workerId: "worker-pi", status: "queued" }),
+    }),
+    worker({
+      id: "worker-codex",
+      type: "codex",
+      taskName: "Codex 任务",
+      latestRun: run({
+        id: "run-codex",
+        workerId: "worker-codex",
+        status: "completed",
+        finishedAt: new Date().toISOString(),
+        exitCode: 0,
+      }),
+    }),
+  ];
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: records,
+        counts: {
+          dsh: counts({ running: 1 }),
+          pi: counts({ queued: 1 }),
+          codex: counts({ completed: 1 }),
+          total: counts({ running: 1, queued: 1, completed: 1 }),
+        },
+      }),
+  });
+  try {
+    await waitFor(() => textOf(mounted.container).includes("Codex 任务"), "三类型列表");
+    const summary = mounted.container.querySelector(
+      '[aria-label="按类型统计"]',
+    );
+    assert.ok(summary);
+    assert.ok(textOf(summary).includes("1DSH 执行中"));
+    assert.ok(textOf(summary).includes("0Pi 执行中"));
+    assert.ok(textOf(summary).includes("0Codex 执行中"));
+    assert.ok(textOf(summary).includes("1全部 执行中"));
+    assert.equal(
+      textOf(mounted.container.querySelector(".worker-type-codex")),
+      "Codex",
+    );
+    assert.ok(textOf(mounted.container).includes("Codex 3"));
+    assert.ok(textOf(mounted.container).includes("3 个 worker · 3 个状态记录"));
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: Codex settings validate env/argv, submit the Codex payload and allow clearing", async () => {
+  const mounted = await mountPlugin({
+    settings: (body) => {
+      const input = body as {
+        concurrency: { dsh: number; pi: number; codex: number };
+        defaults: Record<string, { model: string | null; effort: string | null }>;
+        codex: { env: Record<string, string>; extraArgs: string[] };
+        defaultWorkerType: string;
+        retentionDays: number;
+      };
+      return {
+        ...input,
+        codex: {
+          // The server response, not the local draft, drives the saved fields.
+          env: Object.fromEntries(Object.entries(input.codex.env).reverse()),
+          extraArgs: input.codex.extraArgs,
+        },
+        softReminderSeconds: 600,
+        softReminderSteps: 20,
+        hardTimeoutSeconds: null,
+      };
+    },
+  });
+  try {
+    await waitFor(() => {
+      const entry = findButton(mounted.container, "Worker 设置");
+      return entry !== undefined && !entry.disabled;
+    }, "设置入口");
+    button(mounted.container, "Worker 设置").click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "Codex 额外环境变量")), "Codex 设置");
+    const defaultType = byLabel(
+      mounted.container,
+      "默认 Worker 类型",
+    ) as HTMLSelectElement;
+    const codex = byLabel(mounted.container, "Codex 并发") as HTMLInputElement;
+    const codexModel = byLabel(
+      mounted.container,
+      "Codex 默认模型",
+    ) as HTMLInputElement;
+    const codexEffort = byLabel(
+      mounted.container,
+      "Codex 默认 reasoning",
+    ) as HTMLInputElement;
+    const codexEnv = byLabel(
+      mounted.container,
+      "Codex 额外环境变量",
+    ) as HTMLTextAreaElement;
+    const codexArgs = byLabel(
+      mounted.container,
+      "Codex 额外命令行参数",
+    ) as HTMLTextAreaElement;
+    assert.equal(defaultType.value, "dsh");
+    assert.deepEqual(
+      [...defaultType.options].map((option) => option.value),
+      ["dsh", "pi", "codex"],
+    );
+    assert.equal(codexEnv.value, "CODEX_PROXY_BYPASS=1");
+    assert.equal(
+      codexArgs.value,
+      JSON.stringify(["-c", "model_provider=magpie"], null, 2),
+    );
+
+    await typeInto(codexEnv, "NOT_A_PAIR");
+    await waitFor(
+      () => textOf(mounted.container).includes("需要 KEY=VALUE"),
+      "非法 env 提示",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    await typeInto(codexEnv, "=value");
+    await waitFor(
+      () => textOf(mounted.container).includes("KEY 不能为空"),
+      "空 KEY 提示",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    await typeInto(codexEnv, "VALID=1");
+    await typeInto(codexArgs, '["-c", 1]');
+    await waitFor(
+      () => textOf(mounted.container).includes("必须是 JSON 字符串数组"),
+      "非字符串 argv 提示",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    await typeInto(codexArgs, "not json");
+    await waitFor(
+      () => textOf(mounted.container).includes("必须是 JSON 字符串数组"),
+      "非法 JSON 提示",
+    );
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+
+    await typeInto(defaultType, "codex");
+    await typeInto(codex, "4");
+    await typeInto(codexModel, "gpt-5-codex");
+    await typeInto(codexEffort, "high");
+    await typeInto(codexEnv, "FOO=hello world = value\nEMPTY=");
+    await typeInto(
+      codexArgs,
+      '["-c", "model_provider=magpie", "--search"]',
+    );
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "Codex 可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "Codex 保存请求");
+    assert.deepEqual(callsTo(mounted, "/settings")[0]!.body, {
+      concurrency: { dsh: 3, pi: 3, codex: 4 },
+      retentionDays: 1,
+      defaultWorkerType: "codex",
+      defaults: {
+        dsh: { model: null, effort: null },
+        pi: { model: null, effort: null },
+        codex: { model: "gpt-5-codex", effort: "high" },
+      },
+      codex: {
+        env: { FOO: "hello world = value", EMPTY: "" },
+        extraArgs: ["-c", "model_provider=magpie", "--search"],
+      },
+    });
+    await waitFor(
+      () =>
+        codexEnv.value === "EMPTY=\nFOO=hello world = value" &&
+        codexModel.value === "gpt-5-codex",
+      "保存后回填 Codex 设置",
+    );
+    assert.equal(defaultType.value, "codex");
+    assert.equal(codex.value, "4");
+    assert.equal(codexModel.value, "gpt-5-codex");
+    assert.equal(codexEffort.value, "high");
+    assert.equal(codexEnv.value, "EMPTY=\nFOO=hello world = value");
+    assert.equal(
+      codexArgs.value,
+      JSON.stringify(["-c", "model_provider=magpie", "--search"], null, 2),
+    );
+
+    await typeInto(codexEnv, "");
+    await typeInto(codexArgs, "");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "清空可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 2, "清除 Codex 默认请求");
+    assert.deepEqual(callsTo(mounted, "/settings")[1]!.body, {
+      concurrency: { dsh: 3, pi: 3, codex: 4 },
+      retentionDays: 1,
+      defaultWorkerType: "codex",
+      defaults: {
+        dsh: { model: null, effort: null },
+        pi: { model: null, effort: null },
+        codex: { model: "gpt-5-codex", effort: "high" },
+      },
+      codex: { env: {}, extraArgs: [] },
+    });
+    await waitFor(
+      () => codexEnv.value === "" && codexArgs.value === "[]",
+      "清除后回填为空",
+    );
   } finally {
     mounted.unmount();
   }

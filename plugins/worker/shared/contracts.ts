@@ -9,8 +9,11 @@
 
 //----------------- WORKER IDENTITY AND STATUS ------------
 
-/** Native worker runner implemented by the CloudCLI Worker plugin. */
-export type WorkerType = "dsh" | "pi";
+/**
+ * Native worker runner implemented by the CloudCLI Worker plugin: DSH headless, Pi print/JSON, or
+ * `codex exec`.
+ */
+export type WorkerType = "dsh" | "pi" | "codex";
 
 /**
  * Lifecycle of one run. `queued` waits in FIFO order; `starting`, `running`, `stopping`, and
@@ -126,10 +129,16 @@ export type WorkerStartInput = {
    * additive filesystem permission beyond the workspace, and parallel workers may share a cwd.
    */
   writePaths: string[];
-  /** Optional native model override; Pi may apply effort to its configured default model. */
+  /**
+   * Optional native model/provider overrides. Explicit selections win over configured defaults
+   * and over Codex extra args; Pi may apply effort to its configured default model.
+   */
   model?: string;
   provider?: string;
-  /** Native reasoning effort; DSH requires an explicit model before effort can be applied. */
+  /**
+   * Native reasoning effort. DSH requires an explicit model before effort can be applied; Pi
+   * accepts only its native thinking levels.
+   */
   effort?: string;
   /**
    * Hard timeout in seconds for this run. Omitted uses `WorkerSettings.hardTimeoutSeconds`;
@@ -145,7 +154,8 @@ export type WorkerStartInput = {
 
 /**
  * A follow-up run for an existing worker. The cwd, home, and native session identity stay fixed;
- * each resume creates its own `runId` and may override model/provider/effort explicitly.
+ * each resume creates its own `runId` and may override model/provider/effort explicitly. Codex
+ * resumes its recorded native session id with `codex exec resume`.
  */
 export type WorkerResumeInput = {
   workerId: string;
@@ -317,8 +327,9 @@ export type WorkerNotification = {
 
 /**
  * Configured model and native reasoning effort for one worker type. Null means the runner's
- * existing default: Pi falls back to `CODEX_PI_MODEL` / `CODEX_PI_THINKING`, while a null DSH
- * effort leaves the native model configuration untouched.
+ * existing default: Pi falls back to `CODEX_PI_MODEL` / `CODEX_PI_THINKING`, DSH leaves its
+ * native model configuration untouched, and Codex uses its config plus configured extra args.
+ * Explicit start/resume selections take precedence over these defaults.
  */
 export type WorkerDefault = {
   model: string | null;
@@ -329,6 +340,22 @@ export type WorkerDefault = {
 export type WorkerDefaults = Record<WorkerType, WorkerDefault>;
 
 /**
+ * Codex exec launch settings shared by every run of a Codex worker.
+ *
+ * The initial defaults are `env: { CODEX_PROXY_BYPASS: "1" }` and
+ * `extraArgs: ["-c", "model_provider=magpie"]`. `env` is merged over the inherited environment,
+ * with a same-named key replacing the inherited value; `extraArgs` are separate argv entries and
+ * are never joined into a shell command. An explicit empty env/array clears the prefilled values.
+ * Settings are read again for each start/resume, while the run's recorded home, cwd, and native
+ * session identity stay fixed; explicit model/provider/effort selections win over extra args.
+ * Environment values are settings-only and are never copied into `WorkerRun`.
+ */
+export type WorkerCodexSettings = {
+  env: Record<string, string>;
+  extraArgs: string[];
+};
+
+/**
  * Effective worker settings. Concurrency applies per `(parentSessionId, projectId, workerType)`
  * key. The first soft reminder defaults to 600 seconds / 20 steps, followed by timed reviews
  * every `softReminderSeconds`; no hard timeout is applied by default.
@@ -337,8 +364,10 @@ export type WorkerSettings = {
   concurrency: Record<WorkerType, number>;
   /** Type selected by a start request that omits `type`; initially `dsh`. */
   defaultWorkerType: WorkerType;
-  /** Model and effort defaults for each type; initially null for both types. */
+  /** Model and effort defaults for each type; initially null for all three types. */
   defaults: WorkerDefaults;
+  /** Codex exec launch settings; required here and replaced as a whole by a settings update. */
+  codex: WorkerCodexSettings;
   /** Days to retain finished runs and their logs, measured from finishedAt; initially 1. */
   retentionDays: number;
   softReminderSeconds: number;
@@ -348,28 +377,35 @@ export type WorkerSettings = {
 
 /**
  * Editable subset accepted by `PUT /settings`; reminder and timeout values stay server-owned.
- * Default selection and retention fields are optional so older concurrency-only clients preserve
- * the fields they do not send. A supplied `defaults` must contain the full dsh/pi map; blank or
- * null model/effort values clear that configured default. `retentionDays` must be a positive integer.
+ * Concurrency and defaults stay compatible with older clients: `dsh`/`pi` are required while
+ * `codex` is optional and keeps its existing value when omitted. A supplied `defaults` must
+ * contain both `dsh` and `pi`; a supplied `codex` object must include both `env` and `extraArgs`
+ * and replaces the whole setting. Blank or null model/effort values clear that configured
+ * default. `retentionDays` must be a positive integer.
  */
 export type WorkerSettingsInput = {
-  concurrency: Record<WorkerType, number>;
+  concurrency: { dsh: number; pi: number } & { codex?: number };
   defaultWorkerType?: WorkerType;
-  defaults?: WorkerDefaults;
+  defaults?: { dsh: WorkerDefault; pi: WorkerDefault } & { codex?: WorkerDefault };
+  codex?: WorkerCodexSettings;
   retentionDays?: number;
 };
 
 /** Worker counts keyed by every lifecycle status; absent keys are zero only in serialized data. */
 export type WorkerCountsByStatus = Record<WorkerStatus, number>;
 
-/** Number of workers in each lifecycle status; `total` is the sum across both worker types. */
+/** Number of workers in each lifecycle status; `total` is the sum across all worker types. */
 export type WorkerCounts = {
   dsh: WorkerCountsByStatus;
   pi: WorkerCountsByStatus;
+  codex: WorkerCountsByStatus;
   total: WorkerCountsByStatus;
 };
 
-/** `GET /state` payload. Tokens and other credentials are never present. */
+/**
+ * `GET /state` payload. Host/MCP control tokens are never present; user-configured settings
+ * values (for example Codex env) are returned as stored and may themselves contain credentials.
+ */
 export type WorkerStateSnapshot = {
   workers: WorkerRecord[];
   counts: WorkerCounts;

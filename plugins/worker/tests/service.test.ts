@@ -768,26 +768,41 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   assert.deepEqual(normalized.defaults, {
     dsh: { model: null, effort: null },
     pi: { model: null, effort: null },
+    codex: { model: null, effort: null },
   });
-  assert.deepEqual(normalized.concurrency, { dsh: 5, pi: 2 });
+  assert.deepEqual(normalized.concurrency, { dsh: 5, pi: 2, codex: 3 });
+  assert.deepEqual(normalized.codex, {
+    env: { CODEX_PROXY_BYPASS: "1" },
+    extraArgs: ["-c", "model_provider=magpie"],
+  });
   assert.equal(normalized.softReminderSeconds, 42);
   assert.equal(normalized.softReminderSteps, 7);
   assert.equal(normalized.hardTimeoutSeconds, 90);
   assert.equal(normalized.retentionDays, 1);
 
   const saved = service.updateSettings({
-    concurrency: { dsh: 6, pi: 1 },
+    concurrency: { dsh: 6, pi: 1, codex: 2 },
     retentionDays: 7,
     defaultWorkerType: "pi",
     defaults: {
       dsh: { model: "dsh-model", effort: "high" },
       pi: { model: "  pi-model  ", effort: "low" },
+      codex: { model: "codex-model", effort: "xhigh" },
+    },
+    codex: {
+      env: { TEST_CODEX_CUSTOM: "custom-value" },
+      extraArgs: ["--sandbox", "workspace-write"],
     },
   });
   assert.equal(saved.defaultWorkerType, "pi");
   assert.deepEqual(saved.defaults, {
     dsh: { model: "dsh-model", effort: "high" },
     pi: { model: "pi-model", effort: "low" },
+    codex: { model: "codex-model", effort: "xhigh" },
+  });
+  assert.deepEqual(saved.codex, {
+    env: { TEST_CODEX_CUSTOM: "custom-value" },
+    extraArgs: ["--sandbox", "workspace-write"],
   });
   assert.equal(saved.softReminderSeconds, 42);
   assert.equal(saved.hardTimeoutSeconds, 90);
@@ -827,15 +842,86 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   );
   assert.deepEqual(service.settings(), saved);
 
+  const secret = "settings-secret-never-echoed";
+  for (const codex of [
+    { env: { SECRET: secret, BAD: 7 }, extraArgs: [] },
+    { env: {}, extraArgs: [secret, 7] },
+    { env: ["not-a-map"], extraArgs: [] },
+  ]) {
+    assert.throws(
+      () =>
+        service.updateSettings({
+          concurrency: { dsh: 9, pi: 9 },
+          codex: codex as never,
+        }),
+      (error: unknown) =>
+        /codex\.(env|extraArgs)/.test(String(error)) &&
+        !String(error).includes(secret),
+    );
+    assert.deepEqual(service.settings(), saved);
+  }
+  assert.throws(
+    () =>
+      service.updateSettings({
+        concurrency: { dsh: 9, pi: 9, codex: 0 },
+      }),
+    /concurrency\.codex 必须是正整数/,
+  );
+  assert.deepEqual(service.settings(), saved);
+
+  const alternate = path.join(root, "alternate-workspace");
+  for (const extraArgs of [
+    ["-C", alternate],
+    ["--cd", alternate],
+    ["--cd=" + alternate],
+    ["-C" + alternate],
+  ]) {
+    assert.throws(
+      () =>
+        service.updateSettings({
+          concurrency: { dsh: 9, pi: 9, codex: 9 },
+          defaultWorkerType: "dsh",
+          defaults: {
+            dsh: { model: "changed", effort: null },
+            pi: { model: null, effort: null },
+            codex: { model: "changed", effort: null },
+          },
+          codex: { env: { SECRET: secret }, extraArgs },
+        }),
+      (error: unknown) => {
+        const message = String(error);
+        return (
+          /工作目录由任务工作区控制/.test(message) &&
+          !message.includes(alternate) &&
+          !message.includes(secret)
+        );
+      },
+    );
+    assert.deepEqual(service.settings(), saved);
+  }
+
   const reopened = new WorkerStore(data);
   t.after(() => reopened.close());
   assert.deepEqual(reopened.settings(), saved);
 
-  // A legacy concurrency-only update preserves the new fields.
+  // A legacy concurrency-only update preserves the new fields, including custom Codex values.
   const updated = service.updateSettings({ concurrency: { dsh: 2, pi: 4 } });
   assert.equal(updated.defaultWorkerType, "pi");
   assert.deepEqual(updated.defaults, saved.defaults);
+  assert.deepEqual(updated.codex, saved.codex);
+  assert.equal(updated.concurrency.codex, 2);
   assert.equal(updated.retentionDays, 7);
+
+  // Explicit empty env/args clears the prefilled values instead of restoring them.
+  const cleared = service.updateSettings({
+    concurrency: { dsh: 2, pi: 4 },
+    codex: { env: {}, extraArgs: [] },
+  });
+  assert.deepEqual(cleared.codex, { env: {}, extraArgs: [] });
+  assert.deepEqual(service.updateSettings({ concurrency: { dsh: 2, pi: 4 } }).codex, {
+    env: {},
+    extraArgs: [],
+  });
 });
 
 test("omitted type uses configured defaults ahead of Pi environment, and replay ignores later changes", async (t) => {

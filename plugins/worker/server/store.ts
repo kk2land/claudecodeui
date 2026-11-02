@@ -13,11 +13,16 @@ import type {
 } from "./shared/index.js";
 
 export const DEFAULT_SETTINGS: WorkerSettings = {
-  concurrency: { dsh: 3, pi: 3 },
+  concurrency: { dsh: 3, pi: 3, codex: 3 },
   defaultWorkerType: "dsh",
   defaults: {
     dsh: { model: null, effort: null },
     pi: { model: null, effort: null },
+    codex: { model: null, effort: null },
+  },
+  codex: {
+    env: { CODEX_PROXY_BYPASS: "1" },
+    extraArgs: ["-c", "model_provider=magpie"],
   },
   retentionDays: 1,
   softReminderSeconds: 600,
@@ -129,11 +134,16 @@ export class WorkerStore {
       .prepare("SELECT body FROM settings WHERE id=1")
       .get() as { body: string } | undefined;
     if (!row) return structuredClone(DEFAULT_SETTINGS);
-    // Legacy rows lack only the fields added later; service writes validate the persisted values.
-    // The spread also retains unrelated top-level fields so a later save cannot drop them.
+    const fallback = structuredClone(DEFAULT_SETTINGS);
+    const stored = JSON.parse(row.body) as Partial<WorkerSettings>;
+    // Older rows only lack the whole codex field or the codex entry in the maps; explicit empty
+    // Codex env/args objects are valid and preserved as stored.
     return {
-      ...structuredClone(DEFAULT_SETTINGS),
-      ...(JSON.parse(row.body) as WorkerSettings),
+      ...fallback,
+      ...stored,
+      concurrency: { ...fallback.concurrency, ...(stored.concurrency ?? {}) },
+      defaults: { ...fallback.defaults, ...(stored.defaults ?? {}) },
+      codex: stored.codex ?? fallback.codex,
     };
   }
 

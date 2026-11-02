@@ -7,8 +7,10 @@ import { fileURLToPath } from "node:url";
 import { WorkerStore } from "./store.js";
 import { WorkspaceManager } from "./worktree.js";
 import {
+  codexEnvironment,
   nativeHome,
   newProgress,
+  parseCodex,
   parseDsh,
   parsePi,
   prepareLaunch,
@@ -189,6 +191,7 @@ export class WorkerService {
   updateSettings(input: WorkerSettingsInput): WorkerSettings {
     const dsh = input?.concurrency?.dsh;
     const pi = input?.concurrency?.pi;
+    const codexConcurrency = input?.concurrency?.codex;
     if (
       !Number.isSafeInteger(dsh) ||
       (dsh as number) < 1 ||
@@ -200,13 +203,22 @@ export class WorkerService {
         "concurrency.dsh 和 concurrency.pi 必须是正整数",
       );
     if (
-      input.defaultWorkerType !== undefined &&
-      input.defaultWorkerType !== "dsh" &&
-      input.defaultWorkerType !== "pi"
+      codexConcurrency !== undefined &&
+      (!Number.isSafeInteger(codexConcurrency) || codexConcurrency < 1)
     )
       throw new WorkerFailure(
         "INVALID_SETTINGS",
-        "defaultWorkerType 必须是 dsh 或 pi",
+        "concurrency.codex 必须是正整数",
+      );
+    if (
+      input.defaultWorkerType !== undefined &&
+      input.defaultWorkerType !== "dsh" &&
+      input.defaultWorkerType !== "pi" &&
+      input.defaultWorkerType !== "codex"
+    )
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "defaultWorkerType 必须是 dsh、pi 或 codex",
       );
     if (
       input.retentionDays !== undefined &&
@@ -215,15 +227,48 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_SETTINGS", "retentionDays 必须是正整数");
     const current = this.store.settings();
     // Validate the complete candidate before mutating or saving anything, so an invalid field
-    // never partially persists.
+    // never partially persists. Codex errors never echo configured env values.
+    let codex = current.codex;
+    if (input.codex !== undefined) {
+      const value = input.codex;
+      if (!value || typeof value !== "object" || Array.isArray(value))
+        throw new WorkerFailure("INVALID_SETTINGS", "codex 必须是配置对象");
+      const env = value.env;
+      if (!env || typeof env !== "object" || Array.isArray(env))
+        throw new WorkerFailure("INVALID_SETTINGS", "codex.env 必须是字符串映射");
+      const normalizedEnv: Record<string, string> = {};
+      for (const [key, item] of Object.entries(env))
+        if (typeof item !== "string")
+          throw new WorkerFailure("INVALID_SETTINGS", "codex.env 必须是字符串映射");
+        else normalizedEnv[key] = item;
+      const extraArgs = value.extraArgs;
+      if (!Array.isArray(extraArgs) || extraArgs.some((item) => typeof item !== "string"))
+        throw new WorkerFailure("INVALID_SETTINGS", "codex.extraArgs 必须是字符串数组");
+      if (
+        extraArgs.some(
+          (item) =>
+            item === "--cd" || item.startsWith("--cd=") || item.startsWith("-C"),
+        )
+      )
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "工作目录由任务工作区控制，额外参数不支持 -C/--cd",
+        );
+      codex = { env: normalizedEnv, extraArgs: [...extraArgs] };
+    }
     const settings: WorkerSettings = {
       ...current,
-      concurrency: { dsh: dsh as number, pi: pi as number },
+      concurrency: {
+        dsh: dsh as number,
+        pi: pi as number,
+        codex: codexConcurrency ?? current.concurrency.codex,
+      },
       defaultWorkerType: input.defaultWorkerType ?? current.defaultWorkerType,
       defaults:
         input.defaults === undefined
           ? current.defaults
-          : this.validateDefaults(input.defaults),
+          : this.validateDefaults(input.defaults, current.defaults.codex),
+      codex,
       retentionDays: input.retentionDays ?? current.retentionDays,
     };
     this.store.saveSettings(settings);
@@ -232,15 +277,22 @@ export class WorkerService {
     return settings;
   }
 
-  /** Validates a full dsh/pi defaults map and normalizes blank strings to null. */
-  private validateDefaults(value: WorkerDefaults): WorkerDefaults {
+  /** Validates dsh/pi entries plus optional codex and normalizes blank strings to null. */
+  private validateDefaults(
+    value: NonNullable<WorkerSettingsInput["defaults"]>,
+    currentCodex: WorkerDefaults["codex"],
+  ): WorkerDefaults {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new WorkerFailure(
         "INVALID_SETTINGS",
         "defaults 必须包含 dsh 和 pi 两个配置对象",
       );
     const result = {} as WorkerDefaults;
-    for (const type of ["dsh", "pi"] as const) {
+    for (const type of ["dsh", "pi", "codex"] as const) {
+      if (type === "codex" && value.codex === undefined) {
+        result.codex = currentCodex;
+        continue;
+      }
       const entry = value[type];
       if (!entry || typeof entry !== "object" || Array.isArray(entry))
         throw new WorkerFailure(
@@ -308,7 +360,11 @@ export class WorkerService {
     const id = randomUUID();
     const runId = randomUUID();
     const createdAt = new Date(this.now()).toISOString();
-    const homes = nativeHome(type, this.options.dataDirectory, this.environment);
+    const homes = nativeHome(
+      type,
+      this.options.dataDirectory,
+      this.nativeEnvironment(type, settings),
+    );
     const run: WorkerRun = {
       id: runId,
       workerId: id,
@@ -484,9 +540,10 @@ export class WorkerService {
     if (
       input.type !== undefined &&
       input.type !== "dsh" &&
-      input.type !== "pi"
+      input.type !== "pi" &&
+      input.type !== "codex"
     )
-      throw new WorkerFailure("INVALID_INPUT", "type 必须是 dsh 或 pi");
+      throw new WorkerFailure("INVALID_INPUT", "type 必须是 dsh、pi 或 codex");
     if (typeof input.prompt !== "string" || !input.prompt.trim())
       throw new WorkerFailure("INVALID_INPUT", "prompt 不能为空");
     if (typeof input.requestId !== "string" || !input.requestId.trim())
@@ -601,8 +658,8 @@ export class WorkerService {
   }
 
   /**
-   * New runs snapshot the explicit request first, then the selected type's configured defaults,
-   * then the existing Pi environment fallback. DSH has no environment model fallback.
+   * New runs snapshot the explicit request first, then the selected type's configured defaults.
+   * Only Pi falls back to its existing environment model/provider/thinking values.
    */
   private startSelection(
     type: WorkerType,
@@ -615,7 +672,7 @@ export class WorkerService {
   ): NativeSelection {
     const configuredModel = clean(defaults.model);
     const configuredEffort = clean(defaults.effort);
-    if (type === "dsh")
+    if (type === "dsh" || type === "codex")
       return {
         model: clean(input.model) ?? configuredModel,
         provider: clean(input.provider),
@@ -648,7 +705,8 @@ export class WorkerService {
   }
 
   private validateSelection(type: WorkerType, selection: NativeSelection): void {
-    if (selection.provider && !selection.model)
+    // Codex can take its model from native config or extra args, so provider alone is valid.
+    if (type !== "codex" && selection.provider && !selection.model)
       throw new WorkerFailure("MODEL_REQUIRED", "provider 需要同时选择模型");
     if (type === "dsh" && selection.effort && !selection.model)
       throw new WorkerFailure("MODEL_REQUIRED", "DSH effort 需要同时选择模型");
@@ -739,9 +797,10 @@ export class WorkerService {
     fs.writeFileSync(path.join(runDirectory, "prompt.md"), prompt, { mode: 0o600 });
     // Admission snapshots the native identity so queued resumes survive history expiration.
     const previous = run.nativeSessionId ? run : null;
-    const executable = this.executable(worker.type);
-    // Strip plugin control tokens before they can reach the spec file or the CLI environment.
-    const safeEnvironment = this.guardianEnvironment(this.environment);
+    // Read settings for every native invocation so PATH, Codex env, and extra args stay current.
+    const settings = this.store.settings();
+    const safeEnvironment = this.nativeEnvironment(worker.type, settings);
+    const executable = this.executable(worker.type, safeEnvironment);
     const launch = prepareLaunch({
       type: worker.type,
       run,
@@ -752,6 +811,7 @@ export class WorkerService {
       runDirectory,
       executable,
       baseEnvironment: safeEnvironment,
+      codexExtraArgs: worker.type === "codex" ? settings.codex.extraArgs : null,
       dshPatch: this.dshPatch(),
     });
     // Pi names its transcript before spawn; persist it so cleanup can protect the file.
@@ -825,6 +885,16 @@ export class WorkerService {
     ];
   }
 
+  /** Merges user Codex env first, then strips control tokens from the final native environment. */
+  private nativeEnvironment(
+    type: WorkerType,
+    settings: WorkerSettings,
+  ): NodeJS.ProcessEnv {
+    if (type === "codex")
+      return codexEnvironment(this.environment, settings.codex);
+    return this.guardianEnvironment(this.environment);
+  }
+
   /** Removes every plugin control token before the native CLI or guardian can inherit it. */
   private guardianEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     const environment: NodeJS.ProcessEnv = { ...base };
@@ -833,14 +903,17 @@ export class WorkerService {
     return environment;
   }
 
-  private executable(type: WorkerType): string {
+  private executable(
+    type: WorkerType,
+    environment: NodeJS.ProcessEnv = this.environment,
+  ): string {
     const injected = this.options.executablePaths?.[type];
     if (injected) return path.resolve(injected);
     if (type === "dsh") {
-      const explicit = clean(this.environment.CLOUDCLI_DSH_BIN);
-      if (explicit) return resolveExecutable(explicit, this.environment);
+      const explicit = clean(environment.CLOUDCLI_DSH_BIN);
+      if (explicit) return resolveExecutable(explicit, environment);
     }
-    return resolveExecutable(type, this.environment);
+    return resolveExecutable(type, environment);
   }
 
   private dshPatch(): string {
@@ -863,19 +936,29 @@ export class WorkerService {
     const worker = this.store.worker(handle.workerId);
     trackProgress(worker?.type ?? "dsh", event, handle.progress);
     let identityChanged = false;
-    if (worker?.type === "dsh" && !run.nativeSessionId) {
+    if (worker && !run.nativeSessionId) {
       const value = event as Record<string, unknown> | null;
-      const id = value?.type === "session" ? value.sessionId : null;
-      const cwd = value?.type === "session" ? value.cwd : null;
-      if (
-        typeof id === "string" &&
-        id.trim() &&
-        path.basename(id) === id &&
-        typeof cwd === "string" &&
-        path.isAbsolute(cwd) &&
-        path.resolve(cwd) === path.resolve(worker.cwd)
+      if (worker.type === "dsh") {
+        const id = value?.type === "session" ? value.sessionId : null;
+        const cwd = value?.type === "session" ? value.cwd : null;
+        if (
+          typeof id === "string" &&
+          id.trim() &&
+          path.basename(id) === id &&
+          typeof cwd === "string" &&
+          path.isAbsolute(cwd) &&
+          path.resolve(cwd) === path.resolve(worker.cwd)
+        ) {
+          run.nativeSessionId = id;
+          identityChanged = true;
+        }
+      } else if (
+        worker.type === "codex" &&
+        value?.type === "thread.started" &&
+        typeof value.thread_id === "string" &&
+        value.thread_id.trim()
       ) {
-        run.nativeSessionId = id;
+        run.nativeSessionId = value.thread_id.trim();
         identityChanged = true;
       }
     }
@@ -888,6 +971,8 @@ export class WorkerService {
     const important =
       identityChanged ||
       handle.progress.phase === "turn_end" ||
+      handle.progress.phase === "turn.completed" ||
+      handle.progress.phase === "turn.failed" ||
       handle.progress.phase === "final" ||
       handle.progress.phase === "error";
     if (important || timestamp - handle.lastProgressSave >= 250) {
@@ -1021,15 +1106,17 @@ export class WorkerService {
     const events = path.join(this.runDirectory(worker.id, run.id), "events.log");
     if (!fs.existsSync(events)) return null;
     try {
-      return worker.type === "dsh"
-        ? parseDsh(events, expectedSessionId, worker.cwd, run.sessionsRoot)
-        : parsePi(
-            events,
-            expectedSessionId,
-            worker.cwd,
-            run.nativeSessionFile ??
-              path.join(run.sessionsRoot, run.id + ".jsonl"),
-          );
+      if (worker.type === "dsh")
+        return parseDsh(events, expectedSessionId, worker.cwd, run.sessionsRoot);
+      if (worker.type === "codex")
+        return parseCodex(events, expectedSessionId);
+      return parsePi(
+        events,
+        expectedSessionId,
+        worker.cwd,
+        run.nativeSessionFile ??
+          path.join(run.sessionsRoot, run.id + ".jsonl"),
+      );
     } catch {
       return null;
     }
@@ -1103,6 +1190,7 @@ export class WorkerService {
     const counts = {
       dsh: Object.fromEntries(STATUSES.map((status) => [status, 0])),
       pi: Object.fromEntries(STATUSES.map((status) => [status, 0])),
+      codex: Object.fromEntries(STATUSES.map((status) => [status, 0])),
       total: Object.fromEntries(STATUSES.map((status) => [status, 0])),
     } as WorkerStateSnapshot["counts"];
     for (const worker of workers) {
@@ -1130,10 +1218,12 @@ export class WorkerService {
       projectId: owner.projectId,
       parentSessionId: owner.parentSessionId,
     });
+    // MCP context is model-visible; Codex env/args can hold credentials or proxy config.
+    const { codex: _codex, ...settings } = snapshot.settings;
     return {
       owner,
       plan: this.store.plan(owner.parentSessionId, owner.projectId),
-      settings: snapshot.settings,
+      settings,
       counts: snapshot.counts,
       activeWorkers: snapshot.workers.filter((worker) =>
         worker.latestRun ? OCCUPYING.includes(worker.latestRun.status) : false,

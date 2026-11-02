@@ -4,6 +4,7 @@ import path from "node:path";
 import type {
   NativeExecution,
   NativeLaunch,
+  WorkerCodexSettings,
   WorkerRun,
   WorkerType,
   WorkerUsage,
@@ -36,6 +37,8 @@ type PrepareInput = {
   runDirectory: string;
   executable: string;
   baseEnvironment: NodeJS.ProcessEnv;
+  /** Configured Codex exec extra args; Codex environment values are merged by the caller. */
+  codexExtraArgs?: string[] | null;
   dshPatch: string;
   dshBin?: string;
 };
@@ -105,21 +108,39 @@ function dshLaunchPatches(environment: NodeJS.ProcessEnv): string[] {
   return values.map((value: string) => path.resolve(value));
 }
 
+/**
+ * Merges user Codex env over the inherited environment, then removes plugin control tokens.
+ * The caller fixes CODEX_HOME to the run's admitted home before spawning.
+ */
+export function codexEnvironment(
+  base: NodeJS.ProcessEnv,
+  settings: WorkerCodexSettings,
+): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { ...base, ...settings.env };
+  for (const key of Object.keys(environment))
+    if (key.startsWith("CLOUDCLI_PLUGIN_")) delete environment[key];
+  return environment;
+}
+
 /** Resolves the fixed home and session root used for a new worker (never re-read on resume). */
 export function nativeHome(
   type: WorkerType,
   dataDirectory: string,
   environment: NodeJS.ProcessEnv = process.env,
 ): { home: string; sessionsRoot: string } {
-  return type === "dsh"
-    ? {
-        home: home(environment, "DSH_HOME", ".dsh"),
-        sessionsRoot: path.join(dataDirectory, "sessions", "dsh"),
-      }
-    : {
-        home: home(environment, "PI_CODING_AGENT_DIR", path.join(".pi", "agent")),
-        sessionsRoot: path.join(dataDirectory, "sessions", "pi"),
-      };
+  if (type === "dsh")
+    return {
+      home: home(environment, "DSH_HOME", ".dsh"),
+      sessionsRoot: path.join(dataDirectory, "sessions", "dsh"),
+    };
+  if (type === "codex") {
+    const resolvedHome = home(environment, "CODEX_HOME", ".codex");
+    return { home: resolvedHome, sessionsRoot: path.join(resolvedHome, "sessions") };
+  }
+  return {
+    home: home(environment, "PI_CODING_AGENT_DIR", path.join(".pi", "agent")),
+    sessionsRoot: path.join(dataDirectory, "sessions", "pi"),
+  };
 }
 
 /** Builds the DSH headless launch and its run-level model patch. */
@@ -239,8 +260,52 @@ function preparePi(input: PrepareInput): NativeLaunch {
   };
 }
 
+/**
+ * Builds a Codex exec invocation. All exec-level options, including configured extra args, stay
+ * before the resume subcommand; the thread id is the only positional before the stdin prompt.
+ */
+function prepareCodex(input: PrepareInput): NativeLaunch {
+  const sessionId = input.previous?.nativeSessionId ?? null;
+  const model = nonBlank(input.run.model);
+  const configured = input.codexExtraArgs ?? [];
+  const argv = [input.executable, "exec", "--json"];
+  for (let index = 0; index < configured.length; index++) {
+    const arg = configured[index]!;
+    if (model && (arg === "--model" || arg === "-m")) {
+      index++;
+      continue;
+    }
+    if (
+      model &&
+      (arg.startsWith("--model=") || (arg.startsWith("-m") && arg.length > 2))
+    )
+      continue;
+    argv.push(arg);
+  }
+  const provider = nonBlank(input.run.provider);
+  const effort = nonBlank(input.run.effort);
+  // Explicit selections come after configured args so they win over configured defaults.
+  if (model) argv.push("--model", model);
+  if (provider)
+    argv.push("-c", "model_provider=" + JSON.stringify(provider));
+  if (effort)
+    argv.push("-c", "model_reasoning_effort=" + JSON.stringify(effort));
+  if (sessionId) argv.push("resume", sessionId);
+  argv.push("-");
+  return {
+    argv,
+    cwd: input.cwd,
+    env: { ...input.baseEnvironment, CODEX_HOME: input.run.home },
+    prompt: input.prompt,
+    expectedSessionId: sessionId,
+    sessionFile: null,
+  };
+}
+
 export function prepareLaunch(input: PrepareInput): NativeLaunch {
-  return input.type === "dsh" ? prepareDsh(input) : preparePi(input);
+  if (input.type === "dsh") return prepareDsh(input);
+  if (input.type === "codex") return prepareCodex(input);
+  return preparePi(input);
 }
 
 function existsNonEmpty(file: string): boolean {
@@ -625,6 +690,127 @@ export function parsePi(
   };
 }
 
+/** Parses Codex exec JSONL, keeping a validated thread id even when the turn later fails. */
+export function parseCodex(
+  file: string,
+  expectedSessionId: string | null,
+): NativeExecution {
+  let threadId: string | null = null;
+  let validatedSessionId: string | null = null;
+  let threadEvents = 0;
+  let finalText: string | null = null;
+  let completed = false;
+  let error: string | null = null;
+  let recoverableError: string | null = null;
+  const buckets = emptyBuckets();
+  const fail = (message: string) => {
+    if (error === null) error = message;
+  };
+  for (const { value, number } of lines(file)) {
+    if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) {
+      fail("无效 Codex 事件 (line " + number + ")");
+      continue;
+    }
+    const event = value as Record<string, unknown>;
+    if (typeof event.type !== "string") {
+      fail("无效 Codex 事件 (line " + number + ")");
+      continue;
+    }
+    switch (event.type) {
+      case "thread.started": {
+        threadEvents++;
+        const id = event.thread_id;
+        if (typeof id !== "string" || !id.trim())
+          fail("thread.started 缺少有效 thread_id");
+        else if (threadId !== null) fail("出现多个 thread.started 事件");
+        else {
+          threadId = id;
+          if (expectedSessionId !== null && id !== expectedSessionId)
+            fail("Codex resume 返回了不同 thread_id");
+          else validatedSessionId = id;
+        }
+        break;
+      }
+      case "item.completed": {
+        const item = event.item;
+        if (!item || typeof item !== "object" || Array.isArray(item)) break;
+        const record = item as Record<string, unknown>;
+        if (record.type !== "agent_message") break;
+        if (typeof record.text !== "string") fail("agent_message 缺少文本");
+        else finalText = record.text;
+        break;
+      }
+      case "turn.completed": {
+        completed = true;
+        // The CLI reports session-cumulative usage on cold resume; keep the event value.
+        const usage = event.usage;
+        if (usage && typeof usage === "object" && !Array.isArray(usage)) {
+          const record = usage as Record<string, unknown>;
+          const input = record.input_tokens;
+          const output = record.output_tokens;
+          if (
+            Number.isSafeInteger(input) &&
+            (input as number) >= 0 &&
+            Number.isSafeInteger(output) &&
+            (output as number) >= 0
+          ) {
+            const total = (input as number) + (output as number);
+            if (buckets.samples === 0) {
+              buckets.input = input as number;
+              buckets.output = output as number;
+              buckets.total = total;
+            } else {
+              buckets.input =
+                buckets.input === null ? null : buckets.input + (input as number);
+              buckets.output =
+                buckets.output === null ? null : buckets.output + (output as number);
+              buckets.total =
+                buckets.total === null ? null : buckets.total + total;
+            }
+            buckets.samples++;
+          }
+        }
+        break;
+      }
+      case "turn.failed": {
+        const failure = event.error;
+        const message =
+          failure && typeof failure === "object" && !Array.isArray(failure)
+            ? (failure as Record<string, unknown>).message
+            : null;
+        fail(
+          typeof message === "string" && message
+            ? message
+            : "Codex 报告 turn.failed",
+        );
+        break;
+      }
+      case "error":
+        // Codex emits top-level error lines for reconnectable stream failures; a later
+        // turn.completed is authoritative, while missing completion still reports this message.
+        recoverableError =
+          typeof event.message === "string" && event.message
+            ? event.message
+            : "Codex 报告错误事件";
+        break;
+      default:
+        break;
+    }
+  }
+  if (threadEvents !== 1) validatedSessionId = null;
+  if (!threadId) fail("缺少 thread.started 事件");
+  if (!completed)
+    fail(recoverableError ?? "缺少成功的 turn.completed 事件");
+  return {
+    success: error === null,
+    nativeSessionId: validatedSessionId,
+    nativeSessionFile: null,
+    finalText,
+    usage: toUsage(buckets),
+    error,
+  };
+}
+
 function piIdentity(
   header: Record<string, unknown>,
   expectedCwd: string,
@@ -695,6 +881,22 @@ export function trackProgress(
       progress.currentTool = null;
     } else if (kind === "error") {
       progress.phase = "error";
+      progress.active.clear();
+      progress.currentTool = null;
+    }
+  } else if (type === "codex") {
+    progress.phase = kind;
+    const item =
+      value.item && typeof value.item === "object" && !Array.isArray(value.item)
+        ? (value.item as Record<string, unknown>)
+        : null;
+    if (kind === "item.started") {
+      progress.currentTool =
+        typeof item?.type === "string" && item.type ? item.type : null;
+    } else if (kind === "item.completed") {
+      progress.steps++;
+      progress.currentTool = null;
+    } else if (kind === "turn.completed" || kind === "turn.failed" || kind === "error") {
       progress.active.clear();
       progress.currentTool = null;
     }

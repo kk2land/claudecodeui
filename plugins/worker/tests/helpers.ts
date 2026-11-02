@@ -15,6 +15,7 @@ export const pluginRoot = path.resolve(
 export const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
 export const dshFixture = path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs");
 export const piFixture = path.join(pluginRoot, "tests/fixtures/fake-pi.mjs");
+export const codexFixture = path.join(pluginRoot, "tests/fixtures/fake-codex.mjs");
 export const guardianSource = path.join(pluginRoot, "server/guardian.ts");
 
 export function temporaryRoot(prefix: string): string {
@@ -47,6 +48,7 @@ export function environment(
     HOME: path.join(root, "home"),
     DSH_HOME: path.join(root, "dsh-home"),
     PI_CODING_AGENT_DIR: path.join(root, "pi-home"),
+    CODEX_HOME: path.join(root, "codex-home"),
     TEST_SESSION_ID: "session-fixture-1",
     ...extra,
   };
@@ -61,6 +63,7 @@ export function createService(
   fs.mkdirSync(path.join(root, "home"), { recursive: true });
   fs.mkdirSync(path.join(root, "dsh-home"), { recursive: true });
   fs.mkdirSync(path.join(root, "pi-home"), { recursive: true });
+  fs.mkdirSync(path.join(root, "codex-home"), { recursive: true });
   const project = path.join(root, "project");
   fs.mkdirSync(project, { recursive: true });
   const data = path.join(root, "data");
@@ -68,7 +71,7 @@ export function createService(
   const service = new WorkerService({
     dataDirectory: data,
     environment: env,
-    executablePaths: { dsh: dshFixture, pi: piFixture },
+    executablePaths: { dsh: dshFixture, pi: piFixture, codex: codexFixture },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
     dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
     ...extraOptions,
