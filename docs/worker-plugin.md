@@ -38,6 +38,10 @@ MCP 连接由运行时临时注入，不在用户配置中预置：Codex app-ser
 不启用 Worker MCP。DSH 仅在 ACP 启动时由临时 patch 挂载 HTTP Worker MCP，headless 不注入。
 Codex 原生预测 fork 会继承父线程 MCP 且拒绝配置覆盖；启用 Worker 工具的会话明确显示预测暂不可用，
 避免预测线程获得父会话的 Worker 凭证。未启用 Worker 的会话继续使用原生预测。
+当前服务的 Codex 配置中显式禁用 `cloudcli-workers` 后，宿主不再为该项目会话接入 Worker MCP；
+已打开会话的 MCP 请求也会读取当前技能状态并拒绝调用，避免旧工具列表或全局指令继续创建任务。
+同名技能存在多个副本时，任一可见副本被显式禁用都阻止接入；重新启用后恢复。该设置不取消已接受的任务，
+已有任务仍可在 Worker 页签查看和管理。
 决定委派前，若 skill 未启用，或当前会话的 Worker MCP 未启用、未连接、缺少所需工具，主代理应跳过
 该 skill 并用普通工具直接完成原任务，不要以「请连接 MCP 后重试」为前提报告阻塞。只有已进入 Worker
 委派流程后的持续调用失败才报告具体阻塞；任何情况下都不要绕到 shell、`dsh`/`pi` 或复制 runner

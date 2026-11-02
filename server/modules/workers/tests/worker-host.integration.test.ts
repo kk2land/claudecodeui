@@ -11,6 +11,8 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import express from 'express';
 
+import { providerSkillsService } from '@/modules/providers/index.js';
+import { AppError } from '@/shared/index.js';
 import type {
   WorkerIpcTransport,
   WorkerNotification,
@@ -110,6 +112,19 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   const bin = path.join(root, 'bin');
   fs.mkdirSync(project, { recursive: true });
   fs.mkdirSync(bin, { recursive: true });
+  const codexHome = path.join(root, 'codex-home');
+  const skillDirectory = path.join(project, '.agents/skills/cloudcli-workers');
+  const skillPath = path.join(skillDirectory, 'SKILL.md');
+  fs.mkdirSync(codexHome, { recursive: true });
+  fs.mkdirSync(skillDirectory, { recursive: true });
+  fs.writeFileSync(skillPath, '---\nname: cloudcli-workers\ndescription: Test Worker skill\n---\n');
+  const previousCodexHome = process.env.CODEX_HOME;
+  process.env.CODEX_HOME = codexHome;
+  t.mock.method(os, 'homedir', () => path.join(root, 'home'));
+  t.after(() => {
+    if (previousCodexHome === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = previousCodexHome;
+  });
 
   for (const [name, fixture] of [
     ['dsh', path.join(pluginRoot, 'tests/fixtures/fake-dsh.mjs')],
@@ -179,6 +194,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   const host = createWorkerHostService({
     ipc,
     isEnabled: () => true,
+    skills: providerSkillsService,
     resolveMcpUrl: () => `http://127.0.0.1:${proxyPort}/api/worker-mcp`,
     runtime: {
       isQueueBlocked: () => false,
@@ -208,6 +224,9 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     isEnabled: () => true,
     getPort: () => ready,
   }));
+  app.use((error: AppError, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(error.statusCode).json({ error: { code: error.code } });
+  });
   const proxy = http.createServer(app);
   await new Promise<void>((resolve) => proxy.listen(0, '127.0.0.1', resolve));
   const address = proxy.address();
@@ -241,6 +260,26 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   });
   await client.connect(transport);
   t.after(async () => { await client.close(); });
+
+  if (provider === 'codex') {
+    await providerSkillsService.setProviderSkillEnabled('codex', { sourcePath: skillPath, enabled: false });
+    assert.equal(await host.bridge.prepareSession(codexInput), null);
+    for (const name of ['worker_start', 'worker_resume']) {
+      const response = await fetch(mcp.url, {
+        method: 'POST',
+        headers: { authorization: mcp.http_headers.Authorization, 'content-type': 'application/json' },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } }),
+      });
+      assert.equal(response.status, 403);
+      assert.equal((await response.json() as { error: { code: string } }).error.code, 'WORKER_SKILL_DISABLED');
+    }
+    const disabledState = await (await fetch(`http://127.0.0.1:${ready}/state`, {
+      headers: { authorization: 'Bearer plugin-ui-token' },
+    })).json() as { workers: unknown[] };
+    assert.equal(disabledState.workers.length, 0, 'stale credentials must not create plugin tasks');
+    await providerSkillsService.setProviderSkillEnabled('codex', { sourcePath: skillPath, enabled: true });
+    assert.deepEqual(await host.bridge.prepareSession(codexInput), config);
+  }
 
   const started = toolResult(await client.callTool({
     name: 'worker_start',

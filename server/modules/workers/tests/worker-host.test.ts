@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import type { WorkerNotification } from '@/shared/index.js';
+import type { ProviderSkill, WorkerNotification } from '@/shared/index.js';
 
 import { createWorkerHostService } from '../worker-host.service.js';
 import type { WorkerIpcClient } from '../worker-ipc.client.js';
@@ -47,6 +47,7 @@ function harness(options: {
   const phases = new Map<string, string>();
   const dshModes = new Map<string, 'acp' | 'headless'>();
   const stateProviders: string[] = [];
+  const skills = new Map<string, ProviderSkill[]>();
   const sessions = new Map<string, { project_path: string; provider: string; projectId: string }>();
   for (const [sessionId, projectPath] of Object.entries(options.sessions ?? { 'session-1': '/repo' })) {
     sessions.set(sessionId, { project_path: projectPath, provider: options.providers?.[sessionId] ?? 'codex', projectId: `project-${projectPath.split('/').at(-1)}` });
@@ -107,6 +108,9 @@ function harness(options: {
   const service = createWorkerHostService({
     ipc: ipc as unknown as WorkerIpcClient,
     isEnabled: () => true,
+    skills: {
+      listProviderSkills: async (_provider, options) => skills.get(options?.workspacePath ?? '') ?? [],
+    },
     resolveMcpUrl: () => 'http://127.0.0.1:3001/api/worker-mcp',
     runtime: {
       isQueueBlocked: (sessionId) => blocked.has(sessionId) || queueHeld.has(sessionId) || goals.has(sessionId),
@@ -149,6 +153,7 @@ function harness(options: {
 
   return {
     service, ipc, outbox, requests, claims, settlements, timers, wakeCalls, logs, stateProviders,
+    setSkills(projectPath: string, value: ProviderSkill[]) { skills.set(projectPath, value); },
     deleteSession(sessionId: string) { sessions.delete(sessionId); },
     setDshMode(sessionId: string, mode: 'acp' | 'headless') { dshModes.set(sessionId, mode); },
     setActiveRun(sessionId: string, value: boolean) { if (value) activeRuns.add(sessionId); else activeRuns.delete(sessionId); },
@@ -215,6 +220,35 @@ function harness(options: {
 async function tick(count = 20): Promise<void> {
   for (let index = 0; index < count; index++) await new Promise((resolve) => setImmediate(resolve));
 }
+
+test('a disabled Worker skill prevents owner registration and plugin startup', async () => {
+  const h = harness();
+  h.setSkills('/repo', [{
+    provider: 'codex', name: 'cloudcli-workers', description: 'Worker skill',
+    command: '$cloudcli-workers', scope: 'user', sourcePath: '/skills/cloudcli-workers/SKILL.md', enabled: false,
+  }]);
+  assert.equal(await h.prepare(), null);
+  assert.equal(h.ensureReadyCalls(), 0);
+  assert.equal(h.requests.length, 0);
+});
+
+test('current skill policy blocks existing owner credentials and respects the parent workspace', async () => {
+  const h = harness({ sessions: { 'session-1': '/repo', 'session-2': '/other' } });
+  await h.prepare();
+  const disabled: ProviderSkill = {
+    provider: 'codex', name: 'cloudcli-workers', description: 'Worker skill',
+    command: '$cloudcli-workers', scope: 'repo', sourcePath: '/repo/.agents/skills/cloudcli-workers/SKILL.md', enabled: false,
+  };
+  // Another enabled copy must not bypass an explicit disable.
+  h.setSkills('/repo', [disabled, { ...disabled, scope: 'user', sourcePath: '/skills/cloudcli-workers/SKILL.md', enabled: true }]);
+  await assert.rejects(h.service.assertMcpSkillEnabled('Bearer owner-token'), { code: 'WORKER_SKILL_DISABLED', statusCode: 403 });
+  assert.equal(await h.prepare(), null, 'cached owner registration must consult current settings');
+  assert.ok(await h.prepare('session-2'), 'a different workspace remains enabled');
+  await h.service.assertMcpSkillEnabled('Bearer unknown-token');
+  h.setSkills('/repo', [{ ...disabled, enabled: true }]);
+  await h.service.assertMcpSkillEnabled('Bearer owner-token');
+  assert.ok(await h.prepare(), 're-enabling restores the same parent');
+});
 
 for (const provider of ['codex', 'dsh'] as const) test(`${provider} transport restoration reuses owner authority during an automatic wake-up`, async () => {
   const h = harness({ providers: { 'session-1': provider } });
@@ -365,6 +399,7 @@ test('stopping during initial plugin startup fences the provisional owner withou
   h.setEnsureReady(async () => new Promise<boolean>((resolve) => { ready = resolve; }));
   h.setCloseInstance(async () => { throw new Error('IPC not ready'); });
   const preparing = h.prepare();
+  await tick();
   await h.service.bridge.closeAppServer('instance-1', 'user-stop');
   ready(true);
   await preparing;

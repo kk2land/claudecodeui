@@ -2189,6 +2189,8 @@ export type WorkerHostService = {
   bridge: CodexWorkerBridge;
   dshBridge: DshWorkerBridge;
   fenceCancel(input: WorkerCancelFenceInput): number;
+  /** Checks the current skill setting for a known owner; unknown tokens remain the plugin's responsibility. */
+  assertMcpSkillEnabled(authorization: string | undefined): Promise<void>;
   initialize(): void;
   restoreOwners(): Promise<void>;
   shutdown(): Promise<void>;

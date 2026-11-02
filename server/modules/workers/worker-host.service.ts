@@ -1,11 +1,14 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { AppError } from '@/shared/index.js';
 import type {
   CodexSessionState,
   CodexWorkerBridge,
   CodexWorkerPrepareSessionInput,
   DshWorkerBridge,
+  ProviderSkill,
+  ProviderSkillListOptions,
   ProviderRuntimeState,
   WorkerCancelFenceInput,
   WorkerNotification,
@@ -23,6 +26,9 @@ type WorkerHostDependencies = {
   ipc: WorkerIpcClient;
   /** True only while the bundled Worker plugin is enabled in plugin config. */
   isEnabled(): boolean;
+  skills: {
+    listProviderSkills(providerName: string, options?: ProviderSkillListOptions): Promise<ProviderSkill[]>;
+  };
   /** Absolute MCP URL injected into provider-owned temporary configuration. */
   resolveMcpUrl(): string;
   runtime: {
@@ -112,6 +118,11 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
 
   function currentOwners(): RegisteredOwner[] {
     return [...owners.values()];
+  }
+
+  async function isSkillEnabled(provider: 'codex' | 'dsh', projectPath: string): Promise<boolean> {
+    const skills = await dependencies.skills.listProviderSkills(provider, { workspacePath: projectPath });
+    return !skills.some((skill) => skill.name === 'cloudcli-workers' && skill.enabled === false);
   }
 
   function ownerFor(sessionId: string): RegisteredOwner | undefined {
@@ -489,7 +500,6 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     const reuse = previous?.owner.id === ownerId
       && previous.owner.projectId === project.project_id && previous.owner.projectPath === projectPath
       && previous.owner.userId === input.userId;
-    if (reuse && previous.registered && !previous.owner.paused && dependencies.ipc.isReady()) return previous;
     const entry: RegisteredOwner = reuse ? previous : {
       provider,
       owner: {
@@ -512,10 +522,19 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
       else sessionOwners.delete(input.sessionId);
     };
 
-    // Publish before the first startup/registration await so a Stop during
-    // ensureReady still fences this exact provisional owner.
+    // Publish before skill lookup or startup so Stop still fences this exact
+    // provisional owner while either asynchronous operation is pending.
     owners.set(ownerId, entry);
     sessionOwners.set(input.sessionId, ownerId);
+    const skillEnabled = await isSkillEnabled(provider, projectPath).catch((error) => {
+      rollback();
+      throw error;
+    });
+    if (!skillEnabled) {
+      rollback();
+      return null;
+    }
+    if (reuse && entry.registered && !entry.owner.paused && dependencies.ipc.isReady()) return entry;
     if (!await dependencies.ipc.ensureReady()) {
       rollback();
       return null;
@@ -662,6 +681,15 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     bridge,
     dshBridge,
     fenceCancel,
+    /** The MCP proxy checks live skill policy; the plugin still owns token authentication. */
+    async assertMcpSkillEnabled(authorization: string | undefined): Promise<void> {
+      const entry = currentOwners().find((candidate) => authorization === `Bearer ${candidate.token}`);
+      if (entry && !await isSkillEnabled(entry.provider, entry.owner.projectPath)) {
+        throw new AppError('The cloudcli-workers skill is disabled for this session.', {
+          code: 'WORKER_SKILL_DISABLED', statusCode: 403,
+        });
+      }
+    },
     initialize() {
       unsubscribe.push(
         dependencies.ipc.onEvent((event) => {

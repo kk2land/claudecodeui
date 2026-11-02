@@ -9,7 +9,7 @@ import {
   onPluginReady,
   sendPluginMessage,
 } from '@/modules/plugins/index.js';
-import { providerRuntimeService } from '@/modules/providers/index.js';
+import { providerRuntimeService, providerSkillsService } from '@/modules/providers/index.js';
 import {
   projectsDb,
   sessionDraftsDb,
@@ -59,6 +59,7 @@ export function createWorkerModule(options: {
   const host = createWorkerHostService({
     ipc,
     isEnabled: () => isPluginEnabled(WORKER_PLUGIN),
+    skills: providerSkillsService,
     resolveMcpUrl: () => mcpUrl,
     runtime: {
       ...providerRuntimeService,

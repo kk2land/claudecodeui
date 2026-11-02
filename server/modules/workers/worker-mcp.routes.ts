@@ -2,6 +2,7 @@ import http from 'node:http';
 
 import express from 'express';
 
+import { asyncHandler } from '@/shared/index.js';
 import type { WorkerHostService } from '@/shared/index.js';
 
 /** Header allowlist that carries MCP authentication, protocol negotiation and resumption. */
@@ -26,7 +27,7 @@ export function createWorkerMcpRouter(dependencies: {
 }): express.Router {
   const router = express.Router();
 
-  router.all('*', async (req, res, next) => {
+  router.all('*', asyncHandler(async (req, res, next) => {
     if (!dependencies.isEnabled() || !dependencies.host.isReady()) {
       res.status(503).json({ error: { code: 'WORKER_MCP_UNAVAILABLE', message: 'The Worker plugin is not ready.' } });
       return;
@@ -36,6 +37,7 @@ export function createWorkerMcpRouter(dependencies: {
       res.status(503).json({ error: { code: 'WORKER_MCP_UNAVAILABLE', message: 'The Worker plugin is not ready.' } });
       return;
     }
+    await dependencies.host.assertMcpSkillEnabled(req.headers.authorization);
     const headers: Record<string, string> = {};
     for (const name of FORWARDED_HEADERS) {
       const value = req.headers[name];
@@ -64,7 +66,7 @@ export function createWorkerMcpRouter(dependencies: {
     req.on('aborted', () => proxyRequest.destroy());
     if (body) proxyRequest.write(body);
     proxyRequest.end();
-  });
+  }));
 
   return router;
 }

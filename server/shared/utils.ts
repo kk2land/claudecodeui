@@ -102,7 +102,8 @@ export function createApiSuccessResponse<TData>(
  * Converts an async Express handler into a standard `RequestHandler` and routes
  * rejected promises to Express error middleware.
  *
- * Use this to avoid repeating `try/catch(next)` in every async route.
+ * Used by module routes, including the Worker MCP proxy, to avoid repeating
+ * `try/catch(next)` in every async route.
  */
 export function asyncHandler(
   handler: (req: Request, res: Response, next: NextFunction) => Promise<unknown>

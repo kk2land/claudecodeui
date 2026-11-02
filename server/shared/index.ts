@@ -90,6 +90,7 @@ export type {
 
 export {
   AppError,
+  asyncHandler,
   createCompleteMessage,
   createNormalizedMessage,
   findApplicationRoot,

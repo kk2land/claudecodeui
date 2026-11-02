@@ -4,8 +4,10 @@ import test from 'node:test';
 
 import express from 'express';
 
-import { createWorkerMcpRouter } from '../worker-mcp.routes.js';
+import { AppError } from '@/shared/index.js';
 import type { WorkerHostService } from '@/shared/index.js';
+
+import { createWorkerMcpRouter } from '../worker-mcp.routes.js';
 
 function listen(app: express.Express): Promise<{ port: number; close(): Promise<void> }> {
   return new Promise((resolve) => {
@@ -34,6 +36,7 @@ function request(port: number, options: http.RequestOptions, body?: string): Pro
 }
 
 test('the Worker MCP proxy forwards owner auth, body and streaming response', async (t) => {
+  const checked: Array<string | undefined> = [];
   const received: Array<{ url?: string; headers: http.IncomingHttpHeaders; body: string }> = [];
   const upstream = http.createServer((req, res) => {
     let body = '';
@@ -53,7 +56,10 @@ test('the Worker MCP proxy forwards owner auth, body and streaming response', as
   const app = express();
   app.use(express.json());
   app.use('/api/worker-mcp', createWorkerMcpRouter({
-    host: { isReady: () => true } as WorkerHostService,
+    host: {
+      isReady: () => true,
+      assertMcpSkillEnabled: async (authorization) => { checked.push(authorization); },
+    } as WorkerHostService,
     isEnabled: () => true,
     getPort: () => upstreamPort,
   }));
@@ -73,10 +79,39 @@ test('the Worker MCP proxy forwards owner auth, body and streaming response', as
   assert.equal(response.status, 200);
   assert.match(response.body, /data: \{"ok":true\}/);
   assert.equal(received.length, 1);
+  assert.deepEqual(checked, ['Bearer owner-token']);
   assert.equal(received[0].url, '/api/worker-mcp');
   assert.equal(received[0].headers.authorization, 'Bearer owner-token');
   assert.equal(received[0].headers['mcp-protocol-version'], '2025-06-18');
   assert.deepEqual(JSON.parse(received[0].body), { jsonrpc: '2.0', id: 1, method: 'tools/list' });
+});
+
+test('the Worker MCP proxy rejects disabled skills before forwarding stale tool calls', async (t) => {
+  const app = express();
+  app.use(express.json());
+  app.use('/api/worker-mcp', createWorkerMcpRouter({
+    host: {
+      isReady: () => true,
+      assertMcpSkillEnabled: async () => {
+        throw new AppError('The cloudcli-workers skill is disabled.', { code: 'WORKER_SKILL_DISABLED', statusCode: 403 });
+      },
+    } as unknown as WorkerHostService,
+    isEnabled: () => true,
+    getPort: () => 1,
+  }));
+  app.use((error: AppError, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    res.status(error.statusCode).json({ error: { code: error.code } });
+  });
+  const server = await listen(app);
+  t.after(() => server.close());
+  for (const name of ['worker_start', 'worker_resume']) {
+    const response = await request(server.port, {
+      method: 'POST', path: '/api/worker-mcp',
+      headers: { authorization: 'Bearer owner-token', 'content-type': 'application/json' },
+    }, JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name, arguments: {} } }));
+    assert.equal(response.status, 403);
+    assert.equal(JSON.parse(response.body).error.code, 'WORKER_SKILL_DISABLED');
+  }
 });
 
 test('the Worker MCP proxy never starts or forwards to a disabled plugin', async () => {
