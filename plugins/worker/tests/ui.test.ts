@@ -965,9 +965,12 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
       () => textOf(mounted.container).includes("界面任务"),
       "列表角色",
     );
-    assert.ok(textOf(mounted.container).includes("UI设计"));
-    // A legacy record stays quiet in the list instead of showing an empty role.
-    assert.equal(textOf(mounted.container).includes("未指定"), false);
+    const headings = [...mounted.container.querySelectorAll(".worker-table th")];
+    const roleColumn = headings.findIndex((heading) => textOf(heading) === "任务角色");
+    assert.notEqual(roleColumn, -1);
+    const rows = mounted.container.querySelectorAll(".worker-table tbody tr");
+    assert.equal(textOf(rows[0]!.children[roleColumn]), "UI设计");
+    assert.equal(textOf(rows[1]!.children[roleColumn]), "未指定");
     (byLabel(mounted.container, "查看 界面任务") as HTMLButtonElement).click();
     await waitFor(
       () => Boolean(mounted.container.querySelector(".worker-detail-grid")),
@@ -985,10 +988,10 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
     );
     (byLabel(mounted.container, "查看 历史任务") as HTMLButtonElement).click();
     await waitFor(
-      () => textOf(mounted.container).includes("任务角色"),
+      () => Boolean(mounted.container.querySelector(".worker-detail-grid")),
       "历史任务详情",
     );
-    assert.ok(textOf(mounted.container).includes("未指定"));
+    assert.ok(textOf(mounted.container.querySelector(".worker-detail-grid")).includes("未指定"));
   } finally {
     mounted.unmount();
   }

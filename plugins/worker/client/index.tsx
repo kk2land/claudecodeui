@@ -225,14 +225,18 @@ function WorkerRow({
         )}
       </td>
       <td>
-        <span className={"worker-type worker-type-" + worker.type}>
-          {TYPE_LABELS[worker.type]}
-        </span>
         {worker.taskRole ? (
           <span className="worker-role">
             {TASK_ROLE_LABELS[worker.taskRole]}
           </span>
-        ) : null}
+        ) : (
+          <span className="worker-muted">未指定</span>
+        )}
+      </td>
+      <td>
+        <span className={"worker-type worker-type-" + worker.type}>
+          {TYPE_LABELS[worker.type]}
+        </span>
         <small>
           {run?.model ?? "默认模型"}
           {run?.provider ? " / " + run.provider : ""}
@@ -1612,6 +1616,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
             <thead>
               <tr>
                 <th>任务 / 会话</th>
+                <th>任务角色</th>
                 <th>类型 / 模型</th>
                 <th>状态 / 耗时</th>
                 <th>工作区</th>

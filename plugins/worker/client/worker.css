@@ -281,10 +281,10 @@
 }
 .worker-role {
   display: inline-block;
-  margin-left: 5px;
   padding: 1px 7px;
   border-radius: 999px;
   font-size: 11px;
+  white-space: nowrap;
   background: var(--worker-soft);
   border: 1px solid var(--worker-border);
   color: var(--worker-muted);
@@ -715,6 +715,9 @@
   .worker-table {
     display: block;
     overflow-x: auto;
+  }
+  .worker-table td:first-child {
+    min-width: 220px;
   }
 }
 @media (max-width: 540px) {
