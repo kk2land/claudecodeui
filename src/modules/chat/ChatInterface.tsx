@@ -598,7 +598,8 @@ function ChatInterface({
           </TranscriptSessionContext.Provider>
         </MarkdownWorkspaceContext.Provider>
 
-        <div className="relative flex-shrink-0">
+        {/* Let native questions scroll within the space left by the input on short screens. */}
+        <div className={`relative ${codexControls?.state?.questions.length ? 'flex min-h-0 flex-col' : 'flex-shrink-0'}`}>
           {isUserScrolledUp && chatMessages.length > 0 && (
             <div className="pointer-events-none absolute -top-11 left-0 right-0 z-20 flex justify-center">
               <button

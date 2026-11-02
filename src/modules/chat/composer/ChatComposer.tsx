@@ -304,6 +304,7 @@ export default function ChatComposer({
 
   // Hide the thinking/status bar while any permission request is pending
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
+  const hasBlockingCodexQuestion = Boolean(codexControls?.state?.questions.some((request) => request.isBlocking));
   // Provider toolbars sit above the input, so their activity belongs inside it.
   const hasControlPanel = Boolean(codexControls || runtimeControls);
   // A Worker run can outlive the main turn. On mobile its existing settings
@@ -372,6 +373,8 @@ export default function ChatComposer({
   // rejects it visibly and keeps the text. Falling through to `onAbortSession`
   // would stop the running turn instead of refusing the fourth message.
   const canQueueDraft = !modelRequired && isLoading && Boolean(input.trim() || attachedFiles.length > 0);
+  // A draft turns the main Stop button into Queue; retain the inline Stop in that case.
+  const showInlineActivity = hasControlPanel && !hasPendingPermissions && (!hasBlockingCodexQuestion || canQueueDraft);
   const submitHint = modelRequired ? t('codex.modelRequired') : queueFull && isLoading
     ? t('input.hintText.queueFull', {
       count: MAX_QUEUED_MESSAGES,
@@ -462,7 +465,7 @@ export default function ChatComposer({
   );
 
   return (
-    <div className="chat-composer-shell relative flex-shrink-0 px-2 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6">
+    <div className={`chat-composer-shell relative px-2 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6 ${codexControls?.state?.questions.length ? 'flex min-h-0 flex-col' : 'flex-shrink-0'}`}>
       {showFloatingActivity && (
         <div className="pointer-events-none absolute bottom-full left-1/2 z-10 w-[calc(100%-1rem)] max-w-[54.25rem] -translate-x-1/2 translate-y-px bg-transparent sm:w-[calc(100%-2rem)]">
           <ActivityIndicator activity={activity} onAbort={onAbortSession} isInputFocused={isInputFocused} />
@@ -524,7 +527,7 @@ export default function ChatComposer({
         </div>
       )}
 
-      {isMobile && hasControlPanel && !hasPendingPermissions && (
+      {isMobile && showInlineActivity && (
         <div className="mx-auto max-w-[54.25rem]">
           <ActivityIndicator activity={activity} onAbort={onAbortSession} variant="inline" />
         </div>
@@ -547,7 +550,7 @@ export default function ChatComposer({
         />
       ))}
 
-      {!hasQuestionPanel && <div className="relative mx-auto max-w-[54.25rem]">
+      {!hasQuestionPanel && <div className="relative mx-auto w-full max-w-[54.25rem]">
         {showFileDropdown && filteredFiles.length > 0 && (
           <div
             ref={fileDropdownRef}
@@ -603,7 +606,7 @@ export default function ChatComposer({
           ].filter(Boolean).join(' ')}
           {...getRootProps()}
         >
-          {hasControlPanel && !hasPendingPermissions && !isMobile && (
+          {showInlineActivity && !isMobile && (
             <ActivityIndicator activity={activity} onAbort={onAbortSession} variant="inline" />
           )}
           {isDragActive && (
@@ -845,13 +848,13 @@ export default function ChatComposer({
             {submitButton}
           </div>
 
-          <div
+          {!hasBlockingCodexQuestion && <div
             className={`order-last hidden basis-full px-2 text-center text-xs leading-4 text-muted-foreground/50 transition-opacity duration-200 lg:block ${
               input.trim() && !canQueueDraft ? 'opacity-0' : 'opacity-100'
             }`}
           >
             {submitHint}
-          </div>
+          </div>}
         </PromptInputFooter>
         </PromptInput>
 

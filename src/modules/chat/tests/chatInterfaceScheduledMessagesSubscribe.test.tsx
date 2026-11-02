@@ -30,7 +30,7 @@ const harness = vi.hoisted(() => ({
   composer: vi.fn((_props: ComponentProps<typeof ChatComposer>) => null),
   // The websocket context's own function; ChatInterface must pass this one on, not a stand-in.
   subscribe: (_listener: (event: ServerEvent) => void) => () => {},
-  useCodexControls: vi.fn((_args: unknown) => ({ state: { runtime: 'app-server' } })),
+  useCodexControls: vi.fn((_args: unknown) => ({ state: { runtime: 'app-server', questions: [] } })),
   useProviderRuntimeControls: vi.fn((_args: unknown) => ({ available: false })),
   useScheduledMessages: vi.fn((_sessionId: string | null, _subscribe?: unknown) => ({
     scheduledMessages: [],

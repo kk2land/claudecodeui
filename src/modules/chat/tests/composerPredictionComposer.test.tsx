@@ -461,6 +461,38 @@ test('blocking questions and a held queue stay outside the sheet and keep their 
   ]);
 });
 
+for (const width of [412, 1024]) {
+  test(`a blocking Codex question keeps Stop available while composing a follow-up at width ${width}`, async () => {
+    vi.stubGlobal('innerWidth', width);
+    const codex = mobileControls({
+      mode: 'plan', phase: 'running', turnId: 'turn-1',
+      questions: [{ requestId: 'question-1', turnId: 'turn-1', isBlocking: true,
+        questions: [{ id: 'format', header: 'Format', question: 'Which format?', isOther: true, isSecret: false, options: null }] }],
+    });
+    const onAbortSession = vi.fn();
+    const overrides = { isLoading: true, onAbortSession,
+      activity: { statusText: null, canInterrupt: true, startedAt: Date.now() } };
+    const view = render(<Harness codexControls={codex} overrides={overrides} />);
+    const textarea = await findTextarea();
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    assert.equal(onAbortSession.mock.calls.length, 1);
+
+    await act(async () => { fireEvent.change(textarea, { target: { value: 'Follow-up instructions' } }); });
+    assert.ok(screen.getByRole('button', { name: 'Queue next message' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    assert.equal(onAbortSession.mock.calls.length, 2);
+    assert.equal(textarea.value, 'Follow-up instructions');
+
+    await act(async () => { fireEvent.change(textarea, { target: { value: '' } }); });
+    view.rerender(<Harness codexControls={codex} overrides={{ ...overrides,
+      attachedFiles: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] }} />);
+    assert.ok(screen.getByRole('button', { name: 'Queue next message' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    assert.equal(onAbortSession.mock.calls.length, 3);
+    assert.equal(vi.mocked(codex.control).mock.calls.length, 0);
+  });
+}
+
 test('the mobile Plan badge follows native app-server plan, never SDK or an unsupported permission mode', async () => {
   stubPhone();
   const view = render(

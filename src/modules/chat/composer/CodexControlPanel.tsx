@@ -12,29 +12,33 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
   // Answers are scoped by the native request id and discarded when it resolves.
   const [answers, setAnswers] = useState<Record<string, string>>({});
   return (
-    <form className="space-y-3 rounded-lg border border-border p-3" onSubmit={(event) => {
+    <form className="flex max-h-[min(32rem,calc((100dvh-var(--keyboard-height,0px))*0.5))] min-h-0 min-w-0 flex-col overflow-hidden rounded-lg border border-border" onSubmit={(event) => {
       event.preventDefault();
       void controls.control({ action: 'answer', requestId: request.requestId,
         answers: Object.fromEntries(request.questions.map((question) => [question.id, { answers: [answers[question.id]?.trim() ?? ''] }])) }).catch(() => {});
     }}>
-      <p className="text-xs text-muted-foreground">{t(request.isBlocking ? 'codex.questionBlocking' : 'codex.questionOptional')}</p>
-      {request.questions.map((question) => (
-        <fieldset key={question.id} className="space-y-2">
-          <legend className="text-sm font-medium">{question.question}</legend>
-          {question.options?.map((option) => (
-            <label key={option.label} className="flex cursor-pointer gap-2 text-sm">
-              <input type="radio" name={`${request.requestId}:${question.id}`} checked={answers[question.id] === option.label}
-                onChange={() => setAnswers((old) => ({ ...old, [question.id]: option.label }))} />
-              <span>{option.label}<span className="block text-xs text-muted-foreground">{option.description}</span></span>
-            </label>
-          ))}
-          <input className="w-full rounded-md border border-input bg-background px-2 py-1.5 text-sm" aria-label={question.question}
-            type={question.isSecret ? 'password' : 'text'} placeholder={t('codex.answerPlaceholder')} value={answers[question.id] ?? ''}
-            onChange={(event) => setAnswers((old) => ({ ...old, [question.id]: event.target.value }))} />
-        </fieldset>
-      ))}
-      <button type="submit" className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-40"
-        disabled={controls.pending || request.questions.some((question) => !answers[question.id]?.trim())}>{t('codex.submitAnswers')}</button>
+      <p className="shrink-0 p-3 text-xs text-muted-foreground">{t(request.isBlocking ? 'codex.questionBlocking' : 'codex.questionOptional')}</p>
+      <div className="min-h-0 space-y-3 overflow-y-auto overscroll-contain px-3 pb-3">
+        {request.questions.map((question) => (
+          <fieldset key={question.id} className="min-w-0 space-y-2">
+            <legend className="max-w-full break-words text-sm font-medium">{question.question}</legend>
+            {question.options?.map((option) => (
+              <label key={option.label} className="flex min-w-0 cursor-pointer items-start gap-2 text-sm">
+                <input className="mt-1 shrink-0" type="radio" name={`${request.requestId}:${question.id}`} checked={answers[question.id] === option.label}
+                  onChange={() => setAnswers((old) => ({ ...old, [question.id]: option.label }))} />
+                <span className="min-w-0 break-words">{option.label}<span className="block text-xs text-muted-foreground">{option.description}</span></span>
+              </label>
+            ))}
+            <input className="w-full min-w-0 rounded-md border border-input bg-background px-2 py-1.5 text-sm" aria-label={question.question}
+              type={question.isSecret ? 'password' : 'text'} placeholder={t('codex.answerPlaceholder')} value={answers[question.id] ?? ''}
+              onChange={(event) => setAnswers((old) => ({ ...old, [question.id]: event.target.value }))} />
+          </fieldset>
+        ))}
+      </div>
+      <div className="shrink-0 border-t border-border p-3">
+        <button type="submit" className="rounded-md bg-primary px-3 py-1.5 text-sm text-primary-foreground disabled:opacity-40"
+          disabled={controls.pending || request.questions.some((question) => !answers[question.id]?.trim())}>{t('codex.submitAnswers')}</button>
+      </div>
     </form>
   );
 }
@@ -72,7 +76,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
   const native = state?.runtime !== 'sdk';
   const startedAt = state?.diagnostics?.startedAt != null ? new Date(state.diagnostics.startedAt) : null;
   const button = 'inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-border/60 bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40';
-  const settings = <div className="min-w-0 space-y-2 text-sm">
+  const settings = <div className="min-w-0 shrink-0 space-y-2 text-sm">
       <div className="flex items-start gap-2">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
           {native && <>
@@ -162,7 +166,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
       </details>}
     </div>;
 
-  const notices = <div className="min-w-0 space-y-2 text-sm">
+  const notices = <div className="flex min-h-0 min-w-0 flex-col gap-2 text-sm">
       {settingsContainer !== undefined && native && (state?.phase === 'stopping' || state?.phase === 'stopFailed' || showResumeQueue) && (
         <div className="flex flex-wrap items-center gap-2">
           {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
@@ -184,14 +188,14 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
   );
   if (settingsContainer === undefined) {
     return (
-      <div className="mx-auto mb-2 w-full min-w-0 max-w-[54.25rem] space-y-2 text-sm">
+      <div className="mx-auto mb-2 flex min-h-0 w-full min-w-0 max-w-[54.25rem] flex-col gap-2 text-sm">
         {settings}
         {hasNotices && notices}
       </div>
     );
   }
   return (
-    <div className={hasNotices ? 'mx-auto mb-2 w-full min-w-0 max-w-[54.25rem] space-y-2' : 'contents'}>
+    <div className={hasNotices ? 'mx-auto mb-2 flex min-h-0 w-full min-w-0 max-w-[54.25rem] flex-col gap-2' : 'contents'}>
       {settingsContainer && createPortal(settings, settingsContainer)}
       {hasNotices && notices}
     </div>
