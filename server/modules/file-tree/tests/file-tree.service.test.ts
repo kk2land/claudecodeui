@@ -122,8 +122,9 @@ test('listProjectFiles applies gitignore alongside hard directory exclusions', a
   const fileSystem = createFakeFileSystem({
     access: async () => undefined,
     readTextFile: async (filePath) => {
-      assert.equal(filePath, path.join(projectRoot, '.gitignore'));
-      return '*.log';
+      if (filePath === path.join(projectRoot, '.gitignore')) return '*.log';
+      assert.equal(filePath, path.join(projectRoot, '.cloudcli', 'ignore'));
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     },
     openDirectory: createDirectoryReader((directoryPath) => {
       readDirectories.push(directoryPath);
@@ -182,8 +183,11 @@ test('listProjectFiles excludes gitignored entries only when requested', async (
   const fileSystem = createFakeFileSystem({
     access: async () => undefined,
     readTextFile: async (filePath) => {
-      assert.equal(filePath, path.join(projectRoot, '.gitignore'));
-      return ['*.log', '!keep.log', 'cache/', 'src/generated.ts'].join('\n');
+      if (filePath === path.join(projectRoot, '.gitignore')) {
+        return ['*.log', '!keep.log', 'cache/', 'src/generated.ts'].join('\n');
+      }
+      assert.equal(filePath, path.join(projectRoot, '.cloudcli', 'ignore'));
+      throw Object.assign(new Error('missing'), { code: 'ENOENT' });
     },
     openDirectory: createDirectoryReader((directoryPath) => {
       readDirectories.push(directoryPath);
@@ -220,6 +224,88 @@ test('listProjectFiles excludes gitignored entries only when requested', async (
   assert.deepEqual(tree[0]?.children?.map((entry) => entry.name), ['index.ts']);
   assert.equal(readDirectories.includes(cacheDirectory), false);
 });
+
+test('listProjectFiles merges project-relative CloudCLI rules after gitignore and rereads them', async (context) => {
+  const projectRoot = await fsPromises.mkdtemp(path.join(os.tmpdir(), 'file-tree-ignore-'));
+  context.after(() => fsPromises.rm(projectRoot, { recursive: true, force: true }));
+  await Promise.all(['.cloudcli', 'cache', 'docs/cache', 'src', 'node_modules'].map(
+    (directory) => fsPromises.mkdir(path.join(projectRoot, directory), { recursive: true }),
+  ));
+  const cloudcliIgnorePath = path.join(projectRoot, '.cloudcli', 'ignore');
+  await Promise.all([
+    fsPromises.writeFile(path.join(projectRoot, '.gitignore'), '*.log\n.cloudcli/'),
+    fsPromises.writeFile(cloudcliIgnorePath, [
+      '# Paths are relative to the project, not .cloudcli',
+      '',
+      '/cache/',
+      '/src/generated.ts',
+      '*.tmp',
+      '!keep.log',
+      '!keep.tmp',
+      '!node_modules/',
+    ].join('\n')),
+    ...['README.md', 'debug.log', 'keep.log', 'debug.tmp', 'keep.tmp',
+      'src/generated.ts', 'src/index.ts', 'cache/generated.ts', 'docs/cache/guide.md'].map(
+      (filePath) => fsPromises.writeFile(path.join(projectRoot, filePath), 'content'),
+    ),
+  ]);
+  const service = createRealFileSystemService(projectRoot);
+
+  const tree = await service.listProjectFiles('project-1', { respectGitignore: true });
+
+  assert.deepEqual(tree.map((entry) => entry.name), ['docs', 'src', '.gitignore', 'keep.log', 'keep.tmp', 'README.md']);
+  assert.deepEqual(tree[0]?.children?.map((entry) => entry.name), ['cache']);
+  assert.deepEqual(tree[0]?.children?.[0]?.children?.map((entry) => entry.name), ['guide.md']);
+  assert.deepEqual(tree[1]?.children?.map((entry) => entry.name), ['index.ts']);
+
+  await fsPromises.writeFile(cloudcliIgnorePath, '');
+  const refreshedTree = await service.listProjectFiles('project-1', { respectGitignore: true });
+
+  assert.deepEqual(refreshedTree.map((entry) => entry.name), [
+    'cache', 'docs', 'src', '.gitignore', 'debug.tmp', 'keep.tmp', 'README.md',
+  ]);
+  assert.deepEqual(refreshedTree[2]?.children?.map((entry) => entry.name), ['generated.ts', 'index.ts']);
+});
+
+for (const respectGitignore of [undefined, false, true]) {
+  test(`listProjectFiles applies CloudCLI rules before the entry limit without gitignore (respectGitignore=${respectGitignore})`, async () => {
+    const projectRoot = path.resolve('file-tree-test-project');
+    const readDirectories: string[] = [];
+    const readFiles: string[] = [];
+    const fileSystem = createFakeFileSystem({
+      access: async () => undefined,
+      readTextFile: async (filePath) => {
+        readFiles.push(filePath);
+        if (filePath === path.join(projectRoot, '.cloudcli', 'ignore')) return '/generated/\n*.log';
+        assert.equal(filePath, path.join(projectRoot, '.gitignore'));
+        throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+      },
+      openDirectory: createDirectoryReader((directoryPath) => {
+        readDirectories.push(directoryPath);
+        if (directoryPath !== projectRoot) {
+          assert.fail(`Ignored directory was traversed: ${directoryPath}`);
+        }
+        return [
+          createDirectoryEntry('generated', true),
+          createDirectoryEntry('build', true),
+          ...Array.from({ length: 10_001 }, (_, index) => createDirectoryEntry(`debug-${index}.log`, false)),
+          createDirectoryEntry('README.md', false),
+        ];
+      }),
+      lstat: async () => createStats(false, 0o644),
+    });
+    const service = createFileTreeService(createDependencies(fileSystem, projectRoot));
+
+    const tree = await service.listProjectFiles('project-1',
+      respectGitignore === undefined ? undefined : { respectGitignore });
+
+    assert.deepEqual(tree.map((entry) => entry.name), ['README.md']);
+    assert.deepEqual(readDirectories, [projectRoot]);
+    assert.deepEqual(readFiles, respectGitignore
+      ? [path.join(projectRoot, '.gitignore'), path.join(projectRoot, '.cloudcli', 'ignore')]
+      : [path.join(projectRoot, '.cloudcli', 'ignore')]);
+  });
+}
 
 test('listProjectFiles falls back to conventional directory names when no gitignore exists', async () => {
   const projectRoot = path.resolve('file-tree-test-project');

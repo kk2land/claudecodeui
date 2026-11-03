@@ -65,6 +65,8 @@
 - **TaskMaster AI Integration** *(Optional)* - Advanced project management with AI-powered task planning, PRD parsing, and workflow automation
 - **Model Compatibility** - Works with Claude and GPT model families (the full list of supported models is available at runtime via `GET /api/providers/:provider/models`)
 
+The File Explorer also reads `.cloudcli/ignore` in the project root. It uses `.gitignore` syntax with paths relative to the project root, and its rules follow `.gitignore`, allowing `!` patterns to restore matching entries. Refresh the file tree after editing it. Ignored entries do not count toward the 10,000-entry limit.
+
 
 ## Quick Start
 

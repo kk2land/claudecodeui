@@ -157,18 +157,19 @@ function mapFileSystemError(
   throw error;
 }
 
-function createGitignoreEntryFilter(
+function createIgnoreEntryFilter(
   projectRoot: string,
-  gitignoreContent: string,
+  ignoreContents: string[],
+  includeByDefault: FileTreeEntryFilter,
 ): FileTreeEntryFilter {
-  const gitignore = ignore().add(gitignoreContent);
+  const ignoreRules = ignore().add(ignoreContents.join('\n'));
 
   return (entryPath, isDirectory) => {
-    if (!includeEntryByHardExclusions(entryPath, isDirectory)) return false;
+    if (!includeByDefault(entryPath, isDirectory)) return false;
 
     const relativePath = path.relative(projectRoot, entryPath).split(path.sep).join('/');
     const matchPath = isDirectory ? `${relativePath}/` : relativePath;
-    return !gitignore.ignores(matchPath);
+    return !ignoreRules.ignores(matchPath);
   };
 }
 
@@ -515,18 +516,27 @@ export function createFileTreeService(dependencies: FileTreeServiceDependencies)
         throw createFileTreeError(`Project path not found: ${projectRoot}`, 404, 'PROJECT_PATH_NOT_FOUND');
       }
 
-      let includeEntry: FileTreeEntryFilter | undefined;
-      if (options?.respectGitignore) {
+      let includeByDefault = includeEntryByFallbackDirectoryNames;
+      const ignoreContents: string[] = [];
+      // CloudCLI rules are project-relative and follow .gitignore so their
+      // negations can override it, even when .cloudcli itself is ignored.
+      const ignoreFiles = options?.respectGitignore
+        ? ['.gitignore', '.cloudcli/ignore']
+        : ['.cloudcli/ignore'];
+      for (const ignoreFile of ignoreFiles) {
         try {
-          const gitignoreContent = await fileSystem.readTextFile(path.join(projectRoot, '.gitignore'));
-          includeEntry = createGitignoreEntryFilter(projectRoot, gitignoreContent);
+          ignoreContents.push(await fileSystem.readTextFile(path.join(projectRoot, ignoreFile)));
+          if (ignoreFile === '.gitignore') {
+            includeByDefault = includeEntryByHardExclusions;
+          }
         } catch (error) {
           if (readErrorCode(error) !== 'ENOENT') {
-            dependencies.logger.error(`Error reading .gitignore in "${projectRoot}"`, error);
+            dependencies.logger.error(`Error reading ${ignoreFile} in "${projectRoot}"`, error);
           }
         }
       }
 
+      const includeEntry = createIgnoreEntryFilter(projectRoot, ignoreContents, includeByDefault);
       return buildFileTree(projectRoot, 10, 0, includeEntry);
     },
 
