@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">CloudCLI</string>
+
+    <string name="site_url_hint">https://cloudcli.example.com</string>
+    <string name="site_save">Open site</string>
+    <string name="invalid_url">Enter one http:// or https:// origin (no path, credentials, query or fragment)</string>
+    <string name="setup_help">Enter the root origin of your CloudCLI server. The app loads that single site and keeps its notifications connected in the background.</string>
+    <string name="bridge_unavailable">Android bridge unavailable on this WebView. The site is shown without native features.</string>
+    <string name="no_app_for_link">No app can open this link</string>
+
+    <string name="action_menu">Menu</string>
+    <string name="action_change_site">Change site</string>
+    <string name="action_reload">Reload</string>
+
+    <string name="share_skipped">Not imported: %1$s</string>
+
+    <string name="channel_service_name">Notification connection</string>
+    <string name="channel_service_description">Keeps the CloudCLI notification connection alive in the background.</string>
+    <string name="channel_events_name">Notifications</string>
+    <string name="channel_events_description">Session notifications from your CloudCLI server.</string>
+    <string name="service_title">CloudCLI notifications connected</string>
+    <string name="service_description">Waiting for session notifications</string>
+    <string name="service_stop">Stop</string>
+</resources>

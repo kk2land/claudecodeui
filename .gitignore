@@ -151,3 +151,15 @@ electron/*.tar.gz
 # Test fixtures created beside the tests (cleaned up by the tests; kept out of the tree if a run is killed)
 server/**/tests/read-only-roots-fixture-*/
 server/**/tests/file-tree-outside-*/
+
+# Android build outputs and machine-local SDK config
+android/.gradle/
+android/build/
+android/app/build/
+android/local.properties
+
+# Android release artifacts and private signing material (never tracked)
+release/android/
+*.p12
+*.jks
+signing.properties
