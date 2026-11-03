@@ -154,6 +154,18 @@
       "enabled": "此桌面应用已启用通知",
       "unsupported": "此系统不支持桌面通知。"
     },
+    "android": {
+      "title": "安卓通知",
+      "enable": "启用安卓通知",
+      "disable": "关闭安卓通知",
+      "connected": "已连接服务器",
+      "disconnected": "尚未连接",
+      "serviceRunning": "后台服务运行中",
+      "serviceStopped": "后台服务已停止",
+      "permissionDenied": "安卓通知权限被拒绝。请在安卓系统设置中允许本应用发送通知，然后重试。",
+      "unsupportedServer": "此服务器不支持安卓通知。",
+      "bridgeUnavailable": "安卓桥接不可用。更新应用后请重新加载。"
+    },
     "sound": {
       "title": "声音",
       "description": "聊天运行完成时播放短提示音。",

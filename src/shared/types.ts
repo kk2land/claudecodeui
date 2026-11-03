@@ -1536,12 +1536,14 @@ export type ClaudeSettingsPermissionSource = {
   ask: string[];
 };
 
-/** The user's notification settings, grouped into delivery channels (in-app, web push, desktop, sound) and the events that trigger them; mirrors the payload of the notification preferences API. */
+/** The user's notification settings, grouped into delivery channels (in-app, web push, desktop, Android, sound) and the events that trigger them; mirrors the payload of the notification preferences API. */
 export type NotificationPreferencesState = {
   channels: {
     inApp: boolean;
     webPush: boolean;
     desktop: boolean;
+    /** Device-derived Android service state; mirror the native result here so later whole-object saves stay consistent. */
+    android: boolean;
     sound: boolean;
   };
   events: {
@@ -1550,6 +1552,93 @@ export type NotificationPreferencesState = {
     error: boolean;
   };
 };
+
+//----------------- ANDROID NATIVE BRIDGE ------------
+
+/** The native Android bridge's reported state; read it from `getState()` or the `cloudcliandroid:state` event, never infer it from a socket or browser permission. */
+export type AndroidBridgeState = {
+  version: 1;
+  siteOrigin: string;
+  webBridgeReady: boolean;
+  signedIn: boolean;
+  notificationsEnabled: boolean;
+  serviceRunning: boolean;
+  connected: boolean;
+  lastError: string | null;
+  pendingShareCount: number;
+};
+
+/** A file returned by `pickFiles()` after native read its bytes into memory; wrap it as a `File` before using the composer's attachment path. */
+export type AndroidFile = {
+  name: string;
+  mimeType: string;
+  size: number;
+  blob: Blob;
+};
+
+/** One pending system-share item imported by the Android app; text/link carry `text`, images/files carry name, MIME type and size. */
+export type AndroidShare = {
+  id: string;
+  kind: 'text' | 'link' | 'image' | 'file';
+  text: string | null;
+  name: string | null;
+  mimeType: string | null;
+  size: number | null;
+  createdAt: number;
+};
+
+/**
+ * The injected `window.cloudcliAndroid` public API. Every method is implemented
+ * by the native document-start wrapper; the web adapter only validates and
+ * calls it, so missing methods mean the bridge is unavailable.
+ */
+export type AndroidBridge = {
+  version: 1;
+  getState(): Promise<AndroidBridgeState>;
+  notify(input: {
+    title: string;
+    body: string;
+    sessionId?: string | null;
+    tag?: string | null;
+  }): Promise<{ shown: boolean }>;
+  setNotificationsEnabled(enabled: boolean): Promise<AndroidBridgeState>;
+  getSession(): Promise<{ token: string } | null>;
+  saveSession(token: string): Promise<{
+    accepted: boolean;
+    reason?: 'INVALID_TOKEN' | 'EXPIRED_TOKEN';
+  }>;
+  clearSession(): Promise<void>;
+  listShares(): Promise<AndroidShare[]>;
+  getShareContent(id: string): Promise<{ name: string; mimeType: string; size: number; blob: Blob }>;
+  consumeShare(id: string): Promise<void>;
+  discardShare(id: string): Promise<void>;
+  pickFiles(options?: {
+    multiple?: boolean;
+    maxBytes?: number;
+    maxFiles?: number;
+  }): Promise<AndroidFile[]>;
+  saveFile(input: {
+    name: string;
+    mimeType?: string;
+    blob: Blob;
+  }): Promise<{ saved: boolean }>;
+};
+
+/** Rejection codes from the Android bridge contract; a UI may branch on these but must show the real failure. */
+export type AndroidBridgeErrorCode =
+  | 'UNAVAILABLE'
+  | 'CANCELLED'
+  | 'INVALID_ARGUMENT'
+  | 'FILE_TOO_LARGE'
+  | 'TOO_MANY_FILES'
+  | 'SHARE_NOT_FOUND'
+  | 'SHARE_NOT_FILE'
+  | 'TRANSFER_FAILED'
+  | 'INVALID_TOKEN'
+  | 'NOT_SIGNED_IN'
+  | 'PERMISSION_DENIED'
+  | 'WEB_BRIDGE_NOT_READY';
+// ---------------------------
 
 /** Cursor's persisted permission settings: the allowed and disallowed command patterns and whether permission prompts are skipped; read and written as one unit by the settings controller. */
 export type CursorPermissionsState = {

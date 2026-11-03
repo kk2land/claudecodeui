@@ -20,6 +20,11 @@ import { readUserPreference } from '@/shared/userSettings';
 import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, QueuedDraft, SessionActivityMap, StatusCommandData,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
+  getAndroidBridge,
+  isAndroidBridgeErrorCode,
+  registerAndroidShareInsertionHandler,
+} from '@/modules/android-bridge';
+import {
   QueueLimitError,
   clearQueuedMessage,
   hydrateChatDrafts,
@@ -327,6 +332,12 @@ export function useChatComposerState({
   });
   const input = inputState.value;
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
+  // Mirrors the latest attachment list so a share/picker insertion can reject
+  // synchronously when the composer is already full, without racing state.
+  const attachedFilesRef = useRef<File[]>([]);
+  useEffect(() => {
+    attachedFilesRef.current = attachedFiles;
+  }, [attachedFiles]);
   const [fileErrors, setFileErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
@@ -699,7 +710,8 @@ export function useChatComposerState({
     lastAutosizedInputRef.current = target.value;
   }, []);
 
-  const handleAttachmentFiles = useCallback((files: File[]) => {
+  /** Adds files through the composer's existing size/count rules and returns the ones actually accepted. */
+  const handleAttachmentFiles = useCallback((files: File[]): File[] => {
     const validFiles = files.filter((file) => {
       try {
         if (!file || typeof file !== 'object') {
@@ -724,9 +736,14 @@ export function useChatComposerState({
       }
     });
 
-    if (validFiles.length > 0) {
-      setAttachedFiles((previous) => [...previous, ...validFiles].slice(0, MAX_ATTACHMENT_COUNT));
+    const availableSlots = Math.max(0, MAX_ATTACHMENT_COUNT - attachedFilesRef.current.length);
+    const acceptedFiles = validFiles.slice(0, availableSlots);
+    if (acceptedFiles.length > 0) {
+      attachedFilesRef.current = [...attachedFilesRef.current, ...acceptedFiles].slice(0, MAX_ATTACHMENT_COUNT);
+      setAttachedFiles((previous) => [...previous, ...acceptedFiles].slice(0, MAX_ATTACHMENT_COUNT));
     }
+
+    return acceptedFiles;
   }, []);
 
   const handlePaste = useCallback(
@@ -761,6 +778,38 @@ export function useChatComposerState({
     noClick: true,
     noKeyboard: true,
   });
+
+  // Android sends picked files through the same add-files path as drop, paste
+  // and the browser picker; cancelling either picker resolves quietly.
+  const openAttachmentPicker = useCallback(() => {
+    const bridge = getAndroidBridge();
+    if (!bridge) {
+      open();
+      return;
+    }
+
+    void (async () => {
+      try {
+        const picked = await bridge.pickFiles({
+          multiple: true,
+          maxBytes: MAX_ATTACHMENT_SIZE,
+          maxFiles: MAX_ATTACHMENT_COUNT,
+        });
+        if (picked.length === 0) {
+          return;
+        }
+
+        handleAttachmentFiles(picked.map((file) => (
+          new File([file.blob], file.name, { type: file.mimeType })
+        )));
+      } catch (error) {
+        if (isAndroidBridgeErrorCode(error, 'CANCELLED')) {
+          return;
+        }
+        console.error('[Composer] Android file picker failed:', error);
+      }
+    })();
+  }, [handleAttachmentFiles, open]);
 
   // Snapshot of everything `chat.send` needs beyond the text itself. Built at
   // send time for immediate sends and at queue time for queued ones, so a
@@ -1476,6 +1525,72 @@ export function useChatComposerState({
     writeDraftText(draftScope, inputState.value);
   }, [inputState, draftScope]);
 
+  // The native share inbox queues items for a session; this composer drains
+  // its own session's queue and only then lets the bridge consume the share.
+  useEffect(() => {
+    if (!draftScope || inputState.scope !== draftScope || !getAndroidBridge()) {
+      return undefined;
+    }
+
+    // A file read can finish after this session is no longer the mounted one.
+    // The effect owns this flag so unmount or a scope switch invalidates the
+    // in-flight handler; no separate cancellation framework is needed.
+    let active = true;
+    const unregister = registerAndroidShareInsertionHandler(draftScope, async (share) => {
+      if (share.kind === 'text' || share.kind === 'link') {
+        const text = typeof share.text === 'string' ? share.text : '';
+        if (!text.trim()) {
+          return { ok: false, error: 'The shared item has no text to insert.' };
+        }
+
+        setInputState((previous) => {
+          const separator = previous.value.trim() ? '\n\n' : '';
+          const value = `${previous.value.replace(/\s+$/, '')}${separator}${text}`;
+          inputValueRef.current = value;
+          return { scope: draftScope, value };
+        });
+        return { ok: true };
+      }
+
+      const bridge = getAndroidBridge();
+      if (!bridge) {
+        return { ok: false, error: 'Android bridge unavailable.' };
+      }
+
+      try {
+        const content = await bridge.getShareContent(share.id);
+        if (!active || draftScopeRef.current !== draftScope) {
+          return {
+            ok: false,
+            error: 'The target session is no longer open.',
+          };
+        }
+
+        const file = new File([content.blob], content.name, {
+          type: content.mimeType || share.mimeType || 'application/octet-stream',
+        });
+        const accepted = handleAttachmentFiles([file]);
+        if (accepted.length === 0) {
+          return {
+            ok: false,
+            error: 'The composer cannot accept this file because it is full or too large.',
+          };
+        }
+        return { ok: true };
+      } catch (error) {
+        return {
+          ok: false,
+          error: error instanceof Error ? error.message : 'Could not read the shared file.',
+        };
+      }
+    });
+
+    return () => {
+      active = false;
+      unregister();
+    };
+  }, [draftScope, handleAttachmentFiles, inputState.scope]);
+
   // Persist the whole queue under its session's key — never a single slot, or
   // every write would erase the tail. Must be defined BEFORE the swap effect
   // below: on a session switch there is one commit where `sessionKey` already
@@ -1802,7 +1917,7 @@ export function useChatComposerState({
     getRootProps,
     getInputProps,
     isDragActive,
-    openAttachmentPicker: open,
+    openAttachmentPicker,
     handleSubmit,
     composerPrediction: {
       // The row is shown for the native integration even when this build is

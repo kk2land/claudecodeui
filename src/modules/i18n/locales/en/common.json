@@ -394,5 +394,11 @@
     "taskRowNotLoaded": "Launched earlier in this conversation; click to load it",
     "taskOfAgent": "Launched by one of this session's agents"
   },
-  "cancel": "Cancel"
+  "cancel": "Cancel",
+  "androidShare": {
+    "title": "Received from Android",
+    "target": "Import into session",
+    "import": "Import",
+    "noSession": "Open or choose a session first."
+  }
 }

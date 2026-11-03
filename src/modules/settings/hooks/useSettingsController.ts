@@ -93,6 +93,7 @@ const createDefaultNotificationPreferences = (): NotificationPreferencesState =>
     inApp: true,
     webPush: false,
     desktop: false,
+    android: false,
     sound: true,
   },
   events: {
@@ -112,6 +113,7 @@ const normalizeNotificationPreferences = (
       inApp: preferences?.channels?.inApp ?? defaults.channels.inApp,
       webPush: preferences?.channels?.webPush ?? defaults.channels.webPush,
       desktop: preferences?.channels?.desktop ?? defaults.channels.desktop,
+      android: preferences?.channels?.android ?? defaults.channels.android,
       sound: preferences?.channels?.sound ?? defaults.channels.sound,
     },
     events: {

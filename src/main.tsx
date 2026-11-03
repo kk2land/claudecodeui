@@ -3,6 +3,7 @@ import ReactDOM from 'react-dom/client'
 import { scan } from 'react-scan'
 
 import App from '@/App'
+import { initializeAndroidBridge } from '@/modules/android-bridge'
 import '@/index.css'
 import 'katex/dist/katex.min.css'
 
@@ -16,11 +17,15 @@ import '@/modules/i18n'
 // `localStorage.setItem('react-scan', 'on')` and reload.
 scan({ enabled: import.meta.env.DEV && localStorage.getItem('react-scan') === 'on' })
 
-// Register service worker for PWA + Web Push support
+// Register service worker for PWA + Web Push support. The startup update check
+// must not delay rendering; it only asks the server for a newer worker script.
 if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.register('/sw.js').catch(err => {
-    console.warn('Service worker registration failed:', err);
-  });
+  navigator.serviceWorker
+    .register('/sw.js', { updateViaCache: 'none' })
+    .then((registration) => registration.update())
+    .catch(err => {
+      console.warn('Service worker registration failed:', err);
+    });
 }
 
 const rootElement = document.getElementById('root')
@@ -28,8 +33,18 @@ if (!rootElement) {
   throw new Error('Unable to mount the app: #root is missing from the document')
 }
 
-ReactDOM.createRoot(rootElement).render(
-  <React.StrictMode>
-    <App />
-  </React.StrictMode>,
-)
+async function mountApp() {
+  // The Android WebView is the only source of its session. Restore it (and wire
+  // the native auth events) before AuthProvider reads localStorage, so the first
+  // render already sees the authoritative token. A missing or failing bridge
+  // resolves immediately and leaves the browser path unchanged.
+  await initializeAndroidBridge();
+
+  ReactDOM.createRoot(rootElement as HTMLElement).render(
+    <React.StrictMode>
+      <App />
+    </React.StrictMode>,
+  )
+}
+
+void mountApp()

@@ -269,5 +269,11 @@
       "closeSidebar": "关闭侧边栏",
       "resizeSidebar": "调整侧边栏宽度"
     }
+  },
+  "androidShare": {
+    "title": "来自安卓的分享",
+    "target": "导入到会话",
+    "import": "导入",
+    "noSession": "请先打开或选择一个会话。"
   }
 }

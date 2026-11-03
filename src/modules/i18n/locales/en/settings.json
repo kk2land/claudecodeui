@@ -154,6 +154,18 @@
       "enabled": "Notifications are enabled for this desktop app",
       "unsupported": "Desktop notifications are not supported on this system."
     },
+    "android": {
+      "title": "Android notifications",
+      "enable": "Enable Android notifications",
+      "disable": "Disable Android notifications",
+      "connected": "Connected to the server",
+      "disconnected": "Not connected yet",
+      "serviceRunning": "Background service running",
+      "serviceStopped": "Background service stopped",
+      "permissionDenied": "Android notification permission was denied. Allow notifications for this app in Android settings, then try again.",
+      "unsupportedServer": "This server does not support Android notifications.",
+      "bridgeUnavailable": "Android bridge unavailable. Reload the app after updating it."
+    },
     "sound": {
       "title": "Sound",
       "description": "Play a short tone when a chat run finishes or needs tool approval.",

@@ -17,6 +17,7 @@ import { PluginSettingsTab } from '@/modules/plugins';
 import AboutTab from '@/modules/settings/tabs/AboutTab';
 import { useSettingsController } from '@/modules/settings/hooks/useSettingsController';
 import { useWebPush } from '@/modules/settings/hooks/useWebPush';
+import { getAndroidBridge, useAndroidBridgeState } from '@/modules/android-bridge';
 import type { AgentSettingsProject } from '@/shared/types';
 
 type SettingsProps = {
@@ -43,6 +44,12 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
       : ((window as any).cloudcliDesktopNotifications || null)
   ), []);
   const [desktopNotificationsState, setDesktopNotificationsState] = useState<DesktopNotificationsState | null>(null);
+  const androidBridge = useAndroidBridgeState();
+  // Busy state while the native toggle is in flight; the native state remains
+  // the source of truth for the setting itself.
+  const [isAndroidNotificationsUpdating, setIsAndroidNotificationsUpdating] = useState(false);
+  // A failed native toggle is shown inline; native state.lastError remains separate.
+  const [androidNotificationsError, setAndroidNotificationsError] = useState<string | null>(null);
   const {
     activeTab,
     setActiveTab,
@@ -133,6 +140,45 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
       ...notificationPreferences,
       channels: { ...notificationPreferences.channels, desktop: false },
     });
+  };
+
+  // Mirror the native enabled value into the full preference object so the
+  // dialog's later whole-object save stays consistent. This is not a second
+  // source of truth and never PUTs channels.android on its own.
+  useEffect(() => {
+    const enabled = androidBridge.state?.notificationsEnabled;
+    if (typeof enabled !== 'boolean') {
+      return;
+    }
+    setNotificationPreferences((previous) => (
+      previous.channels.android === enabled
+        ? previous
+        : { ...previous, channels: { ...previous.channels, android: enabled } }
+    ));
+  }, [androidBridge.state?.notificationsEnabled, setNotificationPreferences]);
+
+  const handleToggleAndroidNotifications = async (enabled: boolean) => {
+    const bridge = getAndroidBridge();
+    if (!bridge || isAndroidNotificationsUpdating) return;
+
+    setIsAndroidNotificationsUpdating(true);
+    setAndroidNotificationsError(null);
+    try {
+      const state = await bridge.setNotificationsEnabled(enabled);
+      setNotificationPreferences((previous) => ({
+        ...previous,
+        channels: { ...previous.channels, android: state.notificationsEnabled },
+      }));
+      // Re-read so a permission denial or unsupported server is reflected in
+      // the section even when native does not emit a separate state event.
+      await androidBridge.refresh();
+    } catch (error) {
+      setAndroidNotificationsError(
+        error instanceof Error ? error.message : 'Could not update Android notifications',
+      );
+    } finally {
+      setIsAndroidNotificationsUpdating(false);
+    }
   };
 
   // Escape closes Settings, matching the other modals in the app. Layers that open
@@ -265,6 +311,12 @@ function Settings({ isOpen, onClose, projects = [], initialTab = 'agents' }: Set
                   desktopNotifications={desktopNotificationsState}
                   onEnableDesktopNotifications={handleEnableDesktopNotifications}
                   onDisableDesktopNotifications={handleDisableDesktopNotifications}
+                  androidNotifications={androidBridge.available && androidBridge.state ? {
+                    state: androidBridge.state,
+                    isUpdating: isAndroidNotificationsUpdating,
+                    error: androidNotificationsError,
+                    onToggle: (enabled) => { void handleToggleAndroidNotifications(enabled); },
+                  } : null}
                 />
               )}
 

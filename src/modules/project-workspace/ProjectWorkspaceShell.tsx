@@ -6,6 +6,7 @@ import ProjectCommandPalette from '@/modules/project-workspace/ProjectCommandPal
 import ProjectMainRegion from '@/modules/project-workspace/ProjectMainRegion';
 import ProjectQuickSettingsRegion from '@/modules/project-workspace/ProjectQuickSettingsRegion';
 import ProjectSidebarRegion from '@/modules/project-workspace/ProjectSidebarRegion';
+import AndroidShareInboxRegion from '@/modules/project-workspace/AndroidShareInboxRegion';
 
 /** Rendered by ProjectWorkspaceRoute to lay out the workspace sidebar, main region and global overlays. */
 function ProjectWorkspaceShell({
@@ -32,6 +33,7 @@ function ProjectWorkspaceShell({
       </div>
 
       <ProjectCommandPalette />
+      <AndroidShareInboxRegion />
       {/* Last flex child on purpose: when pinned it docks to the right of the main region. */}
       <ProjectQuickSettingsRegion />
     </div>

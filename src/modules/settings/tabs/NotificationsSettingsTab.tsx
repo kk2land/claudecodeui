@@ -3,7 +3,7 @@ import { useTranslation } from 'react-i18next';
 
 import { Button } from '@/shared/ui';
 import { playChatCompletionSound } from '@/shared/utils';
-import type { NotificationPreferencesState } from '@/shared/types';
+import type { AndroidBridgeState, NotificationPreferencesState } from '@/shared/types';
 
 type NotificationsSettingsTabProps = {
   notificationPreferences: NotificationPreferencesState;
@@ -23,6 +23,13 @@ type NotificationsSettingsTabProps = {
   } | null;
   onEnableDesktopNotifications?: () => void;
   onDisableDesktopNotifications?: () => void;
+  /** Android native controls; null in a browser so its existing notification UI is untouched. */
+  androidNotifications?: {
+    state: AndroidBridgeState;
+    isUpdating: boolean;
+    error: string | null;
+    onToggle: (enabled: boolean) => void;
+  } | null;
 };
 
 /** Rendered by Settings for the "notifications" tab, covering notification channels and events. */
@@ -38,6 +45,7 @@ export default function NotificationsSettingsTab({
   desktopNotifications = null,
   onEnableDesktopNotifications,
   onDisableDesktopNotifications,
+  androidNotifications = null,
 }: NotificationsSettingsTabProps) {
   const { t } = useTranslation('settings');
 
@@ -54,7 +62,80 @@ export default function NotificationsSettingsTab({
         <p className="text-sm text-muted-foreground">{t('notifications.description')}</p>
       </div>
 
-      {isDesktop ? (
+      {androidNotifications ? (
+        <div className="space-y-4 rounded-lg border border-border bg-card p-4">
+          <h4 className="font-medium text-foreground">
+            {t('notifications.android.title', { defaultValue: 'Android notifications' })}
+          </h4>
+          {!androidNotifications.state.webBridgeReady ? (
+            <p className="text-sm text-muted-foreground">
+              {t('notifications.android.bridgeUnavailable', {
+                defaultValue: 'Android bridge unavailable. Reload the app after updating it.',
+              })}
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <div className="flex flex-wrap items-center gap-3">
+                <button
+                  type="button"
+                  disabled={androidNotifications.isUpdating}
+                  onClick={() => androidNotifications.onToggle(!androidNotifications.state.notificationsEnabled)}
+                  className={`inline-flex items-center gap-2 rounded-md px-4 py-2 text-sm font-medium transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    androidNotifications.state.notificationsEnabled
+                      ? 'bg-red-100 text-red-700 hover:bg-red-200 dark:bg-red-900/30 dark:text-red-400 dark:hover:bg-red-900/50'
+                      : 'bg-blue-600 text-white hover:bg-blue-700 dark:bg-blue-500 dark:hover:bg-blue-600'
+                  }`}
+                >
+                  {androidNotifications.isUpdating ? (
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                  ) : androidNotifications.state.notificationsEnabled ? (
+                    <BellOff className="h-4 w-4" />
+                  ) : (
+                    <BellRing className="h-4 w-4" />
+                  )}
+                  {androidNotifications.isUpdating
+                    ? t('notifications.webPush.loading')
+                    : androidNotifications.state.notificationsEnabled
+                      ? t('notifications.android.disable', { defaultValue: 'Disable Android notifications' })
+                      : t('notifications.android.enable', { defaultValue: 'Enable Android notifications' })}
+                </button>
+                <span className={`text-sm ${androidNotifications.state.connected ? 'text-green-600 dark:text-green-400' : 'text-muted-foreground'}`}>
+                  {androidNotifications.state.connected
+                    ? t('notifications.android.connected', { defaultValue: 'Connected to the server' })
+                    : t('notifications.android.disconnected', { defaultValue: 'Not connected yet' })}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  {androidNotifications.state.serviceRunning
+                    ? t('notifications.android.serviceRunning', { defaultValue: 'Background service running' })
+                    : t('notifications.android.serviceStopped', { defaultValue: 'Background service stopped' })}
+                </span>
+              </div>
+              {androidNotifications.error && (
+                <p className="text-sm text-red-600 dark:text-red-400">{androidNotifications.error}</p>
+              )}
+              {androidNotifications.state.lastError === 'PERMISSION_DENIED' && (
+                <p className="text-sm text-red-600 dark:text-red-400">
+                  {t('notifications.android.permissionDenied', {
+                    defaultValue: 'Android notification permission was denied. Allow notifications for this app in Android settings, then try again.',
+                  })}
+                </p>
+              )}
+              {androidNotifications.state.lastError === 'UNSUPPORTED_SERVER' && (
+                <p className="text-sm text-red-600 dark:text-red-400">
+                  {t('notifications.android.unsupportedServer', {
+                    defaultValue: 'This server does not support Android notifications.',
+                  })}
+                </p>
+              )}
+              {androidNotifications.state.lastError
+                && androidNotifications.state.lastError !== 'PERMISSION_DENIED'
+                && androidNotifications.state.lastError !== 'UNSUPPORTED_SERVER' && (
+                <p className="text-sm text-red-600 dark:text-red-400">{androidNotifications.state.lastError}</p>
+              )}
+            </div>
+          )}
+        </div>
+      ) : isDesktop ? (
         <div className="space-y-4 rounded-lg border border-border bg-card p-4">
           <h4 className="font-medium text-foreground">
             {t('notifications.desktop.title', { defaultValue: 'Notify this desktop app' })}
