@@ -46,6 +46,7 @@ import {
     stopAllPlugins,
 } from './modules/plugins/index.js';
 import { createWorkerModule } from './modules/workers/index.js';
+import { applyStaticAssetCacheHeaders, createStaticAssetsMiddleware } from './modules/static-assets/index.js';
 import providerRoutes from './modules/providers/provider.routes.js';
 import { voiceRoutes } from './modules/voice/index.js';
 import {
@@ -239,23 +240,13 @@ app.use('/api/agent', agentRoutes);
 
 app.use('/api/voice', authenticateToken, voiceRoutes);
 
-// Serve public files (like api-docs.html)
-app.use(express.static(path.join(APP_ROOT, 'public')));
-
-// Static files served after API routes
-// Add cache control: HTML files should not be cached, but assets can be cached
-app.use(express.static(path.join(APP_ROOT, 'dist'), {
-    setHeaders: (res, filePath) => {
-        if (filePath.endsWith('.html')) {
-            // Prevent HTML caching to avoid service worker issues after builds
-            res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-            res.setHeader('Pragma', 'no-cache');
-            res.setHeader('Expires', '0');
-        } else if (filePath.match(/\.(js|css|woff2?|ttf|eot|svg|png|jpg|jpeg|gif|ico)$/)) {
-            // Cache static assets for 1 year (they have hashed names)
-            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
-        }
-    }
+// Serve public files (like api-docs.html) and the Vite build with one cache policy:
+// HTML is never stored, the service worker is always revalidated, content-hashed
+// assets are immutable, and everything else revalidates via ETag. See
+// docs/android-cache-strategy.md for the Android WebView update path.
+app.use(createStaticAssetsMiddleware({
+    publicDirectory: path.join(APP_ROOT, 'public'),
+    distDirectory: path.join(APP_ROOT, 'dist'),
 }));
 
 // API Routes (protected)
@@ -278,10 +269,8 @@ app.get('*', (req, res) => {
 
     // Check if dist/index.html exists (production build available)
     if (fs.existsSync(indexPath)) {
-        // Set no-cache headers for HTML to prevent service worker issues
-        res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
-        res.setHeader('Pragma', 'no-cache');
-        res.setHeader('Expires', '0');
+        // The document must never come from cache: it names the current build's assets.
+        applyStaticAssetCacheHeaders(res, indexPath);
         res.sendFile(indexPath);
     } else {
         // In development, redirect to Vite dev server only if dist doesn't exist
