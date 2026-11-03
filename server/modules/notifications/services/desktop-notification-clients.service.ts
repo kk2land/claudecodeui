@@ -2,10 +2,18 @@ import type { WebSocket } from 'ws';
 
 import { notificationChannelEndpointsDb } from '@/modules/database/index.js';
 
-const DESKTOP_CHANNEL = 'desktop';
+const DEFAULT_CHANNEL = 'desktop';
 
-const clientsByUserId = new Map<number, Map<string, WebSocket>>();
-const clientBySocket = new WeakMap<WebSocket, { userId: number; endpointId: string }>();
+type NotificationClientRegistration = {
+  userId: number;
+  channel: string;
+  endpointId: string;
+};
+
+// Each user keeps one map per notification channel so a device id can exist for
+// several channels at once (a browser desktop socket and an Android service).
+const clientsByUserId = new Map<number, Map<string, Map<string, WebSocket>>>();
+const clientBySocket = new WeakMap<WebSocket, NotificationClientRegistration>();
 
 function normalizeUserId(userId: unknown): number | null {
   const numeric = Number(userId);
@@ -17,20 +25,35 @@ function normalizeEndpointId(endpointId: unknown): string {
   return endpointId.trim();
 }
 
-function getUserClients(userId: unknown, create = false): Map<string, WebSocket> | null {
+function getUserChannelClients(
+  userId: unknown,
+  channel: string,
+  create = false
+): Map<string, WebSocket> | null {
   const normalizedUserId = normalizeUserId(userId);
   if (!normalizedUserId) return null;
-  let clients = clientsByUserId.get(normalizedUserId);
+  let channels = clientsByUserId.get(normalizedUserId);
+  if (!channels && create) {
+    channels = new Map();
+    clientsByUserId.set(normalizedUserId, channels);
+  }
+  if (!channels) return null;
+  let clients = channels.get(channel);
   if (!clients && create) {
     clients = new Map();
-    clientsByUserId.set(normalizedUserId, clients);
+    channels.set(channel, clients);
   }
   return clients || null;
 }
 
+/**
+ * Used by the desktop and Android notification websocket handlers to store the
+ * live socket for a user/channel/device and to (re)enable its endpoint row.
+ */
 export function registerDesktopNotificationClient({
   userId,
   deviceId,
+  channel = DEFAULT_CHANNEL,
   label = null,
   platform = null,
   appVersion = null,
@@ -38,6 +61,7 @@ export function registerDesktopNotificationClient({
 }: {
   userId: number;
   deviceId: string;
+  channel?: string;
   label?: string | null;
   platform?: string | null;
   appVersion?: string | null;
@@ -51,48 +75,70 @@ export function registerDesktopNotificationClient({
 
   const endpoint = notificationChannelEndpointsDb.upsertEndpoint({
     userId: normalizedUserId,
-    channel: DESKTOP_CHANNEL,
+    channel,
     endpointId,
     label,
     metadata: { platform, appVersion },
     enabled: true,
   });
 
-  const clients = getUserClients(normalizedUserId, true)!;
+  const clients = getUserChannelClients(normalizedUserId, channel, true)!;
   const previous = clients.get(endpointId);
+  clients.set(endpointId, ws);
+  clientBySocket.set(ws, {
+    userId: normalizedUserId,
+    channel,
+    endpointId,
+  });
+
+  // Registering before closing keeps the same-device replacement in place when
+  // the old socket's close handler unregisters it.
   if (previous && previous !== ws && previous.readyState === previous.OPEN) {
     previous.close(4000, 'Device reconnected');
   }
-
-  clients.set(endpointId, ws);
-  clientBySocket.set(ws, { userId: normalizedUserId, endpointId });
   return endpoint;
 }
 
+/**
+ * Used by the desktop and Android notification websocket handlers on close and
+ * error, and by delivery when a socket is found to be no longer open.
+ */
 export function unregisterDesktopNotificationClient(ws: WebSocket): void {
   const registration = clientBySocket.get(ws);
   if (!registration) return;
 
-  const clients = getUserClients(registration.userId);
+  const clients = getUserChannelClients(registration.userId, registration.channel);
   if (clients?.get(registration.endpointId) === ws) {
     clients.delete(registration.endpointId);
     if (clients.size === 0) {
-      clientsByUserId.delete(registration.userId);
+      const channels = clientsByUserId.get(registration.userId);
+      channels?.delete(registration.channel);
+      if (channels?.size === 0) {
+        clientsByUserId.delete(registration.userId);
+      }
     }
   }
   clientBySocket.delete(ws);
 }
 
-export function sendDesktopNotification(userId: unknown, payload: unknown): { attempted: number; sent: number } {
+/**
+ * Used by the notification orchestrator to deliver a payload to the open,
+ * enabled sockets of one channel.
+ */
+export function sendNotificationToChannel(
+  userId: unknown,
+  payload: unknown,
+  channel: string
+): { attempted: number; sent: number } {
   const normalizedUserId = normalizeUserId(userId);
   if (!normalizedUserId) return { attempted: 0, sent: 0 };
 
-  const clients = getUserClients(normalizedUserId);
+  const clients = getUserChannelClients(normalizedUserId, channel);
   if (!clients?.size) return { attempted: 0, sent: 0 };
 
   const enabledEndpointIds = new Set(
     notificationChannelEndpointsDb
-      .getEnabledEndpoints(normalizedUserId, DESKTOP_CHANNEL)
+      .getEnabledEndpoints(normalizedUserId, channel)
       .map((endpoint) => endpoint.endpoint_id)
   );
 
@@ -113,7 +159,7 @@ export function sendDesktopNotification(userId: unknown, payload: unknown): { at
     }
     try {
       ws.send(message);
-      notificationChannelEndpointsDb.touchEndpoint(normalizedUserId, DESKTOP_CHANNEL, endpointId);
+      notificationChannelEndpointsDb.touchEndpoint(normalizedUserId, channel, endpointId);
       sent += 1;
     } catch {
       unregisterDesktopNotificationClient(ws);
@@ -121,4 +167,15 @@ export function sendDesktopNotification(userId: unknown, payload: unknown): { at
   }
 
   return { attempted, sent };
+}
+
+/**
+ * Used by the notification orchestrator for the desktop channel and kept for
+ * callers that predate channel-aware delivery.
+ */
+export function sendDesktopNotification(
+  userId: unknown,
+  payload: unknown
+): { attempted: number; sent: number } {
+  return sendNotificationToChannel(userId, payload, DEFAULT_CHANNEL);
 }

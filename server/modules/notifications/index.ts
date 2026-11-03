@@ -15,9 +15,14 @@ export {
 export {
   registerDesktopNotificationClient,
   sendDesktopNotification,
+  sendNotificationToChannel,
   unregisterDesktopNotificationClient,
 } from '@/modules/notifications/services/desktop-notification-clients.service.js';
-export { handleDesktopNotificationsConnection } from '@/modules/notifications/websocket/desktop-notifications-websocket.service.js';
+export {
+  // Desktop and Android each register their own websocket path in the gateway.
+  handleAndroidNotificationsConnection,
+  handleDesktopNotificationsConnection,
+} from '@/modules/notifications/websocket/desktop-notifications-websocket.service.js';
 // getPublicKey: used by Settings to expose the Web Push subscription key.
 export { getPublicKey } from './vapid-keys.service.js';
 // configureWebPush: used by the server entrypoint during notification startup.

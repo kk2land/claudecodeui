@@ -1,7 +1,7 @@
 import webPush from 'web-push';
 
 import { notificationPreferencesDb, pushSubscriptionsDb, sessionsDb } from '@/modules/database/index.js';
-import { sendDesktopNotification as sendDesktopNotificationToClients } from '@/modules/notifications/services/desktop-notification-clients.service.js';
+import { sendDesktopNotification as sendDesktopNotificationToClients, sendNotificationToChannel } from '@/modules/notifications/services/desktop-notification-clients.service.js';
 
 const KIND_TO_PREF_KEY = {
   action_required: 'actionRequired',
@@ -219,6 +219,11 @@ const notificationChannels = [
     id: 'desktop',
     isEnabled: (preferences) => Boolean(preferences?.channels?.desktop),
     send: ({ userId, payload }) => sendDesktopNotificationToClients(userId, payload)
+  },
+  {
+    id: 'android',
+    isEnabled: (preferences) => Boolean(preferences?.channels?.android),
+    send: ({ userId, payload }) => sendNotificationToChannel(userId, payload, 'android')
   }
 ];
 

@@ -7,7 +7,17 @@ import {
 import type { AuthenticatedWebSocketRequest } from '@/shared/types.js';
 import { parseIncomingJsonObject } from '@/shared/utils.js';
 
-type DesktopNotificationRegisterMessage = {
+const DESKTOP_CHANNEL = 'desktop';
+const ANDROID_CHANNEL = 'android';
+
+const CHANNEL_LABELS = {
+  [DESKTOP_CHANNEL]: 'Desktop',
+  [ANDROID_CHANNEL]: 'Android',
+} as const;
+
+type NotificationChannel = keyof typeof CHANNEL_LABELS;
+
+type NotificationRegisterMessage = {
   type?: unknown;
   kind?: unknown;
   deviceId?: unknown;
@@ -39,9 +49,15 @@ function sendJson(ws: WebSocket, payload: unknown): void {
   }
 }
 
-export function handleDesktopNotificationsConnection(
+/**
+ * Shared registration protocol for every notification channel. Desktop and
+ * Android differ only in the channel stored with the socket and the device-id
+ * error text, so both handlers delegate here.
+ */
+function handleNotificationChannelConnection(
   ws: WebSocket,
-  request: AuthenticatedWebSocketRequest
+  request: AuthenticatedWebSocketRequest,
+  channel: NotificationChannel
 ): void {
   const userId = readRequestUserId(request);
   if (!userId) {
@@ -49,10 +65,11 @@ export function handleDesktopNotificationsConnection(
     return;
   }
 
+  const channelLabel = CHANNEL_LABELS[channel];
   let registered = false;
 
   ws.on('message', (rawMessage) => {
-    const data = parseIncomingJsonObject(rawMessage) as DesktopNotificationRegisterMessage | null;
+    const data = parseIncomingJsonObject(rawMessage) as NotificationRegisterMessage | null;
     if (!data) {
       return;
     }
@@ -71,7 +88,7 @@ export function handleDesktopNotificationsConnection(
       sendJson(ws, {
         type: 'error',
         code: 'DEVICE_ID_REQUIRED',
-        message: 'Desktop notification registration requires deviceId.',
+        message: `${channelLabel} notification registration requires deviceId.`,
       });
       ws.close(1008, 'Missing deviceId');
       return;
@@ -80,6 +97,7 @@ export function handleDesktopNotificationsConnection(
     const device = registerDesktopNotificationClient({
       userId,
       deviceId,
+      channel,
       label: readOptionalString(data.label),
       platform: readOptionalString(data.platform),
       appVersion: readOptionalString(data.appVersion),
@@ -106,4 +124,20 @@ export function handleDesktopNotificationsConnection(
   ws.on('error', () => {
     unregisterDesktopNotificationClient(ws);
   });
+}
+
+/** Used by the websocket gateway for the `/desktop-notifications` path. */
+export function handleDesktopNotificationsConnection(
+  ws: WebSocket,
+  request: AuthenticatedWebSocketRequest
+): void {
+  handleNotificationChannelConnection(ws, request, DESKTOP_CHANNEL);
+}
+
+/** Used by the websocket gateway for the `/android-notifications` path. */
+export function handleAndroidNotificationsConnection(
+  ws: WebSocket,
+  request: AuthenticatedWebSocketRequest
+): void {
+  handleNotificationChannelConnection(ws, request, ANDROID_CHANNEL);
 }
