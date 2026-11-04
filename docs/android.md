@@ -129,8 +129,9 @@ the server/web side's responsibility (already handled upstream); the app does no
 | Libraries | `androidx.webkit:webkit:1.12.1`, `com.squareup.okhttp3:okhttp:4.12.0` |
 | Tests | JUnit 4.13.2 (+ `org.json` for JVM JWT tests) |
 
-`applicationId` = `ai.cloudcli.android`, label `CloudCLI`, `versionCode` 2, `versionName` 0.1.1
-(`versionCode` 1 / `0.1.0` was the first real-device build; `0.1.1` is the in-place update).
+`applicationId` = `ai.cloudcli.android`, label `CloudCLI`, `versionCode` 3, `versionName` 0.1.2
+(`versionCode` 1 / `0.1.0` was the first real-device build; `0.1.1` / code 2 followed; `0.1.2` /
+code 3 is the current in-place update).
 `allowBackup="false"`, so the token, device id and pending shares stay on the device.
 
 ## Shell UI
@@ -138,10 +139,15 @@ the server/web side's responsibility (already handled upstream); the app does no
 - **Launcher icon** is the project's own CloudCLI mark, reused read-only from
   `public/icons/icon-512x512.svg` (dark `hsl(240 5.9% 10%)` square, white message-square outline).
   `res/drawable/ic_launcher_foreground.xml` keeps that geometry on a 512 viewport in a 108dp
-  adaptive foreground (art ≈67dp, inside the 72dp safe zone),
-  `res/drawable/ic_launcher_monochrome.xml` is the Android 13+ themed variant (same geometry,
-  alpha only), and `mipmap-anydpi-v26`/`mipmap-anydpi-v33` `ic_launcher`/`ic_launcher_round` are the
-  adaptive icons. `res/drawable/ic_notification.xml` stays a white, single-colour status-bar
+  adaptive foreground, with a 0.757 group scale about the artwork centre (256,256): the launcher
+  only shows the central 72dp of that layer, so the scaled art measures ≈46.0dp x 51.1dp =
+  63.9% x 70.9% of the visible tile (13.0dp side / 10.5dp vertical whitespace) and matches the
+  Chrome-installed PWA icon (≈64.0% x 70.9%, measured from the reference screenshot); the unscaled
+  60.75dp x 67.5dp art had rendered at 84.4% x 93.8% and read as oversized. Scaling the whole group
+  (instead of editing path coordinates) keeps the 32-unit stroke proportional to the tile.
+  `res/drawable/ic_launcher_monochrome.xml` is the Android 13+ themed variant (same geometry and the
+  same 0.757 group scale, alpha only, 40-unit stroke),
+  `mipmap-anydpi-v26`/`mipmap-anydpi-v33` `ic_launcher`/`ic_launcher_round` are the adaptive icons. `res/drawable/ic_notification.xml` stays a white, single-colour status-bar
   silhouette as Android requires. No generated/approximated logo artwork is used.
 - **System bars** never paint a Material grey strip: the system contrast scrim is explicitly
   disabled at runtime (`window.isStatusBarContrastEnforced`/`isNavigationBarContrastEnforced = false`,
@@ -203,14 +209,15 @@ The script verifies/reuses the keystore, then runs the real gates in order:
 Output: `release/android/cloudcli-android-<versionName>-release.apk` (gitignored).
 
 Install on a device/emulator with
-`adb install -r release/android/cloudcli-android-0.1.1-release.apk`, then enter the server origin on
-the setup screen and open the site. The `0.1.1` APK is signed with the same certificate as `0.1.0`,
-so it installs as an in-place update and keeps the origin and login. For an on-device install, copy
-the APK from this repository's `release/android/` directory: downloading it through the currently
-deployed `tap` (port 3001) **download button** can still corrupt it, because that bundle
-(`assets/index-DCWN_IYP.js`) predates the fixed original-byte download handler. Update that
-deployment and refresh it before using its download button; do not treat a file fetched from that
-old UI as a valid APK (verify size `1,446,315` and the SHA-256 below).
+`adb install -r release/android/cloudcli-android-0.1.2-release.apk`, then enter the server origin on
+the setup screen and open the site. `0.1.0`, `0.1.1` and `0.1.2` APKs are signed with the same
+certificate, so each installs as an in-place update and keeps the origin and login. For an on-device install, copy
+the APK from this repository's `release/android/` directory with a plain file copy: downloading it
+through the currently deployed `tap` (port 3001) **download button** can still corrupt it, because
+that bundle (`assets/index-DCWN_IYP.js`) predates the fixed original-byte download handler. Update
+and refresh that deployment before using its download button; until then use a direct computer copy
+and do not treat a file fetched from that old UI as a valid APK (for 0.1.2 verify size
+`1,446,483` and SHA-256 `75586f93…e6f60e19` below).
 
 ## Release signing
 
@@ -226,6 +233,63 @@ Private, outside the repository: `/Users/agent/workspaces/tap/.cloudcli/android-
 Keep this key: Android only accepts updates signed with the same certificate. Passwords are only
 read from that private file/environment by keytool and Gradle; they are never printed, committed, or
 packaged into the APK. `*.p12`, `*.jks`, `signing.properties` and `release/android/` are gitignored.
+
+## 0.1.2 build status
+
+`0.1.2` (code 3) is the launcher-icon proportion fix for one real-device finding: the native icon's
+white message-square bubble was oversized and ran close to the tile edge, while the
+Chrome-installed PWA icon of the same mark (`public/manifest.json` ->
+`public/icons/icon-512x512.png`, same SVG geometry) looked balanced with visible whitespace.
+
+- Resource-only change, no Kotlin/bridge/manifest/runtime behaviour touched: the unchanged
+  512-viewport path geometry in `res/drawable/ic_launcher_foreground.xml` and
+  `res/drawable/ic_launcher_monochrome.xml` is wrapped in `<group pivotX=256 pivotY=256
+  scaleX=0.757 scaleY=0.757>`. No web asset (`public/`), `src/` or `server/` file was modified, and
+  no raster/brand artwork was generated.
+- Why 0.757: measured evidence from the two user screenshots (175x175px tile crops) gives the PWA
+  icon glyph at 64.0% width / 70.9% height of the tile with ≈18% side and ≈14% vertical whitespace,
+  and the 0.1.1 icon at 84.6% / 93.7% with 8% / 3% whitespace. The measured 0.1.1 numbers match the
+  adaptive-icon model (visible viewport = the central 72dp of the 108dp layer): 60.75dp x 67.5dp of
+  72dp = 84.4% x 93.8%. Scaling by 0.757 about the artwork centre gives 45.99dp x 51.10dp =
+  63.9% x 71.0% of the 72dp viewport, i.e. the PWA proportion, while keeping the stroke/tile ratio
+  (32-unit stroke scaled with the group) instead of copying raw SVG coordinates.
+- Verification actually run for this change: `lintDebug` — `BUILD SUCCESSFUL`, 0 errors (warnings
+  only, same class as before); `testDebugUnitTest` — `BUILD SUCCESSFUL`, 29 JVM tests, 0 failures;
+  `assembleRelease` — `BUILD SUCCESSFUL`; `apksigner verify` — v2 true, signer certificate SHA-256
+  `4da7c681…a5e8` (same key as 0.1.0/0.1.1, so 0.1.2 installs over them). The unit tests are not
+  required by a resource-only change (they ran because the release script owns that gate sequence),
+  and they were not repeated afterwards. The packaged icon resources were inspected in the APK: the
+  resolved compiled entries behind `drawable/ic_launcher_foreground` and
+  `drawable/ic_launcher_monochrome` (`res/Qr.xml` and `res/Vy.xml` in `0.1.2-release.apk`) were
+  dumped with `aapt2 dump xmltree` and carry the 0.757 group scale with stroke widths 32 and 40.
+- One caveat on the build log: an initial detached wrapper around
+  `scripts/build-android-release.sh` was killed mid-run by the session's background-process
+  handling (its daemon was interrupted while `lintDebug` was still starting). The gates were then
+  run to completion as foreground Gradle invocations on the same tree (`:app:lintDebug`,
+  `:app:testDebugUnitTest`, `:app:assembleRelease`), and the artifact below was produced by the
+  successful `assembleRelease`.
+
+Artifact: `release/android/cloudcli-android-0.1.2-release.apk`, 1,446,483 B, SHA-256
+`75586f93b92de4b8dfc783094ca87566dcd3ff4cbbbe50ce5d4a1629e6f60e19`, `versionCode` 3,
+`versionName` 0.1.2, signer certificate SHA-256
+`4da7c681f9101309af64e432b1d58658920fb4965f6ccc8cc3738497e2e7a5e8` (APK Signature Scheme v2), with
+the `.sha256` sidecar next to it. `release/android/cloudcli-android-0.1.0-release.apk` and the 0.1.1
+artifact are untouched.
+
+### 0.1.2 emulator check (icon only)
+
+Installed with `adb install -r` on the retained own AVD `CloudCLI_Test_API36` (API 36,
+`emulator-5582`, verified via `adb emu avd name` and `ro.build.version.sdk`), without clearing
+app data or touching the configured origin/session. `dumpsys package ai.cloudcli.android` reported
+`versionCode=3` / `versionName=0.1.2`, and the APK pulled from the device
+(`pm path` -> `base.apk`) matched SHA-256 `75586f93…e6f60e19`. A real launcher screenshot from that
+session shows the smaller, centred glyph with clear whitespace under the launcher's round mask
+(`/tmp/w13-launcher-drawer.png`; kept out of the repo). A rendered side-by-side
+(`/tmp/w13-icon-comparison.png`) was used for the ratio analysis only — it approximates the stroke
+with polyline joins, so the screenshot, not the render, is the visual evidence for the final claim.
+Not verified: real OEM/launcher-mask behaviour other than the AVD's AOSP launcher mask; no other UI,
+foreground-service, cache or share flow was re-tested for 0.1.2, since nothing outside the launcher
+vector resources changed.
 
 ## 0.1.1 build status
 
