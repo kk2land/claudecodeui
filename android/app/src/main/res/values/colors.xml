@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Window background / first frame before the injected script reports the real body background
+         (app light theme, hsl(44 22% 96%)). Keep in sync with MainActivity.DEFAULT_PAGE_BACKGROUND. -->
+    <color name="window_background">#FFF8F7F2</color>
+    <!-- Launcher icon background: hsl(240 5.9% 10%) from public/icons/icon-512x512.svg. -->
+    <color name="ic_launcher_background">#FF18181B</color>
+</resources>

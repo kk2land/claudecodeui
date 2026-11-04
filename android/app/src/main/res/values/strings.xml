@@ -9,9 +9,8 @@
     <string name="bridge_unavailable">Android bridge unavailable on this WebView. The site is shown without native features.</string>
     <string name="no_app_for_link">No app can open this link</string>
 
-    <string name="action_menu">Menu</string>
-    <string name="action_change_site">Change site</string>
-    <string name="action_reload">Reload</string>
+    <string name="action_change_site">Change server</string>
+    <string name="action_reload">Reload page</string>
 
     <string name="share_skipped">Not imported: %1$s</string>
 

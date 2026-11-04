@@ -22,6 +22,13 @@ class SessionStore(context: Context) {
             prefs.edit().putBoolean(KEY_NOTIFICATIONS_ENABLED, value).apply()
         }
 
+    /**
+     * True once the user (or the one-time first-sign-in prompt) stored a decision. A missing key is
+     * the only state that allows the automatic first enable; an explicit false (Stop/Disable/denied
+     * permission/change site) is never auto-reversed.
+     */
+    fun hasNotificationPreference(): Boolean = prefs.contains(KEY_NOTIFICATIONS_ENABLED)
+
     /** Stable across service restarts and reconnects. */
     val deviceId: String
         get() {

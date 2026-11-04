@@ -79,6 +79,21 @@ which platform the page is running on.
 - Notification click opens the activity and loads `siteOrigin + /session/<id>` (or `/`). No
   notification persistence or replay.
 
+### First-run notification enablement
+
+Notification channels/sockets are native, but they are only started once the user has enabled them.
+On the first meaningful sign-in (a valid native `saveSession`, or a cold-start `getSession` that
+returns a valid native token) the shell enables them **once** when no notification preference has
+ever been stored: it records `false` first (so the decision is remembered), then asks for the
+Android 13+ notification permission and, if granted, sets the preference to `true` and starts the
+foreground service through the same path as the web toggle. A denial keeps the preference `false`
+with `lastError = PERMISSION_DENIED`; the web settings page can still enable it manually.
+
+An existing explicit `false` is never auto-reversed: `Stop`, disable, a denied permission request
+and changing the server all leave a stored `false`, and ordinary token refreshes never prompt again.
+No valid native token means no automatic start. The automatic completion is reported through the
+existing `cloudcliandroid:state` events; the public bridge API stays at the same 12 methods.
+
 ## Shares and files
 
 - Incoming text/link and file URIs are copied into app-private `filesDir/shares/` with an index, so
@@ -114,8 +129,57 @@ the server/web side's responsibility (already handled upstream); the app does no
 | Libraries | `androidx.webkit:webkit:1.12.1`, `com.squareup.okhttp3:okhttp:4.12.0` |
 | Tests | JUnit 4.13.2 (+ `org.json` for JVM JWT tests) |
 
-`applicationId` = `ai.cloudcli.android`, label `CloudCLI`, `versionCode` 1, `versionName` 0.1.0.
+`applicationId` = `ai.cloudcli.android`, label `CloudCLI`, `versionCode` 2, `versionName` 0.1.1
+(`versionCode` 1 / `0.1.0` was the first real-device build; `0.1.1` is the in-place update).
 `allowBackup="false"`, so the token, device id and pending shares stay on the device.
+
+## Shell UI
+
+- **Launcher icon** is the project's own CloudCLI mark, reused read-only from
+  `public/icons/icon-512x512.svg` (dark `hsl(240 5.9% 10%)` square, white message-square outline).
+  `res/drawable/ic_launcher_foreground.xml` keeps that geometry on a 512 viewport in a 108dp
+  adaptive foreground (art ≈67dp, inside the 72dp safe zone),
+  `res/drawable/ic_launcher_monochrome.xml` is the Android 13+ themed variant (same geometry,
+  alpha only), and `mipmap-anydpi-v26`/`mipmap-anydpi-v33` `ic_launcher`/`ic_launcher_round` are the
+  adaptive icons. `res/drawable/ic_notification.xml` stays a white, single-colour status-bar
+  silhouette as Android requires. No generated/approximated logo artwork is used.
+- **System bars** never paint a Material grey strip: the system contrast scrim is explicitly
+  disabled at runtime (`window.isStatusBarContrastEnforced`/`isNavigationBarContrastEnforced = false`,
+  Android 10+; no API-29-only theme attribute is used) and the shell background always matches the web
+  page's **actual** computed background colour (`getComputedStyle(document.body).backgroundColor`,
+  falling back to the root element), not `<meta name="theme-color">` — the meta can drift from the
+  CSS (e.g. `#f6f4ef` vs the real light `hsl(44 22% 96%)`). The injected script normalizes it to
+  `#rrggbb` and reports it through a private `native.theme` message (not part of the public bridge
+  API); `onPageFinished`/`onResume` read it directly as a fallback when the bridge is unavailable.
+  `Theme.CloudCLI` itself sets `windowBackground=@color/window_background` (`#F8F7F2`, the same
+  value as `MainActivity.DEFAULT_PAGE_BACKGROUND`), transparent `statusBarColor`/
+  `navigationBarColor` and `windowLightStatusBar`, so the first frame before the page reports its
+  background already matches the light theme. Light navigation-bar icons are set at runtime
+  (`windowLightNavigationBar` is API 27 while minSdk is 26, so it is not used as a theme item).
+  Live light/dark switches are picked up with a `MutationObserver` on the root/body class and style,
+  and a `transitionend` listener on the body/root waits for their 200ms `background-color`
+  transition to finish before re-reading (so a class toggle is not reported with the old colour).
+  API split: on **API 35/36** (edge-to-edge enforced for target 36) the bars stay transparent and
+  the root background shows through; on **API 26-34** the window still paints
+  `statusBarColor`/`navigationBarColor` with the same colour (a transparent colour there would fall
+  back to the theme's grey bar). Status/navigation icon appearance follows the background
+  luminance, so light theme gets dark icons and dark theme gets light icons.
+- **Insets**: top/left/right use `systemBars() | displayCutout()`. The bottom uses the IME inset
+  while the keyboard is visible and the `tappableElement()` navigation inset otherwise — zero in
+  gesture navigation. The web page already reserves its own bottom safe area
+  (`px-2 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))]` in the chat composer), so reserving the
+  full navigation-bar inset natively as well counted the same space twice. Gesture navigation now
+  keeps only the page's own gesture-handle clearance, while a three-button navigation bar still
+  reserves its tappable height. This is a code-level fix; the actual `env()` value and the visual
+  result on a device are still to be measured (the earlier ~16 px figure came from a screenshot
+  estimate, not a device probe). No screen height or fixed padding is hard-coded, and closing the
+  keyboard never leaves the IME inset behind.
+- **Native shell entry points**: the in-page floating overflow button was removed (user feedback:
+  it sat over the web header and was unreliable). There is no replacement overlay or hidden
+  gesture. Native actions are static launcher shortcuts (`res/xml/shortcuts.xml`): long-press the
+  app icon → **Change server** (the existing setup screen, which clears the native session like
+  before) or **Reload page**. The web app keeps its own in-page settings (server configuration,
+  notifications) reachable through its own sidebar; the app does not add a native settings screen.
 
 ## Build and install
 
@@ -138,7 +202,7 @@ The script verifies/reuses the keystore, then runs the real gates in order:
 Output: `release/android/cloudcli-android-<versionName>-release.apk` (gitignored).
 
 Install on a device/emulator with
-`adb install -r release/android/cloudcli-android-0.1.0-release.apk`, then enter the server origin on
+`adb install -r release/android/cloudcli-android-0.1.1-release.apk`, then enter the server origin on
 the setup screen and open the site.
 
 ## Release signing
@@ -156,7 +220,37 @@ Keep this key: Android only accepts updates signed with the same certificate. Pa
 read from that private file/environment by keytool and Gradle; they are never printed, committed, or
 packaged into the APK. `*.p12`, `*.jks`, `signing.properties` and `release/android/` are gitignored.
 
-## Verification status
+## 0.1.1 build status
+
+`0.1.0` (code 1) was the first real-device build; `0.1.1` (code 2) is the in-place update for the
+five real-device findings (status-bar strip, removed overflow button, bottom inset duplication,
+launcher icon, first-run notification enablement). Built from this tree with
+`./scripts/build-android-release.sh`:
+
+- `lintDebug` — success (0 errors; warnings only, e.g. the pre-existing `ImplicitSamInstance` note).
+- `testDebugUnitTest` — success, 29 JVM tests, 0 failures.
+- `assembleRelease` + `apksigner verify` — success.
+
+After a review fix in `android/app/src/main/assets/bridge.js` (theme re-read after the body
+`background-color` transition), only `assembleRelease` + `apksigner verify` were rerun; lint and the
+29 JVM tests were not rerun for that asset-only patch, which was covered by a targeted Node VM
+harness instead.
+
+Artifact: `release/android/cloudcli-android-0.1.1-release.apk`, 1,446,315 B, SHA-256
+`4e5ebdb5a36cbeab777c1046fb8a330097dfed68009504a2293ed6f6627d6c87`, signer certificate SHA-256
+`4da7c681f9101309af64e432b1d58658920fb4965f6ccc8cc3738497e2e7a5e8` (APK Signature Scheme v2 —
+same certificate as `0.1.0`, so it installs as an update). The previous
+`release/android/cloudcli-android-0.1.0-release.apk` is left untouched.
+
+0.1.1 is **build-verified only** (the gates above). Device QA is still pending and no 0.1.1
+behaviour is claimed as accepted here: the visual result of the status-bar colour/icon contrast and
+bottom inset changes, keyboard open/close behaviour, the launcher icon on a real launcher, the
+launcher-shortcut entry points, and the first-run permission/enable flow end to end (including
+denial and a later explicit `Stop`, which must not be auto-reversed). The 0.1.0 emulator acceptance
+below describes the previous build (overflow menu, no shortcuts, no first-run enablement) and does
+not transfer to 0.1.1.
+
+## Verification status (0.1.0 emulator acceptance)
 
 Accepted on the API 36 emulator (`emulator-5582`, `CloudCLI_Test_API36`, WebView
 133.0.6943.137) with the signed **release** APK (not debuggable) — no device/real-hardware run was
@@ -215,10 +309,6 @@ await window.cloudcliAndroid.notify({
   tag: 'claude:app-session-id:run.stopped', // replaces an equal tag, optional
 });
 ```
-
-Observed once during testing: after focusing a plain HTML file input, the first tap on the native
-overflow button did not respond; restarting the app recovered normal behaviour. It was not
-consistently reproduced and is recorded without any code change.
 
 Compatibility note: the app requires the WebView to support `DOCUMENT_START_SCRIPT`,
 `WEB_MESSAGE_LISTENER` and `WEB_MESSAGE_ARRAY_BUFFER`; when a provider lacks

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Native shell actions without an in-page floating button: long-press the launcher icon.
+  The web app keeps owning its own settings; these only replace the removed overflow button.
+-->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:shortcutId="change_site"
+        android:shortcutLongLabel="@string/action_change_site"
+        android:shortcutShortLabel="@string/action_change_site">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetClass="ai.cloudcli.android.MainActivity"
+            android:targetPackage="ai.cloudcli.android">
+            <extra
+                android:name="ai.cloudcli.android.extra.SHELL_ACTION"
+                android:value="change_site" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:shortcutId="reload"
+        android:shortcutLongLabel="@string/action_reload"
+        android:shortcutShortLabel="@string/action_reload">
+        <intent
+            android:action="android.intent.action.MAIN"
+            android:targetClass="ai.cloudcli.android.MainActivity"
+            android:targetPackage="ai.cloudcli.android">
+            <extra
+                android:name="ai.cloudcli.android.extra.SHELL_ACTION"
+                android:value="reload" />
+        </intent>
+    </shortcut>
+</shortcuts>

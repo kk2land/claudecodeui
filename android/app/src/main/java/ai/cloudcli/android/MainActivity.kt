@@ -4,11 +4,11 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Color
+import android.graphics.drawable.ColorDrawable
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
-import android.view.Menu
-import android.view.MenuItem
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
@@ -37,7 +37,7 @@ class MainActivity : Activity(), BridgeHost.Host {
     private lateinit var setupPanel: View
     private lateinit var siteInput: EditText
     private lateinit var siteError: TextView
-    private lateinit var overflowButton: View
+    private lateinit var root: View
     private var bridgeHost: BridgeHost? = null
     private var siteOrigin: String? = null
 
@@ -47,6 +47,7 @@ class MainActivity : Activity(), BridgeHost.Host {
     private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
     private var pendingDeepLink: String? = null
     private var clearHistoryOnNextPage = false
+    private var pageBackgroundColor: Int = DEFAULT_PAGE_BACKGROUND
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -54,14 +55,13 @@ class MainActivity : Activity(), BridgeHost.Host {
         Notifications.ensureChannels(this)
         setContentView(R.layout.activity_main)
         applyEdgeToEdgeInsets()
+        applyPageTheme(null)
 
         webView = findViewById(R.id.web_view)
         progress = findViewById(R.id.progress)
         setupPanel = findViewById(R.id.setup_panel)
         siteInput = findViewById(R.id.site_input)
         siteError = findViewById(R.id.site_error)
-        overflowButton = findViewById(R.id.overflow_button)
-        overflowButton.setOnClickListener { openOptionsMenu() }
         findViewById<Button>(R.id.site_save).setOnClickListener { saveSite() }
         siteInput.setText(AppRuntime.prefs.siteOrigin.orEmpty())
 
@@ -71,11 +71,15 @@ class MainActivity : Activity(), BridgeHost.Host {
             ) { handleBack() }
         }
 
+        val shellAction = consumeShellAction(intent)
         val origin = AppRuntime.prefs.siteOrigin
-        if (origin == null) {
+        if (shellAction == SHELL_ACTION_CHANGE_SITE) {
+            changeSite()
+        } else if (origin == null) {
             showSetup()
         } else {
             openSite(origin, deepLinkFrom(intent))
+            if (shellAction == SHELL_ACTION_RELOAD) reloadTopLevel()
         }
         importShareIntent(intent, savedInstanceState)
     }
@@ -87,35 +91,120 @@ class MainActivity : Activity(), BridgeHost.Host {
     }
 
     /**
-     * Target 36 enforces edge-to-edge: content draws under the status/navigation bars. Pad the
-     * single root view by the system-bar + cutout insets and by the IME so the WebView and the
-     * overflow button are never covered (and the keyboard does not hide the input).
-     * Below API 30 the platform still fits system windows, so no manual insets are applied.
+     * Target 36 enforces edge-to-edge: content draws under the status/navigation bars.
+     *
+     * Top/left/right use the system-bar (plus cutout) insets so the web header never hides under
+     * the status bar. Bottom uses the IME inset only while the keyboard is visible; otherwise it
+     * uses the *tappable* navigation-bar inset, which is zero in gesture navigation. That keeps the
+     * page's own bottom safe spacing (the gesture handle clearance) instead of stacking the full
+     * navigation-bar height on top of it, while a three-button navigation bar still reserves its
+     * tappable height. Nothing is hard-coded to a screen size and the previous IME inset is never
+     * left behind when the keyboard closes.
      */
     private fun applyEdgeToEdgeInsets() {
+        root = findViewById(R.id.root)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            // No system contrast scrim over our own background (Android 10+).
+            window.isStatusBarContrastEnforced = false
+            window.isNavigationBarContrastEnforced = false
+        }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) return
         window.setDecorFitsSystemWindows(false)
-        window.insetsController?.setSystemBarsAppearance(
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-            WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
-                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS,
-        )
-        val root = findViewById<View>(R.id.root)
         root.setOnApplyWindowInsetsListener { view, insets ->
             val bars = insets.getInsets(
                 WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout(),
             )
-            val ime = insets.getInsets(WindowInsets.Type.ime())
-            view.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+            val bottom = if (insets.isVisible(WindowInsets.Type.ime())) {
+                insets.getInsets(WindowInsets.Type.ime()).bottom
+            } else {
+                insets.getInsets(WindowInsets.Type.tappableElement()).bottom
+            }
+            view.setPadding(bars.left, bars.top, bars.right, bottom)
             insets
         }
         root.requestApplyInsets()
     }
 
+    /**
+     * Shell background and system-bar icon contrast follow the page's *actual* background colour
+     * (body, falling back to the root element), normalized to `#rrggbb` by the injected script.
+     * The page's `<meta name="theme-color">` is not used: it can drift from the CSS background.
+     * The bridge forwards live theme changes; [syncPageTheme] is the page-finish/resume fallback.
+     */
+    override fun applyPageTheme(color: String?) {
+        val parsed = parseHexColor(color)
+        if (parsed != null) pageBackgroundColor = parsed
+        val background = pageBackgroundColor
+        root.setBackgroundColor(background)
+        window.setBackgroundDrawable(ColorDrawable(background))
+        val lightIcons = Color.luminance(background) > 0.5f
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val mask = WindowInsetsController.APPEARANCE_LIGHT_STATUS_BARS or
+                WindowInsetsController.APPEARANCE_LIGHT_NAVIGATION_BARS
+            window.insetsController?.setSystemBarsAppearance(if (lightIcons) mask else 0, mask)
+        } else {
+            @Suppress("DEPRECATION")
+            window.decorView.systemUiVisibility = if (lightIcons) {
+                View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR
+            } else {
+                0
+            }
+        }
+        // Android 15 (API 35+) enforces edge-to-edge for target 36 and ignores explicit bar
+        // colours; there the transparent bars show this root background. API 26-34 do not become
+        // edge-to-edge on their own, so the window still has to paint the bars with the same colour
+        // (a transparent colour there would fall back to the theme's grey Material status bar).
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.VANILLA_ICE_CREAM) {
+            @Suppress("DEPRECATION")
+            window.statusBarColor = background
+            @Suppress("DEPRECATION")
+            window.navigationBarColor = background
+        }
+    }
+
+    private fun syncPageTheme() {
+        if (!::webView.isInitialized || webView.visibility != View.VISIBLE) return
+        webView.evaluateJavascript(THEME_READER_JS) { value -> applyPageTheme(parseJsString(value)) }
+    }
+
+    private fun parseJsString(raw: String?): String? {
+        if (raw == null || raw.length < 2 || raw == "null") return null
+        return try {
+            org.json.JSONTokener(raw).nextValue() as? String
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    /** The injected script normalizes the colour; native only accepts the `#rgb*` forms it emits. */
+    private fun parseHexColor(value: String?): Int? {
+        val text = value?.trim().orEmpty()
+        if (!text.startsWith("#")) return null
+        return try {
+            Color.parseColor(text)
+        } catch (_: IllegalArgumentException) {
+            null
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        syncPageTheme()
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
+        when (consumeShellAction(intent)) {
+            SHELL_ACTION_CHANGE_SITE -> {
+                changeSite()
+                return
+            }
+            SHELL_ACTION_RELOAD -> {
+                reloadTopLevel()
+                return
+            }
+        }
         val deepLink = deepLinkFrom(intent)
         val origin = siteOrigin ?: AppRuntime.prefs.siteOrigin
         if (deepLink != null && origin != null) {
@@ -151,26 +240,6 @@ class MainActivity : Activity(), BridgeHost.Host {
         }
     }
 
-    // ---------------------------------------------------------------- menu
-
-    override fun onCreateOptionsMenu(menu: Menu): Boolean {
-        menu.add(Menu.NONE, MENU_CHANGE_SITE, 0, R.string.action_change_site)
-        menu.add(Menu.NONE, MENU_RELOAD, 1, R.string.action_reload)
-        return true
-    }
-
-    override fun onOptionsItemSelected(item: MenuItem): Boolean = when (item.itemId) {
-        MENU_CHANGE_SITE -> {
-            changeSite()
-            true
-        }
-        MENU_RELOAD -> {
-            reloadTopLevel()
-            true
-        }
-        else -> super.onOptionsItemSelected(item)
-    }
-
     // ---------------------------------------------------------------- site setup
 
     private fun saveSite() {
@@ -189,7 +258,6 @@ class MainActivity : Activity(), BridgeHost.Host {
         siteOrigin = origin
         setupPanel.visibility = View.GONE
         webView.visibility = View.VISIBLE
-        overflowButton.visibility = View.VISIBLE
         configureWebView()
         bridgeHost?.destroy()
         val host = BridgeHost(this, webView, this)
@@ -204,7 +272,6 @@ class MainActivity : Activity(), BridgeHost.Host {
     private fun showSetup() {
         webView.visibility = View.GONE
         progress.visibility = View.GONE
-        overflowButton.visibility = View.GONE
         setupPanel.visibility = View.VISIBLE
         window.setSoftInputMode(WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
     }
@@ -250,6 +317,7 @@ class MainActivity : Activity(), BridgeHost.Host {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 progress.visibility = View.GONE
+                syncPageTheme()
                 val origin = siteOrigin
                 if (clearHistoryOnNextPage && url != null) {
                     if (url == "about:blank") {
@@ -322,6 +390,14 @@ class MainActivity : Activity(), BridgeHost.Host {
     }
 
     // ---------------------------------------------------------------- intents
+
+    /** Launcher shortcuts replace the removed in-page overflow button (native shell actions). */
+    private fun consumeShellAction(intent: Intent?): String? {
+        if (intent == null) return null
+        val action = intent.getStringExtra(EXTRA_SHELL_ACTION) ?: return null
+        intent.removeExtra(EXTRA_SHELL_ACTION)
+        return action
+    }
 
     private fun deepLinkFrom(intent: Intent?): String? {
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)
@@ -447,12 +523,22 @@ class MainActivity : Activity(), BridgeHost.Host {
 
     companion object {
         const val EXTRA_SESSION_ID = "ai.cloudcli.android.extra.SESSION_ID"
+        const val EXTRA_SHELL_ACTION = "ai.cloudcli.android.extra.SHELL_ACTION"
+        private const val SHELL_ACTION_CHANGE_SITE = "change_site"
+        private const val SHELL_ACTION_RELOAD = "reload"
         private const val REQUEST_PERMISSION = 11
         private const val REQUEST_PICK = 12
         private const val REQUEST_CREATE = 13
         private const val REQUEST_WEB_FILE = 14
         private const val STATE_SHARE_IMPORTED = "cloudcli.share.imported"
-        private const val MENU_CHANGE_SITE = 21
-        private const val MENU_RELOAD = 22
+        private val DEFAULT_PAGE_BACKGROUND = Color.rgb(0xF8, 0xF7, 0xF2)
+        private const val THEME_READER_JS =
+            "(function(){function n(v){var m=/^rgba?\\(([^)]+)\\)$/.exec(v||'');if(!m)return null;" +
+                "var p=m[1].split(',');if(p.length<3)return null;" +
+                "if(p.length>3&&parseFloat(p[3])===0)return null;" +
+                "return '#'+[0,1,2].map(function(i){var x=Math.round(parseFloat(p[i]));" +
+                "x=Math.max(0,Math.min(255,x));return (x<16?'0':'')+x.toString(16);}).join('');}" +
+                "return (document.body?n(getComputedStyle(document.body).backgroundColor):null)||" +
+                "n(getComputedStyle(document.documentElement).backgroundColor);})()"
     }
 }

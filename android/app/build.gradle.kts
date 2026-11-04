@@ -30,8 +30,9 @@ android {
         applicationId = "ai.cloudcli.android"
         minSdk = 26
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        // 0.1.0 (code 1) shipped the first real-device build; 0.1.1 must install over it.
+        versionCode = 2
+        versionName = "0.1.1"
     }
 
     signingConfigs {

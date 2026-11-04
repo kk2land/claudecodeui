@@ -1,4 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.CloudCLI" parent="@android:style/Theme.Material.Light.NoActionBar" />
+    <!--
+      Edge-to-edge shell. The window background is the app's light page colour so the first frame
+      (before the web page reports its actual body background) is not the default Material grey.
+      The bars are transparent and light; the runtime contrast scrim is disabled in MainActivity
+      (Window.isStatusBarContrastEnforced/isNavigationBarContrastEnforced, API 29+), so no
+      API-29-only theme attribute is needed here.
+    -->
+    <style name="Theme.CloudCLI" parent="@android:style/Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/window_background</item>
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <!-- windowLightNavigationBar is API 27 while minSdk is 26; the light navigation-bar icon
+             appearance is set at runtime (applyPageTheme) for every API level instead. -->
+        <item name="android:windowLightStatusBar">true</item>
+    </style>
 </resources>

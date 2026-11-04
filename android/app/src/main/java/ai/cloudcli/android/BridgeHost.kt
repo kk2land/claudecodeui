@@ -28,6 +28,9 @@ class BridgeHost(
 ) : AppRuntime.Listener, WebViewCompat.WebMessageListener {
 
     interface Host {
+        /** Applies the page's actual background colour to the shell background and bar icons. */
+        fun applyPageTheme(color: String?)
+
         fun notificationPermissionGranted(): Boolean
         fun requestNotificationPermission(onResult: (Boolean) -> Unit)
         fun pickDocuments(multiple: Boolean, onResult: (List<Uri>?) -> Unit)
@@ -49,6 +52,7 @@ class BridgeHost(
     private var scriptHandler: ScriptHandler? = null
     private var replyProxy: JavaScriptReplyProxy? = null
     private var pendingPermissionRequest: String? = null
+    private var permissionRequestInFlight = false
 
     /** Returns false when the WebView does not support the required features; nothing is exposed. */
     fun install(siteOrigin: String): Boolean {
@@ -114,6 +118,12 @@ class BridgeHost(
             return
         }
         when (json.optString("type")) {
+            // Native-only shell message (not part of the public bridge API): the injected script
+            // reports the page's actual background so the shell and system bars keep matching it.
+            "native.theme" -> {
+                host.applyPageTheme(json.optString("color").ifEmpty { null })
+                return
+            }
             "transfer.ack" -> {
                 transfers.onAck(json.optString("transferId"), json.optInt("nextOffset", -1))
                 return
@@ -195,34 +205,69 @@ class BridgeHost(
             return
         }
         if (host.notificationPermissionGranted()) {
-            applyNotificationsEnabled(id)
+            applyNotificationsEnabled()
+            respond(id, AppRuntime.state().toJson())
             return
         }
-        if (pendingPermissionRequest != null) {
+        if (pendingPermissionRequest != null || permissionRequestInFlight) {
             respondError(id, BridgeErrorCode.UNAVAILABLE, "permission request already pending")
             return
         }
         pendingPermissionRequest = id
+        permissionRequestInFlight = true
         host.requestNotificationPermission { granted ->
             val requestId = pendingPermissionRequest
             pendingPermissionRequest = null
+            permissionRequestInFlight = false
             if (requestId == null) return@requestNotificationPermission
             if (granted) {
-                applyNotificationsEnabled(requestId)
+                applyNotificationsEnabled()
             } else {
-                AppRuntime.prefs.notificationsEnabled = false
-                AppRuntime.setLastError(BridgeLastError.PERMISSION_DENIED)
-                respond(requestId, AppRuntime.state().toJson())
+                denyNotifications()
             }
+            respond(requestId, AppRuntime.state().toJson())
         }
     }
 
-    private fun applyNotificationsEnabled(id: String) {
+    /** Shared by the explicit web toggle and the one-time first-sign-in prompt. */
+    private fun applyNotificationsEnabled() {
         AppRuntime.prefs.notificationsEnabled = true
         AppRuntime.setLastError(null)
         AppRuntime.startNotificationService()
         AppRuntime.notifyState()
-        respond(id, AppRuntime.state().toJson())
+    }
+
+    private fun denyNotifications() {
+        AppRuntime.prefs.notificationsEnabled = false
+        AppRuntime.setLastError(BridgeLastError.PERMISSION_DENIED)
+        AppRuntime.notifyState()
+    }
+
+    /**
+     * First meaningful sign-in policy: if a valid native login exists and the user has never chosen
+     * a notification setting, ask for the Android 13+ permission once and enable on grant. The
+     * preference key is written (false) before the prompt, so a denial, later Stop/Disable or a
+     * site change is never auto-reversed. The completion is reported through the existing state
+     * events, not through a second response to the caller.
+     */
+    private fun maybeAutoEnableNotifications() {
+        if (!AppRuntime.state().signedIn) return
+        if (AppRuntime.prefs.hasNotificationPreference()) return
+        if (permissionRequestInFlight || pendingPermissionRequest != null) return
+        AppRuntime.prefs.notificationsEnabled = false
+        if (host.notificationPermissionGranted()) {
+            applyNotificationsEnabled()
+            return
+        }
+        permissionRequestInFlight = true
+        host.requestNotificationPermission { granted ->
+            permissionRequestInFlight = false
+            if (granted) {
+                applyNotificationsEnabled()
+            } else {
+                denyNotifications()
+            }
+        }
     }
 
     // ---------------------------------------------------------------- session
@@ -236,6 +281,8 @@ class BridgeHost(
             if (AppRuntime.prefs.notificationsEnabled && NotificationService.current() == null) {
                 AppRuntime.startNotificationService()
             }
+            // Cold start with a valid login is the other first-sign-in moment.
+            maybeAutoEnableNotifications()
         } else {
             respond(id, null)
         }
@@ -259,6 +306,7 @@ class BridgeHost(
         }
         AppRuntime.storeSession(token)
         respond(id, JSONObject().put("accepted", true))
+        maybeAutoEnableNotifications()
     }
 
     // ---------------------------------------------------------------- shares

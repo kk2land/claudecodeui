@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  CloudCLI mark, read-only from public/icons/icon-512x512.svg (same geometry: message-square
+  outline, 32/512 stroke). 512 viewport on a 108dp adaptive foreground keeps the visible art
+  (~67dp) inside the 72dp safe zone.
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="512"
+    android:viewportHeight="512">
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M128,144C128,126.327 142.327,112 160,112H352C369.673,112 384,126.327 384,144V272C384,289.673 369.673,304 352,304H224L128,400V144Z"
+        android:strokeColor="#FFFFFFFF"
+        android:strokeLineCap="round"
+        android:strokeLineJoin="round"
+        android:strokeWidth="32" />
+</vector>

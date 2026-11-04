@@ -261,6 +261,74 @@
     return request('share.content', { id: id }).then(receiveTransfer);
   }
 
+  // Native-only shell plumbing (no public API): keep the Android shell background and system-bar
+  // icons in step with the page's *actual* background colour. <meta name="theme-color"> is not used
+  // because it can drift from the CSS background. The value is normalized to #rrggbb here so the
+  // native side only needs to parse that one form.
+  function normalizeBackground(value) {
+    var match = /^rgba?\(([^)]+)\)$/.exec(value || '');
+    if (!match) return null;
+    var parts = match[1].split(',');
+    if (parts.length < 3) return null;
+    if (parts.length > 3 && parseFloat(parts[3]) === 0) return null;
+    var hex = '#';
+    for (var i = 0; i < 3; i += 1) {
+      var channel = Math.max(0, Math.min(255, Math.round(parseFloat(parts[i]))));
+      hex += (channel < 16 ? '0' : '') + channel.toString(16);
+    }
+    return hex;
+  }
+
+  function readBackground() {
+    var value = null;
+    if (document.body) {
+      value = normalizeBackground(getComputedStyle(document.body).backgroundColor);
+    }
+    if (!value && document.documentElement) {
+      value = normalizeBackground(getComputedStyle(document.documentElement).backgroundColor);
+    }
+    return value;
+  }
+
+  var lastReportedBackground = null;
+  function reportTheme() {
+    var value = readBackground();
+    if (!value || value === lastReportedBackground) return;
+    lastReportedBackground = value;
+    post({ v: 1, type: 'native.theme', color: value });
+  }
+
+  function watchTheme() {
+    reportTheme();
+    // The web app toggles the light/dark theme through the root class (and may restyle the body),
+    // so observe those attribute changes rather than the theme-color meta.
+    new MutationObserver(reportTheme).observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ['class', 'style']
+    });
+    if (document.body) {
+      new MutationObserver(reportTheme).observe(document.body, {
+        attributes: true,
+        attributeFilter: ['class', 'style']
+      });
+    }
+    // The body has a 200ms background-color transition, so a class toggle can be observed while the
+    // computed colour is still the old value; the de-duplicated MutationObserver report would then
+    // be dropped and the bars would stay on the old theme. Re-read after the body/root background
+    // transition actually finishes. Child transitions bubbling up are ignored.
+    document.addEventListener('transitionend', function (event) {
+      if (event.propertyName !== 'background-color') return;
+      if (event.target !== document.body && event.target !== document.documentElement) return;
+      reportTheme();
+    }, true);
+  }
+
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', watchTheme);
+  } else {
+    watchTheme();
+  }
+
   window.cloudcliAndroid = {
     version: 1,
     getState: function () {
