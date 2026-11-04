@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import { api, readApiJson } from '@/shared/api';
+import { saveBlob } from '@/modules/android-bridge';
 import type { CodeEditorFile } from '@/shared/types';
 import { isBinaryFile } from '@/modules/code-editor/utils/binaryFile';
 import { getPreviewKind } from '@/modules/code-editor/utils/previewableFile';
@@ -69,10 +70,11 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
         setSaving(false);
         setSaveError(null);
 
-        // Natively previewable media (image/pdf/audio/video) is rendered by
-        // CodeEditorMediaPreview, so there is nothing to read as text here.
-        // Clear any buffer left over from a previously opened text file so a
-        // stray save can't write stale content over the binary file.
+        // Previewable media (image/pdf/audio/video) and binaries get a
+        // download-only notice instead of an editor, so there is nothing to
+        // read as text here. Clear any buffer left over from a previously
+        // opened text file so a stray save can't write stale content over the
+        // binary file.
         if (getPreviewKind(file.name)) {
           applyLoadedContent('');
           setLoading(false);
@@ -182,20 +184,23 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
     }
   }, [content, filePath, fileProjectId, previewKind, fileName]);
 
-  const handleDownload = useCallback(() => {
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement('a');
+  // The title-bar download always saves the file's original bytes from disk.
+  // Re-encoding the editor buffer would corrupt non-text files (an APK read as
+  // UTF-8 grew from 1.44 MB to ~2.5 MB), and for text files the disk is the
+  // source of truth; unsaved edits stay in the buffer for the save button.
+  const handleDownload = useCallback(async () => {
+    if (!fileProjectId) {
+      throw new Error('Missing project identifier');
+    }
 
-    anchor.href = url;
-    anchor.download = file.name;
+    const response = await api.readFileBlob(fileProjectId, filePath);
 
-    document.body.appendChild(anchor);
-    anchor.click();
-    document.body.removeChild(anchor);
+    if (!response.ok) {
+      throw new Error(`Download failed: ${response.status} ${response.statusText}`);
+    }
 
-    URL.revokeObjectURL(url);
-  }, [content, file.name]);
+    await saveBlob(await response.blob(), fileName);
+  }, [fileProjectId, filePath, fileName]);
 
   // The baseline only changes on load and save, so it is not re-normalised on
   // every keystroke.

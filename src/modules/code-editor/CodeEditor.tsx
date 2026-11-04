@@ -18,7 +18,6 @@ import CodeEditorHeader from '@/modules/code-editor/CodeEditorHeader';
 import CodeEditorLoadingState from '@/modules/code-editor/CodeEditorLoadingState';
 import CodeEditorSurface from '@/modules/code-editor/CodeEditorSurface';
 import CodeEditorBinaryFile from '@/modules/code-editor/CodeEditorBinaryFile';
-import CodeEditorMediaPreview from '@/modules/code-editor/CodeEditorMediaPreview';
 
 type CodeEditorProps = {
   file: CodeEditorFile;
@@ -69,7 +68,6 @@ export default function CodeEditor({
     saveError,
     isBinary,
     previewKind,
-    fileProjectId,
     hasUnsavedChanges,
     handleSave,
     handleDownload,
@@ -237,32 +235,10 @@ export default function CodeEditor({
     );
   }
 
-  // Natively previewable media (image/pdf/audio/video) is rendered inline
-  // instead of showing the generic "cannot be displayed" placeholder.
-  if (previewKind) {
-    return (
-      <CodeEditorMediaPreview
-        file={file}
-        kind={previewKind}
-        projectId={fileProjectId}
-        isSidebar={isSidebar}
-        isFullscreen={isFullscreen}
-        onClose={requestClose}
-        onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
-        labels={{
-          loading: t('filePreview.loading', 'Loading preview...'),
-          error: t('filePreview.error', 'Unable to display this file.'),
-          openInNewTab: t('filePreview.openInNewTab', 'Open in new tab'),
-          fullscreen: t('actions.fullscreen', 'Fullscreen'),
-          exitFullscreen: t('actions.exitFullscreen', 'Exit fullscreen'),
-          close: t('actions.close', 'Close'),
-        }}
-      />
-    );
-  }
-
-  // Binary file display
-  if (isBinary) {
+  // Non-text files (binaries, images, PDF, audio, video) are never shown as
+  // source or inline media here: the pane explains why and offers the original
+  // file through the title-bar download.
+  if (previewKind || isBinary) {
     return (
       <CodeEditorBinaryFile
         file={file}
@@ -270,8 +246,13 @@ export default function CodeEditor({
         isFullscreen={isFullscreen}
         onClose={requestClose}
         onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
+        onDownload={handleDownload}
         title={t('binaryFile.title', 'Binary File')}
         message={t('binaryFile.message', 'The file "{{fileName}}" cannot be displayed in the text editor because it is a binary file.', { fileName: file.name })}
+        labels={{
+          download: t('actions.download'),
+          downloadError: t('download.error', 'Unable to download this file.'),
+        }}
       />
     );
   }
@@ -304,7 +285,7 @@ export default function CodeEditor({
             onToggleMarkdownPreview={() => setMarkdownPreview((previous) => !previous)}
             onOpenHtmlPreview={openHtmlPreview}
             onOpenSettings={() => paletteOps.openSettings('appearance')}
-            onDownload={handleDownload}
+            onDownload={() => { void handleDownload().catch((error) => console.error('Error downloading file:', error)); }}
             onSave={handleSave}
             onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
             onClose={requestClose}

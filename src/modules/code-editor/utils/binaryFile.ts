@@ -1,4 +1,5 @@
-// Binary file extensions (images are handled by ImageViewer, not here)
+// Binary file extensions. Images/PDF/media are additionally covered by
+// getPreviewKind so the editor shows a download-only notice for them too.
 const BINARY_EXTENSIONS = [
   // Archives
   'zip', 'tar', 'gz', 'rar', '7z', 'bz2', 'xz',
@@ -13,7 +14,9 @@ const BINARY_EXTENSIONS = [
   // Database
   'db', 'sqlite', 'sqlite3',
   // Other binary
-  'bin', 'dat', 'iso', 'img', 'class', 'jar', 'war', 'pyc', 'pyo'
+  'bin', 'dat', 'iso', 'img', 'class', 'jar', 'war', 'pyc', 'pyo',
+  // Mobile app packages
+  'apk', 'aab', 'ipa'
 ];
 
 export const isBinaryFile = (filename: string): boolean => {
