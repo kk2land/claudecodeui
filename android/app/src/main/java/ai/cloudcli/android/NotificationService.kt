@@ -185,7 +185,7 @@ class NotificationService : Service() {
                 connecting = false
                 return@execute
             }
-            if (!registerEndpoint(current.origin, current.token)) {
+            if (!registerEndpoint(current)) {
                 connecting = false
                 if (!stopping) scheduleReconnect()
                 return@execute
@@ -216,7 +216,7 @@ class NotificationService : Service() {
 
     private fun isCurrent(attemptId: Int): Boolean = attemptId == attempt && !stopping
 
-    private fun registerEndpoint(origin: String, token: String): Boolean {
+    private fun registerEndpoint(captured: Captured): Boolean {
         val body = JSONObject()
             .put("channel", "android")
             .put("endpointId", AppRuntime.prefs.deviceId)
@@ -226,32 +226,41 @@ class NotificationService : Service() {
             .toString()
             .toRequestBody(JSON_MEDIA_TYPE)
         val request = Request.Builder()
-            .url("$origin/api/notifications/endpoints/current")
-            .header("Authorization", "Bearer $token")
+            .url("${captured.origin}/api/notifications/endpoints/current")
+            .header("Authorization", "Bearer ${captured.token}")
             .post(body)
             .build()
+        // The blocking response can arrive long after a logout, site change or re-login (up to the
+        // client read timeout). Only the captured origin+token still being current may change
+        // session state; otherwise the newer login is left alone and the existing caller reconnect
+        // path picks up its credentials.
         return try {
             client.newCall(request).execute().use { response ->
+                val owner = owns(captured) && !stopping
                 when {
                     response.isSuccessful -> true
                     response.code == 401 -> {
-                        AppRuntime.expireSession()
-                        shutdownNow(disableEndpoint = false)
+                        if (owner) {
+                            AppRuntime.expireSession()
+                            shutdownNow(disableEndpoint = false)
+                        }
                         false
                     }
                     response.code == 404 -> {
-                        AppRuntime.setLastError(BridgeLastError.UNSUPPORTED_SERVER)
-                        shutdownNow(disableEndpoint = false)
+                        if (owner) {
+                            AppRuntime.setLastError(BridgeLastError.UNSUPPORTED_SERVER)
+                            shutdownNow(disableEndpoint = false)
+                        }
                         false
                     }
                     else -> {
-                        AppRuntime.setLastError(BridgeLastError.REGISTER_FAILED)
+                        if (owner) AppRuntime.setLastError(BridgeLastError.REGISTER_FAILED)
                         false
                     }
                 }
             }
         } catch (_: IOException) {
-            AppRuntime.setLastError(BridgeLastError.NETWORK_ERROR)
+            if (owns(captured) && !stopping) AppRuntime.setLastError(BridgeLastError.NETWORK_ERROR)
             false
         }
     }

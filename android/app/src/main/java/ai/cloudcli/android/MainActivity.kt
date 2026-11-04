@@ -45,7 +45,6 @@ class MainActivity : Activity(), BridgeHost.Host {
     private var pendingPick: ((List<Uri>?) -> Unit)? = null
     private var pendingCreate: ((Uri?) -> Unit)? = null
     private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
-    private var pendingDeepLink: String? = null
     private var clearHistoryOnNextPage = false
     private var pageBackgroundColor: Int = DEFAULT_PAGE_BACKGROUND
 
@@ -251,7 +250,9 @@ class MainActivity : Activity(), BridgeHost.Host {
         }
         siteError.visibility = View.GONE
         AppRuntime.prefs.changeOrigin(origin)
-        openSite(origin, pendingDeepLink)
+        // A notification deep link belongs to the origin that delivered it; a new origin always
+        // opens at its root instead of replaying another server's session id.
+        openSite(origin, deepLink = null)
     }
 
     private fun openSite(origin: String, deepLink: String?) {
@@ -399,10 +400,10 @@ class MainActivity : Activity(), BridgeHost.Host {
         return action
     }
 
+    /** The notification session id is consumed from the intent itself, so it is used once. */
     private fun deepLinkFrom(intent: Intent?): String? {
         val sessionId = intent?.getStringExtra(EXTRA_SESSION_ID)
         if (intent != null && sessionId != null) intent.removeExtra(EXTRA_SESSION_ID)
-        pendingDeepLink = sessionId
         return sessionId
     }
 

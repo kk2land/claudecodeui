@@ -129,9 +129,9 @@ the server/web side's responsibility (already handled upstream); the app does no
 | Libraries | `androidx.webkit:webkit:1.12.1`, `com.squareup.okhttp3:okhttp:4.12.0` |
 | Tests | JUnit 4.13.2 (+ `org.json` for JVM JWT tests) |
 
-`applicationId` = `ai.cloudcli.android`, label `CloudCLI`, `versionCode` 3, `versionName` 0.1.2
+`applicationId` = `ai.cloudcli.android`, label `CloudCLI`, `versionCode` 4, `versionName` 0.1.3
 (`versionCode` 1 / `0.1.0` was the first real-device build; `0.1.1` / code 2 followed; `0.1.2` /
-code 3 is the current in-place update).
+code 3 was the icon fix; `0.1.3` / code 4 is the current in-place update).
 `allowBackup="false"`, so the token, device id and pending shares stay on the device.
 
 ## Shell UI
@@ -209,15 +209,15 @@ The script verifies/reuses the keystore, then runs the real gates in order:
 Output: `release/android/cloudcli-android-<versionName>-release.apk` (gitignored).
 
 Install on a device/emulator with
-`adb install -r release/android/cloudcli-android-0.1.2-release.apk`, then enter the server origin on
-the setup screen and open the site. `0.1.0`, `0.1.1` and `0.1.2` APKs are signed with the same
+`adb install -r release/android/cloudcli-android-0.1.3-release.apk`, then enter the server origin on
+the setup screen and open the site. `0.1.0` through `0.1.3` APKs are signed with the same
 certificate, so each installs as an in-place update and keeps the origin and login. For an on-device install, copy
 the APK from this repository's `release/android/` directory with a plain file copy: downloading it
 through the currently deployed `tap` (port 3001) **download button** can still corrupt it, because
 that bundle (`assets/index-DCWN_IYP.js`) predates the fixed original-byte download handler. Update
 and refresh that deployment before using its download button; until then use a direct computer copy
-and do not treat a file fetched from that old UI as a valid APK (for 0.1.2 verify size
-`1,446,483` and SHA-256 `75586f93…e6f60e19` below).
+and do not treat a file fetched from that old UI as a valid APK (for 0.1.3 verify size and SHA-256
+against the 0.1.3 section below).
 
 ## Release signing
 
@@ -233,6 +233,47 @@ Private, outside the repository: `/Users/agent/workspaces/tap/.cloudcli/android-
 Keep this key: Android only accepts updates signed with the same certificate. Passwords are only
 read from that private file/environment by keytool and Gradle; they are never printed, committed, or
 packaged into the APK. `*.p12`, `*.jks`, `signing.properties` and `release/android/` are gitignored.
+
+## 0.1.3 build status
+
+`0.1.3` (code 4) bundles the three low-severity fixes from the native pre-push review; no bridge
+contract, icon resource, signing or web/server/source change was made.
+
+- **Notification deep link is one-shot and origin-bound.** A notification session id is read from
+the delivering intent once and no longer stored on the Activity. Tapping a notification still opens
+that session; after a `Change server` the new origin opens at its root instead of replaying the old
+server's session id, and an ordinary reload no longer reuses a stale link.
+- **Endpoint registration no longer clears a newer login.** `registerEndpoint()` works on the
+captured origin+token and applies a blocking result (401/404/other error/network error, up to the
+15 s connect / 90 s read timeout) only while that capture is still current, using the existing
+`RefreshGuard` ownership check and `stopping` flag. A stale 401/404/error therefore leaves a newer
+login untouched and the existing connect/reconnect path schedules the current credentials. The
+refresh-ownership rules are unchanged; no new locking, generation or expiry system was added.
+- **`uiMode`, `fontScale` and `density` added to the existing `configChanges`.** A system
+dark/light switch, font-size change or display-size change no longer recreates `MainActivity`/
+reloads the WebView, so page-owned drafts, in-memory attachments and pending pick/save callbacks
+survive. Rotation/screen-size handling is unchanged and the framework still re-runs layout, insets
+and the onResume theme sync; no Activity state framework was introduced.
+
+Verification actually run on the final tree: `lintDebug` — `BUILD SUCCESSFUL`, 0 errors (deprecation
+warnings only, same class as before); `testDebugUnitTest` — `BUILD SUCCESSFUL`, 29 JVM tests, 0
+failures; `assembleRelease` — `BUILD SUCCESSFUL`; `apksigner verify` — v2 true, signer certificate
+SHA-256 `4da7c681…a5e8` (same key as 0.1.0–0.1.2, so 0.1.3 installs over 0.1.2 and keeps the
+origin/login). The 0.757 launcher icon resources and all 12 public bridge methods are unchanged.
+
+Artifact: `release/android/cloudcli-android-0.1.3-release.apk`, 1,446,587 B, SHA-256
+`869cddb0dd9408da8d54fb18de1e7a6dbf47a1920b9ab3c7d9bdfd3ae0a967c7`, `versionCode` 4,
+`versionName` 0.1.3, signer certificate SHA-256
+`4da7c681f9101309af64e432b1d58658920fb4965f6ccc8cc3738497e2e7a5e8` (APK Signature Scheme v2), with
+the `.sha256` sidecar and `apksigner-verify-0.1.3.txt` next to it. The 0.1.0/0.1.1/0.1.2 artifacts
+and the root APKs are left untouched.
+
+Not verified for 0.1.3: no live emulator/device run of a system dark-mode/font-size/display-size
+change or of a slow 401 crossing a logout/re-login (both need a running device and network
+manipulation; the harness here cannot keep a background emulator alive across tool calls, and the
+change was validated from the compiled/signed tree plus the source paths above). The earlier
+0.1.0/0.1.1/0.1.2 device evidence still covers the bridge, notification service, cache and share
+flows.
 
 ## 0.1.2 build status
 
