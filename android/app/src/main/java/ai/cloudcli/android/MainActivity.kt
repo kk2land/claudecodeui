@@ -46,6 +46,7 @@ class MainActivity : Activity(), BridgeHost.Host {
     private var pendingCreate: ((Uri?) -> Unit)? = null
     private var pendingFileChooser: ValueCallback<Array<Uri>>? = null
     private var pendingDeepLink: String? = null
+    private var clearHistoryOnNextPage = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -218,6 +219,7 @@ class MainActivity : Activity(), BridgeHost.Host {
         siteOrigin = null
         webView.stopLoading()
         webView.loadUrl("about:blank")
+        clearHistoryOnNextPage = true
         siteInput.setText("")
         showSetup()
     }
@@ -248,6 +250,18 @@ class MainActivity : Activity(), BridgeHost.Host {
 
             override fun onPageFinished(view: WebView, url: String?) {
                 progress.visibility = View.GONE
+                val origin = siteOrigin
+                if (clearHistoryOnNextPage && url != null) {
+                    if (url == "about:blank") {
+                        // The site change unloads the old page here; drop it from history immediately.
+                        view.clearHistory()
+                    } else if (origin != null && url.startsWith("$origin/")) {
+                        // After the first page of the newly configured origin, only that page remains,
+                        // so Back never lands on the old origin or a blank page.
+                        view.clearHistory()
+                        clearHistoryOnNextPage = false
+                    }
+                }
             }
         }
         // Plain HTML uploads (file-tree, skills) keep using the page's own <input type="file">.

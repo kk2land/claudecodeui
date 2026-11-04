@@ -195,10 +195,22 @@ force-stop and explicit user reopen shows `Runtime build B`, still signed in, an
 notification socket **after** the fix described below (no boot receiver/watchdog added: the web
 bootstrap's `getSession` handshake now resumes the service when the preference is enabled).
 
-Still unverified natively: draft/unsent-attachment persistence across the A→B cold open (the
-attempt landed on a blank WebView page after closing Settings with BACK — `Change site` loads
-`about:blank`, which stays in WebView history; a minimal back-handling fix is pending), and every
-phase-2 item (shares, pick/save, plain HTML upload).
+- Cache A→B with the real Vite builds behind `http://127.0.0.1:3100`: unsent draft in the same
+  new-session scope survives `switch.sh B`, a force-stop and an explicit user reopen — `Runtime build B`,
+  still signed in, draft intact and unsent (the new bundle comes from the immutable HTTP cache when the
+  hash was fetched before; the executed bundle is verified by the runtime badge, and `/sw.js` shows a
+  fresh 304 revalidation).
+- Site change no longer leaves `about:blank` in WebView history: Back from the newly configured origin
+  exits instead of showing a blank page (history is cleared after the unload and after the first page
+  of the new origin; in-site history is untouched).
+- `ACTION_SEND` text/link and `ACTION_SEND_MULTIPLE` (real `ParcelableArrayList<Uri>`, 2 files) import
+  into the pending index; `getShareContent` returns byte-identical data (sha256 checked), consume and
+  discard remove the items, and an 11 MiB file is not imported (10 MiB boundary).
+- `saveFile` writes byte-identical data: 300000 B (>256 KiB, sha256 checked) and 0 B both report
+  `saved:true` and land in `Download`.
+
+Still unverified natively: `pickFiles` (cancel/success), `saveFile` cancel, plain HTML
+`<input type="file">`, and inserting a share into a real session draft through the web share inbox.
 
 Earlier API 34 run (`emulator-5580`) with the **release** APK (not debuggable):
 the setup screen accepts `http://127.0.0.1:3000`, the real dev site loads in the app's WebView, real
