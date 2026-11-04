@@ -83,7 +83,10 @@ export ANDROID_HOME="$SDK_ROOT"
 
 GRADLE_CMD="${GRADLE_CMD:-$ANDROID_DIR/gradlew}"
 [ -x "$GRADLE_CMD" ] || die "Gradle command not executable: $GRADLE_CMD"
-read -r -a EXTRA_GRADLE_ARGS <<< "${GRADLE_ARGS:-}"
+EXTRA_GRADLE_ARGS=()
+if [ -n "${GRADLE_ARGS:-}" ]; then
+  read -r -a EXTRA_GRADLE_ARGS <<< "$GRADLE_ARGS"
+fi
 
 # ---------------------------------------------------------------- signing setup
 SIGNING_DIR="${CLOUDCLI_ANDROID_SIGNING_DIR:-$HOME/.cloudcli/android-signing}"
@@ -135,7 +138,7 @@ if [ ! -f "$ANDROID_DIR/local.properties" ]; then
 fi
 
 gradle() {
-  "$GRADLE_CMD" -p "$ANDROID_DIR" --console=plain "${EXTRA_GRADLE_ARGS[@]}" "$@"
+  "$GRADLE_CMD" -p "$ANDROID_DIR" --console=plain ${EXTRA_GRADLE_ARGS[@]+"${EXTRA_GRADLE_ARGS[@]}"} "$@"
 }
 
 log "lintDebug"
