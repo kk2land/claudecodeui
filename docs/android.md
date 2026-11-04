@@ -41,8 +41,10 @@ runtime for providers, background upload/sync frameworks.
   Zero-byte files send exactly one empty chunk so both sides complete.
 
 If the WebView does not support document-start scripts, web message listeners or ArrayBuffer
-messages, **nothing is exposed** (no partial bridge); the web app then shows "Android bridge
-unavailable".
+messages, **nothing is exposed** (no partial bridge). The native shell reports this with a Toast
+("Android bridge unavailable"); the web app can only observe that the bridge object is absent and
+falls back to its normal browser behaviour, so the absence of the object does not by itself prove
+which platform the page is running on.
 
 `getState` fields: `version`, `siteOrigin`, `webBridgeReady`, `signedIn`, `notificationsEnabled`,
 `serviceRunning`, `connected` (true only after the server's `registered` frame), `lastError`,
@@ -156,80 +158,90 @@ packaged into the APK. `*.p12`, `*.jks`, `signing.properties` and `release/andro
 
 ## Verification status
 
-Verified in this repository: 29 JVM unit tests (`SiteOrigin`, `Jwt`, `TransferFrame`,
-`ReconnectPolicy`, `RefreshGuard`), the bridge itself under a Node VM (zero-byte transfer, finish
-failure rejection, 256 KiB chunking, error/event dispatch), `lintDebug` (0 errors), signed
-`assembleRelease` and `apksigner verify`.
+Accepted on the API 36 emulator (`emulator-5582`, `CloudCLI_Test_API36`, WebView
+133.0.6943.137) with the signed **release** APK (not debuggable) — no device/real-hardware run was
+part of this acceptance.
 
-**Phase 1 verified on the API 36 emulator (`emulator-5582`, WebView 133.0.6943.137)** with the
-release APK (not debuggable), against the `/tmp` fixture on `http://127.0.0.1:3110`:
+Release artifact: `release/android/cloudcli-android-0.1.0-release.apk`, 1,440,719 B, SHA-256
+`7962654f03bcefb357d327e3ef257c0226cf5963d0108b76a0cd0d4b6a5d3587`, signer certificate SHA-256
+`4da7c681f9101309af64e432b1d58658920fb4965f6ccc8cc3738497e2e7a5e8` (APK Signature Scheme v2).
 
-- bridge v1 with all 12 methods, `getState` answering `webBridgeReady: true`;
-- notification permission denial → `notificationsEnabled:false` / `lastError:PERMISSION_DENIED`;
-- permission granted → real `POST /api/notifications/endpoints/current` (channel `android`, stable
-  device id, `appVersion` from the build) → WS `register` → `registered` → `serviceRunning:true`,
-  `connected:true`, foreground `cloudcli-service` notification;
-- repeated `setNotificationsEnabled(true)` + `saveSession` keep exactly one live socket;
-- `notify()` → system notification (`cloudcli-events`, tag from the request) and tapping it opens
-  `/session/<id>`; a fixture-pushed notification while backgrounded is shown and acknowledged
-  (`notification_ack … action:shown`);
-- the foreground notification `Stop` action closes the socket and notification immediately with no
-  auto-restart;
-- refresh ownership (connecting phase): a token saved while the 4 s delayed refresh is in flight is
-  used for `register`, and the current token gets its own next refresh (~60 s later) with a single
-  chain — the service never dead-ends;
-- target-36 edge-to-edge: content and the overflow menu are inset below the status bar and above the
-  navigation bar/IME (`applyEdgeToEdgeInsets`, no new dependency).
+Bridge and notifications (fixture origin `http://127.0.0.1:3110` unless stated):
 
-- refresh ownership (connected phase): a token saved while the **connected** half-life refresh is in
-  flight again gets its own next refresh (~60 s) with one live socket and `connected:true`;
-  `clearSession` during an in-flight refresh clears the token, stops the service and never restores
-  either (no retry, no re-register, sockets stay 0).
+- bridge v1 with all 12 methods; `getState` returns `webBridgeReady`/`signedIn`/`connected` correctly;
+- Android 13+ notification permission denial keeps the setting off with
+  `lastError = PERMISSION_DENIED`; after granting, enabling performs the real
+  `POST /api/notifications/endpoints/current` (channel `android`, stable device id), opens the WS,
+  `register` → `registered`, and shows the `cloudcli-service` foreground notification;
+- repeated `setNotificationsEnabled(true)` and `saveSession` keep exactly one live socket;
+- `notify()` posts a `cloudcli-events` notification and tapping it opens `/session/<id>`; a
+  server/fixture-pushed notification while the app is backgrounded is shown and acknowledged
+  (`notification_ack … action:shown`); the foreground notification `Stop` action closes the socket
+  and notification immediately and nothing restarts it;
+- refresh handoff: a token saved while a half-life refresh is in flight (both while connecting and
+  while connected) is used for `register`, and the current token gets its own next refresh with a
+  single retry chain; `clearSession` during an in-flight refresh clears the token, stops the service
+  and restores neither;
+- overflow menu / Change site / Reload are reachable, target-36 edge-to-edge insets keep the WebView
+  and overflow button clear of the status and navigation bars and of the IME, and Back from a newly
+  configured origin no longer lands on a blank page (the previous origin and `about:blank` are
+  dropped from WebView history).
 
-Also verified through the real backend reverse-proxied at `http://127.0.0.1:3100`: real login,
-native `saveSession` sync (enable only succeeds with the native token), real
-`POST /api/notifications/endpoints/current`, real `/android-notifications` upgrade authenticated by
-the dev server, `已连接服务器`/`后台服务运行中` in the settings UI and the `cloudcli-service`
-foreground notification. Switching the A/B fixture from build A to build B (new Vite hash) with a
-force-stop and explicit user reopen shows `Runtime build B`, still signed in, and reconnects the
-notification socket **after** the fix described below (no boot receiver/watchdog added: the web
-bootstrap's `getSession` handshake now resumes the service when the preference is enabled).
+Real backend (dev server proxied at `http://127.0.0.1:3100`): real login, native `saveSession` sync
+(enabling only succeeds with the native token), real endpoint registration, real
+`/android-notifications` upgrade authenticated by the server, settings showing connected/running, and
+the foreground notification. After switching the A/B fixtures from build A to build B (different
+Vite hash, no server restart, no storage clear), a force-stop and explicit user reopen show
+`Runtime build B`, keep the login and the unsent draft in the same session scope, and resume the
+notification connection (the web bootstrap's `getSession` handshake resumes the service when the
+preference is enabled; there is no boot receiver, watchdog or polling).
 
-- Cache A→B with the real Vite builds behind `http://127.0.0.1:3100`: unsent draft in the same
-  new-session scope survives `switch.sh B`, a force-stop and an explicit user reopen — `Runtime build B`,
-  still signed in, draft intact and unsent (the new bundle comes from the immutable HTTP cache when the
-  hash was fetched before; the executed bundle is verified by the runtime badge, and `/sw.js` shows a
-  fresh 304 revalidation).
-- Site change no longer leaves `about:blank` in WebView history: Back from the newly configured origin
-  exits instead of showing a blank page (history is cleared after the unload and after the first page
-  of the new origin; in-site history is untouched).
-- `ACTION_SEND` text/link and `ACTION_SEND_MULTIPLE` (real `ParcelableArrayList<Uri>`, 2 files) import
-  into the pending index; `getShareContent` returns byte-identical data (sha256 checked), consume and
-  discard remove the items, and an 11 MiB file is not imported (10 MiB boundary).
-- `saveFile` writes byte-identical data: 300000 B (>256 KiB, sha256 checked) and 0 B both report
-  `saved:true` and land in `Download`.
+Files and shares (release APK): `ACTION_SEND` text/link and `ACTION_SEND_MULTIPLE` with a real
+`ParcelableArrayList<Uri>` import into the pending index, `getShareContent` returns byte-identical
+data (sha256 verified), consume/discard remove items, and an 11 MiB file is refused by the 10 MiB
+boundary; `saveFile` writes byte-identical 300000 B and 0 B files; `pickFiles` cancel resolves `[]`
+and a real multi-select returns correct 300000 B and 0 B Blobs (sha256 verified); `saveFile` cancel
+rejects `CANCELLED`; a plain HTML `<input type="file">` delivers correct bytes; the web share inbox
+appends `\n\n`-separated text to an existing session draft without sending it, and a 25 B
+attachment plus the draft survive backgrounding and returning to the app.
 
-Still unverified natively: `pickFiles` (cancel/success), `saveFile` cancel, plain HTML
-`<input type="file">`, and inserting a share into a real session draft through the web share inbox.
+Calling `notify` from the page (the same call the web app uses):
 
-Earlier API 34 run (`emulator-5580`) with the **release** APK (not debuggable):
-the setup screen accepts `http://127.0.0.1:3000`, the real dev site loads in the app's WebView, real
-credentials log in successfully, the session survives force-stop/relaunch, and the new overflow menu
-exposes *Change site* / *Reload* (the `NoActionBar` theme previously left the options menu
-unreachable). Back with no WebView history exits the activity.
+```js
+await window.cloudcliAndroid.notify({
+  title: 'Build finished',
+  body: 'Session "release" stopped',
+  sessionId: 'app-session-id',   // click target, optional
+  tag: 'claude:app-session-id:run.stopped', // replaces an equal tag, optional
+});
+```
 
-Blocked on the emulator's WebView: the installed provider (`com.google.android.webview`
-113.0.5672.136) reports `DOCUMENT_START_SCRIPT` and `WEB_MESSAGE_LISTENER` supported but
-**`WEB_MESSAGE_ARRAY_BUFFER` unsupported**, so by contract the app exposes no bridge
-(`W CloudCLIBridge: bridge disabled, unsupported WebView features: [WEB_MESSAGE_ARRAY_BUFFER]` and
-the test page shows `window.cloudcliAndroid` absent). Until the WebView is updated to a provider
-that advertises `WEB_MESSAGE_ARRAY_BUFFER`, none of the bridge-dependent flows can be exercised:
-notification registration/`registered`, permission deny/grant, system notification + `/session/:id`
-click, background fixture delivery/ack, immediate stop / single-socket enable, share intake,
-`pickFiles`/`saveFile` (cancel, 0-byte, >256 KiB), plain HTML file upload, and the refresh-ownership
-scenarios with the delayed fixture. These are **not** verified natively and the unit/VM tests are not
-a substitute. The test fixture used for those scenarios lives at `/tmp/w2-fixture/` (port 3110) and
-the emulator has `adb reverse tcp:3110 tcp:3110`; evidence is in `/tmp/w2-emulator-*.log|json`.
+Observed once during testing: after focusing a plain HTML file input, the first tap on the native
+overflow button did not respond; restarting the app recovered normal behaviour. It was not
+consistently reproduced and is recorded without any code change.
+
+Compatibility note: the app requires the WebView to support `DOCUMENT_START_SCRIPT`,
+`WEB_MESSAGE_LISTENER` and `WEB_MESSAGE_ARRAY_BUFFER`; when a provider lacks
+`WEB_MESSAGE_ARRAY_BUFFER` (observed with the API 34 image's WebView 113.0.5672.136) the app
+deliberately exposes **no** bridge and logs
+`bridge disabled, unsupported WebView features: [WEB_MESSAGE_ARRAY_BUFFER]`, and the native shell
+shows a Toast reporting that the bridge is unavailable instead of degrading. Update the
+WebView/system image to use the bridge.
+
+Scope of these guarantees: this acceptance ran on an emulator. Real devices may apply Doze and
+vendor battery management, so the foreground notification connection is best effort — it is not
+claimed to be immune to being killed by the system; reopening the app after a force-stop/user stop
+resumes it only when the user has notifications enabled.
+
+First run: install the APK, enter the server root origin, sign in on the web page, then enable
+"Android notifications" in the web notification settings (granting the Android permission when
+asked). After the server's web frontend is updated, opening the app cold fetches the new HTML and
+hashed assets while login and drafts are preserved; returning to a warm app does not force a reload,
+so unsent attachments are kept.
+
+Also verified without a device: 29 JVM unit tests (`SiteOrigin`, `Jwt`, `TransferFrame`,
+`ReconnectPolicy`, `RefreshGuard`), the injected bridge under a Node VM (zero-byte transfer, finish
+failure rejection, 256 KiB chunking, events), `lintDebug` (0 errors) and `apksigner verify`.
 
 ## Sandboxed build hosts
 
