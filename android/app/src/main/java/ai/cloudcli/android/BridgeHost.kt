@@ -231,6 +231,11 @@ class BridgeHost(
         val token = AppRuntime.prefs.token()
         if (token != null && Jwt.isUsable(token)) {
             respond(id, JSONObject().put("token", token))
+            // The web bootstrap's first getSession is the handshake on every (cold) app open: if the
+            // user previously enabled notifications, resume the connection now (no boot/watchdog).
+            if (AppRuntime.prefs.notificationsEnabled && NotificationService.current() == null) {
+                AppRuntime.startNotificationService()
+            }
         } else {
             respond(id, null)
         }

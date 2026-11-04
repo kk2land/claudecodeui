@@ -181,9 +181,24 @@ release APK (not debuggable), against the `/tmp` fixture on `http://127.0.0.1:31
 - target-36 edge-to-edge: content and the overflow menu are inset below the status bar and above the
   navigation bar/IME (`applyEdgeToEdgeInsets`, no new dependency).
 
-Still unverified natively: the `refresh-connected` variant, logout during an in-flight refresh, real
-backend `http://127.0.0.1:3000` login/native token sync/cold-open restore, and every phase-2 item
-(shares, pick/save, plain HTML upload, A→B cache).
+- refresh ownership (connected phase): a token saved while the **connected** half-life refresh is in
+  flight again gets its own next refresh (~60 s) with one live socket and `connected:true`;
+  `clearSession` during an in-flight refresh clears the token, stops the service and never restores
+  either (no retry, no re-register, sockets stay 0).
+
+Also verified through the real backend reverse-proxied at `http://127.0.0.1:3100`: real login,
+native `saveSession` sync (enable only succeeds with the native token), real
+`POST /api/notifications/endpoints/current`, real `/android-notifications` upgrade authenticated by
+the dev server, `已连接服务器`/`后台服务运行中` in the settings UI and the `cloudcli-service`
+foreground notification. Switching the A/B fixture from build A to build B (new Vite hash) with a
+force-stop and explicit user reopen shows `Runtime build B`, still signed in, and reconnects the
+notification socket **after** the fix described below (no boot receiver/watchdog added: the web
+bootstrap's `getSession` handshake now resumes the service when the preference is enabled).
+
+Still unverified natively: draft/unsent-attachment persistence across the A→B cold open (the
+attempt landed on a blank WebView page after closing Settings with BACK — `Change site` loads
+`about:blank`, which stays in WebView history; a minimal back-handling fix is pending), and every
+phase-2 item (shares, pick/save, plain HTML upload).
 
 Earlier API 34 run (`emulator-5580`) with the **release** APK (not debuggable):
 the setup screen accepts `http://127.0.0.1:3000`, the real dev site loads in the app's WebView, real
