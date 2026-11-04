@@ -170,10 +170,11 @@ the server/web side's responsibility (already handled upstream); the app does no
   (`px-2 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))]` in the chat composer), so reserving the
   full navigation-bar inset natively as well counted the same space twice. Gesture navigation now
   keeps only the page's own gesture-handle clearance, while a three-button navigation bar still
-  reserves its tappable height. This is a code-level fix; the actual `env()` value and the visual
-  result on a device are still to be measured (the earlier ~16 px figure came from a screenshot
-  estimate, not a device probe). No screen height or fixed padding is hard-coded, and closing the
-  keyboard never leaves the IME inset behind.
+  reserves its tappable height. On the API 36 emulator the WebView reports
+  `env(safe-area-inset-top)`/`env(safe-area-inset-bottom)` = 0 (a WebView/version-specific result,
+  not a blanket claim about all WebViews; the earlier ~16 px figure was only a screenshot estimate).
+  No screen height or fixed padding is hard-coded, and closing the keyboard never leaves the IME
+  inset behind.
 - **Native shell entry points**: the in-page floating overflow button was removed (user feedback:
   it sat over the web header and was unreliable). There is no replacement overlay or hidden
   gesture. Native actions are static launcher shortcuts (`res/xml/shortcuts.xml`): long-press the
@@ -203,7 +204,13 @@ Output: `release/android/cloudcli-android-<versionName>-release.apk` (gitignored
 
 Install on a device/emulator with
 `adb install -r release/android/cloudcli-android-0.1.1-release.apk`, then enter the server origin on
-the setup screen and open the site.
+the setup screen and open the site. The `0.1.1` APK is signed with the same certificate as `0.1.0`,
+so it installs as an in-place update and keeps the origin and login. For an on-device install, copy
+the APK from this repository's `release/android/` directory: downloading it through the currently
+deployed `tap` (port 3001) **download button** can still corrupt it, because that bundle
+(`assets/index-DCWN_IYP.js`) predates the fixed original-byte download handler. Update that
+deployment and refresh it before using its download button; do not treat a file fetched from that
+old UI as a valid APK (verify size `1,446,315` and the SHA-256 below).
 
 ## Release signing
 
@@ -231,10 +238,13 @@ launcher icon, first-run notification enablement). Built from this tree with
 - `testDebugUnitTest` — success, 29 JVM tests, 0 failures.
 - `assembleRelease` + `apksigner verify` — success.
 
-After a review fix in `android/app/src/main/assets/bridge.js` (theme re-read after the body
-`background-color` transition), only `assembleRelease` + `apksigner verify` were rerun; lint and the
-29 JVM tests were not rerun for that asset-only patch, which was covered by a targeted Node VM
-harness instead.
+Two review fixes followed the first build: the theme re-read after the body `background-color`
+transition in `android/app/src/main/assets/bridge.js` (validated by a Node VM harness — failing
+before, passing after), and the static `Theme.CloudCLI` attributes (`windowBackground`, transparent
+bars) that were previously only set at runtime. After the asset-only patch only
+`assembleRelease`/`apksigner` were rerun; after the resource fix `lintDebug` (0 errors) and
+`assembleRelease`/`apksigner` were rerun. The 29 JVM tests were not re-run for either, since neither
+touched Kotlin logic.
 
 Artifact: `release/android/cloudcli-android-0.1.1-release.apk`, 1,446,315 B, SHA-256
 `4e5ebdb5a36cbeab777c1046fb8a330097dfed68009504a2293ed6f6627d6c87`, signer certificate SHA-256
@@ -242,13 +252,53 @@ Artifact: `release/android/cloudcli-android-0.1.1-release.apk`, 1,446,315 B, SHA
 same certificate as `0.1.0`, so it installs as an update). The previous
 `release/android/cloudcli-android-0.1.0-release.apk` is left untouched.
 
-0.1.1 is **build-verified only** (the gates above). Device QA is still pending and no 0.1.1
-behaviour is claimed as accepted here: the visual result of the status-bar colour/icon contrast and
-bottom inset changes, keyboard open/close behaviour, the launcher icon on a real launcher, the
-launcher-shortcut entry points, and the first-run permission/enable flow end to end (including
-denial and a later explicit `Stop`, which must not be auto-reversed). The 0.1.0 emulator acceptance
-below describes the previous build (overflow menu, no shortcuts, no first-run enablement) and does
-not transfer to 0.1.1.
+### 0.1.1 emulator acceptance
+
+Accepted on the same API 36 emulator (`emulator-5582`, `CloudCLI_Test_API36`, WebView
+133.0.6943.137) with the signed **release** APK (not debuggable). The installed APK pulled from the
+device matched SHA-256 `4e5ebdb5…7d6c87`; no debug build was used. This section covers only 0.1.1
+and only that emulator image.
+
+Upgrade and first-run notifications:
+
+- `adb install -r` over `0.1.0` without clearing data kept the configured origin and the real JWT
+  session. On the next real login no manual notification toggle was needed: the shell asked for the
+  Android `POST_NOTIFICATIONS` permission itself, and **Allow** brought up the real endpoint and
+  WebSocket connection in under a second (`connected = true`), with `NotificationService` running
+  as a foreground service (`id 1001`, channel `cloudcli-service`, ONGOING) and visible in the
+  notification drawer.
+- An explicit **Stop** was respected: after a cold restart the stored preference stayed `false` and
+  no permission dialog reappeared.
+- A fresh app-data run choosing **Don't allow** ended with `notificationsEnabled = false`,
+  `lastError = PERMISSION_DENIED`, no foreground service and no reversed state on a later cold
+  start. Enabling again manually from the web Settings → notifications and choosing **Allow**
+  restored `serviceRunning`/`connected`.
+- A persistent "old" state is never revived automatically: Stop/Disable, a denied permission or a
+  server change stays off until the user enables it again in the web settings.
+
+UI findings from the emulator report:
+
+- Status bar follows the web theme: light theme measured `rgb(247,246,243)` and dark theme
+  `rgb(20,20,20)` at native y=20/y=35, matching the web body/header after the 200 ms
+  `background-color` transition; status/navigation icons stay legible in both themes.
+- The native grey `⋮` button is gone; there is no overlay on the web header. The launcher icon is
+  the real CloudCLI SVG-derived adaptive icon. Long-pressing the launcher icon shows **Change
+  server** and **Reload page**; **Reload page** was tapped and really reloaded the app origin.
+  **Change server** was only observed in the menu (not tapped, because it clears the session), so
+  that flow is documented but not executed.
+- Bottom spacing: with the duplicated native gesture inset removed, the gesture-navigation viewport
+  grew from 842 to 866 CSS px and the page's own 24 CSS px bottom padding remains; three-button
+  navigation measured 818 CSS px with no overlap. With the keyboard open the viewport was 530 CSS px
+  and returned to 866 when it closed, with no residual gap and no covered content.
+
+Not verified: real OEM/physical-device behaviour (only the API 36 emulator was used), vendor battery
+management/Doze, and a long-running multi-hour notification connection. "Never killed by the system"
+is not claimed. Earlier "composer gap" pixel numbers are dropped: the probe
+measured `textarea` bottom including its toolbar/margins, not a blank-space height.
+
+The older `## Verification status (0.1.0 emulator acceptance)` section below is historical: the
+0.1.0 cache/share/picker runs were not repeated for 0.1.1 (the native code there is unchanged), and
+0.1.0 used the overflow menu without launcher shortcuts or first-run enablement.
 
 ## Verification status (0.1.0 emulator acceptance)
 
