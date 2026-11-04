@@ -143,3 +143,29 @@ test('without a bridge initialization is a no-op and leaves the browser session 
 
   assert.equal(localStorage.getItem('auth-token'), token);
 });
+
+test('an ordinary logout drops the cached token so the same token reaches native again', async () => {
+  // The server signs JWTs without a jti, so a login in the same second as the
+  // previous one reissues a byte-identical token. Without resetting the dedupe
+  // cache on logout that token would never be saved to the native store.
+  const token = createToken(0);
+  const saveSession = vi.fn(async (_token: string) => ({ accepted: true }));
+  const clearSession = vi.fn(async () => undefined);
+  (window as BridgeWindow).cloudcliAndroid = createBridge({ saveSession, clearSession });
+
+  const { clearAndroidBridgeSession, initializeAndroidBridge } = await import('@/modules/android-bridge/bootstrap');
+  const { AUTH_TOKEN_REFRESHED_EVENT } = await import('@/shared/authToken');
+  await initializeAndroidBridge();
+
+  window.dispatchEvent(new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: token }));
+  await flush();
+  assert.equal(saveSession.mock.calls.length, 1);
+
+  clearAndroidBridgeSession();
+  await flush();
+  assert.equal(clearSession.mock.calls.length, 1);
+
+  window.dispatchEvent(new CustomEvent(AUTH_TOKEN_REFRESHED_EVENT, { detail: token }));
+  await flush();
+  assert.deepEqual(saveSession.mock.calls.map(([saved]) => saved), [token, token]);
+});

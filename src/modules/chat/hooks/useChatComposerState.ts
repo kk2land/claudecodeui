@@ -1540,7 +1540,10 @@ export function useChatComposerState({
       if (share.kind === 'text' || share.kind === 'link') {
         const text = typeof share.text === 'string' ? share.text : '';
         if (!text.trim()) {
-          return { ok: false, error: 'The shared item has no text to insert.' };
+          return {
+            ok: false,
+            error: t('androidShare.noText', { defaultValue: 'The shared item has no text to insert.' }),
+          };
         }
 
         setInputState((previous) => {
@@ -1554,7 +1557,10 @@ export function useChatComposerState({
 
       const bridge = getAndroidBridge();
       if (!bridge) {
-        return { ok: false, error: 'Android bridge unavailable.' };
+        return {
+          ok: false,
+          error: t('androidShare.bridgeUnavailable', { defaultValue: 'Android bridge unavailable.' }),
+        };
       }
 
       try {
@@ -1562,7 +1568,7 @@ export function useChatComposerState({
         if (!active || draftScopeRef.current !== draftScope) {
           return {
             ok: false,
-            error: 'The target session is no longer open.',
+            error: t('androidShare.sessionClosed', { defaultValue: 'The target session is no longer open.' }),
           };
         }
 
@@ -1573,14 +1579,19 @@ export function useChatComposerState({
         if (accepted.length === 0) {
           return {
             ok: false,
-            error: 'The composer cannot accept this file because it is full or too large.',
+            error: t('androidShare.composerFull', {
+              defaultValue: 'The composer cannot accept this file because it is full or too large.',
+            }),
           };
         }
         return { ok: true };
       } catch (error) {
+        // A bridge read failure keeps native's own explanation when it has one.
         return {
           ok: false,
-          error: error instanceof Error ? error.message : 'Could not read the shared file.',
+          error: error instanceof Error
+            ? error.message
+            : t('androidShare.readFailed', { defaultValue: 'Could not read the shared file.' }),
         };
       }
     });
@@ -1589,7 +1600,7 @@ export function useChatComposerState({
       active = false;
       unregister();
     };
-  }, [draftScope, handleAttachmentFiles, inputState.scope]);
+  }, [draftScope, handleAttachmentFiles, inputState.scope, t]);
 
   // Persist the whole queue under its session's key — never a single slot, or
   // every write would erase the tail. Must be defined BEFORE the swap effect

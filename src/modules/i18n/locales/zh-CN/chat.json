@@ -456,5 +456,12 @@
     "model": "模型",
     "reasoning": "思考强度",
     "effortDefault": "默认"
+  },
+  "androidShare": {
+    "noText": "该分享内容没有可插入的文本。",
+    "bridgeUnavailable": "安卓桥接不可用。",
+    "sessionClosed": "目标会话已不再打开。",
+    "composerFull": "输入框无法接收此文件，因为内容已满或文件过大。",
+    "readFailed": "无法读取分享的文件。"
   }
 }

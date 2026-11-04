@@ -274,6 +274,11 @@
     "title": "来自安卓的分享",
     "target": "导入到会话",
     "import": "导入",
-    "noSession": "请先打开或选择一个会话。"
+    "noSession": "请先打开或选择一个会话。",
+    "sharedLink": "分享的链接",
+    "sharedText": "分享的文本",
+    "sharedImage": "分享的图片",
+    "sharedFile": "分享的文件",
+    "discardFailed": "无法删除该分享内容"
   }
 }

@@ -192,3 +192,42 @@ test('a text file keeps its unsaved edit while downloading the original disk byt
   await waitFor(() => assert.equal(saveFile.mock.calls.length, 1));
   assert.deepEqual(saveFile.mock.calls[0], ['p1', textFile.path, 'unsaved edit']);
 });
+
+test('a failed text download shows a visible error and the retry clears it', async () => {
+  readFile.mockResolvedValue({ ok: true, json: async () => ({ content: 'on disk' }) });
+  readFileBlob.mockRejectedValueOnce(new Error('offline'));
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+  render(<CodeEditor file={textFile} onClose={() => undefined} />);
+  const editor = await screen.findByTestId<HTMLTextAreaElement>('editor');
+  await waitFor(() => assert.equal(editor.value, 'on disk'));
+
+  fireEvent.click(screen.getByTitle('actions.download'));
+
+  // The text pane has no other feedback surface, so a failed disk read must not
+  // look like a successful download.
+  const alert = await screen.findByRole('alert');
+  assert.ok(alert.textContent?.trim().length);
+  assert.equal(saveBlob.mock.calls.length, 0);
+
+  serveBytes(new TextEncoder().encode('on disk'), 'text/plain');
+  fireEvent.click(screen.getByTitle('actions.download'));
+
+  await waitFor(() => assert.equal(saveBlob.mock.calls.length, 1));
+  await waitFor(() => assert.equal(screen.queryByRole('alert'), null));
+});
+
+test('a text download without a project identifier reports the failure instead of only logging it', async () => {
+  const orphanFile: CodeEditorFile = { name: 'notes.txt', path: '/repo/notes.txt' };
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+
+  render(<CodeEditor file={orphanFile} onClose={() => undefined} />);
+  await screen.findByTestId('editor');
+
+  fireEvent.click(screen.getByTitle('actions.download'));
+
+  const alert = await screen.findByRole('alert');
+  assert.ok(alert.textContent?.trim().length);
+  assert.equal(readFileBlob.mock.calls.length, 0);
+  assert.equal(saveBlob.mock.calls.length, 0);
+});

@@ -4,7 +4,7 @@ import type { ReactNode } from 'react';
 
 import { IS_PLATFORM } from '@/shared/utils';
 import { api, readApiErrorMessage } from '@/shared/api';
-import { getAndroidBridge } from '@/modules/android-bridge';
+import { clearAndroidBridgeSession } from '@/modules/android-bridge';
 import { AUTH_SESSION_EXPIRED_EVENT, AUTH_TOKEN_REFRESHED_EVENT, getAuthTokenRefreshDelay, isValidRefreshedToken, storeAuthToken } from '@/shared/authToken';
 import { hydrateChatDrafts, resetChatDrafts } from '@/shared/chatDrafts';
 import { hydrateUserPreferences, resetUserPreferences } from '@/shared/userSettings';
@@ -354,12 +354,11 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // JWT logout is client-side: the server endpoint does not maintain a
     // revocation list, so clearing the session is the complete operation.
     clearSession();
-    // The native store is authoritative on Android; without this the next
-    // launch would restore the session the user just signed out of. A missing
-    // bridge stays a no-op, and a native failure must not break web logout.
-    void getAndroidBridge()?.clearSession().catch((caughtError) => {
-      console.warn('[Auth] Could not clear the native Android session:', caughtError);
-    });
+    // The native store is authoritative on Android; clear it and the token
+    // bootstrap cached for deduplication so a later login reaches native again.
+    // A missing bridge stays a no-op, and a native failure must not break web
+    // logout.
+    clearAndroidBridgeSession();
   }, [clearSession]);
 
   const contextValue = useMemo<AuthContextValue>(

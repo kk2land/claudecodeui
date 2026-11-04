@@ -547,5 +547,12 @@
     "model": "Model",
     "reasoning": "Reasoning",
     "effortDefault": "Default"
+  },
+  "androidShare": {
+    "noText": "The shared item has no text to insert.",
+    "bridgeUnavailable": "Android bridge unavailable.",
+    "sessionClosed": "The target session is no longer open.",
+    "composerFull": "The composer cannot accept this file because it is full or too large.",
+    "readFailed": "Could not read the shared file."
   }
 }

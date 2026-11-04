@@ -89,6 +89,18 @@ function registerBridgeEvents(bridge: AndroidBridge): void {
   });
 }
 
+/**
+ * Clears the native session and the token cached for deduplication. The
+ * ordinary logout path calls this: leaving the cache in place would drop the
+ * next login when the server reissues an identical token in the same second.
+ */
+export function clearAndroidBridgeSession(): void {
+  lastSyncedToken = null;
+  void getAndroidBridge()?.clearSession().catch((error) => {
+    console.warn('[AndroidBridge] Could not clear the native session:', error);
+  });
+}
+
 async function restoreSession(bridge: AndroidBridge): Promise<void> {
   try {
     const session = await bridge.getSession();

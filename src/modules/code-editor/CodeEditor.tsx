@@ -48,6 +48,9 @@ export default function CodeEditor({
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [showDiff, setShowDiff] = useState(Boolean(file.diffInfo));
   const [markdownPreview, setMarkdownPreview] = useState(false);
+  // The text pane's title-bar download reads from disk, so it can fail where
+  // the old in-memory download could not; this keeps that failure visible.
+  const [downloadError, setDownloadError] = useState<string | null>(null);
 
   // The code editor follows the app-wide theme; it has no theme of its own.
   const { isDarkMode } = useTheme();
@@ -106,6 +109,24 @@ export default function CodeEditor({
     window.addEventListener('beforeunload', warnBeforeUnload);
     return () => window.removeEventListener('beforeunload', warnBeforeUnload);
   }, [hasUnsavedChanges]);
+
+  // Clears old download feedback when the editor switches files; it does not
+  // try to cancel or sequence an in-flight request.
+  useEffect(() => {
+    setDownloadError(null);
+  }, [file.path, file.projectId]);
+
+  // A failed text download must be as visible as the binary pane's notice; the
+  // error clears on retry and the original disk bytes are still what is saved.
+  const requestDownload = useCallback(async () => {
+    setDownloadError(null);
+    try {
+      await handleDownload();
+    } catch (error) {
+      console.error('Error downloading file:', error);
+      setDownloadError(t('download.error', 'Unable to download this file.'));
+    }
+  }, [handleDownload, t]);
 
   // Keyed on the file object rather than on the line number: `useEditorSidebar`
   // builds a new one per open, so clicking the same `path:line` reference again
@@ -285,7 +306,7 @@ export default function CodeEditor({
             onToggleMarkdownPreview={() => setMarkdownPreview((previous) => !previous)}
             onOpenHtmlPreview={openHtmlPreview}
             onOpenSettings={() => paletteOps.openSettings('appearance')}
-            onDownload={() => { void handleDownload().catch((error) => console.error('Error downloading file:', error)); }}
+            onDownload={() => void requestDownload()}
             onSave={handleSave}
             onToggleFullscreen={() => setIsFullscreen((previous) => !previous)}
             onClose={requestClose}
@@ -307,6 +328,15 @@ export default function CodeEditor({
               unsavedChanges: t('unsavedChanges.indicator', 'Unsaved changes'),
             }}
           />
+
+          {downloadError && (
+            <div
+              role="alert"
+              className="border-b border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300"
+            >
+              {downloadError}
+            </div>
+          )}
 
           {saveError && (
             <div className="border-b border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300">

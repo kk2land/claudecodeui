@@ -399,6 +399,11 @@
     "title": "Received from Android",
     "target": "Import into session",
     "import": "Import",
-    "noSession": "Open or choose a session first."
+    "noSession": "Open or choose a session first.",
+    "sharedLink": "Shared link",
+    "sharedText": "Shared text",
+    "sharedImage": "Shared image",
+    "sharedFile": "Shared file",
+    "discardFailed": "Could not discard the shared item"
   }
 }

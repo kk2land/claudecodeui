@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
+import type { TFunction } from 'i18next';
 import { DownloadIcon, Share2Icon, Trash2Icon } from 'lucide-react';
 
 import { getAndroidBridge } from '@/modules/android-bridge/androidBridge';
@@ -18,11 +19,17 @@ type AndroidShareInboxProps = {
   onOpenSession: (session: ProjectSession) => void;
 };
 
-const describeShare = (share: AndroidShare): string => {
+const describeShare = (share: AndroidShare, t: TFunction): string => {
   if (share.kind === 'text' || share.kind === 'link') {
-    return share.text?.trim() || (share.kind === 'link' ? 'Shared link' : 'Shared text');
+    return share.text?.trim()
+      || t(`androidShare.${share.kind === 'link' ? 'sharedLink' : 'sharedText'}`, {
+        defaultValue: share.kind === 'link' ? 'Shared link' : 'Shared text',
+      });
   }
-  return share.name || (share.kind === 'image' ? 'Shared image' : 'Shared file');
+  return share.name
+    || t(`androidShare.${share.kind === 'image' ? 'sharedImage' : 'sharedFile'}`, {
+      defaultValue: share.kind === 'image' ? 'Shared image' : 'Shared file',
+    });
 };
 
 /**
@@ -82,8 +89,14 @@ export function AndroidShareInbox({ projects, currentSession, onOpenSession }: A
     cancelAndroidShareInsertion(share.id);
     try {
       await bridge.discardShare(share.id);
+      // The discarded share can no longer report its old failure, so drop it
+      // with the row; once the list is empty the whole panel disappears.
+      clearAndroidShareInsertionError();
+      setLocalError(null);
     } catch (error) {
-      setLocalError(error instanceof Error ? error.message : 'Could not discard the shared item');
+      setLocalError(error instanceof Error
+        ? error.message
+        : t('androidShare.discardFailed', { defaultValue: 'Could not discard the shared item' }));
     } finally {
       setDiscardingId(null);
     }
@@ -129,7 +142,7 @@ export function AndroidShareInbox({ projects, currentSession, onOpenSession }: A
       <ul className="mt-3 max-h-64 space-y-2 overflow-y-auto pr-1">
         {shares.map((share) => (
           <li key={share.id} className="rounded-lg border border-border/60 p-2">
-            <p className="line-clamp-2 break-words text-sm text-foreground">{describeShare(share)}</p>
+            <p className="line-clamp-2 break-words text-sm text-foreground">{describeShare(share, t)}</p>
             <div className="mt-2 flex items-center justify-end gap-2">
               <button
                 type="button"
