@@ -8,6 +8,8 @@ import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities'
 import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDelivery, readQueuedMessage, readQueuedMessages, subscribeToChatDrafts, writeDraftText, writeQueuedMessages } from '@/shared/chatDrafts';
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
+const CONFIRMATION_PENDING_MESSAGE = 'Confirmation pending. Reconnect to check the saved state.';
+
 /** Retained control failure; the code is kept only to retire an uncertain Stop on native idle. */
 type CodexControlError = { message: string; code?: string; processStop?: boolean };
 
@@ -65,9 +67,12 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
     // Only a clean native idle snapshot proves the previous Stop settled.
     const confirmedIdle = nativeState?.runtime === 'app-server' && nativeState.phase === 'idle' && !nativeState.error;
     if (event.kind !== 'control_result') {
-      // Text/status/completion events can carry the recovery snapshot; they never
-      // write a control error, so only the uncertain Stop alert may be retired.
-      if (confirmedIdle) setErrors((old) => old[sid]?.code === 'STOP_NOT_CONFIRMED' ? { ...old, [sid]: null } : old);
+      // A fresh session snapshot retires a confirmation timeout without resolving
+      // its command. An uncertain Stop still requires clean native idle.
+      if (nativeState) setErrors((old) => (
+        old[sid]?.message === CONFIRMATION_PENDING_MESSAGE
+        || (old[sid]?.code === 'STOP_NOT_CONFIRMED' && confirmedIdle)
+      ) ? { ...old, [sid]: null } : old);
       return;
     }
     // The same response can report a failed Stop and an already-recovered idle
@@ -118,7 +123,7 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
       const timer = setTimeout(() => {
         pending.current.delete(requestId);
         setPendingSessions(new Set([...pending.current.values()].map((item) => item.sessionId)));
-        const error = 'Confirmation pending. Reconnect to check the saved state.';
+        const error = CONFIRMATION_PENDING_MESSAGE;
         setErrors((old) => ({ ...old, [sid]: { message: error } }));
         void hydrateChatDrafts();
         reject(new Error(error));

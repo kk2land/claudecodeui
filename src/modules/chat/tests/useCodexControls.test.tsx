@@ -418,6 +418,35 @@ test('unconfirmed stop and unrelated control failures survive non-idle or dirty 
 
 });
 
+test.each(['refresh', 'mode'] as const)('a pushed snapshot clears a timed-out %s confirmation for the same session only', async (source) => {
+  const { hook, emit, sendMessage } = await setupStopAlerts();
+  sendMessage.mockImplementation(() => {});
+  vi.useFakeTimers();
+  let outcome: Promise<unknown> | undefined;
+  await act(async () => {
+    if (source === 'refresh') emit({ kind: 'websocket_reconnected' });
+    else outcome = hook.result.current.control({ action: 'mode', mode: 'plan' }).catch((error) => error);
+  });
+  await act(async () => { await vi.advanceTimersByTimeAsync(40_000); });
+  expect(hook.result.current.error).toBe('Confirmation pending. Reconnect to check the saved state.');
+  expect(hook.result.current.pending).toBe(false);
+
+  const recovered: CodexSessionState = {
+    runtime: 'app-server', mode: 'default', phase: 'running', turnId: 'turn-recovered', goal: null, questions: [],
+  };
+  // Traffic alone and another session's state cannot reconcile this session.
+  emit({ kind: 'text', text: 'Still connected' });
+  emit({ sessionId: 'session-other', kind: 'status', codexState: recovered });
+  expect(hook.result.current.error).toBe('Confirmation pending. Reconnect to check the saved state.');
+
+  emit({ kind: source === 'refresh' ? 'status' : 'text', codexState: recovered });
+  expect(hook.result.current.state).toEqual(recovered);
+  expect(hook.result.current.error).toBeNull();
+  // A recovered snapshot does not turn an unacknowledged mutation into success.
+  if (source === 'mode') expect(await outcome).toBeInstanceOf(Error);
+  hook.unmount();
+});
+
 test('a timed-out control clears on a late success for the same session only', async () => {
   const { hook, sendMessage, respond } = await setupStopAlerts();
   sendMessage.mockImplementation(() => {});
