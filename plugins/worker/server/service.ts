@@ -115,8 +115,6 @@ export type WorkerServiceOptions = {
   /** Tests inject a source guardian invocation; production uses compiled guardian.mjs. */
   guardianCommand?: string[];
   dshPatch?: string;
-  /** Test override for the isolated Pi model-directory query. */
-  piCatalogTimeoutMs?: number;
   now?: () => number;
   /** Test/diagnostic hook mirroring IPC events; never exposes tokens. */
   onEvent?: (event: unknown) => void;
@@ -210,16 +208,11 @@ export class WorkerService {
     return this.store.settings();
   }
 
-  /** Reads the static Pi model directory without touching the real agent home. */
+  /** Reads the Pi agent home's configured models without starting the native CLI. */
   async piCatalog(): Promise<PiModelCatalog> {
     const environment = this.guardianEnvironment(this.environment);
     const { home } = nativeHome("pi", this.options.dataDirectory, environment);
-    return readPiCatalog({
-      sourceHome: home,
-      executable: this.executable("pi", environment),
-      environment,
-      timeoutMs: this.options.piCatalogTimeoutMs,
-    });
+    return readPiCatalog(home);
   }
 
   updateSettings(input: WorkerSettingsInput): WorkerSettings {

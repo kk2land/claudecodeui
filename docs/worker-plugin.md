@@ -231,7 +231,9 @@ provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配�
 ### 模型选择界面
 
 模型与 reasoning 全部使用下拉选择，按引擎读取真实目录：DSH 与 Codex 使用宿主模型目录；Codex 先从宿主读取
-模型服务目录，再按服务读取模型列表；Pi 通过插件 `GET /catalog/pi` 读取原生模型目录。Codex 卡片顺序为
+模型服务目录，再按服务读取模型列表；Pi 通过插件 `GET /catalog/pi` 直接读取 `PI_CODING_AGENT_DIR`
+（或 `~/.pi/agent`）下 `models.json` 中 providers 配置的完整 provider/model 与 reasoning 布尔值；不启动 Pi，
+不使用凭据，也不执行 `!command`。文件缺失时目录为空。Codex 卡片顺序为
 先模型服务、再模型、再 reasoning：切换模型服务会清空该配置已选模型与 reasoning；切换模型会丢弃新模型
 不支持的 reasoning。目录接口不可用时卡片显示本地错误与重试，并保留当前配置值；模型或 reasoning 不在
 目录中时以“（当前已保存）”选项保留，普通保存不会清掉它们。留空表示沿用执行器自身默认。Codex 模型服务
