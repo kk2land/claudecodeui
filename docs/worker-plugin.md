@@ -66,7 +66,9 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 
 决定委派且满足 skill/MCP 启用条件后，先调用一次 `worker_context` 确认真实父会话、项目和可用状态；
 同一轮内复用，仅范围变化或需要恢复上下文时再查；返回的 `plan` 可用于恢复计划，并须结合实际 Worker 状态核对。
-`worker_context` 只返回协调元数据，`settings` 中不包含 `codex.env` 与 `codex.extraArgs`；完整 Codex 配置仅保留在受保护 UI `GET /state`、持久化与原生执行路径中，避免把可能含凭证或代理配置的环境值送入父模型上下文。
+`worker_context` 只返回协调元数据，`settings` 中不包含 `codex.env` 与 `codex.legacyExtraArgs`，Codex 配置仅
+保留 `codex.modelProvider`；完整 Codex 配置仅保留在受保护 UI `GET /state`、持久化与原生执行路径中，
+避免把可能含凭证或代理配置的环境值送入父模型上下文。
 每次 `worker_start` 都必须显式选择工作区：
 
 - `worktree`：插件创建隔离 worktree，并在接受请求时解析 Git 基线（默认 `HEAD`）。源目录脏默认拒绝；
@@ -87,11 +89,15 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 
 主会话为每次新任务按其主要交付物标注单一 `taskRole`，不根据提示词关键词猜测：`testing`（测试）、
 `development`（开发）、`ui_design`（UI 设计）、`plan_review`（方案审核）、`code_review`（代码审核）。
-角色只用于倾向匹配，不是硬限制：显式 `type` 可覆盖，未匹配时回退默认类型。省略 `type` 时，只在已启用且 `roles` 包含该角色的类型中选择：默认类型优先，
-否则按 `dsh`→`pi`→`codex`；无匹配或未提供 `taskRole` 时回退默认类型。显式 `type` 优先但必须已启用。满载
-仍按原有 FIFO 排队；`worker_resume` 保持原类型，不用角色重新匹配；同一 `requestId` 的幂等重放保持原结果。
+角色只用于倾向匹配，不是硬限制：显式 `configId` 或 `type` 可覆盖，未匹配时回退默认配置。省略 `configId`
+时，只在已启用且 `roles` 包含该角色的配置中选择：默认配置优先，否则按配置列表顺序；无匹配或未提供
+`taskRole` 时用默认配置或首个已启用配置。显式 `configId`/`type` 优先，但必须已启用且类型一致。满载
+仍按原有 FIFO 排队；`worker_resume` 保持原配置，不用角色重新匹配；同一 `requestId` 的幂等重放保持原结果。
 `ui_design` 只负责界面布局、视觉样式和交互设计；技术方案、架构设计、任务拆分和实施计划由主会话完成。
-`plan_review` 只审核主会话已有产物，方案决策与修订仍由主会话负责。
+`plan_review` 只审核主会话已有产物，方案决策与修订仍由主会话负责。方案审核只用于计划阶段形成的整体
+方案，不是每次实施改动的前置：进入实施后，修复、需求或契约调整、集成问题由主代理直接协调开发、测试与
+代码审核，不自动启动 `plan_review` 做例行补审；只有明确重新进入计划阶段、制定新的整体方案时才再次安排
+方案审核。审核交付发现问题时必须给出具体、可执行的调整建议。
 
 每个 run 首次达到软预算（默认 600 秒或 20 步）时生成运行提醒，以 `status: running` 写入 outbox；
 此后每隔 `softReminderSeconds`（默认 600 秒）继续提醒，即使 Worker 正在等待没有新事件的长命令。
@@ -108,8 +114,8 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 
 父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi/Codex 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。列表与详情显示任务记录的角色，历史记录缺少
-角色时详情显示未指定，列表不额外展示。设置页可按类型开关启用并多选倾向任务；关闭的类型保留原有
-模型、角色等配置，重新开启后继续使用。页面只读状态并执行取消、暂停、恢复、清理和
+角色时详情显示未指定，列表不额外展示。设置页按每个 Worker 配置管理启用开关、并发和倾向任务；配置
+停用后保留模型、角色等内容，重新启用后继续使用。页面只读状态并执行取消、暂停、恢复、清理和
 通知重试；不展示宿主认证令牌或 MCP 控制令牌。用户自行配置的 Codex 环境变量可在设置页编辑。
 没有会话时禁用会话视图，没有项目时仅保留全部视图。
 
@@ -141,22 +147,49 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 [Worker skill](../plugins/worker/skills/cloudcli-workers/SKILL.md) 和
 [协作案例与模板](../plugins/worker/skills/cloudcli-workers/references/workflows.md)。
 
-## 启用、角色、默认类型、模型、reasoning 与 Codex 启动参数
+## Worker 配置：引擎、启用、角色、并发、模型与 Codex 服务
 
-Worker 设置可按类型启用或停用，并为每种类型多选倾向任务。关闭某个类型只阻止之后新建和续接请求；
-已接受、包括已排队的运行继续。角色和默认设置的修改只影响之后新建的任务。默认类型必须保持启用且至少启用
-一种类型；编辑中关闭当前默认类型时，界面提示先选择其他已启用类型并阻止保存，服务端对最终快照作同样校验。
-关闭类型不会清空其模型、角色等配置，重新启用后继续使用。
+执行引擎固定为 `dsh`、`pi`、`codex` 三种。用户可以管理多个具名 Worker 配置；新安装直接使用三个初始配置
+`dsh-default`（DSH default）、`pi-default`（Pi default）、`codex-default`（Codex default），
+`defaultConfigId` 为 `dsh-default`。从旧设置迁移时保留原 `defaultWorkerType`，映射为对应初始配置的
+`defaultConfigId`；只有旧值缺失或无效时才回退 `dsh-default`，迁移结果不会一律改成 DSH。每个配置包含
+`id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`model`、
+`effort`；Codex 配置另有 `codex.modelProvider`、`codex.env` 和保留的 `codex.legacyExtraArgs`。`id` 在创建时
+生成，重命名保持不变；只要该配置已被任何 worker 或 run 历史引用，就不能修改其 `type`。模型的真实能力以
+执行器配置为准，插件不虚构未支持的参数。
 
-Worker 设置可指定未指定类型且没有角色匹配时的回退默认类型，以及 DSH/Pi/Codex 各自的默认模型和
-effort。Codex 另有每次 `codex exec` 原生调用共用的额外环境变量与命令行参数。并发额度的修改会立即参与
-排队调度；默认类型、模型和 effort 只用于之后的新 worker，不会改写已有记录或已接受/排队 run 已确定的值，
-也不会重新套用到续接。Codex 额外环境变量与命令行参数在每次 Codex 启动和续接时读取。
+设置页按实际能力提供新增、复制、删除、设为默认、启停和并发编辑，并以整份 `configs`/`defaultConfigId`
+文档原子保存。默认配置必须已启用，且至少有一个配置启用；停用当前默认配置时界面自动改选配置列表中首个
+已启用配置，没有已启用配置时提示并阻止保存；服务端仍校验 `defaultConfigId` 指向已启用配置。删除只移除
+配置，历史任务与日志保留，但之后无法再用该配置续接；
+仍有排队或运行中任务的配置不能删除。停用只阻止之后的新建和续接，已接受（包括已排队）的运行继续；配置
+内容保留，重新启用后继续使用。角色、模型和 reasoning 的修改只影响之后新建的任务；并发修改立即参与排队。
 
-`GET /state` 的 `settings` 形状示例（`softReminderSeconds`、`softReminderSteps`、`hardTimeoutSeconds`
-由服务端管理，`PUT /settings` 不接受）：
+### 设置结构与兼容投影
+
+`GET /state` 的 `settings` 以 schema 2 的 `configs` 与 `defaultConfigId` 为唯一持久化来源，另含保留天数及
+由服务端管理的软提醒/硬超时值（`PUT /settings` 不接受后者）。`concurrency`、`enabled`、`roles`、
+`defaults`、`defaultWorkerType`、`codex` 是只读兼容投影：按引擎取 `defaultConfigId` 属于该引擎时的默认
+配置，否则取列表中该引擎的第一个配置；某引擎没有配置时 `enabled` 为 `false`、`roles` 为 `[]`、
+`concurrency` 为 1、`defaults` 为 null model/effort、`codex` 为空 env/args。`defaultWorkerType` 投影
+`defaultConfigId` 的类型。旧客户端仍可提交旧版映射更新，但它只能编辑三个初始固定配置；任一初始配置已被
+删除时整次更新失败。
+
+`GET /state` 的 `settings` 形状示例（软提醒 600 秒 / 20 步、硬超时默认关闭）：
 
     {
+      "schemaVersion": 2,
+      "configs": [
+        { "id": "dsh-default", "name": "DSH default", "type": "dsh", "enabled": true,
+          "roles": [], "concurrency": 3, "model": null, "effort": null },
+        { "id": "pi-default", "name": "Pi default", "type": "pi", "enabled": true,
+          "roles": [], "concurrency": 3, "model": null, "effort": null },
+        { "id": "codex-default", "name": "Codex default", "type": "codex", "enabled": true,
+          "roles": [], "concurrency": 3, "model": null, "effort": null,
+          "codex": { "modelProvider": "magpie", "env": { "CODEX_PROXY_BYPASS": "1" },
+                     "legacyExtraArgs": [] } }
+      ],
+      "defaultConfigId": "dsh-default",
       "concurrency": { "dsh": 3, "pi": 3, "codex": 3 },
       "defaultWorkerType": "dsh",
       "enabled": { "dsh": true, "pi": true, "codex": true },
@@ -166,42 +199,74 @@ effort。Codex 另有每次 `codex exec` 原生调用共用的额外环境变量
         "pi": { "model": null, "effort": null },
         "codex": { "model": null, "effort": null }
       },
-      "codex": {
-        "env": { "CODEX_PROXY_BYPASS": "1" },
-        "extraArgs": ["-c", "model_provider=magpie"]
-      },
+      "codex": { "env": { "CODEX_PROXY_BYPASS": "1" },
+                 "extraArgs": ["-c", "model_provider=magpie"] },
       "retentionDays": 1,
       "softReminderSeconds": 600,
       "softReminderSteps": 20,
       "hardTimeoutSeconds": null
     }
 
-`PUT /settings` 要求 `concurrency.dsh`、`concurrency.pi` 为正整数；`concurrency.codex`、`defaultWorkerType`、
-`enabled`、`roles`、`defaults`、`codex` 和 `retentionDays` 可省略。旧客户端仅提交 DSH/Pi 并发时，已保存的 Codex 并发、
-`defaults.codex`、`defaultWorkerType`、`enabled`、`roles`、`defaults`、`codex` 启动参数和保留天数都保持不变。
-`enabled` 与 `roles` 按整个 map 可选：提供时必须同时包含 `dsh`、`pi`、`codex`，未提供则保留已存值；但
-`defaultWorkerType` 最终必须引用已启用的类型，且至少启用一种类型。`roles` 只接受任务角色目录中的值。
-`codex` 对象若
-提供，必须同时包含 `env` 和 `extraArgs`，并整对象替换原设置；`env` 必须为字符串到字符串的对象，
-`extraArgs` 必须为字符串数组。提供 `defaults` 时必须同时包含 `dsh` 与 `pi`，可额外包含 `codex`；
-`model`/`effort` 为字符串或 `null`，空白字符串按清除处理。非法类型、错误的值类型、缺失的必需类型对象、
-非正整数并发、无效 Pi thinking 级别、Codex 非法 env/argv，或 DSH effort 没有同时配置模型，都会让整次
-更新失败且不保存任何字段。`extraArgs` 中的 `-C`、`--cd`、`--cd=...` 及以 `-C` 开头的附加形式会被拒绝，
-工作目录只能由 `worker_start.workspace` 确定。
+规范的 `PUT /settings` 整份替换 `configs`，并在保存前原子校验：`id` 唯一且非空、`name` 非空、`type` 合法、
+`enabled` 为布尔值、`roles` 只含任务角色目录中的值、`concurrency` 为正整数、`defaultConfigId` 引用已启用
+配置；Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同时配置模型；Codex 配置必须带 `codex`
+对象，`env` 为字符串到字符串映射，`legacyExtraArgs` 为字符串数组，含 `-C`/`--cd` 的项被拒绝。任一项非法
+都会让整次更新失败且不保存任何字段。`retentionDays` 为正整数，省略时保留原值；`schemaVersion` 由服务端
+管理，客户端不提供。
 
-旧设置 JSON 在读取时补齐缺少的 `defaultWorkerType: "dsh"`、全为 `null` 的 DSH/Pi defaults、Codex 并发
-`3`、全为 `null` 的 `defaults.codex`、`enabled` 全为 `true`、`roles` 全为 `[]`，以及默认 `codex: { "env": { "CODEX_PROXY_BYPASS": "1" },
-"extraArgs": ["-c", "model_provider=magpie"] }` 和 `retentionDays: 1`；原有字段保持不变。
+旧版映射更新仍兼容：`concurrency.dsh`、`concurrency.pi` 必填且为正整数，`concurrency.codex` 可省略并保留
+原值；`defaultWorkerType` 选择对应初始配置为默认；`enabled` 与 `roles` 若提供必须同时包含 `dsh`、`pi`、
+`codex`，省略则保留；`defaults` 若提供必须含 `dsh` 与 `pi`，可含 `codex`，空白字符串按清除处理；`codex`
+对象若提供必须同时含 `env` 与 `extraArgs`。旧版 `extraArgs` 中的 `-c model_provider=<id>`（或
+`--config=model_provider=<id>`）会被提取为 `modelProvider`，不再留在 `legacyExtraArgs` 中。
+
+旧设置 JSON 在读取时一次性迁移为 schema 2：由旧 `concurrency`、`enabled`、`roles`、`defaults` 生成三个
+初始配置；旧 `codex.env` 与 `extraArgs` 生成 `codex-default` 的 env、`modelProvider` 与
+`legacyExtraArgs`；旧 `defaultWorkerType` 映射为对应初始配置的 `defaultConfigId`，并补齐提醒、保留天数与
+硬超时默认值。迁移同时为旧 worker 回填 `configId`/`configName`，并按 run 自己记录的 `spec.json` argv
+补齐缺失的 model/provider/effort；没有证据时保留原 null 而不从当前设置猜测。旧 Codex run 没有可靠
+provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配置的 `modelProvider`。迁移只执行一次，
+之后不会重建已被删除的配置，也不会重写历史 run 记录。
+
+### 模型选择界面
+
+模型与 reasoning 全部使用下拉选择，按引擎读取真实目录：DSH 与 Codex 使用宿主模型目录；Codex 先从宿主读取
+模型服务目录，再按服务读取模型列表；Pi 通过插件 `GET /catalog/pi` 读取原生模型目录。Codex 卡片顺序为
+先模型服务、再模型、再 reasoning：切换模型服务会清空该配置已选模型与 reasoning；切换模型会丢弃新模型
+不支持的 reasoning。目录接口不可用时卡片显示本地错误与重试，并保留当前配置值；模型或 reasoning 不在
+目录中时以“（当前已保存）”选项保留，普通保存不会清掉它们。留空表示沿用执行器自身默认。Codex 模型服务
+目录与模型列表由宿主全局 Codex home（`CODEX_HOME` 或 `~/.codex`）和环境读取，不随单个配置的 `codex.env`
+或运行 home 变化，这是已知范围限制。
 
 Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名键以设置值覆盖继承值；`{}` 显式清除预填
-的 `CODEX_PROXY_BYPASS`。`extraArgs` 的每个数组元素就是一个独立 argv，不会拼接成 shell 字符串，也不做
-引号或空格解析；空数组显式清除预填的 `-c model_provider=magpie`。设置页按首个 `=` 分割每行 KEY=VALUE，
-保留值中的空格和后续 `=`；空 env 文本保存为 `{}`，空参数文本保存为 `[]`，非法 env 或非字符串 JSON
-数组会提示并禁止保存。界面回填以服务端返回的设置对象为准。
+的 `CODEX_PROXY_BYPASS`。`legacyExtraArgs` 的每个元素是一个独立 argv，不拼接成 shell 字符串，不做引号或
+空格解析；空数组表示没有额外参数。`modelProvider` 是独立的模型服务选择，启动时以
+`-c model_provider=<id>` 传入。设置页按首个 `=` 分割每行 KEY=VALUE，保留值中的空格和后续 `=`；空 env
+文本保存为 `{}`，非法 env 会提示并禁止保存。界面回填以服务端返回的设置对象为准；迁移保留的额外命令行
+参数仍用于启动，但界面不再提供额外参数编辑入口。
 
-启动或续接 Codex 时都重新读取当前 Codex 启动参数；模型/effort 等默认只对新 worker 生效，续接沿用原
-run 已记录的模型/provider/effort，除非调用方显式覆盖。每次原生调用都使用固定 worker cwd 和固定 home；
-续接还固定使用已记录的原生 session ID。显式 model/provider/effort 选择优先于 `extraArgs` 中的同名设置。
+### 新任务选择与续接
+
+新 worker 的配置选择：显式 `configId` 优先，必须存在、已启用且与显式 `type` 一致；未提供 `configId` 时
+只在已启用的配置中路由，显式 `type` 先收窄候选，提供了 `taskRole` 时优先 `roles` 包含该角色的配置，
+在候选内优先默认配置，否则按配置列表顺序。无角色匹配时回退到类型候选中的默认配置或首个配置。`worker_start`
+在接受请求时把最终 `configId`、`type`、model、provider、effort 快照到 worker/run；之后修改设置不会改变已
+排队 run 已接受的值，原生 argv 与 DSH 模型 patch 都使用该快照。
+
+新任务的 model/effort 优先级为：请求显式值 > 所选配置的 `model`/`effort` > 执行器原生默认。provider 只有
+Codex 支持：请求显式 provider > 所选配置的 `codex.modelProvider` > Codex 原生默认；非 Codex 类型若显式
+传入非空 provider，会在幂等重放检查之后以 `PROVIDER_UNSUPPORTED` 拒绝，旧请求的幂等重放仍返回原结果。
+Pi 把完整模型 ID 直接传给 `--model`，不再接受 `--provider`；DSH 的 provider/model 由运行模型 patch 表达。
+
+`worker_resume` 保持原 worker 类型与 `configId`、cwd、home 和原生会话身份，默认沿用上一次 run 记录的
+model/provider/effort，不套用当前配置；显式 model/effort（Codex 还包括 provider）仍可覆盖。旧 Pi 的独立
+provider 会折叠进完整模型 ID，并按大小写不敏感的前缀去重；旧 DSH 的独立 provider 与原始 model 直接拼接为
+provider/model；旧 DSH 裸 model 只从该 run 自己生成的 `model.patch.yml` 恢复路由证据，完整 ID 不依赖旧
+patch；没有证据时续接要求显式提供完整 model（`MODEL_REQUIRED`）。历史记录不重写，续接创建新的 runId。
+原类型或配置已停用时，续接请求保留原配置但按启用规则拒绝。Codex 续接使用记录的 `thread_id` 执行
+`codex exec resume --json`，每次仍读取当前配置的 Codex env 与保留的启动参数。
+
+## 原生会话保留与清理
 
 原生 DSH/Pi 会话文件独立保留 3 天，按文件修改时间计算；插件启动时清理一次，之后每 24 小时清理一次。
 范围包括 `CODEX_DSH_SESSIONS_ROOT`（默认 `$HOME/tmp/codex-dsh-sessions`）、`$HOME/.pi/agent/sessions`，
@@ -213,35 +278,14 @@ Worker 引用的原生会话会跳过。DSH 即使尚无文件路径也按已记
 `HOME` 缺失时依次使用 `USERPROFILE` 和系统用户目录定位共享会话目录。
 清理保留锁文件和其他非会话文件，失败项记录到插件日志并在下次清理时重试。插件停用期间不执行清理。
 
-新 worker 启动请求的参数优先级为：请求中显式给出的非空值 > 所选类型的插件默认值 > 现有后端环境回退
-（仅 Pi：`CODEX_PI_MODEL`、`CODEX_PI_THINKING`）> 原生 CLI 自身默认。Codex 的 `extraArgs` 和
-`model_provider` 配置也会影响原生调用，但显式 model/provider/effort 仍优先。省略 `type` 时按启用与角色
-配置选择：只在已启用且 `roles` 包含请求 `taskRole` 的类型中，优先 `defaultWorkerType`，否则按
-`dsh`→`pi`→`codex`；无匹配或未提供 `taskRole` 时用 `defaultWorkerType`。显式 `dsh`/`pi`/`codex` 总是优先但
-必须已启用。provider 仍只来自请求、Pi 的
-`CODEX_PI_PROVIDER` 或 Codex 的显式参数/配置，没有插件级 provider 默认。插件在接受请求时把最终
-type/model/provider/effort 快照到 run；之后修改默认不会改变已排队 run 已接受的值，原生 argv 与 DSH
-model patch 也使用该快照。Codex 每次 start/resume 另外读取当前 `settings.codex` 环境与 argv。
-
-skill 与 MCP 的参数名是 `effort`，不是 `reasoning`。调用方把用户说的 reasoning 映射为 `effort`；DSH 配置
-effort 时必须从请求或已配置默认获得有效模型，Pi 仅接受 `off/minimal/low/medium/high/xhigh/max`。模型或
-effort 留空表示沿用执行器现有配置，不会覆盖 Pi 的环境配置，也不是“清空原生配置”。
-
-续接（`worker_resume`）保持原 worker 类型、cwd、home 和原生会话身份；未显式覆盖的 model/provider/effort
-沿用上一次 run 的记录值，即使插件默认或环境此后已变化，也不会重新套用新默认。显式覆盖仍按原有校验生效。
-`worker_resume` 不使用 `taskRole` 重新选择类型；若原类型已禁用，新的续接请求保留原类型但按启用规则拒绝。
-Codex 续接使用记录的 `thread_id` 执行 `codex exec resume --json`，但每次仍读取当前 `settings.codex` 的额外
-环境和参数。并发额度仍按 `(parentSessionId, projectId, workerType)` 独立计算，默认类型、模型设置或
-Codex 启动参数不改变额度与排队语义。
-
 ## 并发、排队与去重
 
-并发键为 `(parentSessionId, projectId, workerType)`，DSH、Pi 与 Codex 默认各 3，每个键独立。应用会话 ID 已隐含
-provider 隔离，父会话、项目与执行器的额度仍各自独立。`starting`、
+并发键为 `(parentSessionId, projectId, configId)`，每个配置默认 3，各自独立计数。应用会话 ID 已隐含
+provider 隔离，父会话、项目与各个配置的额度仍相互独立。`starting`、
 `running`、`stopping`、`unknown` 都占用额度；超额请求按 FIFO 排队。同一原生会话只允许一个调用。
 start/resume 都要求调用方提供 `requestId` 作为幂等键；相同操作与载荷的重复键返回原 worker/run，不会再次
-启动 CLI。同一 `requestId` 用于不同操作或不同载荷时直接拒绝（ID 冲突），不会覆盖原记录。Worker 设置中的
-并发只接受正整数，保存后按类型生效；默认类型与模型/reasoning 默认是独立的设置，不改变该并发键。
+启动 CLI。同一 `requestId` 用于不同操作或不同载荷时直接拒绝（ID 冲突），不会覆盖原记录。配置的并发
+只接受正整数，保存后立即生效；默认配置与模型/reasoning 默认是独立的设置，不改变该并发键。
 
 ## 原生 CLI 参数与成功判定
 
@@ -255,12 +299,12 @@ DSH：
 
 - stdin 传 UTF-8 提示词，末尾参数 `-` 表示从 stdin 读取。
 - 必需的会话 patch 由插件从打包文件原样复制到每次运行的目录，并以绝对路径传入；原生执行器读取运行副本，
-  续接也为新 run 准备独立副本。
-- 若设置了 `CLOUDCLI_DSH_PATCHES`（文件路径 JSON 数组），这些 patch 先于插件必需的会话持久化 patch 和
-  运行模型 patch 传入，顺序固定为：用户 patch、`dsh-session.patch.yml`、模型 patch。
+  续接也为新 run 准备独立副本。运行 patch 与 Worker 持久化的 home/session 隔离继续保留。
 - `DSH_HOME` 使用原环境值或 `~/.dsh`；会话根由插件显式设为实例数据目录下的 `sessions/dsh`。
-- 模型与 effort 通过 `agent-default-model` 的 provider/model/reasoningEffort patch 注入，不伪造 CLI flags；
-  effort 必须同时有显式模型。
+- 模型与 effort 通过运行级 `agent-default-model` patch 注入，不伪造 CLI flags：完整 model ID 按第一个 `/`
+  解析为 provider/model；裸 model 的 provider 固定为 `deepseek-official`；effort 必须同时有模型。
+- 用户没有独立的 DSH provider 或环境配置；`CLOUDCLI_DSH_PROVIDER`、`CLOUDCLI_DSH_PATCHES`、
+  `CLOUDCLI_DSH_BIN` 不再作为 Worker 运行配置。`CLOUDCLI_DSH_SMOKE_BIN` 仅是测试入口。
 - 成功要求：exit 0、事件完整合法、`session.cwd` 与 ID 匹配、出现 final，且最后一个 turn_end 的
   `reason.kind=completed`。已确认 CLI 退出但事件协议非法（例如缺少或错误的原生会话身份）是 `failed`，
   不会据此猜测原生身份，也不能续接；只有进程存活/退出证据本身缺失时才是 `unknown`。
@@ -268,13 +312,13 @@ DSH：
 Pi：
 
     pi --print --mode json --session-dir <实例数据目录>/sessions/pi \
-      --session <首次 runId>.jsonl [--model X] [--provider X] [--thinking X]
+      --session <首次 runId>.jsonl [--model <完整模型 ID>] [--thinking X]
 
 - 通过 stdin 输入提示词，不追加 `-`。
-- `PI_CODING_AGENT_DIR` 使用原环境值或 `~/.pi/agent`。新请求参数优先级：
-  显式请求 > 插件 Pi 默认 > `CODEX_PI_*` 环境 > Pi 配置；续接时显式参数 > 旧记录。provider 必须与
-  model 一起给出。
-- `thinking` 仅接受 `off/minimal/low/medium/high/xhigh/max`。
+- `PI_CODING_AGENT_DIR` 使用原环境值或 `~/.pi/agent`，认证与 PATH 按原方式继承。新请求参数优先级：
+  显式请求 > 所选配置的默认值 > Pi 原生配置；续接时显式参数 > 旧记录。完整模型 ID 直接传给 `--model`，
+  不再接受 `--provider`，也没有 `CODEX_PI_MODEL`/`CODEX_PI_PROVIDER`/`CODEX_PI_THINKING` 环境回退。
+- `thinking` 仅接受 `off/minimal/low/medium/high/xhigh/max`；留空沿用 Pi 自身配置。
 - 续接前核实会话文件存在且非空、header 的 ID 与 cwd 匹配，否则不续接。
 - 成功要求：exit 0、会话身份匹配、最终 assistant 的 `stopReason=stop`、最终 `agent_end` 的
   `willRetry=false`、`agent_settled` 的 `aborted=false`。原生重试后最终成功可以接受。
@@ -286,24 +330,33 @@ Codex：
   `codex exec --json [额外参数] [显式 model/provider/effort] [resume <thread_id>] -`，通过 stdin 输入提示词。
   `--sandbox`、`--profile`、`--add-dir` 等受支持的 exec 级参数必须放在 `resume` 子命令之前；
   `-C`/`--cd` 不受支持，工作目录由任务工作区控制。
-- 每次启动或续接都合并当前 `settings.codex.env` 并追加 `settings.codex.extraArgs`；`{}`/`[]` 可清除预填值。
-  每个额外参数单独传入，不拼接 shell 字符串。
-- 显式 model/provider/effort 选择优先于 `extraArgs` 中的同名配置；provider/effort 的 `-c` 以最后值为准，
-  provider 未显式给出时沿用 Codex 配置或 `model_provider` 参数。已有明确 model 时，插件会从额外参数中移除
-  `--model <v>`、`-m <v>`、`--model=<v>`、`-m<v>`，再追加唯一 `--model`；没有明确 model 时保留原参数，
-  避免 Codex `0.165.0` 拒绝重复 `--model`。
+- 每次启动或续接都合并当前所选配置的 `codex.env`，并追加其 `codex.legacyExtraArgs`；`{}`/`[]` 表示没有
+  额外环境或参数。每个额外参数单独传入，不拼接 shell 字符串。
+- 显式 model/provider/effort 选择优先于 `legacyExtraArgs` 中的同名配置；provider/effort 的 `-c` 以最后值
+  为准。provider 未显式给出时使用 run 记录值，迁移来的旧 Codex run 可回退到当前配置的 `modelProvider`。
+  已有明确 model 时，插件会从额外参数中移除 `--model <v>`、`-m <v>`、`--model=<v>`、`-m<v>`，再追加唯一
+  `--model`；没有明确 model 时保留原参数，避免 Codex `0.165.0` 拒绝重复 `--model`。
 - 成功要求：exit 0、原生 `thread_id` 与预期一致、收到 `turn.completed`。流中断出现 `Reconnecting error`
   后仍收到 `turn.completed` 可判定成功；协议无效、ID 不一致或 `turn.failed` 仍失败。
-- 续接的 `turn.completed.usage` 是整个原生会话累计值，不是单次 run 增量；Codex 详情页据此显示
-  “Token（会话累计）”。其他类型的用量语义不变。
-- 沙箱和审批继承 Codex 原生配置，插件不默认添加危险 bypass 参数。需要时可在额外参数中配置
+- `turn.completed.usage` 与 rollout 是原生会话累计口径。插件在启动前记录测量基线（新线程为已知全零，
+  续接读取可用的 `total_token_usage` 快照与 rollout EOF），成功后按同一口径差分出本次 run 的输入、输出、
+  缓存读写与合计。优先使用可信的原生 total；没有可信 native total 时使用同一 run 已确认的 I/O 增量和。
+  证据不足时标记 `partial` 或 `scope: "session"`，不把会话累计冒充本次用量。
+- 沙箱和审批继承 Codex 原生配置，插件不默认添加危险 bypass 参数。需要时可在保留的启动参数中配置
   `--sandbox workspace-write` 等 exec 级参数。
 - 固定首次 run 记录的 home 与 worker cwd；续接不更换 cwd/home，并使用记录的 `thread_id`。当前原生实现用
   `CODEX_HOME` 注入固定 home。
 - Codex 原生 session 目录不参与上述 DSH/Pi 3 天批量 retention 删除。
 
 真实的模型与 effort 能力以执行器配置为准；插件不虚构未支持参数。原始事件与 stderr 落盘保存，日志按页
-读取，未上报的用量保持 `null`，不显示为 0。
+读取。
+
+每个 run 单独保存用量字段 `inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、
+`totalTokens` 以及 `scope`/`partial`。DSH/Pi 按原生样本累加并标记本次运行范围；Codex 按上述基线差分。
+未知或未上报的字段保持 `null`，真实 0 仍显示 0，不估算也不裁剪。失败、取消或超时的 run 对已收集用量标记
+`partial`，插件重启后无法确认停止的 `unknown` run 同样标记 `partial`，成功结果按已确认的原生数据保存。
+UI 对 Codex 显示“输入（含缓存）”，对 DSH/Pi 显示“未缓存输入”，并显示缓存读取/写入、合计、统计范围与
+部分统计标记；历史记录缺少范围时显示为未标注。
 
 ## 自动唤醒、Stop 与恢复
 
@@ -380,7 +433,7 @@ host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自�
 ## 验收限制
 
 自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；另有真实 Codex app-server 与 DSH ACP
-连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用。
+连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用；它只是测试入口，不是 Worker 运行配置。
 Codex CLI 与 SDK 固定为 `0.165.0`。本地启动器被代理替换时，可用 `CLOUDCLI_CODEX_TEST_BINARY` 指向同版本官方二进制，
 验证原生预测、模型服务切换与 SDK 会话交接，避免代理改写本地测试请求。
 实际部署中的执行器、认证和模型联通仍需环境验收。浏览器验收先完成构建，
