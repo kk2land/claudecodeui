@@ -1058,7 +1058,7 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
   assert.equal(service.get(first.id).runs.length, 1);
 });
 
-test("task roles route omitted types through enabled matches, default, and fixed order", async (t) => {
+test("task roles route omitted types through enabled matches, config order, and default fallback", async (t) => {
   const root = temporaryRoot("worker-role-selection-");
   const { service } = createService(t, root);
   const started: string[] = [];
@@ -1081,15 +1081,16 @@ test("task roles route omitted types through enabled matches, default, and fixed
   assert.equal(await start("plan_review"), "pi");
   assert.equal(await start(undefined), "dsh");
 
-  // Multiple matches prefer the default type.
+  // Multiple role matches follow config order, including when a later match is the default.
   service.updateSettings({
     concurrency: { dsh: 3, pi: 3 },
     defaultWorkerType: "pi",
     roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
   });
-  assert.equal(await start("testing"), "pi");
+  assert.equal(await start("testing"), "dsh");
+  assert.equal(await start(), "pi");
 
-  // Without a matching default, candidates keep the fixed dsh -> pi -> codex order.
+  // A default without a role match also leaves the config order unchanged.
   service.updateSettings({
     concurrency: { dsh: 3, pi: 3 },
     defaultWorkerType: "codex",
