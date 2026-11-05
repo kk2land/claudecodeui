@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import { WorkerService } from "../server/service.js";
+import { migrateLegacySettings } from "../server/settings.js";
 import type { WorkerOwner } from "../shared/contracts.js";
 import {
   dshFixture,
@@ -47,6 +48,7 @@ test("historical parent+project keeps read and resume after owner generation cha
     dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
   };
   const first = new WorkerService(options);
+  first.updateSettings(migrateLegacySettings({}));
   first.registerOwner(generation(root, project, "generation-1"), "token-1");
   const original = await first.start("generation-1", startInput({ requestId: "shared-request" }));
   const done = await waitStatus(first, original.worker.id, ["completed"]);

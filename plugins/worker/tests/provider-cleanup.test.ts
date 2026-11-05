@@ -4,6 +4,7 @@ import path from "node:path";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { WorkerService } from "../server/service.js";
+import { migrateLegacySettings } from "../server/settings.js";
 import { WorkerStore } from "../server/store.js";
 import type { WorkerRecord, WorkerRun } from "../shared/contracts.js";
 import {
@@ -110,6 +111,7 @@ test("non-Codex provider is rejected for new work while an old request replays",
     )
     .digest("hex");
   const store = new WorkerStore(data);
+  store.saveSettings({});
   const worker = historicalWorker("old-pi-worker", "pi", project);
   store.createWorker(
     worker,
@@ -326,6 +328,7 @@ test("removed CLOUDCLI_DSH_* variables no longer affect DSH launch", async (t) =
     await service.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
+  service.updateSettings(migrateLegacySettings({}));
   service.registerOwner(owner(project), "owner-token");
   const started = await service.start(
     "owner-1",

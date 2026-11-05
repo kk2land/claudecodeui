@@ -55,6 +55,9 @@ test("losing the host IPC channel stops active DSH and its TERM-resistant tree",
     `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs")}" "$@"\n`,
     { mode: 0o755 },
   );
+  const initialStore = new WorkerStore(data);
+  initialStore.saveSettings({});
+  initialStore.close();
 
   const child = spawn(process.execPath, [builtEntry], {
     env: {

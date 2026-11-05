@@ -150,9 +150,9 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 
 ## Worker 配置：引擎、启用、角色、并发、模型与 Codex 服务
 
-执行引擎固定为 `dsh`、`pi`、`codex` 三种。用户可以管理多个具名 Worker 配置；新安装直接使用三个初始配置
-`dsh-default`（dsh#1）、`pi-default`（pi#1）、`codex-default`（codex#1），
-`defaultConfigId` 为 `dsh-default`。从旧设置迁移时保留原 `defaultWorkerType`，映射为对应初始配置的
+执行引擎固定为 `dsh`、`pi`、`codex` 三种。用户可以管理多个具名 Worker 配置；首次使用只创建并启用
+`pi-default`（pi default），`defaultConfigId` 为 `pi-default`。DSH 和 Codex 配置由用户按需添加。
+从旧设置迁移时仍生成三个初始配置并保留原 `defaultWorkerType`，映射为对应初始配置的
 `defaultConfigId`；只有旧值缺失或无效时才回退 `dsh-default`，迁移结果不会一律改成 DSH。每个配置包含
 `id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`model`、
 `effort`；Codex 配置另有 `codex.modelProvider`、`codex.env` 和保留的 `codex.legacyExtraArgs`。`id` 在创建时
@@ -178,32 +178,25 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 `defaultConfigId` 的类型。旧客户端仍可提交旧版映射更新，但它只能编辑三个初始固定配置；任一初始配置已被
 删除时整次更新失败。
 
-`GET /state` 的 `settings` 形状示例（软提醒 600 秒 / 20 步、硬超时默认关闭）：
+首次使用时 `GET /state` 的 `settings` 形状示例（软提醒 600 秒 / 20 步、硬超时默认关闭）：
 
     {
       "schemaVersion": 2,
       "configs": [
-        { "id": "dsh-default", "name": "dsh#1", "type": "dsh", "enabled": true,
-          "roles": [], "concurrency": 3, "model": null, "effort": null },
-        { "id": "pi-default", "name": "pi#1", "type": "pi", "enabled": true,
-          "roles": [], "concurrency": 3, "model": null, "effort": null },
-        { "id": "codex-default", "name": "codex#1", "type": "codex", "enabled": true,
-          "roles": [], "concurrency": 3, "model": null, "effort": null,
-          "codex": { "modelProvider": "magpie", "env": { "CODEX_PROXY_BYPASS": "1" },
-                     "legacyExtraArgs": [] } }
+        { "id": "pi-default", "name": "pi default", "type": "pi", "enabled": true,
+          "roles": [], "concurrency": 3, "model": null, "effort": null }
       ],
-      "defaultConfigId": "dsh-default",
-      "concurrency": { "dsh": 3, "pi": 3, "codex": 3 },
-      "defaultWorkerType": "dsh",
-      "enabled": { "dsh": true, "pi": true, "codex": true },
+      "defaultConfigId": "pi-default",
+      "concurrency": { "dsh": 1, "pi": 3, "codex": 1 },
+      "defaultWorkerType": "pi",
+      "enabled": { "dsh": false, "pi": true, "codex": false },
       "roles": { "dsh": [], "pi": [], "codex": [] },
       "defaults": {
         "dsh": { "model": null, "effort": null },
         "pi": { "model": null, "effort": null },
         "codex": { "model": null, "effort": null }
       },
-      "codex": { "env": { "CODEX_PROXY_BYPASS": "1" },
-                 "extraArgs": ["-c", "model_provider=magpie"] },
+      "codex": { "env": {}, "extraArgs": [] },
       "retentionDays": 1,
       "softReminderSeconds": 600,
       "softReminderSteps": 20,

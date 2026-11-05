@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { WorkerService } from "../../server/service.js";
+import { migrateLegacySettings } from "../../server/settings.js";
 import { pluginRoot, tsxLoader } from "../helpers.js";
 
 const root = process.argv[2]!;
@@ -27,6 +28,7 @@ const service = new WorkerService({
   guardianCommand: [process.execPath, "--import", tsxLoader, path.join(pluginRoot, "server/guardian.ts")],
   dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
 });
+service.updateSettings(migrateLegacySettings({}));
 service.registerOwner(
   {
     id: "harness-owner",

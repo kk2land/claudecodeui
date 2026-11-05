@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import type { TestContext } from "node:test";
 import { WorkerService } from "../server/service.js";
+import { migrateLegacySettings } from "../server/settings.js";
 import type { WorkerServiceOptions } from "../server/service.js";
 import type { WorkerOwner, WorkerStartInput } from "../shared/contracts.js";
 
@@ -80,6 +81,8 @@ export function createService(
     await service.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
+  // Multi-engine regressions use the legacy configuration set explicitly.
+  service.updateSettings(migrateLegacySettings({}));
   service.registerOwner(owner(project), "owner-token");
   return { service, project, data, env };
 }

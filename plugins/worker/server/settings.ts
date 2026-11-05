@@ -110,28 +110,21 @@ function codexConfig(
   };
 }
 
-function initialConfig(type: WorkerType): WorkerConfig {
-  const config: WorkerConfig = {
-    id: INITIAL_CONFIG_IDS[type],
-    name: INITIAL_CONFIG_NAMES[type],
-    type,
-    enabled: true,
-    roles: [],
-    concurrency: DEFAULT_CONCURRENCY,
-    model: null,
-    effort: null,
-  };
-  if (type === "codex")
-    config.codex = codexConfig({ ...DEFAULT_CODEX_ENV }, [...DEFAULT_CODEX_ARGS]);
-  return config;
-}
-
-/** The canonical schema-2 defaults before any user update. */
+/** Fresh-install settings used by WorkerStore; only Pi is configured by default. */
 export function defaultSettingsRecord(): WorkerSettingsRecord {
   return {
     schemaVersion: 2,
-    configs: TYPES.map(initialConfig),
-    defaultConfigId: INITIAL_CONFIG_IDS.dsh,
+    configs: [{
+      id: INITIAL_CONFIG_IDS.pi,
+      name: "pi default",
+      type: "pi",
+      enabled: true,
+      roles: [],
+      concurrency: DEFAULT_CONCURRENCY,
+      model: null,
+      effort: null,
+    }],
+    defaultConfigId: INITIAL_CONFIG_IDS.pi,
     retentionDays: 1,
     softReminderSeconds: 600,
     softReminderSteps: 20,

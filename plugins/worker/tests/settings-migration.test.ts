@@ -304,11 +304,27 @@ test("a store without a settings row persists defaults and backfills legacy work
     "fp",
   );
   const settings = store.settings();
-  assert.equal(settings.defaultConfigId, "dsh-default");
+  assert.equal(settings.defaultConfigId, "pi-default");
+  assert.equal(settings.defaultWorkerType, "pi");
+  assert.deepEqual(settings.configs, [{
+    id: "pi-default",
+    name: "pi default",
+    type: "pi",
+    enabled: true,
+    roles: [],
+    concurrency: 3,
+    model: null,
+    effort: null,
+  }]);
+  assert.deepEqual(settings.enabled, { dsh: false, pi: true, codex: false });
+  assert.deepEqual(settings.codex, { env: {}, extraArgs: [] });
   assert.equal(store.worker("worker-defaults")?.configId, "dsh-default");
   assert.equal(
     rawSettings(data).schemaVersion,
     2,
     "canonical defaults are persisted once so later reads stay canonical",
   );
+  const reopened = new WorkerStore(data);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.settings(), settings);
 });

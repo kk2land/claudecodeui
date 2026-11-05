@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import type { TestContext } from "node:test";
 import { WorkerService } from "../server/service.js";
+import { migrateLegacySettings } from "../server/settings.js";
 import type { WorkerNotification, WorkerRecord, WorkerRun, WorkerStatus } from "../shared/contracts.js";
 import { createService, owner, startInput, temporaryRoot, waitStatus } from "./helpers.js";
 
@@ -26,6 +27,7 @@ function setup(t: TestContext): WorkerService {
     await service.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
+  service.updateSettings(migrateLegacySettings({}));
   return service;
 }
 

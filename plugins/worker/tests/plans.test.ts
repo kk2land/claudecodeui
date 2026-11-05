@@ -4,6 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { WorkerService } from "../server/service.js";
+import { migrateLegacySettings } from "../server/settings.js";
 import { createService, owner, temporaryRoot } from "./helpers.js";
 
 test("plans preserve Markdown and isolate parent/project scopes without execution side effects", (t) => {
@@ -54,6 +55,7 @@ test("existing databases gain plan storage and retain it across restart and owne
   });
   const originalOwner = owner(root);
   service.registerOwner(originalOwner, "first-token");
+  service.updateSettings(migrateLegacySettings({}));
   service.updateSettings({ concurrency: { dsh: 2, pi: 1 } });
   await service.close();
 

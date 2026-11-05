@@ -516,10 +516,11 @@ export type WorkerCodexSettings = {
  * new worker and never changes an existing worker or resume. A replayed request returns its
  * original record instead of reading these settings again.
  *
+ * Fresh installs create only `pi-default` (name "pi default") and select it as the default.
  * The schema-2 migration creates the initial fixed configs `dsh-default`, `pi-default`, and
  * `codex-default` (names "dsh#1", "pi#1", "codex#1") from the previous
  * per-type maps and defaults, and sets `defaultConfigId` to the initial config matching the
- * previous `defaultWorkerType` (initially `dsh-default`).
+ * previous `defaultWorkerType` (falling back to `dsh-default`).
  */
 export type WorkerSettings = {
   schemaVersion: 2;
