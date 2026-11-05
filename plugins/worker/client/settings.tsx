@@ -740,7 +740,6 @@ export function SettingsView({
             <details
               className="worker-type-settings worker-form-wide"
               key={config.id}
-              open={isDefault}
               data-dragging={dragState?.id === config.id ? "true" : undefined}
               data-drop-target={
                 dragState && dragState.id !== config.id && dragState.overId === config.id
@@ -822,6 +821,13 @@ export function SettingsView({
                     {config.enabled ? "已启用" : "已停用"}
                   </span>
                   {isDefault ? <span className="worker-badge worker-active">默认</span> : null}
+                  <span className="worker-type-roles">
+                    {config.roles.length
+                      ? WORKER_TASK_ROLES.filter((role) => config.roles.includes(role.value))
+                          .map((role) => TASK_ROLE_LABELS[role.value])
+                          .join("、")
+                      : "未设置角色"}
+                  </span>
                 </span>
                 <span className="worker-type-overview">
                   <span className="worker-type-model" title={config.model ?? "沿用执行器模型"}>

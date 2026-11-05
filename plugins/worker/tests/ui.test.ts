@@ -636,6 +636,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     // A not-yet-saved config can always be deleted again without touching the server.
     (byLabel(mounted.container, "新增 DSH 配置") as HTMLButtonElement).click();
     await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增配置");
+    assert.equal(configCards(mounted.container)[3]!.open, false);
     assert.equal(
       (byLabel(mounted.container, "配置 4 名称") as HTMLInputElement).value,
       "dsh#1",
@@ -657,6 +658,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     );
     (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
     await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 名称")), "复制 Codex 配置");
+    assert.equal(configCards(mounted.container)[4]!.open, false);
     assert.equal(
       (byLabel(mounted.container, "配置 5 名称") as HTMLInputElement).value,
       "codex#1",
@@ -1986,6 +1988,47 @@ function configCardNames(root: ParentNode): string[] {
     textOf(card.querySelector(".worker-type-identity strong")),
   );
 }
+
+test("DOM: config summaries follow draft roles and settings reopen closed", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openSettings(mounted);
+    const cards = configCards(mounted.container);
+    assert.deepEqual(cards.map((card) => card.open), [false, false, false]);
+    const card = cards[0]!;
+    const summary = card.querySelector("summary")!;
+    assert.equal(textOf(summary.querySelector(".worker-type-roles")), "未设置角色");
+    summary.click();
+    assert.equal(card.open, true);
+    (byLabel(card, "配置 1 任务角色 开发") as HTMLInputElement).click();
+    (byLabel(card, "配置 1 任务角色 测试") as HTMLInputElement).click();
+    await waitFor(
+      () => textOf(summary.querySelector(".worker-type-roles")) === "测试、开发",
+      "角色摘要实时更新并按目录排序",
+    );
+    assert.equal(card.open, true);
+    (byLabel(card, "配置 1 下移 DSH default") as HTMLButtonElement).click();
+    await waitFor(() => configCards(mounted.container)[1] === card, "移动已展开配置");
+    assert.equal(card.open, true);
+    summary.click();
+    assert.equal(card.open, false);
+    assert.equal(textOf(summary.querySelector(".worker-type-roles")), "测试、开发");
+    summary.click();
+    (byLabel(card, "配置 2 任务角色 测试") as HTMLInputElement).click();
+    (byLabel(card, "配置 2 任务角色 开发") as HTMLInputElement).click();
+    await waitFor(
+      () => textOf(summary.querySelector(".worker-type-roles")) === "未设置角色",
+      "清空角色显示占位",
+    );
+    button(mounted.container, "返回列表").click();
+    await openSettings(mounted);
+    assert.deepEqual(configCards(mounted.container).map((item) => item.open), [false, false, false]);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+  } finally {
+    mounted.unmount();
+  }
+});
+
 function dragHandles(root: ParentNode): HTMLElement[] {
   return [...root.querySelectorAll(".worker-drag-handle")] as HTMLElement[];
 }
@@ -2020,6 +2063,7 @@ test("DOM: reorder buttons keep id-keyed drafts and save the new config order", 
       "Pi default",
       "Codex default",
     ]);
+    configCards(mounted.container)[0]!.querySelector("summary")!.click();
 
     // Draft edits stay attached to their config id, not to a list position.
     await typeInto(
@@ -2101,6 +2145,7 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     await openSettings(mounted);
     const initialOrder = configCardNames(mounted.container);
     assert.deepEqual(initialOrder, ["DSH default", "Pi default", "Codex default"]);
+    configCards(mounted.container)[0]!.querySelector("summary")!.click();
 
     await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
     await waitFor(
