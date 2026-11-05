@@ -36,7 +36,7 @@ export type WorkerStatus =
   | "interrupted"
   | "unknown";
 
-/** Statuses that hold one slot of the `(parentSessionId, projectId, workerType)` key. */
+/** Statuses that hold one slot of the `(parentSessionId, projectId, configId)` key. */
 export type WorkerOccupyingStatus = Extract<
   WorkerStatus,
   "starting" | "running" | "stopping" | "unknown"
@@ -121,16 +121,26 @@ export type WorkerStartInput = {
   /** Short user-visible label for the worker. */
   taskName: string;
   /**
-   * Native runner for this worker. An explicit value always wins, but it must be enabled. When
-   * omitted, the type is chosen only from enabled types whose `roles` include `taskRole` (see
-   * `WorkerSettings.roles`); among those candidates `defaultWorkerType` wins, otherwise the
-   * first in `dsh`/`pi`/`codex` order. `defaultWorkerType` is used only when no role was
-   * supplied or no enabled type matches it.
+   * Configuration to use for a new worker. An explicit `configId` wins over `type`/`taskRole`,
+   * must exist and be enabled, and must agree with an explicit `type`. When omitted, routing
+   * considers only enabled configs: an optional explicit `type` narrows the list first, then
+   * `taskRole` selects matching configs, preferring the default config and otherwise the first
+   * in list order; with no role match it falls back to the type-constrained candidates. The
+   * chosen config is recorded on the worker. An omitted key is left out of the replay
+   * fingerprint entirely (never recorded as null), so a replay keeps its original config.
+   */
+  configId?: string;
+  /**
+   * Optional engine filter for a new worker. It only narrows which enabled configs are
+   * routable; it never selects an engine independently of a config. With `configId` it must
+   * agree with that config's type. With no role match the type-constrained candidates are used.
+   * Ignored on resume, which keeps the worker's recorded config.
    */
   type?: WorkerType;
   /**
-   * Requested task role; one of `WORKER_TASK_ROLES`. A role only narrows which type an omitted
-   * `type` selects, so it applies to new workers only: a resume keeps the worker's recorded type.
+   * Requested task role; one of `WORKER_TASK_ROLES`. A role only narrows which enabled config an
+   * omitted `configId`/`type` selects, so it applies to new workers only: a resume keeps the
+   * worker's recorded config and type.
    */
   taskRole?: WorkerTaskRole;
   prompt: string;
@@ -142,10 +152,12 @@ export type WorkerStartInput = {
    */
   writePaths: string[];
   /**
-   * Optional native model/provider overrides. Explicit selections win over configured defaults
-   * and over Codex extra args; Pi may apply effort to its configured default model.
+   * Optional native model override. Explicit selections win over configured defaults and over
+   * Codex extra args. Pi/DSH receive one complete native model identifier (for example
+   * `provider/model`) and their CLI/adapter resolves the route; they have no independent service.
    */
   model?: string;
+  /** Independent model service, supported only for Codex; non-Codex requests reject it. */
   provider?: string;
   /**
    * Native reasoning effort. DSH requires an explicit model before effort can be applied; Pi
@@ -166,13 +178,15 @@ export type WorkerStartInput = {
 
 /**
  * A follow-up run for an existing worker. The cwd, home, and native session identity stay fixed;
- * each resume creates its own `runId` and may override model/provider/effort explicitly. Codex
- * resumes its recorded native session id with `codex exec resume`.
+ * each resume creates its own `runId` and may override model/effort explicitly. An independent
+ * provider is Codex-only. Codex resumes its recorded native session id with `codex exec resume`;
+ * old non-Codex providers are folded into the full model id.
  */
 export type WorkerResumeInput = {
   workerId: string;
   prompt: string;
   model?: string;
+  /** Independent model service, supported only for Codex; non-Codex requests reject it. */
   provider?: string;
   effort?: string;
   /**
@@ -236,11 +250,56 @@ export type WorkerOwner = {
   pausedReason?: string;
 };
 
-/** Token-usage data from the native runner; every unknown or unreported value is null. */
+/**
+ * One normalized counter snapshot. Every unknown or unreported value is null; a reported zero
+ * stays zero and is never confused with an unreported field.
+ */
+export type WorkerTokenCounters = {
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  totalTokens: number | null;
+};
+
+/**
+ * Token usage reported by the native runner. The original three fields stay compatible with
+ * older records; new parsers always fill `cacheReadTokens` and `cacheWriteTokens`.
+ *
+ * `inputTokens` keeps the native meaning per engine: DSH/Pi input excludes cache tokens while
+ * Codex input already includes them. `totalTokens` prefers the native total. For DSH/Pi the
+ * fallback sum is input + output + cache read + cache write, and only when one sample reports
+ * all four; Codex falls back to input + output because cache is already inside input. `scope`
+ * says whether the counters
+ * describe this run or the whole native session, and `partial` means the visible statistics
+ * have a gap (interruption, cancellation, or an incompatible counter shape). Unknown values
+ * stay null and are never estimated or clipped to zero. Older records may omit the optional
+ * keys; readers must treat a missing scope as unknown and a missing partial as false.
+ * `cacheWriteTokens` includes the 1h cache write subset where the native source reports it.
+ */
 export type WorkerUsage = {
   inputTokens: number | null;
   outputTokens: number | null;
   totalTokens: number | null;
+  cacheReadTokens?: number | null;
+  cacheWriteTokens?: number | null;
+  scope?: "run" | "session" | "unknown";
+  partial?: boolean;
+};
+
+/**
+ * Measurement start for Codex session-cumulative counters. A new thread stores a known
+ * all-zero `WorkerTokenCounters` baseline (not null); null only means a resume had no trusted
+ * baseline. `counters` is the last `total_token_usage` snapshot before launch when trusted;
+ * `offset` is the rollout EOF read at launch (0 for a new thread, or the later usable start).
+ * The run's native rollout file is `WorkerRun.nativeSessionFile`. The baseline only marks
+ * where this run starts: it never fabricates native history, is never derived from a previous
+ * run's `usage`, and contains no sensitive data. Runtime must capture it before launch, not
+ * while queued; a resume reuses the matching session rollout.
+ */
+export type WorkerCodexUsageBaseline = {
+  counters: WorkerTokenCounters | null;
+  offset: number;
 };
 
 /**
@@ -273,6 +332,12 @@ export type WorkerRun = {
   /** ISO-8601 timestamps; both stay null until the run enters that lifecycle phase. */
   startedAt: string | null;
   finishedAt: string | null;
+  /**
+   * Selection snapshotted at admission. Historical runs migrated from before configs existed
+   * keep any recorded value; only a missing value is filled from the run's own reliable
+   * `spec.json` argv. Without spec evidence the legacy null is preserved instead of guessing
+   * from current settings.
+   */
   model: string | null;
   provider: string | null;
   effort: string | null;
@@ -288,6 +353,19 @@ export type WorkerRun = {
   /** Native identity; null until it has been validated, never guessed. */
   nativeSessionId: string | null;
   nativeSessionFile: string | null;
+  /**
+   * Codex-only measurement start for session-cumulative token counters; absent for other
+   * engines and for older records. See `WorkerCodexUsageBaseline`.
+   */
+  codexUsageBaseline?: WorkerCodexUsageBaseline;
+  /**
+   * Set only by the schema-2 migration on a Codex run that had no reliable recorded provider
+   * (no run value and no spec argv evidence). It preserves the old resume behavior by letting
+   * the launch use the worker's current config `modelProvider` as a fallback without ever
+   * pretending that provider was the run's historical value. Kept across resumes until an
+   * explicit provider is supplied; new runs never set it.
+   */
+  legacyCodexProvider?: true;
   exitCode: number | null;
   /** Final assistant text, or null when the runner produced none. */
   finalText: string | null;
@@ -300,6 +378,14 @@ export type WorkerRun = {
 export type WorkerRecord = {
   id: string;
   type: WorkerType;
+  /**
+   * Configuration that created this worker; fixed for the worker's lifetime, including every
+   * resume. Workers recorded before configs existed are backfilled by the schema-2 migration
+   * with the initial config of their `type` in one transaction.
+   */
+  configId: string;
+  /** Snapshot of the config's name at creation, kept for display after later renames. */
+  configName: string;
   taskName: string;
   /** Task role recorded at creation; absent on workers created before roles existed. */
   taskRole?: WorkerTaskRole;
@@ -337,32 +423,64 @@ export type WorkerNotification = {
   batchId: string | null;
 };
 
-//----------------- SETTINGS, COUNTS, AND UI SNAPSHOTS ------------
+//----------------- WORKER CONFIGS, SETTINGS, COUNTS, AND UI SNAPSHOTS ------------
 
 /**
- * Configured model and native reasoning effort for one worker type. Null means the runner's
- * existing default: Pi falls back to `CODEX_PI_MODEL` / `CODEX_PI_THINKING`, DSH leaves its
- * native model configuration untouched, and Codex uses its config plus configured extra args.
- * Explicit start/resume selections take precedence over these defaults.
+ * One named, reusable execution configuration. `id` is a stable client-generated UUID chosen
+ * when the config is created; renaming keeps it, deletion never allows reuse while worker
+ * history still references it, and a config's `type` cannot change while any worker or run
+ * history still references it (see `WorkerConfigUsage.referenced`). `configs` is the single
+ * canonical source of per-engine settings; there is no separate `engine` field copying `type`.
+ *
+ * `model`/`effort` are the configured defaults used only when a request omits explicit
+ * selections; null means the runner's own default. Pi stores the complete native model id,
+ * which is often `provider/model`.
+ * `codex` is present for `type: "codex"` configs only: `modelProvider` is the Codex inference
+ * service (null keeps Codex's own default), `env` is merged over the inherited environment for
+ * the run, and `legacyExtraArgs` are separate `codex exec` argv entries that were originally
+ * configured as extra args. Codex env values never enter `WorkerRun` or MCP-visible output.
+ */
+export type WorkerConfig = {
+  id: string;
+  name: string;
+  type: WorkerType;
+  enabled: boolean;
+  roles: WorkerTaskRole[];
+  concurrency: number;
+  model: string | null;
+  effort: string | null;
+  codex?: WorkerCodexConfig;
+};
+
+/** Codex-only part of a `WorkerConfig`; see `WorkerConfig.codex`. */
+export type WorkerCodexConfig = {
+  modelProvider: string | null;
+  env: Record<string, string>;
+  legacyExtraArgs: string[];
+};
+
+/**
+ * Configured model and native reasoning effort projected for one worker type. Null means the
+ * runner's existing native default; no plugin environment variable overrides Pi/DSH selection.
+ * Codex uses its config plus configured extra args. Explicit start/resume selections take
+ * precedence over these defaults.
  */
 export type WorkerDefault = {
   model: string | null;
   effort: string | null;
 };
 
-/** Per-type configured defaults used when a start request omits model/effort. */
+/** Per-type configured defaults, projected from `WorkerConfig` for legacy readers only. */
 export type WorkerDefaults = Record<WorkerType, WorkerDefault>;
 
 /**
- * Codex exec launch settings shared by every run of a Codex worker.
- *
- * The initial defaults are `env: { CODEX_PROXY_BYPASS: "1" }` and
- * `extraArgs: ["-c", "model_provider=magpie"]`. `env` is merged over the inherited environment,
- * with a same-named key replacing the inherited value; `extraArgs` are separate argv entries and
- * are never joined into a shell command. An explicit empty env/array clears the prefilled values.
- * Settings are read again for each start/resume, while the run's recorded home, cwd, and native
- * session identity stay fixed; explicit model/provider/effort selections win over extra args.
- * Environment values are settings-only and are never copied into `WorkerRun`.
+ * Legacy read-only projection of the Codex config selected by `WorkerSettings`'s per-engine
+ * projection rule. It is never persisted on its own and is replaced as a whole only by the
+ * legacy settings input. `env` is merged over the inherited environment, with a same-named key
+ * replacing the inherited value; `extraArgs` are separate argv entries and are never joined into
+ * a shell command. Settings are re-read for each start/resume, while the run's recorded home,
+ * cwd, and native session identity stay fixed; explicit model/provider/effort selections win over
+ * extra args. Environment values are settings-only and are never copied into `WorkerRun`.
  */
 export type WorkerCodexSettings = {
   env: Record<string, string>;
@@ -370,34 +488,49 @@ export type WorkerCodexSettings = {
 };
 
 /**
- * Effective worker settings. Concurrency applies per `(parentSessionId, projectId, workerType)`
- * key. The first soft reminder defaults to 600 seconds / 20 steps, followed by timed reviews
- * every `softReminderSeconds`; no hard timeout is applied by default.
+ * Effective worker settings: the canonical read shape of `GET /state` and `PUT /settings`.
  *
- * `enabled` gates both newly accepted starts and newly accepted resumes; a run that was already
- * accepted, including queued work, is unchanged. `roles` only routes the type of a new worker
- * and never changes an existing worker or resume. A replayed request returns its original
- * record instead of reading these settings again.
+ * Persisted canonical state is `schemaVersion`, `configs`, `defaultConfigId`, and the global
+ * retention/reminder/timeout values. `schemaVersion` is server-managed and is never supplied by
+ * clients. `defaultConfigId` must reference an enabled entry in `configs`.
+ *
+ * `concurrency`, `enabled`, `roles`, `defaults`, `codex`, and `defaultWorkerType` are READ-ONLY
+ * compatibility projections, never a second persistence source. Per engine they project the
+ * engine's default config when `defaultConfigId` belongs to that engine, otherwise the first
+ * config of that engine in list order; when an engine has no config, `enabled` is false, `roles`
+ * is `[]`, `concurrency` is 1, `defaults` is null model/effort, and `codex` is empty env/args.
+ * `defaultWorkerType` projects the type of `defaultConfigId`. Writers must update `configs`.
+ *
+ * Concurrency applies per `(parentSessionId, projectId, configId)` key. The first soft reminder
+ * defaults to 600 seconds / 20 steps, followed by timed reviews every `softReminderSeconds`; no
+ * hard timeout is applied by default.
+ *
+ * A config's `enabled` gates both newly accepted starts and newly accepted resumes; a run that
+ * was already accepted, including queued work, is unchanged. `roles` only routes the config of a
+ * new worker and never changes an existing worker or resume. A replayed request returns its
+ * original record instead of reading these settings again.
+ *
+ * The schema-2 migration creates the initial fixed configs `dsh-default`, `pi-default`, and
+ * `codex-default` (names "DSH default", "Pi default", "Codex default") from the previous
+ * per-type maps and defaults, and sets `defaultConfigId` to the initial config matching the
+ * previous `defaultWorkerType` (initially `dsh-default`).
  */
 export type WorkerSettings = {
-  concurrency: Record<WorkerType, number>;
-  /**
-   * Fallback for a start request with no task role or no matching enabled type, and preferred
-   * among multiple role matches. Must be enabled; defaults to `dsh`.
-   */
-  defaultWorkerType: WorkerType;
-  /** Whether each type may be used for new starts and resumes; initially true for every type. */
-  enabled: Record<WorkerType, boolean>;
-  /**
-   * Task roles each type accepts. A type with no roles here simply does not participate in role
-   * matching; only when no enabled type matches the requested role does an omitted `type` fall
-   * back to `defaultWorkerType`. Initially `[]` for every type.
-   */
-  roles: Record<WorkerType, WorkerTaskRole[]>;
-  /** Model and effort defaults for each type; initially null for all three types. */
-  defaults: WorkerDefaults;
-  /** Codex exec launch settings; required here and replaced as a whole by a settings update. */
-  codex: WorkerCodexSettings;
+  schemaVersion: 2;
+  configs: WorkerConfig[];
+  defaultConfigId: string;
+  /** Read-only projection; see the type comment. */
+  readonly concurrency: Record<WorkerType, number>;
+  /** Read-only projection of the `defaultConfigId` config's type. */
+  readonly defaultWorkerType: WorkerType;
+  /** Read-only projection; an engine with no config is false. */
+  readonly enabled: Record<WorkerType, boolean>;
+  /** Read-only projection; an engine with no config is `[]`. */
+  readonly roles: Record<WorkerType, WorkerTaskRole[]>;
+  /** Read-only projection; an engine with no config is null model/effort. */
+  readonly defaults: WorkerDefaults;
+  /** Read-only projection; an engine with no config is empty env/args. */
+  readonly codex: WorkerCodexSettings;
   /** Days to retain finished runs and their logs, measured from finishedAt; initially 1. */
   retentionDays: number;
   softReminderSeconds: number;
@@ -406,18 +539,37 @@ export type WorkerSettings = {
 };
 
 /**
- * Editable subset accepted by `PUT /settings`; reminder and timeout values stay server-owned.
+ * Canonical `PUT /settings` input. `configs` is replaced as a whole and validated atomically
+ * before anything is persisted: ids are unique, `defaultConfigId` references an enabled config,
+ * and an existing config keeps its `type` while referenced. Deployment-owned reminder and
+ * timeout values stay server-owned. An omitted `retentionDays` keeps the stored value.
+ */
+export type WorkerSettingsUpdate = {
+  configs: WorkerConfig[];
+  defaultConfigId: string;
+  retentionDays?: number;
+};
+
+/**
+ * Legacy `PUT /settings` input, still accepted for older clients. It can only edit the initial
+ * fixed configs `dsh-default` / `pi-default` / `codex-default`, matched by id even after they are
+ * renamed: each supplied map entry updates the matching initial config, and a supplied
+ * `defaultWorkerType` selects its initial config as `defaultConfigId`. If an initial config has
+ * since been deleted the whole update is rejected; user-added configs are never editable through
+ * this input.
+ *
  * Concurrency and defaults stay compatible with older clients: `dsh`/`pi` are required while
  * `codex` is optional and keeps its existing value when omitted. A supplied `defaults` must
  * contain both `dsh` and `pi`; a supplied `codex` object must include both `env` and `extraArgs`
- * and replaces the whole setting. Blank or null model/effort values clear that configured
- * default. `retentionDays` must be a positive integer.
+ * and replaces the whole Codex launch block: `modelProvider` is re-extracted from the new
+ * `extraArgs` and cleared when they no longer name one. Blank or null model/effort values clear
+ * that configured default. `retentionDays` must be a positive integer.
  *
  * `enabled` and `roles` are whole-setting optional: when a map is supplied it must contain all
  * three of `dsh`, `pi`, and `codex`; when omitted the stored value is kept. A supplied
- * `defaultWorkerType` must reference a type that is enabled afterwards.
+ * `defaultWorkerType` must reference an initial config that is enabled afterwards.
  */
-export type WorkerSettingsInput = {
+export type WorkerLegacySettingsInput = {
   concurrency: { dsh: number; pi: number } & { codex?: number };
   defaultWorkerType?: WorkerType;
   enabled?: Record<WorkerType, boolean>;
@@ -425,6 +577,98 @@ export type WorkerSettingsInput = {
   defaults?: { dsh: WorkerDefault; pi: WorkerDefault } & { codex?: WorkerDefault };
   codex?: WorkerCodexSettings;
   retentionDays?: number;
+};
+
+/** `PUT /settings` accepts either the canonical shape or the mapped legacy shape. */
+export type WorkerSettingsInput = WorkerSettingsUpdate | WorkerLegacySettingsInput;
+
+/**
+ * Credential-free config view exposed to MCP/model-visible context. Codex configs carry only
+ * `modelProvider`; `env` and `legacyExtraArgs` remain in the authenticated UI REST/state view.
+ */
+export type WorkerConfigMcpView = Omit<WorkerConfig, "codex"> & {
+  codex?: { modelProvider: string | null };
+};
+
+/**
+ * MCP-safe settings view: canonical configs without Codex env/args plus the same read-only
+ * per-engine projections as `WorkerSettings`, so older MCP guidance and tools keep working.
+ */
+export type WorkerMcpSettings = {
+  configs: WorkerConfigMcpView[];
+  defaultConfigId: string;
+  defaultWorkerType: WorkerType;
+  enabled: Record<WorkerType, boolean>;
+  roles: Record<WorkerType, WorkerTaskRole[]>;
+  concurrency: Record<WorkerType, number>;
+  defaults: WorkerDefaults;
+  retentionDays: number;
+  softReminderSeconds: number;
+  softReminderSteps: number;
+  hardTimeoutSeconds: number | null;
+};
+
+//----------------- MODEL CATALOGS ------------
+
+/**
+ * One selectable model row. It mirrors the host provider catalog; additional host fields are
+ * ignored by the Worker config editor. `effort` lists the real configured levels for this model.
+ */
+export type WorkerModelOption = {
+  value: string;
+  label: string;
+  description?: string;
+  effort?: {
+    default?: string;
+    values: Array<{ value: string; description?: string }>;
+  };
+};
+
+/** Read-only provider model catalog used by the config editor. */
+export type WorkerModelCatalog = {
+  DEFAULT: string;
+  OPTIONS: WorkerModelOption[];
+  EFFORT_LEVELS?: string[];
+};
+
+/** Credential-free Codex inference-service directory from the host provider API. */
+export type CodexModelsDirectory = {
+  defaultProvider: string;
+  providers: Array<{ id: string; name: string }>;
+  hasCustomProviders?: boolean;
+};
+
+/** Models exposed by one Codex inference service; never carries provider credentials. */
+export type CodexServiceModelCatalog = {
+  modelProvider: string;
+  models: string[];
+};
+
+/** One Pi model from the plugin's `GET /catalog/pi` response. */
+export type PiModelOption = {
+  provider: string;
+  id: string;
+  reasoning: boolean;
+};
+
+/**
+ * `GET /catalog/pi` response. Pi stays a Worker execution engine and is not added to the host's
+ * global `LLMProvider`; `thinkingLevels` are the native levels accepted as `effort`.
+ */
+export type PiModelCatalog = {
+  models: PiModelOption[];
+  thinkingLevels: string[];
+};
+
+/**
+ * Optional authenticated host catalog capabilities. The Worker client adds these as optional
+ * `models` / `codexModelProviders` / `codexModelProviderModels` members of `WorkerHost` in
+ * `client/api.ts`; a missing capability must read as "catalog unavailable".
+ */
+export type WorkerHostCatalogCapabilities = {
+  models?(provider: "codex" | "dsh"): Promise<WorkerModelCatalog>;
+  codexModelProviders?(): Promise<CodexModelsDirectory>;
+  codexModelProviderModels?(modelProvider: string): Promise<CodexServiceModelCatalog>;
 };
 
 /** Worker counts keyed by every lifecycle status; absent keys are zero only in serialized data. */
@@ -439,13 +683,30 @@ export type WorkerCounts = {
 };
 
 /**
- * `GET /state` payload. Host/MCP control tokens are never present; user-configured settings
- * values (for example Codex env) are returned as stored and may themselves contain credentials.
+ * Reference usage of one config across the WHOLE store, never narrowed by a `GET /state`
+ * project/session filter, so the UI can forbid deletion and engine changes reliably.
+ * `referenced` is true when any worker record or run history uses the config, which locks its
+ * engine and forbids reusing a deleted id. `activeRuns` counts non-terminal runs
+ * (queued/starting/running/stopping/unknown) and is what blocks deletion; after a config is
+ * deleted, terminal workers keep its name snapshot. Configs with no usage are absent from the
+ * map, and ids referenced only by deleted-config history remain present.
+ */
+export type WorkerConfigUsage = {
+  referenced: boolean;
+  activeRuns: number;
+};
+
+/**
+ * `GET /state` payload. Host/MCP control tokens are never present. This authenticated view
+ * returns real stored settings including Codex env; the MCP/model-visible view uses
+ * `WorkerMcpSettings`, which omits Codex env and extra args.
  */
 export type WorkerStateSnapshot = {
   workers: WorkerRecord[];
   counts: WorkerCounts;
   settings: WorkerSettings;
+  /** Per-config usage for `settings.configs`, computed from the whole store. */
+  configUsage: Record<string, WorkerConfigUsage>;
   notifications: WorkerNotification[];
 };
 

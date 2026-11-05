@@ -50,6 +50,26 @@ if (resumeAt < 0)
     JSON.stringify({ thread_id: sessionId, cwd: process.cwd() }) + "\n",
   );
 
+const readUsage = (name, fallback) => {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  return JSON.parse(raw);
+};
+const appendRolloutUsage = (usage) => {
+  fs.appendFileSync(
+    sessionFile,
+    JSON.stringify({
+      type: "event_msg",
+      payload: {
+        type: "token_count",
+        info: { total_token_usage: usage, last_token_usage: usage },
+      },
+    }) + "\n",
+  );
+};
+if (process.env.TEST_CODEX_ROLLOUT_USAGE)
+  appendRolloutUsage(readUsage("TEST_CODEX_ROLLOUT_USAGE", null));
+
 emit({
   type: "thread.started",
   thread_id: scenario === "wrong-thread" ? "wrong-" + sessionId : sessionId,
@@ -70,14 +90,13 @@ if (scenario === "hang") {
       type: "item.completed",
       item: { type: "agent_message", text: "codex answer " + sessionId },
     });
-  emit({
-    type: "turn.completed",
-    usage: {
-      input_tokens: 11,
-      cached_input_tokens: 4,
-      cache_write_input_tokens: 2,
-      output_tokens: 5,
-      reasoning_output_tokens: 3,
-    },
+  const completionUsage = readUsage("TEST_CODEX_COMPLETION_USAGE", {
+    input_tokens: 11,
+    cached_input_tokens: 4,
+    cache_write_input_tokens: 2,
+    output_tokens: 5,
+    reasoning_output_tokens: 3,
   });
+  emit({ type: "turn.completed", usage: completionUsage });
+  appendRolloutUsage(completionUsage);
 }

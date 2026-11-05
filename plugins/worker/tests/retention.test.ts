@@ -42,6 +42,8 @@ function seed(
   const worker: WorkerRecord = {
     id: workerId,
     type: "dsh",
+    configId: "dsh-default",
+    configName: "DSH default",
     taskName: id,
     ownerId: "owner-1",
     parentSessionId: "parent-1",

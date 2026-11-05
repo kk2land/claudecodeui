@@ -214,20 +214,46 @@ export function budgetState(
   };
 }
 
-/** Token values stay `—` when the runner never reported them. */
-export function formatTokens(usage: WorkerUsage | null): string {
+/**
+ * Token usage for one selected run. Missing counters stay `—` and a real zero stays `0`; no
+ * value is summed, estimated, or relabeled. The input label follows the native meaning
+ * (DSH/Pi input excludes cache, Codex input already includes it) and the scope suffix keeps
+ * session-cumulative numbers from being read as this run's usage.
+ */
+export function formatTokens(
+  usage: WorkerUsage | null,
+  type?: WorkerType,
+): string {
   if (!usage) return "用量未知";
-  const value = (input: number | null) =>
+  const value = (input: number | null | undefined) =>
     typeof input === "number" && Number.isFinite(input)
       ? input.toLocaleString("zh-CN")
       : "—";
+  const inputLabel = type === "codex" ? "输入（含缓存）" : "未缓存输入";
+  // A missing scope is a legacy record, never the same as a reported `unknown`.
+  const scope =
+    usage.scope === "run"
+      ? "本次运行"
+      : usage.scope === "session"
+        ? "会话累计（无法确认本次用量）"
+        : usage.scope === "unknown"
+          ? "统计范围未知"
+          : "历史记录，统计范围未标注";
   return (
-    "输入 " +
+    (usage.partial ? "部分统计 · " : "") +
+    inputLabel +
+    " " +
     value(usage.inputTokens) +
     " · 输出 " +
     value(usage.outputTokens) +
+    " · 缓存读取 " +
+    value(usage.cacheReadTokens) +
+    " · 缓存写入 " +
+    value(usage.cacheWriteTokens) +
     " · 合计 " +
-    value(usage.totalTokens)
+    value(usage.totalTokens) +
+    " · " +
+    scope
   );
 }
 

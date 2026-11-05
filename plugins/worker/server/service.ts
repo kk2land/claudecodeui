@@ -7,7 +7,9 @@ import { fileURLToPath } from "node:url";
 import { WorkerStore } from "./store.js";
 import { WorkspaceManager } from "./worktree.js";
 import {
+  codexBaseline,
   codexEnvironment,
+  findCodexSessionFile,
   nativeHome,
   newProgress,
   parseCodex,
@@ -16,19 +18,34 @@ import {
   prepareLaunch,
   resolveExecutable,
   trackProgress,
+  zeroCodexCounters,
   PI_THINKING_LEVELS,
 } from "./native.js";
 import type { ProgressTracker } from "./native.js";
 import { readLogPage } from "./logs.js";
+import { readPiCatalog } from "./pi-catalog.js";
 import { sweepNativeSessions } from "./native-retention.js";
+import {
+  INITIAL_CONFIG_IDS,
+  configById,
+  extractCodexLaunch,
+  projectSettings,
+} from "./settings.js";
 import type {
   GuardianEvidence,
   WorkerCancelInput,
   WorkerCleanupInput,
+  WorkerCodexConfig,
+  WorkerConfig,
   WorkerDefaults,
+  WorkerLegacySettingsInput,
+  WorkerSettingsRecord,
+  WorkerSettingsUpdate,
   WorkerLogQuery,
+  WorkerMcpSettings,
   WorkerNotification,
   WorkerNotificationDelivery,
+  PiModelCatalog,
   WorkerOwner,
   WorkerPlan,
   WorkerRecord,
@@ -98,6 +115,8 @@ export type WorkerServiceOptions = {
   /** Tests inject a source guardian invocation; production uses compiled guardian.mjs. */
   guardianCommand?: string[];
   dshPatch?: string;
+  /** Test override for the isolated Pi model-directory query. */
+  piCatalogTimeoutMs?: number;
   now?: () => number;
   /** Test/diagnostic hook mirroring IPC events; never exposes tokens. */
   onEvent?: (event: unknown) => void;
@@ -125,6 +144,8 @@ export class WorkerService {
 
   constructor(private readonly options: WorkerServiceOptions) {
     this.store = new WorkerStore(options.dataDirectory);
+    // Complete the schema-2 settings/worker migration before any worker can be read.
+    this.store.settings();
     this.workspace = new WorkspaceManager(options.dataDirectory);
     this.environment = options.environment ?? process.env;
     this.now = options.now ?? Date.now;
@@ -189,10 +210,78 @@ export class WorkerService {
     return this.store.settings();
   }
 
+  /** Reads the static Pi model directory without touching the real agent home. */
+  async piCatalog(): Promise<PiModelCatalog> {
+    const environment = this.guardianEnvironment(this.environment);
+    const { home } = nativeHome("pi", this.options.dataDirectory, environment);
+    return readPiCatalog({
+      sourceHome: home,
+      executable: this.executable("pi", environment),
+      environment,
+      timeoutMs: this.options.piCatalogTimeoutMs,
+    });
+  }
+
   updateSettings(input: WorkerSettingsInput): WorkerSettings {
-    const dsh = input?.concurrency?.dsh;
-    const pi = input?.concurrency?.pi;
-    const codexConcurrency = input?.concurrency?.codex;
+    if (!input || typeof input !== "object")
+      throw new WorkerFailure("INVALID_SETTINGS", "设置请求体无效");
+    const canonical =
+      "configs" in input || "defaultConfigId" in input;
+    return canonical
+      ? this.updateCanonicalSettings(input as WorkerSettingsUpdate)
+      : this.updateLegacySettings(input as WorkerLegacySettingsInput);
+  }
+
+  /** Replaces the full canonical config list atomically; legacy maps are never persisted. */
+  private updateCanonicalSettings(input: WorkerSettingsUpdate): WorkerSettings {
+    if (!Array.isArray(input.configs) || !input.configs.length)
+      throw new WorkerFailure("INVALID_SETTINGS", "configs 必须是非空数组");
+    if (
+      input.retentionDays !== undefined &&
+      (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 1)
+    )
+      throw new WorkerFailure("INVALID_SETTINGS", "retentionDays 必须是正整数");
+    const configs = input.configs.map((value) => this.normalizeConfig(value));
+    const seen = new Set<string>();
+    for (const config of configs) {
+      if (seen.has(config.id))
+        throw new WorkerFailure("INVALID_SETTINGS", "configs 的 id 不能重复");
+      seen.add(config.id);
+    }
+    const defaultConfigId = clean(input.defaultConfigId);
+    const defaultConfig = configs.find((config) => config.id === defaultConfigId);
+    if (!defaultConfigId || !defaultConfig)
+      throw new WorkerFailure("INVALID_SETTINGS", "defaultConfigId 必须引用已存在的配置");
+    if (!defaultConfig.enabled)
+      throw new WorkerFailure("INVALID_SETTINGS", "defaultConfigId 必须指向已启用的配置");
+    if (!configs.some((config) => config.enabled))
+      throw new WorkerFailure("INVALID_SETTINGS", "至少需要一个已启用的配置");
+    const current = this.store.settings();
+    this.assertConfigReferences(current.configs, configs);
+    const record: WorkerSettingsRecord = {
+      schemaVersion: 2,
+      configs,
+      defaultConfigId,
+      retentionDays: input.retentionDays ?? current.retentionDays,
+      softReminderSeconds: current.softReminderSeconds,
+      softReminderSteps: current.softReminderSteps,
+      hardTimeoutSeconds: current.hardTimeoutSeconds,
+    };
+    this.store.saveSettings(record);
+    this.pruneHistory();
+    void this.dispatch();
+    return projectSettings(record);
+  }
+
+  /**
+   * Maps the legacy full-map update onto the fixed initial config ids. Renamed initial configs
+   * keep their id and stay editable; a missing initial config rejects the update instead of
+   * silently creating a replacement.
+   */
+  private updateLegacySettings(input: WorkerLegacySettingsInput): WorkerSettings {
+    const dsh = input.concurrency?.dsh;
+    const pi = input.concurrency?.pi;
+    const codexConcurrency = input.concurrency?.codex;
     if (
       !Number.isSafeInteger(dsh) ||
       (dsh as number) < 1 ||
@@ -251,9 +340,57 @@ export class WorkerService {
       }
     }
     const current = this.store.settings();
-    // Validate the complete candidate before mutating or saving anything, so an invalid field
-    // never partially persists. Codex errors never echo configured env values.
-    let codex = current.codex;
+    const configs = current.configs.map((config): WorkerConfig => {
+      const copy: WorkerConfig = {
+        id: config.id,
+        name: config.name,
+        type: config.type,
+        enabled: config.enabled,
+        roles: [...config.roles],
+        concurrency: config.concurrency,
+        model: config.model,
+        effort: config.effort,
+      };
+      if (config.codex)
+        copy.codex = {
+          modelProvider: config.codex.modelProvider,
+          env: { ...config.codex.env },
+          legacyExtraArgs: [...config.codex.legacyExtraArgs],
+        };
+      return copy;
+    });
+    const byId = new Map(configs.map((config) => [config.id, config]));
+    const initial = (type: WorkerType): WorkerConfig => {
+      const config = byId.get(INITIAL_CONFIG_IDS[type]);
+      if (!config)
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "初始配置 " + INITIAL_CONFIG_IDS[type] + " 已不存在，旧版设置无法更新",
+        );
+      return config;
+    };
+    initial("dsh").concurrency = dsh as number;
+    initial("pi").concurrency = pi as number;
+    if (codexConcurrency !== undefined)
+      initial("codex").concurrency = codexConcurrency;
+    if (input.enabled)
+      for (const type of ["dsh", "pi", "codex"] as const)
+        initial(type).enabled = input.enabled[type];
+    if (input.roles)
+      for (const type of ["dsh", "pi", "codex"] as const)
+        initial(type).roles = [...input.roles[type]];
+    if (input.defaults !== undefined) {
+      const currentCodex: WorkerDefaults["codex"] = {
+        model: initial("codex").model,
+        effort: initial("codex").effort,
+      };
+      const defaults = this.validateDefaults(input.defaults, currentCodex);
+      for (const type of ["dsh", "pi", "codex"] as const) {
+        if (type === "codex" && input.defaults.codex === undefined) continue;
+        initial(type).model = defaults[type].model;
+        initial(type).effort = defaults[type].effort;
+      }
+    }
     if (input.codex !== undefined) {
       const value = input.codex;
       if (!value || typeof value !== "object" || Array.isArray(value))
@@ -279,36 +416,162 @@ export class WorkerService {
           "INVALID_SETTINGS",
           "工作目录由任务工作区控制，额外参数不支持 -C/--cd",
         );
-      codex = { env: normalizedEnv, extraArgs: [...extraArgs] };
+      // The legacy Codex block replaces the whole launch view: the service is re-extracted from
+      // the new args and cleared when they no longer name one, so stale providers never win.
+      const extracted = extractCodexLaunch([...extraArgs]);
+      initial("codex").codex = {
+        modelProvider: extracted.modelProvider,
+        env: normalizedEnv,
+        legacyExtraArgs: extracted.legacyExtraArgs,
+      };
     }
-    const settings: WorkerSettings = {
-      ...current,
-      concurrency: {
-        dsh: dsh as number,
-        pi: pi as number,
-        codex: codexConcurrency ?? current.concurrency.codex,
-      },
-      defaultWorkerType: input.defaultWorkerType ?? current.defaultWorkerType,
-      enabled: input.enabled ?? current.enabled,
-      roles: input.roles ?? current.roles,
-      defaults:
-        input.defaults === undefined
-          ? current.defaults
-          : this.validateDefaults(input.defaults, current.defaults.codex),
-      codex,
-      retentionDays: input.retentionDays ?? current.retentionDays,
-    };
-    if (!settings.enabled[settings.defaultWorkerType])
+    const defaultConfigId =
+      input.defaultWorkerType === undefined
+        ? current.defaultConfigId
+        : initial(input.defaultWorkerType).id;
+    const defaultConfig = configs.find((config) => config.id === defaultConfigId);
+    if (!defaultConfig || !defaultConfig.enabled)
       throw new WorkerFailure("INVALID_SETTINGS", "defaultWorkerType 必须为已启用的类型");
-    this.store.saveSettings(settings);
+    if (!configs.some((config) => config.enabled))
+      throw new WorkerFailure("INVALID_SETTINGS", "至少需要一个已启用的配置");
+    const record: WorkerSettingsRecord = {
+      schemaVersion: 2,
+      configs,
+      defaultConfigId,
+      retentionDays: input.retentionDays ?? current.retentionDays,
+      softReminderSeconds: current.softReminderSeconds,
+      softReminderSteps: current.softReminderSteps,
+      hardTimeoutSeconds: current.hardTimeoutSeconds,
+    };
+    this.store.saveSettings(record);
     this.pruneHistory();
     void this.dispatch();
-    return settings;
+    return projectSettings(record);
+  }
+
+  /** Validates one canonical config and normalizes its Codex launch view. */
+  private normalizeConfig(value: unknown): WorkerConfig {
+    if (!value || typeof value !== "object" || Array.isArray(value))
+      throw new WorkerFailure("INVALID_SETTINGS", "configs 的每一项必须是配置对象");
+    const entry = value as Record<string, unknown>;
+    const id = clean(entry.id as string | undefined);
+    const name = clean(entry.name as string | undefined);
+    if (!id) throw new WorkerFailure("INVALID_SETTINGS", "配置 id 不能为空");
+    if (!name) throw new WorkerFailure("INVALID_SETTINGS", "配置 name 不能为空");
+    const type = entry.type as WorkerType;
+    if (type !== "dsh" && type !== "pi" && type !== "codex")
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 type 必须是 dsh、pi 或 codex");
+    if (typeof entry.enabled !== "boolean")
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 enabled 必须是布尔值");
+    if (!Array.isArray(entry.roles) || entry.roles.some(
+      (role) =>
+        typeof role !== "string" ||
+        !WORKER_TASK_ROLES.some((item) => item.value === role),
+    ))
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 roles 必须是合法任务角色数组");
+    if (!Number.isSafeInteger(entry.concurrency) || (entry.concurrency as number) < 1)
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 concurrency 必须是正整数");
+    if (entry.model !== undefined && entry.model !== null && typeof entry.model !== "string")
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 model 必须是字符串或 null");
+    if (entry.effort !== undefined && entry.effort !== null && typeof entry.effort !== "string")
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 effort 必须是字符串或 null");
+    const model = clean(entry.model as string | null | undefined);
+    const effort = clean(entry.effort as string | null | undefined);
+    const config: WorkerConfig = {
+      id,
+      name,
+      type,
+      enabled: entry.enabled,
+      roles: [...(entry.roles as WorkerConfig["roles"])],
+      concurrency: entry.concurrency as number,
+      model,
+      effort,
+    };
+    if (type === "pi" && effort && !(PI_THINKING_LEVELS as readonly string[]).includes(effort))
+      throw new WorkerFailure("INVALID_SETTINGS", "Pi 配置的 effort 必须是受支持的 thinking 级别");
+    if (type === "dsh" && effort && !model)
+      throw new WorkerFailure("INVALID_SETTINGS", "DSH 配置的 effort 需要同时配置 model");
+    if (type === "codex") {
+      if (!entry.codex || typeof entry.codex !== "object" || Array.isArray(entry.codex))
+        throw new WorkerFailure("INVALID_SETTINGS", "Codex 配置必须包含 codex 对象");
+      config.codex = this.normalizeCodexConfig(entry.codex as Record<string, unknown>);
+    }
+    return config;
+  }
+
+  private normalizeCodexConfig(value: Record<string, unknown>): WorkerCodexConfig {
+    const env = value.env;
+    if (!env || typeof env !== "object" || Array.isArray(env))
+      throw new WorkerFailure("INVALID_SETTINGS", "codex.env 必须是字符串映射");
+    const normalizedEnv: Record<string, string> = {};
+    for (const [key, item] of Object.entries(env))
+      if (typeof item !== "string")
+        throw new WorkerFailure("INVALID_SETTINGS", "codex.env 必须是字符串映射");
+      else normalizedEnv[key] = item;
+    const extraArgs = value.legacyExtraArgs;
+    if (!Array.isArray(extraArgs) || extraArgs.some((item) => typeof item !== "string"))
+      throw new WorkerFailure("INVALID_SETTINGS", "codex.legacyExtraArgs 必须是字符串数组");
+    if (
+      extraArgs.some(
+        (item) =>
+          item === "--cd" || item.startsWith("--cd=") || item.startsWith("-C"),
+      )
+    )
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "工作目录由任务工作区控制，额外参数不支持 -C/--cd",
+      );
+    if (
+      value.modelProvider !== undefined &&
+      value.modelProvider !== null &&
+      typeof value.modelProvider !== "string"
+    )
+      throw new WorkerFailure("INVALID_SETTINGS", "codex.modelProvider 必须是字符串或 null");
+    const extracted = extractCodexLaunch([...extraArgs]);
+    return {
+      modelProvider:
+        clean(value.modelProvider as string | null | undefined) ??
+        extracted.modelProvider,
+      env: normalizedEnv,
+      legacyExtraArgs: extracted.legacyExtraArgs,
+    };
+  }
+
+  /**
+   * Workers lock a config's engine and id against reuse; active runs block deletion. Terminal
+   * history may outlive a deleted config because the worker keeps its name snapshot.
+   */
+  private assertConfigReferences(
+    previous: WorkerConfig[],
+    next: WorkerConfig[],
+  ): void {
+    const usage = this.store.configUsage();
+    const previousById = new Map(previous.map((config) => [config.id, config]));
+    const nextIds = new Set(next.map((config) => config.id));
+    for (const config of next) {
+      const before = previousById.get(config.id);
+      if (!before && usage[config.id]?.referenced)
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "配置 id 已被历史记录引用，不能复用",
+        );
+      if (before && before.type !== config.type && usage[config.id]?.referenced)
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "已引用的配置不能修改执行引擎",
+        );
+    }
+    for (const config of previous)
+      if (!nextIds.has(config.id) && (usage[config.id]?.activeRuns ?? 0) > 0)
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "配置仍有活动运行，不能删除",
+        );
   }
 
   /** Validates dsh/pi entries plus optional codex and normalizes blank strings to null. */
   private validateDefaults(
-    value: NonNullable<WorkerSettingsInput["defaults"]>,
+    value: NonNullable<WorkerLegacySettingsInput["defaults"]>,
     currentCodex: WorkerDefaults["codex"],
   ): WorkerDefaults {
     if (!value || typeof value !== "object" || Array.isArray(value))
@@ -379,23 +642,13 @@ export class WorkerService {
       this.assertReplay(existing, "start", fingerprint);
       return this.resultOf(existing.workerId, existing.runId);
     }
-    // Resolve mutable settings only after replay lookup: an omitted type must not reinterpret a
+    // Resolve mutable settings only after replay lookup: an omitted config must not reinterpret a
     // request whose original run already exists.
     const settings = this.store.settings();
-    let type = settings.defaultWorkerType;
-    if (input.type !== undefined) {
-      if (!settings.enabled[input.type])
-        throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用");
-      type = input.type;
-    } else if (input.taskRole !== undefined) {
-      const taskRole = input.taskRole;
-      const candidates = (["dsh", "pi", "codex"] as const).filter(
-        (workerType) =>
-          settings.enabled[workerType] && settings.roles[workerType].includes(taskRole),
-      );
-      if (!candidates.includes(type) && candidates.length) type = candidates[0]!;
-    }
-    const selection = this.startSelection(type, input, settings.defaults[type]);
+    const config = this.resolveStartConfig(input, settings);
+    const type = config.type;
+    this.rejectNonCodexProvider(type, input.provider);
+    const selection = this.startSelection(type, input, config);
     this.validateSelection(type, selection);
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, settings);
     const id = randomUUID();
@@ -404,7 +657,7 @@ export class WorkerService {
     const homes = nativeHome(
       type,
       this.options.dataDirectory,
-      this.nativeEnvironment(type, settings),
+      this.nativeEnvironment(type, config),
     );
     const run: WorkerRun = {
       id: runId,
@@ -437,6 +690,8 @@ export class WorkerService {
     const worker: WorkerRecord = {
       id,
       type,
+      configId: config.id,
+      configName: config.name,
       taskName: input.taskName.trim(),
       taskRole: input.taskRole,
       ownerId,
@@ -500,8 +755,10 @@ export class WorkerService {
     }
     const worker = this.ownedWorker(ownerId, input.workerId);
     const settings = this.store.settings();
-    if (!settings.enabled[worker.type])
-      throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用，不能续接");
+    const config = configById(settings, worker.configId);
+    if (!config || !config.enabled)
+      throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用或配置不存在，不能续接");
+    this.rejectNonCodexProvider(worker.type, input.provider);
     if (this.store.workerCleanedAt(worker.id))
       throw new WorkerFailure("WORKSPACE_CLEANED", "worktree 已清理，请为后续任务创建新的 worker");
     const previous = this.store.latestRun(worker.id);
@@ -517,7 +774,7 @@ export class WorkerService {
         "NATIVE_SESSION_UNKNOWN",
         "上一次运行没有可核实的原生会话身份，不能续接",
       );
-    const selection = this.resumeSelection(input, previous);
+    const selection = this.resumeSelection(worker.type, input, previous, worker.id);
     this.validateSelection(worker.type, selection);
     const runId = randomUUID();
     const timeoutSeconds =
@@ -539,6 +796,12 @@ export class WorkerService {
       sessionsRoot: previous.sessionsRoot,
       nativeSessionId: previous.nativeSessionId,
       nativeSessionFile: previous.nativeSessionFile,
+      legacyCodexProvider:
+        worker.type === "codex" &&
+        previous.legacyCodexProvider === true &&
+        selection.provider === null
+          ? true
+          : undefined,
       exitCode: null,
       finalText: null,
       error: null,
@@ -614,6 +877,8 @@ export class WorkerService {
       if (!Number.isSafeInteger(input.timeoutSeconds) || input.timeoutSeconds <= 0)
         throw new WorkerFailure("INVALID_INPUT", "timeoutSeconds 必须是正整数或 null");
     }
+    if (input.configId !== undefined && typeof input.configId !== "string")
+      throw new WorkerFailure("INVALID_INPUT", "configId 必须是字符串");
     this.validateOptionalSelection(input);
   }
 
@@ -667,6 +932,8 @@ export class WorkerService {
       effort: clean(input.effort),
       timeoutSeconds:
         input.timeoutSeconds === undefined ? "default" : input.timeoutSeconds,
+      // Omitted configId stays absent so pre-config replay hashes remain identical.
+      ...(input.configId !== undefined ? { configId: input.configId } : {}),
     };
   }
 
@@ -703,9 +970,49 @@ export class WorkerService {
   }
 
   /**
-   * New runs snapshot the explicit request first, then the selected type's configured defaults.
-   * Only Pi falls back to its existing environment model/provider/thinking values.
+   * Chooses the config for a new worker. An explicit `configId` is authoritative; otherwise only
+   * enabled configs route, optionally narrowed by an explicit `type`, then by `taskRole`, with
+   * the default config preferred inside the candidate set and list order breaking ties. No role
+   * match falls back to the type-constrained candidates.
    */
+  private resolveStartConfig(
+    input: WorkerStartInput,
+    settings: WorkerSettings,
+  ): WorkerConfig {
+    const configs = settings.configs;
+    if (input.configId !== undefined) {
+      const configId = input.configId.trim();
+      const config = configs.find((candidate) => candidate.id === configId);
+      if (!config)
+        throw new WorkerFailure("CONFIG_NOT_FOUND", "worker 配置不存在");
+      if (input.type !== undefined && input.type !== config.type)
+        throw new WorkerFailure("INVALID_INPUT", "configId 与 type 不一致");
+      if (!config.enabled)
+        throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 配置已停用");
+      return config;
+    }
+    let candidates = configs.filter((config) => config.enabled);
+    if (input.type !== undefined) {
+      candidates = candidates.filter((config) => config.type === input.type);
+      if (!candidates.length)
+        throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用");
+    }
+    if (!candidates.length)
+      throw new WorkerFailure("WORKER_TYPE_DISABLED", "没有可用的 worker 配置");
+    const preferred = candidates.find(
+      (config) => config.id === settings.defaultConfigId,
+    );
+    if (input.taskRole !== undefined) {
+      const matches = candidates.filter((config) =>
+        config.roles.includes(input.taskRole!),
+      );
+      if (matches.length)
+        return preferred && matches.includes(preferred) ? preferred : matches[0]!;
+    }
+    return preferred ?? candidates[0]!;
+  }
+
+  /** New runs snapshot the explicit request first, then the selected config's defaults. */
   private startSelection(
     type: WorkerType,
     input: {
@@ -713,46 +1020,107 @@ export class WorkerService {
       provider?: string;
       effort?: string;
     },
-    defaults: WorkerDefaults[WorkerType],
+    config: WorkerConfig,
   ): NativeSelection {
-    const configuredModel = clean(defaults.model);
-    const configuredEffort = clean(defaults.effort);
-    if (type === "dsh" || type === "codex")
-      return {
-        model: clean(input.model) ?? configuredModel,
-        provider: clean(input.provider),
-        effort: clean(input.effort) ?? configuredEffort,
-      };
     return {
-      model:
-        clean(input.model) ??
-        configuredModel ??
-        clean(this.environment.CODEX_PI_MODEL),
-      provider:
-        clean(input.provider) ?? clean(this.environment.CODEX_PI_PROVIDER),
-      effort:
-        clean(input.effort) ??
-        configuredEffort ??
-        clean(this.environment.CODEX_PI_THINKING),
+      model: clean(input.model) ?? clean(config.model),
+      // Only Codex has an independent service; Pi receives its full model id and DSH routes from
+      // the model patch.
+      provider: type === "codex" ? clean(input.provider) ?? config.codex?.modelProvider ?? null : null,
+      effort: clean(input.effort) ?? clean(config.effort),
     };
   }
 
-  /** Resume never re-reads the environment; explicit values override the recorded run. */
+  /**
+   * Resume uses the recorded run plus explicit overrides; it never re-applies current config
+   * models. Old Pi/DSH independent providers are folded into a full model id for this new run.
+   */
   private resumeSelection(
+    type: WorkerType,
     input: { model?: string; provider?: string; effort?: string },
     previous: WorkerRun,
+    workerId: string,
   ): NativeSelection {
-    return {
-      model: clean(input.model) ?? previous.model,
-      provider: clean(input.provider) ?? previous.provider,
-      effort: clean(input.effort) ?? previous.effort,
-    };
+    const explicitModel = clean(input.model);
+    const effort = clean(input.effort) ?? previous.effort;
+    if (type === "codex") {
+      return {
+        model: explicitModel ?? previous.model,
+        provider: clean(input.provider) ?? previous.provider,
+        effort,
+      };
+    }
+    if (explicitModel)
+      return { model: explicitModel, provider: null, effort };
+    let model = previous.model;
+    if (type === "pi") {
+      if (model && previous.provider) {
+        const prefix = previous.provider + "/";
+        if (!model.toLowerCase().startsWith(prefix.toLowerCase()))
+          model = prefix + model;
+      }
+      return { model, provider: null, effort };
+    }
+    if (model && previous.provider) {
+      // Historical DSH routes are already provider/model; do not deduplicate the prefix.
+      model = previous.provider + "/" + model;
+    } else if (model && !model.includes("/")) {
+      // A bare old model may have used the removed environment provider; only its own generated
+      // patch is valid evidence, and a full id already carries its route.
+      const recovered = this.readDshModelRoute(workerId, previous.id);
+      if (!recovered)
+        throw new WorkerFailure(
+          "MODEL_REQUIRED",
+          "无法确认旧 DSH 模型路由，请显式提供完整 model 后继续",
+        );
+      model = recovered.provider + "/" + recovered.model;
+    }
+    return { model, provider: null, effort };
+  }
+
+  /** Rejects a non-empty independent provider for engines that no longer support one. */
+  private rejectNonCodexProvider(
+    type: WorkerType,
+    provider: string | undefined,
+  ): void {
+    if (type !== "codex" && clean(provider))
+      throw new WorkerFailure(
+        "PROVIDER_UNSUPPORTED",
+        "provider 仅 Codex 支持；Pi/DSH 请使用完整 model",
+      );
+  }
+
+  /**
+   * Reads only the historical route generated into this run directory. It is used to preserve a
+   * pre-cleanup DSH environment route on resume, never as a new provider input.
+   */
+  private readDshModelRoute(
+    workerId: string,
+    runId: string,
+  ): { provider: string; model: string } | null {
+    const file = path.join(this.runDirectory(workerId, runId), "model.patch.yml");
+    try {
+      const patches = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
+      if (!Array.isArray(patches)) return null;
+      for (const patch of patches) {
+        if (!patch || typeof patch !== "object" || Array.isArray(patch)) continue;
+        const record = patch as Record<string, unknown>;
+        if (record.id !== "agent-default-model") continue;
+        const config =
+          record.config && typeof record.config === "object" && !Array.isArray(record.config)
+            ? (record.config as Record<string, unknown>)
+            : null;
+        const provider = clean(config?.provider as string | undefined);
+        const model = clean(config?.model as string | undefined);
+        if (provider && model) return { provider, model };
+      }
+    } catch {
+      return null;
+    }
+    return null;
   }
 
   private validateSelection(type: WorkerType, selection: NativeSelection): void {
-    // Codex can take its model from native config or extra args, so provider alone is valid.
-    if (type !== "codex" && selection.provider && !selection.model)
-      throw new WorkerFailure("MODEL_REQUIRED", "provider 需要同时选择模型");
     if (type === "dsh" && selection.effort && !selection.model)
       throw new WorkerFailure("MODEL_REQUIRED", "DSH effort 需要同时选择模型");
     if (
@@ -783,12 +1151,15 @@ export class WorkerService {
         const queued = this.store.queuedRuns().filter((run) => !skipped.has(run.id));
         if (!queued.length) return;
         const settings = this.store.settings();
+        const configs = new Map(
+          settings.configs.map((config) => [config.id, config]),
+        );
         const occupied = this.store.occupyingRuns();
         const counts = new Map<string, number>();
         for (const run of occupied) {
           const worker = this.store.worker(run.workerId);
           if (!worker) continue;
-          const key = [worker.parentSessionId, worker.projectId, worker.type].join("\u0000");
+          const key = [worker.parentSessionId, worker.projectId, worker.configId].join("\u0000");
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
         let selected: WorkerRun | null = null;
@@ -805,8 +1176,9 @@ export class WorkerService {
             skipped.add(run.id);
             continue;
           }
-          const key = [worker.parentSessionId, worker.projectId, worker.type].join("\u0000");
-          if ((counts.get(key) ?? 0) >= settings.concurrency[worker.type]) continue;
+          const key = [worker.parentSessionId, worker.projectId, worker.configId].join("\u0000");
+          const limit = configs.get(worker.configId)?.concurrency ?? 1;
+          if ((counts.get(key) ?? 0) >= limit) continue;
           selected = run;
           break;
         }
@@ -844,8 +1216,22 @@ export class WorkerService {
     const previous = run.nativeSessionId ? run : null;
     // Read settings for every native invocation so PATH, Codex env, and extra args stay current.
     const settings = this.store.settings();
-    const safeEnvironment = this.nativeEnvironment(worker.type, settings);
+    const config = configById(settings, worker.configId);
+    const safeEnvironment = this.nativeEnvironment(worker.type, config);
     const executable = this.executable(worker.type, safeEnvironment);
+    if (worker.type === "codex") {
+      // Baseline is captured at actual launch, never while queued: a resumed thread reads the
+      // last cumulative snapshot and the rollout EOF, while a new thread uses known zero.
+      const file =
+        run.nativeSessionFile && fs.existsSync(run.nativeSessionFile)
+          ? run.nativeSessionFile
+          : findCodexSessionFile(run.sessionsRoot, run.nativeSessionId);
+      if (file) run.nativeSessionFile = file;
+      run.codexUsageBaseline = run.nativeSessionId
+        ? codexBaseline(file)
+        : { counters: zeroCodexCounters(), offset: 0 };
+      this.store.saveRun(run);
+    }
     const launch = prepareLaunch({
       type: worker.type,
       run,
@@ -856,7 +1242,14 @@ export class WorkerService {
       runDirectory,
       executable,
       baseEnvironment: safeEnvironment,
-      codexExtraArgs: worker.type === "codex" ? settings.codex.extraArgs : null,
+      codexExtraArgs:
+        worker.type === "codex" ? config?.codex?.legacyExtraArgs ?? [] : null,
+      codexLegacyProvider:
+        worker.type === "codex" &&
+        run.legacyCodexProvider === true &&
+        run.provider === null
+          ? config?.codex?.modelProvider ?? null
+          : null,
       dshPatch: this.dshPatch(),
     });
     // Pi names its transcript before spawn; persist it so cleanup can protect the file.
@@ -930,13 +1323,18 @@ export class WorkerService {
     ];
   }
 
-  /** Merges user Codex env first, then strips control tokens from the final native environment. */
+  /**
+   * Merges the selected config's Codex env first, then strips control tokens from the final
+   * native environment. A config deleted after a terminal run falls back to the inherited env.
+   */
   private nativeEnvironment(
     type: WorkerType,
-    settings: WorkerSettings,
+    config: WorkerConfig | null,
   ): NodeJS.ProcessEnv {
     if (type === "codex")
-      return codexEnvironment(this.environment, settings.codex);
+      return codexEnvironment(this.environment, {
+        env: config?.codex?.env ?? {},
+      });
     return this.guardianEnvironment(this.environment);
   }
 
@@ -954,10 +1352,6 @@ export class WorkerService {
   ): string {
     const injected = this.options.executablePaths?.[type];
     if (injected) return path.resolve(injected);
-    if (type === "dsh") {
-      const explicit = clean(environment.CLOUDCLI_DSH_BIN);
-      if (explicit) return resolveExecutable(explicit, environment);
-    }
     return resolveExecutable(type, environment);
   }
 
@@ -1125,6 +1519,8 @@ export class WorkerService {
     run.exitCode = evidence?.exitCode ?? run.exitCode;
     if (!handle && (status === "cancelled" || status === "interrupted")) hold = true;
     run.status = status;
+    if (status !== "completed" && run.usage)
+      run.usage = { ...run.usage, partial: true };
     if (status !== "unknown") run.finishedAt = new Date(this.now()).toISOString();
     run.error =
       error && status !== "completed" ? { code: error.code, message: error.message } : null;
@@ -1154,7 +1550,11 @@ export class WorkerService {
       if (worker.type === "dsh")
         return parseDsh(events, expectedSessionId, worker.cwd, run.sessionsRoot);
       if (worker.type === "codex")
-        return parseCodex(events, expectedSessionId);
+        return parseCodex(events, expectedSessionId, {
+          baseline: run.codexUsageBaseline ?? null,
+          sessionFile: run.nativeSessionFile,
+          sessionsRoot: run.sessionsRoot,
+        });
       return parsePi(
         events,
         expectedSessionId,
@@ -1249,7 +1649,13 @@ export class WorkerService {
       query.projectId || query.parentSessionId
         ? this.store.notifications().filter((item) => ids.has(item.workerId))
         : this.store.notifications();
-    return { workers, counts, settings: this.store.settings(), notifications };
+    return {
+      workers,
+      counts,
+      settings: this.store.settings(),
+      configUsage: this.store.configUsage(),
+      notifications,
+    };
   }
 
   get(workerId: string, ownerId?: string): { worker: WorkerRecord; runs: WorkerRun[] } {
@@ -1263,17 +1669,45 @@ export class WorkerService {
       projectId: owner.projectId,
       parentSessionId: owner.parentSessionId,
     });
-    // MCP context is model-visible; Codex env/args can hold credentials or proxy config.
-    const { codex: _codex, ...settings } = snapshot.settings;
     return {
       owner,
       plan: this.store.plan(owner.parentSessionId, owner.projectId),
-      settings,
+      // MCP context is model-visible; configs are projected without Codex env/extra args.
+      settings: this.mcpSettings(snapshot.settings),
       counts: snapshot.counts,
       activeWorkers: snapshot.workers.filter((worker) =>
         worker.latestRun ? OCCUPYING.includes(worker.latestRun.status) : false,
       ),
       notifications: snapshot.notifications,
+    };
+  }
+
+  /** Credential-free settings view: Codex configs expose only the selected service. */
+  private mcpSettings(settings: WorkerSettings): WorkerMcpSettings {
+    return {
+      configs: settings.configs.map((config) => ({
+        id: config.id,
+        name: config.name,
+        type: config.type,
+        enabled: config.enabled,
+        roles: [...config.roles],
+        concurrency: config.concurrency,
+        model: config.model,
+        effort: config.effort,
+        ...(config.type === "codex"
+          ? { codex: { modelProvider: config.codex?.modelProvider ?? null } }
+          : {}),
+      })),
+      defaultConfigId: settings.defaultConfigId,
+      defaultWorkerType: settings.defaultWorkerType,
+      enabled: settings.enabled,
+      roles: settings.roles,
+      concurrency: settings.concurrency,
+      defaults: settings.defaults,
+      retentionDays: settings.retentionDays,
+      softReminderSeconds: settings.softReminderSeconds,
+      softReminderSteps: settings.softReminderSteps,
+      hardTimeoutSeconds: settings.hardTimeoutSeconds,
     };
   }
 
@@ -1827,11 +2261,12 @@ export class WorkerService {
         }
         const worker = this.store.worker(run.workerId);
         if (!worker) continue;
-        if (!run.nativeSessionId || !run.nativeSessionFile) {
-          const parsed = this.parseRun(worker, run, run.nativeSessionId);
-          run.nativeSessionId = parsed?.nativeSessionId ?? run.nativeSessionId;
-          run.nativeSessionFile = parsed?.nativeSessionFile ?? run.nativeSessionFile;
-        }
+        // Recovery always re-reads statistics, even when the native identity is already known.
+        const parsed = this.parseRun(worker, run, run.nativeSessionId);
+        run.nativeSessionId = parsed?.nativeSessionId ?? run.nativeSessionId;
+        run.nativeSessionFile = parsed?.nativeSessionFile ?? run.nativeSessionFile;
+        if (parsed?.usage) run.usage = parsed.usage;
+        if (run.usage) run.usage = { ...run.usage, partial: true };
         run.status = "unknown";
         run.error = {
           code: "RESTART_UNKNOWN",
@@ -2091,6 +2526,7 @@ export class WorkerService {
     return path.join(this.options.dataDirectory, "logs", workerId, runId);
   }
 }
+
 
 function realPath(value: string): string {
   try {

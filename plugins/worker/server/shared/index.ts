@@ -5,6 +5,22 @@
 export type * from "../../shared/contracts.js";
 export type * as Contracts from "../../shared/contracts.js";
 
+/**
+ * Canonical settings row persisted by the store. The read-only per-engine projections on
+ * `Contracts.WorkerSettings` are derived on read and are deliberately excluded, so the legacy
+ * maps never become a second persistence source.
+ */
+export type WorkerSettingsRecord = Pick<
+  import("../../shared/contracts.js").WorkerSettings,
+  | "schemaVersion"
+  | "configs"
+  | "defaultConfigId"
+  | "retentionDays"
+  | "softReminderSeconds"
+  | "softReminderSteps"
+  | "hardTimeoutSeconds"
+>;
+
 /** Validated internal error raised by service boundaries; `code` is stable for API responses. */
 export class WorkerFailure extends Error {
   constructor(

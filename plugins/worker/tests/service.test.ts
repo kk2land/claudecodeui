@@ -34,7 +34,11 @@ test("starts, records, logs, and deduplicates one DSH run", async (t) => {
   assert.deepEqual(worker.latestRun?.usage, {
     inputTokens: 10,
     outputTokens: 5,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
     totalTokens: 15,
+    scope: "run",
+    partial: true,
   });
   assert.equal(worker.cwd, path.join(root, "project"));
   const snapshot = service.state({ projectId: "project-1" });
@@ -417,7 +421,7 @@ test("DSH resume needs only the recorded native identity", async (t) => {
   assert.equal(service.get(first.id).runs.length, 2);
 });
 
-test("Pi snapshots environment defaults and keeps them after environment changes", async (t) => {
+test("Pi ignores removed environment model settings", async (t) => {
   const root = temporaryRoot("worker-pi-env-");
   const { service, data, env } = createService(t, root, {
     CODEX_PI_MODEL: "env-model",
@@ -429,16 +433,16 @@ test("Pi snapshots environment defaults and keeps them after environment changes
     startInput({ type: "pi", requestId: "pi-env-1" }),
   );
   const first = await waitStatus(service, started.worker.id, ["completed"]);
-  assert.equal(first.latestRun?.model, "env-model");
-  assert.equal(first.latestRun?.provider, "env-provider");
-  assert.equal(first.latestRun?.effort, "low");
+  assert.equal(first.latestRun?.model, null);
+  assert.equal(first.latestRun?.provider, null);
+  assert.equal(first.latestRun?.effort, null);
   const firstSpec = fs.readFileSync(
     path.join(data, "logs", first.id, first.latestRun!.id, "spec.json"),
     "utf8",
   );
-  assert.match(firstSpec, /env-model/);
-  assert.match(firstSpec, /env-provider/);
-  assert.match(firstSpec, /"low"/);
+  assert.doesNotMatch(firstSpec, /env-model/);
+  assert.doesNotMatch(firstSpec, /env-provider/);
+  assert.doesNotMatch(firstSpec, /"low"/);
 
   env.CODEX_PI_MODEL = "changed-model";
   env.CODEX_PI_PROVIDER = "changed-provider";
@@ -449,14 +453,13 @@ test("Pi snapshots environment defaults and keeps them after environment changes
     requestId: "pi-env-2",
   });
   const resumed = await waitStatus(service, first.id, ["completed"]);
-  assert.equal(resumed.latestRun?.model, "env-model");
-  assert.equal(resumed.latestRun?.provider, "env-provider");
-  assert.equal(resumed.latestRun?.effort, "low");
+  assert.equal(resumed.latestRun?.model, null);
+  assert.equal(resumed.latestRun?.provider, null);
+  assert.equal(resumed.latestRun?.effort, null);
   const secondSpec = fs.readFileSync(
     path.join(data, "logs", first.id, resumed.latestRun!.id, "spec.json"),
     "utf8",
   );
-  assert.match(secondSpec, /env-model/);
   assert.doesNotMatch(secondSpec, /changed-model/);
   assert.doesNotMatch(secondSpec, /changed-provider/);
 });
@@ -599,6 +602,8 @@ function emptyWorker(project: string, type: "dsh" | "pi" = "dsh"): WorkerRecord 
   return {
     id: "worker-restart",
     type,
+    configId: type + "-default",
+    configName: type + " default",
     taskName: "restart",
     ownerId: "owner-1",
     parentSessionId: "parent-1",
@@ -988,7 +993,7 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
   const first = await waitStatus(service, started.worker.id, ["completed"]);
   assert.equal(first.type, "pi");
   assert.equal(first.latestRun?.model, "pi-default");
-  assert.equal(first.latestRun?.provider, "env-provider");
+  assert.equal(first.latestRun?.provider, null);
   assert.equal(first.latestRun?.effort, "medium");
   const spec = JSON.parse(
     fs.readFileSync(
@@ -998,7 +1003,7 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
   ) as { argv: string[] };
   assert.deepEqual(
     spec.argv.slice(spec.argv.indexOf("--model")),
-    ["--model", "pi-default", "--provider", "env-provider", "--thinking", "medium"],
+    ["--model", "pi-default", "--thinking", "medium"],
   );
 
   const explicit = await service.start(
@@ -1299,7 +1304,10 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
     prompt: "resume with recorded defaults",
     requestId: "resume-defaulted",
   });
-  assert.equal(resumed.run.model, "accepted-model");
+  // The recorded DSH run used a bare model; its generated patch is the only reliable historical
+  // route, so resume folds that provider into the full model id.
+  assert.equal(resumed.run.model, "deepseek-official/accepted-model");
+  assert.equal(resumed.run.provider, null);
   assert.equal(resumed.run.effort, "high");
   await waitStatus(service, finished.id, ["completed"]);
   const overridden = await service.resume("owner-1", {

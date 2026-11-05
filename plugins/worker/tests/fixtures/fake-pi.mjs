@@ -10,6 +10,51 @@ if (process.env.TEST_PID_FILE) {
 }
 const sessionId = process.env.TEST_SESSION_ID || randomUUID();
 const args = process.argv.slice(2);
+if (args.includes("--list-models")) {
+  if (process.env.TEST_CAPTURE_FILE) {
+    const agent = process.env.PI_CODING_AGENT_DIR;
+    let agentFiles = [];
+    try {
+      agentFiles = fs.readdirSync(agent).sort();
+    } catch {
+      agentFiles = [];
+    }
+    const inspect = (name) => {
+      const file = path.join(agent, name);
+      try {
+        return {
+          regular: fs.lstatSync(file).isFile(),
+          text: fs.readFileSync(file, "utf8"),
+        };
+      } catch {
+        return null;
+      }
+    };
+    fs.writeFileSync(
+      process.env.TEST_CAPTURE_FILE,
+      JSON.stringify({
+        args,
+        cwd: process.cwd(),
+        env: process.env,
+        agentFiles,
+        agentModelsStore: inspect("models-store.json"),
+        agentAuth: inspect("auth.json"),
+      }),
+    );
+  }
+  const delay = Number(process.env.TEST_LIST_MODELS_DELAY_MS || 0);
+  if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+  process.stdout.write(
+    process.env.TEST_LIST_MODELS ||
+      [
+        "Provider Model Context MaxOutput Thinking Reason",
+        "openrouter fast-1 200k 8k high yes",
+        "local slow-2 100k 4k off no",
+        "local slow-2 100k 4k off no",
+      ].join("\n") + "\n",
+  );
+  process.exit(0);
+}
 const file = args[args.indexOf("--session") + 1];
 const root = path.dirname(file);
 fs.mkdirSync(root, { recursive: true });

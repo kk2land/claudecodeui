@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import type {
+  WorkerConfigUsage,
   WorkerNotification,
   WorkerNotificationDelivery,
   WorkerOwner,
@@ -9,28 +10,20 @@ import type {
   WorkerRecord,
   WorkerRun,
   WorkerSettings,
+  WorkerSettingsRecord,
   WorkerStateQuery,
 } from "./shared/index.js";
+import {
+  INITIAL_CONFIG_IDS,
+  INITIAL_CONFIG_NAMES,
+  defaultSettingsRecord,
+  isCanonicalSettings,
+  migrateLegacySettings,
+  projectSettings,
+} from "./settings.js";
 
-export const DEFAULT_SETTINGS: WorkerSettings = {
-  concurrency: { dsh: 3, pi: 3, codex: 3 },
-  defaultWorkerType: "dsh",
-  enabled: { dsh: true, pi: true, codex: true },
-  roles: { dsh: [], pi: [], codex: [] },
-  defaults: {
-    dsh: { model: null, effort: null },
-    pi: { model: null, effort: null },
-    codex: { model: null, effort: null },
-  },
-  codex: {
-    env: { CODEX_PROXY_BYPASS: "1" },
-    extraArgs: ["-c", "model_provider=magpie"],
-  },
-  retentionDays: 1,
-  softReminderSeconds: 600,
-  softReminderSteps: 20,
-  hardTimeoutSeconds: null,
-};
+/** Read-only schema-2 defaults plus their compatibility projections. */
+export const DEFAULT_SETTINGS = projectSettings(defaultSettingsRecord());
 
 type WorkerRow = { body: string; cleaned_at: string | null };
 type RunRow = { body: string };
@@ -131,33 +124,135 @@ export class WorkerStore {
       .run(parentSessionId, projectId, plan.content, plan.updatedAt);
   }
 
+  /**
+   * Loads canonical settings, migrating a pre-schema-2 row (and legacy workers/runs) exactly
+   * once in a single transaction. After that every read returns the canonical row and never
+   * recreates a config deleted by a later update.
+   */
   settings(): WorkerSettings {
     const row = this.db
       .prepare("SELECT body FROM settings WHERE id=1")
       .get() as { body: string } | undefined;
-    if (!row) return structuredClone(DEFAULT_SETTINGS);
-    const fallback = structuredClone(DEFAULT_SETTINGS);
-    const stored = JSON.parse(row.body) as Partial<WorkerSettings>;
-    // Older rows only lack the whole codex field or the codex entry in the maps; explicit empty
-    // Codex env/args objects are valid and preserved as stored.
-    // Older rows predate enabled/roles and lack the whole maps or individual entries.
-    return {
-      ...fallback,
-      ...stored,
-      concurrency: { ...fallback.concurrency, ...(stored.concurrency ?? {}) },
-      enabled: { ...fallback.enabled, ...(stored.enabled ?? {}) },
-      roles: { ...fallback.roles, ...(stored.roles ?? {}) },
-      defaults: { ...fallback.defaults, ...(stored.defaults ?? {}) },
-      codex: stored.codex ?? fallback.codex,
-    };
+    if (!row) {
+      const record = defaultSettingsRecord();
+      this.transaction(() => {
+        this.saveSettings(record);
+        this.backfillLegacyRecords(record);
+      });
+      return projectSettings(record);
+    }
+    const stored = JSON.parse(row.body) as Record<string, unknown>;
+    if (isCanonicalSettings(stored))
+      return projectSettings(stored as unknown as WorkerSettingsRecord);
+    const record = migrateLegacySettings(stored);
+    this.transaction(() => {
+      this.saveSettings(record);
+      this.backfillLegacyRecords(record);
+    });
+    return projectSettings(record);
   }
 
-  saveSettings(settings: WorkerSettings): void {
+  /** Persists exactly the supplied body; callers only pass a canonical record in production. */
+  saveSettings(settings: WorkerSettingsRecord | Record<string, unknown>): void {
     this.db
       .prepare(
         "INSERT INTO settings(id,body) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET body=excluded.body",
       )
       .run(JSON.stringify(settings));
+  }
+
+  /**
+   * Whole-store reference counts keyed by config id, including ids of deleted configs that
+   * worker history still references. `referenced` locks the engine and id reuse; `activeRuns`
+   * blocks deletion until every accepted run reaches a terminal state.
+   */
+  configUsage(): Record<string, WorkerConfigUsage> {
+    const usage: Record<string, WorkerConfigUsage> = {};
+    for (const worker of this.workers()) {
+      const entry = (usage[worker.configId] ??= {
+        referenced: true,
+        activeRuns: 0,
+      });
+      entry.referenced = true;
+    }
+    for (const run of this.activeRuns()) {
+      const worker = this.worker(run.workerId);
+      if (!worker) continue;
+      const entry = (usage[worker.configId] ??= {
+        referenced: true,
+        activeRuns: 0,
+      });
+      entry.activeRuns++;
+    }
+    return usage;
+  }
+
+  /**
+   * Backfills config identity on legacy workers and missing run selections from the run's own
+   * recorded `spec.json` argv. Explicit selections always win; absent spec evidence leaves the
+   * historical legacy selection untouched rather than guessing from current settings.
+   */
+  private backfillLegacyRecords(record: WorkerSettingsRecord): void {
+    for (const worker of this.workers()) {
+      let workerChanged = false;
+      if (!worker.configId || !worker.configName) {
+        const config =
+          record.configs.find(
+            (candidate) =>
+              candidate.id === INITIAL_CONFIG_IDS[worker.type] &&
+              candidate.type === worker.type,
+          ) ?? record.configs.find((candidate) => candidate.type === worker.type);
+        worker.configId =
+          config?.id ?? INITIAL_CONFIG_IDS[worker.type] ?? "dsh-default";
+        worker.configName =
+          config?.name ?? INITIAL_CONFIG_NAMES[worker.type] ?? "DSH default";
+        workerChanged = true;
+      }
+      for (const run of this.runs(worker.id)) {
+        if (this.backfillRunSelection(run, worker.type)) this.saveRun(run);
+      }
+      if (workerChanged) this.saveWorker(worker);
+    }
+  }
+
+  private backfillRunSelection(run: WorkerRun, type: WorkerRecord["type"]): boolean {
+    let changed = false;
+    if (run.model === null || run.provider === null || run.effort === null) {
+      const spec = path.join(
+        this.directory,
+        "logs",
+        run.workerId,
+        run.id,
+        "spec.json",
+      );
+      let argv: unknown;
+      try {
+        argv = (JSON.parse(fs.readFileSync(spec, "utf8")) as { argv?: unknown })
+          .argv;
+      } catch {
+        argv = null;
+      }
+      if (Array.isArray(argv) && argv.every((item) => typeof item === "string")) {
+        const selection = parseSpecSelection(argv as string[], type);
+        for (const key of ["model", "provider", "effort"] as const) {
+          if (run[key] === null && selection[key] !== null) {
+            run[key] = selection[key];
+            changed = true;
+          }
+        }
+      }
+    }
+    // Codex had no config service before schema 2; a run without provider evidence keeps the
+    // old resume behavior through an explicit flag rather than a fabricated historical value.
+    if (
+      type === "codex" &&
+      run.provider === null &&
+      run.legacyCodexProvider !== true
+    ) {
+      run.legacyCodexProvider = true;
+      changed = true;
+    }
+    return changed;
   }
 
   saveOwner(owner: WorkerOwner): void {
@@ -514,4 +609,68 @@ export class WorkerStore {
   close(): void {
     this.db.close();
   }
+}
+
+type SpecSelection = {
+  model: string | null;
+  provider: string | null;
+  effort: string | null;
+};
+
+/**
+ * Extracts the last effective selection option from a recorded native argv, using only the
+ * syntax of the run's actual engine. DSH stores selection in a patch file, not argv, so it is
+ * never inferred from unrelated arguments or text.
+ */
+function parseSpecSelection(
+  argv: string[],
+  type: WorkerRecord["type"],
+): SpecSelection {
+  const selection: SpecSelection = { model: null, provider: null, effort: null };
+  if (type === "dsh") return selection;
+  const configValue = (value: string): string | null => {
+    const raw = value.slice(value.indexOf("=") + 1).trim();
+    if (!raw) return null;
+    try {
+      const parsed = JSON.parse(raw) as unknown;
+      return typeof parsed === "string" && parsed.trim() ? parsed.trim() : null;
+    } catch {
+      return raw.replace(/^["']|["']$/g, "").trim() || null;
+    }
+  };
+  for (let index = 0; index < argv.length; index++) {
+    const arg = argv[index]!;
+    const next = argv[index + 1];
+    if (arg === "--model" || arg === "-m") {
+      if (typeof next === "string" && next.trim()) selection.model = next.trim();
+      index++;
+    } else if (arg.startsWith("--model=")) {
+      const value = arg.slice("--model=".length).trim();
+      if (value) selection.model = value;
+    } else if (arg.startsWith("-m") && arg.length > 2) {
+      const value = arg.slice(2).trim();
+      if (value) selection.model = value;
+    } else if (type === "pi" && arg === "--provider") {
+      if (typeof next === "string" && next.trim()) selection.provider = next.trim();
+      index++;
+    } else if (type === "pi" && arg === "--thinking") {
+      if (typeof next === "string" && next.trim()) selection.effort = next.trim();
+      index++;
+    } else if (type === "codex" && (arg === "-c" || arg === "--config")) {
+      if (typeof next !== "string") continue;
+      if (next.startsWith("model_provider="))
+        selection.provider = configValue(next);
+      else if (next.startsWith("model_reasoning_effort="))
+        selection.effort = configValue(next);
+      index++;
+    } else if (type === "codex" && arg.startsWith("--config=model_provider=")) {
+      selection.provider = configValue(arg.slice("--config=".length));
+    } else if (
+      type === "codex" &&
+      arg.startsWith("--config=model_reasoning_effort=")
+    ) {
+      selection.effort = configValue(arg.slice("--config=".length));
+    }
+  }
+  return selection;
 }

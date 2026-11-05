@@ -41,6 +41,8 @@ const project = {
 
 type Host = {
   models?: (provider: 'codex' | 'dsh') => Promise<unknown>;
+  codexModelProviders?: () => Promise<unknown>;
+  codexModelProviderModels?: (modelProvider: string) => Promise<unknown>;
 };
 
 /** The host object the fake plugin received from the real host component. */
@@ -160,6 +162,96 @@ describe('PluginTabContent host models capability', () => {
       // A failed upstream response rejects instead of returning a bogus catalog.
       await expect(harness!.models!('dsh')).rejects.toThrow(/HTTP 503/);
       expect(models).toHaveBeenCalledWith('dsh');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+});
+
+describe('PluginTabContent Codex provider directory capabilities', () => {
+  it('reads the provider directory and one provider model list from authenticated endpoints', async () => {
+    stubAssetsAndPlugins();
+    const { api } = await import('@/shared/api');
+    const providers = vi.fn(async () =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: {
+            defaultProvider: 'openai',
+            providers: [{ id: 'openai', name: 'OpenAI' }],
+            hasCustomProviders: false,
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    const providerModels = vi.fn(async (modelProvider: string) =>
+      new Response(
+        JSON.stringify({
+          success: true,
+          data: { modelProvider, models: ['gpt-6-sol'] },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    );
+    vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(providers as never);
+    vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(providerModels as never);
+    try {
+      renderHost();
+      await waitFor(() => {
+        harness = ((globalThis as Record<string, unknown>).__schedulerHost ?? null) as Host | null;
+        expect(harness).toBeTruthy();
+      });
+      await expect(harness!.codexModelProviders!()).resolves.toEqual({
+        defaultProvider: 'openai',
+        providers: [{ id: 'openai', name: 'OpenAI' }],
+        hasCustomProviders: false,
+      });
+      expect(providers).toHaveBeenCalledTimes(1);
+      await expect(harness!.codexModelProviderModels!('openai')).resolves.toEqual({
+        modelProvider: 'openai',
+        models: ['gpt-6-sol'],
+      });
+      expect(providerModels).toHaveBeenCalledWith('openai');
+    } finally {
+      vi.restoreAllMocks();
+    }
+  });
+
+  it('rejects a blank provider id and upstream failures without inventing a directory', async () => {
+    stubAssetsAndPlugins();
+    const { api } = await import('@/shared/api');
+    const providers = vi.fn(async () =>
+      new Response(JSON.stringify({ success: false }), {
+        status: 502,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const providerModels = vi.fn(async () =>
+      new Response(JSON.stringify({ success: true, data: null }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(providers as never);
+    vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(providerModels as never);
+    try {
+      renderHost();
+      await waitFor(() => {
+        harness = ((globalThis as Record<string, unknown>).__schedulerHost ?? null) as Host | null;
+        expect(harness).toBeTruthy();
+      });
+      // A blank id never reaches the network.
+      await expect(harness!.codexModelProviderModels!('   ')).rejects.toThrow(
+        /model provider id is required/i,
+      );
+      expect(providerModels).not.toHaveBeenCalled();
+      await expect(harness!.codexModelProviders!()).rejects.toThrow(/HTTP 502/);
+      await expect(harness!.codexModelProviderModels!('openai')).rejects.toThrow(
+        /Failed to load models for "openai"/,
+      );
+      expect(providers).toHaveBeenCalledTimes(1);
+      expect(providerModels).toHaveBeenCalledWith('openai');
     } finally {
       vi.restoreAllMocks();
     }

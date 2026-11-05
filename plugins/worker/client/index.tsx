@@ -4,7 +4,6 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bell,
-  ChevronRight,
   CircleCheck,
   Clock3,
   FileText,
@@ -21,6 +20,7 @@ import {
   type WorkerHost,
   type WorkerPluginContext,
 } from "./api.js";
+import { SettingsView } from "./settings.js";
 import {
   STATUS_LABELS,
   TYPE_LABELS,
@@ -54,17 +54,12 @@ import type {
   WorkerRecord,
   WorkerRun,
   WorkerSettings,
-  WorkerSettingsInput,
   WorkerStateSnapshot,
   WorkerStatus,
-  WorkerTaskRole,
-  WorkerType,
 } from "../shared/contracts.js";
-import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import styles from "./worker.css";
 
 const roots = new WeakMap<HTMLElement, Root>();
-const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex"];
 
 const STATUS_TONE: Record<WorkerStatus, string> = {
   queued: "queued",
@@ -237,6 +232,7 @@ function WorkerRow({
         <span className={"worker-type worker-type-" + worker.type}>
           {TYPE_LABELS[worker.type]}
         </span>
+        <small>配置 {worker.configName || "—"}</small>
         <small>
           {run?.model ?? "默认模型"}
           {run?.provider ? " / " + run.provider : ""}
@@ -585,8 +581,10 @@ function DetailView({
         <section>
           <h3>任务</h3>
           <dl>
-            <dt>类型</dt>
+            <dt>执行引擎</dt>
             <dd>{TYPE_LABELS[worker.type]}</dd>
+            <dt>Worker 配置</dt>
+            <dd>{worker.configName || "—"}</dd>
             <dt>任务角色</dt>
             <dd>
               {worker.taskRole
@@ -638,8 +636,8 @@ function DetailView({
               <code>{run ? run.home : "—"}</code> /{" "}
               <code>{run ? run.sessionsRoot : "—"}</code>
             </dd>
-            <dt>{worker.type === "codex" ? "Token（会话累计）" : "Token"}</dt>
-            <dd>{formatTokens(run?.usage ?? null)}</dd>
+            <dt>Token 用量</dt>
+            <dd>{formatTokens(run?.usage ?? null, worker.type)}</dd>
             <dt>退出码</dt>
             <dd>{run?.exitCode ?? "—"}</dd>
             <dt>执行与验收</dt>
@@ -722,510 +720,6 @@ function NotificationList({
         </div>
       ))}
     </details>
-  );
-}
-
-function envText(env: Record<string, string>): string {
-  return Object.entries(env)
-    .map(([key, value]) => key + "=" + value)
-    .join("\n");
-}
-
-function TypeSettings({
-  type,
-  enabled,
-  isDefault,
-  model,
-  concurrency,
-  children,
-}: {
-  type: WorkerType;
-  enabled: boolean;
-  isDefault: boolean;
-  model: string;
-  concurrency: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <details className="worker-type-settings worker-form-wide">
-      <summary aria-label={TYPE_LABELS[type] + " 设置"}>
-        <span className="worker-type-identity">
-          <strong>{TYPE_LABELS[type]}</strong>
-          <span className={"worker-badge " + (enabled ? "worker-ok" : "worker-muted")}>
-            {enabled ? "已启用" : "已关闭"}
-          </span>
-          {isDefault ? <span className="worker-badge worker-active">默认</span> : null}
-        </span>
-        <span className="worker-type-overview">
-          <span className="worker-type-model" title={model.trim() || "沿用执行器模型"}>
-            {model.trim() || "沿用执行器模型"}
-          </span>
-          <span>并发 {concurrency}</span>
-        </span>
-        <ChevronRight size={16} className="worker-type-chevron" aria-hidden="true" />
-      </summary>
-      <div className="worker-type-fields">{children}</div>
-    </details>
-  );
-}
-
-function TypePolicy({
-  type,
-  enabled,
-  roles,
-  onEnabled,
-  onToggleRole,
-}: {
-  type: WorkerType;
-  enabled: boolean;
-  roles: WorkerTaskRole[];
-  onEnabled(value: boolean): void;
-  onToggleRole(role: WorkerTaskRole): void;
-}) {
-  const label = TYPE_LABELS[type];
-  return (
-    <>
-      <label className="worker-checkbox worker-form-wide">
-        <input
-          type="checkbox"
-          aria-label={"启用 " + label}
-          checked={enabled}
-          onChange={(event) => onEnabled(event.target.checked)}
-        />
-        启用 {label}
-      </label>
-      <small className="worker-form-wide">
-        关闭后仅阻止之后新建和续接；已接受的运行中和排队任务继续。
-      </small>
-      <div
-        className="worker-form-wide worker-roles"
-        role="group"
-        aria-label={label + " 倾向任务（可多选）"}
-      >
-        <span className="worker-roles-label">倾向任务（可多选）</span>
-        {WORKER_TASK_ROLES.map((role) => (
-          <label className="worker-checkbox" key={role.value}>
-            <input
-              type="checkbox"
-              aria-label={label + " 任务角色 " + role.label}
-              checked={roles.includes(role.value)}
-              onChange={() => onToggleRole(role.value)}
-            />
-            <span>
-              {role.label}
-              <small>{role.description}</small>
-            </span>
-          </label>
-        ))}
-      </div>
-    </>
-  );
-}
-
-function SettingsView({
-  settings,
-  api,
-  onBack,
-  onSaved,
-  onError,
-}: {
-  settings: WorkerSettings;
-  api: ReturnType<typeof workerApi>;
-  onBack(): void;
-  onSaved(settings: WorkerSettings): void;
-  onError(message: string): void;
-}) {
-  const [dsh, setDsh] = useState(String(settings.concurrency.dsh));
-  const [pi, setPi] = useState(String(settings.concurrency.pi));
-  const [codex, setCodex] = useState(String(settings.concurrency.codex));
-  const [defaultType, setDefaultType] = useState<WorkerType>(
-    settings.defaultWorkerType,
-  );
-  const [enabled, setEnabled] = useState<Record<WorkerType, boolean>>({
-    ...settings.enabled,
-  });
-  const [roles, setRoles] = useState<Record<WorkerType, WorkerTaskRole[]>>({
-    ...settings.roles,
-  });
-  const [dshModel, setDshModel] = useState(settings.defaults.dsh.model ?? "");
-  const [dshEffort, setDshEffort] = useState(
-    settings.defaults.dsh.effort ?? "",
-  );
-  const [piModel, setPiModel] = useState(settings.defaults.pi.model ?? "");
-  const [piEffort, setPiEffort] = useState(settings.defaults.pi.effort ?? "");
-  const [codexModel, setCodexModel] = useState(
-    settings.defaults.codex.model ?? "",
-  );
-  const [codexEffort, setCodexEffort] = useState(
-    settings.defaults.codex.effort ?? "",
-  );
-  const [codexEnv, setCodexEnv] = useState(envText(settings.codex.env));
-  const [codexArgs, setCodexArgs] = useState(
-    JSON.stringify(settings.codex.extraArgs, null, 2),
-  );
-  const [retentionDays, setRetentionDays] = useState(String(settings.retentionDays));
-  const [busy, setBusy] = useState(false);
-  const validNumber = (value: string) => {
-    const parsed = Number(value);
-    return Number.isSafeInteger(parsed) && parsed > 0;
-  };
-  const dshModelValue = dshModel.trim();
-  const codexEnvValue: Record<string, string> = {};
-  let codexEnvError = "";
-  for (const [index, line] of codexEnv.split(/\r?\n/).entries()) {
-    if (!line.trim()) continue;
-    const separator = line.indexOf("=");
-    if (separator < 0) {
-      codexEnvError = "额外环境变量第 " + (index + 1) + " 行需要 KEY=VALUE。";
-      break;
-    }
-    const key = line.slice(0, separator).trim();
-    if (!key) {
-      codexEnvError = "额外环境变量第 " + (index + 1) + " 行的 KEY 不能为空。";
-      break;
-    }
-    // Only the first `=` separates; spaces and later `=` stay in the value.
-    codexEnvValue[key] = line.slice(separator + 1);
-  }
-  const codexArgsValue: string[] = [];
-  let codexArgsError = "";
-  const codexArgsMessage =
-    '额外命令行参数必须是 JSON 字符串数组，每个元素就是一个命令行参数，例如 ["-c", "model_provider=magpie"]。';
-  if (codexArgs.trim()) {
-    try {
-      const parsed: unknown = JSON.parse(codexArgs);
-      if (
-        Array.isArray(parsed) &&
-        parsed.every((item): item is string => typeof item === "string")
-      )
-        codexArgsValue.push(...parsed);
-      else codexArgsError = codexArgsMessage;
-    } catch {
-      codexArgsError = codexArgsMessage;
-    }
-  }
-  const enabledCount = WORKER_TYPES.filter((type) => enabled[type]).length;
-  const valid = validNumber(dsh) && validNumber(pi) && validNumber(codex) &&
-    validNumber(retentionDays) &&
-    (!dshEffort.trim() || !!dshModelValue) &&
-    enabledCount > 0 && enabled[defaultType] &&
-    !codexEnvError && !codexArgsError;
-  const validationMessage = !validNumber(dsh) || !validNumber(pi) || !validNumber(codex)
-    ? "并发必须是大于 0 的整数。"
-    : !validNumber(retentionDays)
-      ? "保留天数必须是大于 0 的整数。"
-      : dshEffort.trim() && !dshModelValue
-        ? "DSH reasoning 需要同时配置 DSH 默认模型。"
-        : enabledCount === 0
-          ? "至少需要启用一种 Worker 类型。"
-          : !enabled[defaultType]
-            ? "默认 Worker 类型 " + TYPE_LABELS[defaultType] + " 已关闭，请先选择其他已启用的默认类型再保存。"
-            : codexEnvError || codexArgsError;
-  const toggleRole = (type: WorkerType, role: WorkerTaskRole) =>
-    setRoles((current) => ({
-      ...current,
-      [type]: current[type].includes(role)
-        ? current[type].filter((item) => item !== role)
-        : [...current[type], role],
-    }));
-  const save = async () => {
-    if (!valid) return;
-    const body: WorkerSettingsInput = {
-      concurrency: { dsh: Number(dsh), pi: Number(pi), codex: Number(codex) },
-      retentionDays: Number(retentionDays),
-      defaultWorkerType: defaultType,
-      enabled,
-      roles,
-      defaults: {
-        dsh: {
-          model: dshModelValue || null,
-          effort: dshEffort.trim() || null,
-        },
-        pi: {
-          model: piModel.trim() || null,
-          effort: piEffort.trim() || null,
-        },
-        codex: {
-          model: codexModel.trim() || null,
-          effort: codexEffort.trim() || null,
-        },
-      },
-      codex: { env: codexEnvValue, extraArgs: codexArgsValue },
-    };
-    setBusy(true);
-    try {
-      const value = await api.saveSettings(body);
-      onSaved(value);
-      setDsh(String(value.concurrency.dsh));
-      setPi(String(value.concurrency.pi));
-      setCodex(String(value.concurrency.codex));
-      setDefaultType(value.defaultWorkerType);
-      setEnabled({ ...value.enabled });
-      setRoles({ ...value.roles });
-      setDshModel(value.defaults.dsh.model ?? "");
-      setDshEffort(value.defaults.dsh.effort ?? "");
-      setPiModel(value.defaults.pi.model ?? "");
-      setPiEffort(value.defaults.pi.effort ?? "");
-      setCodexModel(value.defaults.codex.model ?? "");
-      setCodexEffort(value.defaults.codex.effort ?? "");
-      setCodexEnv(envText(value.codex.env));
-      setCodexArgs(JSON.stringify(value.codex.extraArgs, null, 2));
-      setRetentionDays(String(value.retentionDays));
-    } catch (error) {
-      onError(String(error));
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <>
-      <button className="worker-back" onClick={onBack}>
-        <ArrowLeft size={14} /> 返回列表
-      </button>
-      <header className="worker-heading">
-        <div>
-          <h2>Worker 设置</h2>
-          <p>
-            启用开关只阻止之后新建和续接；角色、默认类型、模型和 reasoning 用于之后的新
-            worker，不会改写已有任务。Codex 额外环境变量与命令行参数用于每次 Codex 启动和续接
-          </p>
-        </div>
-      </header>
-      <div className="worker-form">
-        <label className="worker-form-wide">
-          默认 Worker 类型
-          <select
-            aria-label="默认 Worker 类型"
-            value={defaultType}
-            onChange={(event) =>
-              setDefaultType(event.target.value as WorkerType)
-            }
-          >
-            {WORKER_TYPES.map((type) => (
-              <option key={type} value={type} disabled={!enabled[type]}>
-                {TYPE_LABELS[type]}
-              </option>
-            ))}
-          </select>
-          <small>
-            默认类型必须已启用；满载仍按原有 FIFO 排队。
-          </small>
-        </label>
-        <TypeSettings
-          type="dsh"
-          enabled={enabled.dsh}
-          isDefault={defaultType === "dsh"}
-          model={dshModel}
-          concurrency={dsh}
-        >
-          <TypePolicy
-            type="dsh"
-            enabled={enabled.dsh}
-            roles={roles.dsh}
-            onEnabled={(value) =>
-              setEnabled((current) => ({ ...current, dsh: value }))
-            }
-            onToggleRole={(role) => toggleRole("dsh", role)}
-          />
-          <label>
-            默认模型
-            <input
-              type="text"
-              aria-label="DSH 默认模型"
-              placeholder="留空沿用执行器现有配置"
-              value={dshModel}
-              onChange={(event) => setDshModel(event.target.value)}
-            />
-          </label>
-          <label>
-            Reasoning
-            <input
-              type="text"
-              aria-label="DSH 默认 reasoning"
-              placeholder="留空沿用执行器现有配置；填写时需同时配置模型"
-              value={dshEffort}
-              onChange={(event) => setDshEffort(event.target.value)}
-            />
-          </label>
-          <label>
-            并发
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label="DSH 并发"
-              value={dsh}
-              onChange={(event) => setDsh(event.target.value)}
-            />
-          </label>
-        </TypeSettings>
-        <TypeSettings
-          type="pi"
-          enabled={enabled.pi}
-          isDefault={defaultType === "pi"}
-          model={piModel}
-          concurrency={pi}
-        >
-          <TypePolicy
-            type="pi"
-            enabled={enabled.pi}
-            roles={roles.pi}
-            onEnabled={(value) =>
-              setEnabled((current) => ({ ...current, pi: value }))
-            }
-            onToggleRole={(role) => toggleRole("pi", role)}
-          />
-          <label>
-            默认模型
-            <input
-              type="text"
-              aria-label="Pi 默认模型"
-              placeholder="留空沿用执行器现有配置"
-              value={piModel}
-              onChange={(event) => setPiModel(event.target.value)}
-            />
-          </label>
-          <label>
-            Reasoning
-            <input
-              type="text"
-              aria-label="Pi 默认 reasoning"
-              placeholder="留空沿用执行器现有配置"
-              value={piEffort}
-              onChange={(event) => setPiEffort(event.target.value)}
-            />
-          </label>
-          <label>
-            并发
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label="Pi 并发"
-              value={pi}
-              onChange={(event) => setPi(event.target.value)}
-            />
-          </label>
-        </TypeSettings>
-        <TypeSettings
-          type="codex"
-          enabled={enabled.codex}
-          isDefault={defaultType === "codex"}
-          model={codexModel}
-          concurrency={codex}
-        >
-          <TypePolicy
-            type="codex"
-            enabled={enabled.codex}
-            roles={roles.codex}
-            onEnabled={(value) =>
-              setEnabled((current) => ({ ...current, codex: value }))
-            }
-            onToggleRole={(role) => toggleRole("codex", role)}
-          />
-          <label>
-            默认模型
-            <input
-              type="text"
-              aria-label="Codex 默认模型"
-              placeholder="留空沿用 Codex 配置和额外参数"
-              value={codexModel}
-              onChange={(event) => setCodexModel(event.target.value)}
-            />
-          </label>
-          <label>
-            Reasoning
-            <input
-              type="text"
-              aria-label="Codex 默认 reasoning"
-              placeholder="留空沿用 Codex 配置和额外参数"
-              value={codexEffort}
-              onChange={(event) => setCodexEffort(event.target.value)}
-            />
-          </label>
-          <label>
-            并发
-            <input
-              type="number"
-              min="1"
-              step="1"
-              aria-label="Codex 并发"
-              value={codex}
-              onChange={(event) => setCodex(event.target.value)}
-            />
-          </label>
-          <label className="worker-form-wide">
-            额外环境变量（每行一个 KEY=VALUE）
-            <textarea
-              rows={3}
-              aria-label="Codex 额外环境变量"
-              spellCheck={false}
-              placeholder={"EXAMPLE_KEY=example value\nHTTPS_PROXY=http://127.0.0.1:7890"}
-              value={codexEnv}
-              onChange={(event) => setCodexEnv(event.target.value)}
-            />
-            <small>
-              覆盖继承环境中的同名变量；按首个 = 分割，值中的空格和后续 = 保留。
-              留空表示不注入额外变量。
-            </small>
-          </label>
-          <label className="worker-form-wide">
-            额外命令行参数（JSON 数组）
-            <textarea
-              rows={3}
-              aria-label="Codex 额外命令行参数"
-              spellCheck={false}
-              placeholder={'["-c", "model_provider=magpie"]'}
-              value={codexArgs}
-              onChange={(event) => setCodexArgs(event.target.value)}
-            />
-            <small>
-              每个数组元素就是一个命令行参数，不是一段 shell 命令。
-              留空表示不加额外参数；显式模型、provider 与 effort 优先于这些参数。
-            </small>
-          </label>
-        </TypeSettings>
-        <label className="worker-form-wide">
-          日志和运行记录保留天数
-          <input
-            type="number"
-            min="1"
-            step="1"
-            aria-label="日志和运行记录保留天数"
-            value={retentionDays}
-            onChange={(event) => setRetentionDays(event.target.value)}
-          />
-          <small>
-            默认 1 天，从每次运行结束起计算，到期自动删除日志和运行记录。
-            运行中或状态未知的任务、原生会话和工作目录保留。
-          </small>
-        </label>
-        <p>
-          并发为正整数，按类型独立计算；启动中、运行中、停止中和状态未知的 run 都占用额度；
-          超过额度的请求按 FIFO 排队。每个类型可多选倾向任务，匹配角色时优先使用，没有匹配使用默认类型；
-          关闭的类型保留原配置，重新开启后继续使用。模型或 reasoning
-          留空表示沿用执行器现有配置。
-          DSH reasoning 需要同时配置模型。同一原生会话只允许一个调用。软提醒默认{" "}
-          {settings.softReminderSeconds} 秒 / {settings.softReminderSteps} 步，硬超时
-          {settings.hardTimeoutSeconds === null
-            ? "默认关闭"
-            : "默认 " + settings.hardTimeoutSeconds + " 秒"}
-          。
-        </p>
-        {!valid ? (
-          <p className="worker-error" role="alert">
-            {validationMessage}
-          </p>
-        ) : null}
-        <button
-          className="worker-primary worker-form-wide"
-          disabled={busy || !valid}
-          onClick={() => void save()}
-        >
-          {busy ? "保存中…" : "保存设置"}
-        </button>
-      </div>
-    </>
   );
 }
 
@@ -1471,9 +965,11 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
         </div>
       ) : null}
       {view === "settings" && settings ? (
-        settings.enabled && settings.roles ? (
+        settings.schemaVersion === 2 && Array.isArray(settings.configs) ? (
           <SettingsView
             settings={settings}
+            usage={liveSnapshot?.configUsage ?? {}}
+            host={host}
             api={api}
             onBack={() => setView("list")}
             onSaved={(value) => {
@@ -1495,7 +991,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
               </div>
             </header>
             <p className="worker-hint" role="alert">
-              Worker 插件服务版本较旧，暂不支持类型开关和倾向任务，请重启当前
+              Worker 插件服务版本较旧，暂不支持 Worker 配置管理，请重启当前
               CloudCLI 服务后重试。
             </p>
           </>
@@ -1617,7 +1113,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
               <tr>
                 <th>任务 / 会话</th>
                 <th>任务角色</th>
-                <th>类型 / 模型</th>
+                <th>引擎 / 配置</th>
                 <th>状态 / 耗时</th>
                 <th>工作区</th>
                 <th>操作</th>
@@ -1660,10 +1156,13 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
           ) : null}
           <footer className="worker-footer">
             <span>
-              <PlugZap size={13} /> 并发键 (父会话, 项目, 类型)：DSH{" "}
-              {settings?.concurrency.dsh ?? "—"} / Pi{" "}
-              {settings?.concurrency.pi ?? "—"} / Codex{" "}
-              {settings?.concurrency.codex ?? "—"}
+              <PlugZap size={13} /> 并发键 (父会话, 项目, 配置)：
+              {settings && Array.isArray(settings.configs)
+                ? settings.configs
+                    .filter((config) => config.enabled)
+                    .map((config) => config.name + " " + config.concurrency)
+                    .join(" / ") || "无启用配置"
+                : "—"}
             </span>
             <span>
               排队按 FIFO；同一原生会话只允许一个调用；清理仅限插件创建且干净、已停止的

@@ -139,6 +139,36 @@ export default function PluginTabContent({
             }
             return body.data.models;
           },
+
+          // Read-only Codex inference-service directory for plugins whose forms let
+          // users pin a service. Both methods are allowlisted host capabilities; the
+          // plugin still persists its own config and never changes the global default.
+          async codexModelProviders(): Promise<unknown> {
+            const res = await api.providers.codexModelProviders();
+            if (!res.ok) {
+              throw new Error(`Failed to load Codex model providers (HTTP ${res.status})`);
+            }
+            const body = await res.json() as { success?: boolean; data?: unknown };
+            if (!body.success || !body.data) {
+              throw new Error('Failed to load Codex model providers');
+            }
+            return body.data;
+          },
+
+          async codexModelProviderModels(modelProvider: string): Promise<unknown> {
+            if (typeof modelProvider !== 'string' || !modelProvider.trim()) {
+              throw new Error('A model provider id is required');
+            }
+            const res = await api.providers.codexModelProviderModels(modelProvider);
+            if (!res.ok) {
+              throw new Error(`Failed to load models for "${modelProvider}" (HTTP ${res.status})`);
+            }
+            const body = await res.json() as { success?: boolean; data?: unknown };
+            if (!body.success || !body.data) {
+              throw new Error(`Failed to load models for "${modelProvider}"`);
+            }
+            return body.data;
+          },
         };
 
         await mod.mount?.(container, pluginHostApi);

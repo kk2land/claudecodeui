@@ -59,7 +59,11 @@ test("DSH uses headless, configured patches, persistence patch, model patch and 
   const runPatch = path.join(runDirectory, "dsh-session.patch.yml");
   const custom = path.join(root, "custom.patch.yml");
   fs.writeFileSync(custom, "[]");
-  const current = run(root, { model: "provider/model", effort: "high" });
+  const current = run(root, {
+    model: "provider/model",
+    provider: "legacy-provider",
+    effort: "high",
+  });
   const launch = prepareLaunch({
     type: "dsh",
     run: current,
@@ -72,23 +76,23 @@ test("DSH uses headless, configured patches, persistence patch, model patch and 
     baseEnvironment: {
       DSH_HOME: path.join(root, "dsh-home"),
       CLOUDCLI_DSH_PATCHES: JSON.stringify([custom]),
+      CLOUDCLI_DSH_PROVIDER: "environment-provider",
     },
     dshPatch: patch,
   });
   assert.equal(launch.argv[0], "/bin/fake-dsh");
-  assert.deepEqual(launch.argv.slice(1, 7), [
+  assert.deepEqual(launch.argv.slice(1, 5), [
     "--profile",
     "headless",
     "--patch",
-    custom,
-    "--patch",
     runPatch,
   ]);
+  assert.equal(launch.argv.includes(custom), false);
   assert.equal(fs.readFileSync(runPatch, "utf8"), fs.readFileSync(patch, "utf8"));
   assert.ok(launch.argv.includes("--json"));
   assert.equal(launch.argv.at(-1), "-");
   assert.equal(launch.argv.includes("--session-id"), false);
-  const modelPatch = launch.argv[launch.argv.indexOf("--patch", 6) + 1]!;
+  const modelPatch = launch.argv[launch.argv.lastIndexOf("--patch") + 1]!;
   assert.deepEqual(JSON.parse(fs.readFileSync(modelPatch, "utf8")), [
     {
       id: "agent-default-model",
@@ -154,28 +158,12 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
       }),
     /effort/,
   );
-  assert.throws(
-    () =>
-      prepareLaunch({
-        type: "dsh",
-        run: run(root),
-        cwd: root,
-        prompt: "x",
-        previous: null,
-        dataDirectory: path.join(root, "data"),
-        runDirectory,
-        executable: "/bin/fake-dsh",
-        baseEnvironment: { CLOUDCLI_DSH_PATCHES: "not-json" },
-        dshPatch: path.join(root, "patch.yml"),
-      }),
-    /CLOUDCLI_DSH_PATCHES/,
-  );
   const pi = prepareLaunch({
     type: "pi",
     run: run(root, {
       workerId: "worker-pi",
       id: "run-pi",
-      model: "recorded-model",
+      model: "provider/sub/model",
       provider: "recorded-provider",
       effort: "high",
     }),
@@ -203,9 +191,7 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
     pi.argv.slice(pi.argv.indexOf("--model")),
     [
       "--model",
-      "recorded-model",
-      "--provider",
-      "recorded-provider",
+      "provider/sub/model",
       "--thinking",
       "high",
     ],
@@ -306,6 +292,7 @@ test("Pi protocol accepts retry success and rejects wrong id/cwd or unfinished s
       role: "assistant",
       stopReason: "stop",
       content: [{ type: "text", text }],
+      usage: { input: 2, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 3 },
     },
   });
   const retried = [
@@ -323,7 +310,15 @@ test("Pi protocol accepts retry success and rejects wrong id/cwd or unfinished s
   const parsed = parsePi(file, "session-pi", cwd, file);
   assert.equal(parsed.success, true);
   assert.equal(parsed.finalText, "final answer");
-  assert.equal(parsed.usage?.totalTokens, 3);
+  assert.deepEqual(parsed.usage, {
+    inputTokens: 4,
+    outputTokens: 2,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 6,
+    scope: "run",
+    partial: false,
+  });
   assert.equal(
     parsePi(eventsFile(root, retried), "session-other", cwd, file).success,
     false,
@@ -368,7 +363,6 @@ test("Codex env merges before plugin control tokens are removed", () => {
       },
       {
         env: { CUSTOM: "value", CLOUDCLI_PLUGIN_OTHER: "control-value" },
-        extraArgs: [],
       },
     ),
     { PATH: "/bin", CUSTOM: "value" },
@@ -503,7 +497,15 @@ test("Codex JSONL parser reports final text and input-plus-output usage", () => 
     nativeSessionId: "thread-1",
     nativeSessionFile: null,
     finalText: "answer",
-    usage: { inputTokens: 11, outputTokens: 5, totalTokens: 16 },
+    usage: {
+      inputTokens: 11,
+      outputTokens: 5,
+      cacheReadTokens: 4,
+      cacheWriteTokens: 2,
+      totalTokens: 16,
+      scope: "session",
+      partial: false,
+    },
     error: null,
   });
 });

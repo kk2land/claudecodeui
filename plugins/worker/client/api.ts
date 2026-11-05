@@ -1,4 +1,6 @@
 import type {
+  PiModelCatalog,
+  WorkerHostCatalogCapabilities,
   WorkerLogPage,
   WorkerLogStream,
   WorkerNotificationRetryInput,
@@ -23,7 +25,7 @@ export type WorkerPluginContext = {
  * Authenticated host surface. The plugin only calls its own protected REST routes through this
  * bridge; it never receives the host UI token, the MCP token, or any other credential.
  */
-export type WorkerHost = {
+export type WorkerHost = WorkerHostCatalogCapabilities & {
   context: WorkerPluginContext;
   onContextChange(
     callback: (context: WorkerPluginContext) => void,
@@ -81,6 +83,8 @@ export function workerApi(host: WorkerHost) {
     },
     cancel: (input: WorkerCancelInput) =>
       request<{ workerIds?: string[] }>("POST", "/cancel", input),
+    /** Pi model directory served by this plugin; the host catalog has no Pi entry. */
+    piCatalog: () => request<PiModelCatalog>("GET", "/catalog/pi"),
     saveSettings: (input: WorkerSettingsInput) =>
       request<WorkerSettings>("PUT", "/settings", input),
     recover: (input: WorkerRecoverInput) =>

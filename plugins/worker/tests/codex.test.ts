@@ -52,14 +52,18 @@ test("Codex starts with default settings, confirmed thread, usage, and counts", 
   const run = worker.latestRun!;
   assert.equal(worker.type, "codex");
   assert.equal(run.model, null);
-  assert.equal(run.provider, null);
+  assert.equal(run.provider, "magpie");
   assert.equal(run.effort, null);
   assert.equal(run.nativeSessionId, "session-fixture-1");
   assert.equal(run.finalText, "codex answer session-fixture-1");
   assert.deepEqual(run.usage, {
     inputTokens: 11,
     outputTokens: 5,
+    cacheReadTokens: 4,
+    cacheWriteTokens: 2,
     totalTokens: 16,
+    scope: "run",
+    partial: false,
   });
   assert.equal(run.home, path.join(root, "codex-home"));
   assert.equal(run.sessionsRoot, path.join(root, "codex-home", "sessions"));
@@ -72,7 +76,7 @@ test("Codex starts with default settings, confirmed thread, usage, and counts", 
     "exec",
     "--json",
     "-c",
-    "model_provider=magpie",
+    'model_provider="magpie"',
     "-",
   ]);
   assert.equal(spec.cwd, project);
@@ -133,13 +137,19 @@ test("Codex settings replace env/args, explicit selection wins, and secrets stay
   assert.equal(spec.argv[2], "--json");
   assert.ok(!spec.argv.includes("model_provider=magpie"));
   assert.equal(spec.argv.includes("args-model"), false);
+  // The legacy launch block is canonicalized: its provider becomes the config service and is
+  // no longer duplicated in the configured args; the explicit request provider wins.
+  assert.equal(spec.argv.includes("model_provider=args-provider"), false);
   const explicitModel = spec.argv.indexOf("explicit-model");
-  const configuredProvider = spec.argv.indexOf("model_provider=args-provider");
   const explicitProvider = spec.argv.indexOf('model_provider="explicit-provider"');
   const explicitEffort = spec.argv.indexOf('model_reasoning_effort="high"');
   assert.ok(explicitModel > 0);
-  assert.ok(configuredProvider > 0 && explicitProvider > configuredProvider);
-  assert.ok(explicitEffort > configuredProvider);
+  assert.equal(
+    spec.argv.filter((value) => value.includes("model_provider=")).length,
+    1,
+  );
+  assert.ok(explicitProvider > explicitModel);
+  assert.ok(explicitEffort > explicitProvider);
 
   const observed = capture(captureFile);
   assert.equal(observed.cwd, project);

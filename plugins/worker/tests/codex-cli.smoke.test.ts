@@ -59,8 +59,8 @@ test("real Codex exec starts, reconnects, resumes the same thread, and honors ex
     const text = requestCount === 2 ? "real start answer" : "real resume answer";
     const usage =
       requestCount === 2
-        ? { input_tokens: 11, output_tokens: 5, total_tokens: 16 }
-        : { input_tokens: 7, output_tokens: 3, total_tokens: 10 };
+        ? { input_tokens: 11, output_tokens: 5, total_tokens: 70 }
+        : { input_tokens: 7, output_tokens: 3, total_tokens: 40 };
     const item = {
       id: "message-" + requestCount,
       type: "message",
@@ -135,11 +135,10 @@ test("real Codex exec starts, reconnects, resumes the same thread, and honors ex
   const firstRun = first.latestRun!;
   assert.match(firstRun.nativeSessionId ?? "", /^[0-9a-f-]{36}$/);
   assert.equal(firstRun.finalText, "real start answer");
-  assert.deepEqual(firstRun.usage, {
-    inputTokens: 11,
-    outputTokens: 5,
-    totalTokens: 16,
-  });
+  assert.equal(firstRun.usage?.inputTokens, 11);
+  assert.equal(firstRun.usage?.outputTokens, 5);
+  assert.equal(firstRun.usage?.totalTokens, 70);
+  assert.equal(firstRun.usage?.scope, "run");
   assert.equal(requests.length, 2, "the first stream reset is retried once");
   assert.match(requests[1]!.url, /\/second\/responses$/);
   assert.equal(requests[1]!.body.model, "explicit-model");
@@ -170,12 +169,14 @@ test("real Codex exec starts, reconnects, resumes the same thread, and honors ex
   const resumedRun = resumed.latestRun!;
   assert.equal(resumedRun.nativeSessionId, firstRun.nativeSessionId);
   assert.equal(resumedRun.finalText, "real resume answer");
-  // The 0.165 CLI reports session-cumulative usage on a cold resume (start 11/5 + resume 7/3).
-  assert.deepEqual(resumedRun.usage, {
-    inputTokens: 18,
-    outputTokens: 8,
-    totalTokens: 26,
-  });
+  // The 0.165 CLI reports session-cumulative usage on a cold resume (18/8); the launch baseline
+  // turns that into this run's real 7/3.
+  assert.equal(resumedRun.usage?.inputTokens, 7);
+  assert.equal(resumedRun.usage?.outputTokens, 3);
+  assert.equal(resumedRun.usage?.totalTokens, 40);
+  assert.equal(resumedRun.usage?.scope, "run");
+  // Native T is intentionally not input + output: the diff must use native totals.
+  assert.notEqual(resumedRun.usage?.totalTokens, (resumedRun.usage?.inputTokens ?? 0) + (resumedRun.usage?.outputTokens ?? 0));
   assert.equal(requests.length, 3);
   assert.match(requests[2]!.url, /\/second\/responses$/);
   assert.equal(requests[2]!.body.model, "explicit-model");

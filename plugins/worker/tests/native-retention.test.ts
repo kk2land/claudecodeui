@@ -642,6 +642,8 @@ function seedRun(
   const worker: WorkerRecord = {
     id: workerId,
     type,
+    configId: type + "-default",
+    configName: type + " default",
     taskName: id,
     ownerId: "owner-1",
     parentSessionId: "parent-1",

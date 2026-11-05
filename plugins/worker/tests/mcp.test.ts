@@ -157,12 +157,25 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
     codex: [],
   });
   assert.equal("codex" in contextSettings, false);
+  const mcpConfigs = (context as {
+    settings: { configs: Array<{ type: string; codex?: unknown }> };
+  }).settings.configs;
+  assert.deepEqual(
+    mcpConfigs.find((config) => config.type === "codex")?.codex,
+    { modelProvider: "magpie" },
+  );
   const serializedContext = JSON.stringify(context);
   assert.equal(serializedContext.includes(codexEnvSecret), false);
   assert.equal(serializedContext.includes(codexArgSecret), false);
   assert.deepEqual(service.context(owner.id).settings, contextSettings);
-  assert.deepEqual(service.state().settings.codex, codex);
-  assert.deepEqual(service.settings().codex, codex);
+  // The legacy projection keeps the service as a valid argv pair, but canonical state no
+  // longer stores it inside the extra args.
+  const projectedCodex = {
+    env: codex.env,
+    extraArgs: ["--token", codexArgSecret, "-c", "model_provider=magpie"],
+  };
+  assert.deepEqual(service.state().settings.codex, projectedCodex);
+  assert.deepEqual(service.settings().codex, projectedCodex);
   const { type: _omittedType, ...omitted } = startInput({
     requestId: "mcp-start",
     taskName: "mcp task",

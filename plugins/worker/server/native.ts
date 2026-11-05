@@ -4,8 +4,9 @@ import path from "node:path";
 import type {
   NativeExecution,
   NativeLaunch,
-  WorkerCodexSettings,
+  WorkerCodexUsageBaseline,
   WorkerRun,
+  WorkerTokenCounters,
   WorkerType,
   WorkerUsage,
 } from "./shared/index.js";
@@ -39,8 +40,9 @@ type PrepareInput = {
   baseEnvironment: NodeJS.ProcessEnv;
   /** Configured Codex exec extra args; Codex environment values are merged by the caller. */
   codexExtraArgs?: string[] | null;
+  /** Current config service for a migrated run that had no reliable recorded provider. */
+  codexLegacyProvider?: string | null;
   dshPatch: string;
-  dshBin?: string;
 };
 
 /** Resolves an executable on PATH before any cwd change; explicit paths are made absolute. */
@@ -84,37 +86,13 @@ function home(environment: NodeJS.ProcessEnv, name: string, fallback: string): s
   );
 }
 
-/** Mirrors the app's CLOUDCLI_DSH_PATCHES launch configuration without rewriting profiles. */
-function dshLaunchPatches(environment: NodeJS.ProcessEnv): string[] {
-  const raw = environment.CLOUDCLI_DSH_PATCHES;
-  if (raw === undefined || !raw.trim()) return [];
-  let values: unknown;
-  try {
-    values = JSON.parse(raw);
-  } catch {
-    throw new WorkerFailure(
-      "DSH_CONFIG_INVALID",
-      "CLOUDCLI_DSH_PATCHES 必须是文件路径的 JSON 数组",
-    );
-  }
-  if (
-    !Array.isArray(values) ||
-    !values.every((value) => typeof value === "string" && value.trim())
-  )
-    throw new WorkerFailure(
-      "DSH_CONFIG_INVALID",
-      "CLOUDCLI_DSH_PATCHES 必须包含非空文件路径",
-    );
-  return values.map((value: string) => path.resolve(value));
-}
-
 /**
  * Merges user Codex env over the inherited environment, then removes plugin control tokens.
  * The caller fixes CODEX_HOME to the run's admitted home before spawning.
  */
 export function codexEnvironment(
   base: NodeJS.ProcessEnv,
-  settings: WorkerCodexSettings,
+  settings: { env: Record<string, string> },
 ): NodeJS.ProcessEnv {
   const environment: NodeJS.ProcessEnv = { ...base, ...settings.env };
   for (const key of Object.keys(environment))
@@ -150,31 +128,24 @@ function prepareDsh(input: PrepareInput): NativeLaunch {
   const resolvedHome = previous ? previous.home : defaults.home;
   const sessionsRoot = previous ? previous.sessionsRoot : defaults.sessionsRoot;
   const model = nonBlank(input.run.model);
-  const provider = nonBlank(input.run.provider);
   const effort = nonBlank(input.run.effort);
   if (effort && !model)
     throw new WorkerFailure(
       "MODEL_REQUIRED",
       "DSH 设置 effort 前必须显式选择模型",
     );
-  const patches = dshLaunchPatches(input.baseEnvironment);
-  // The native proxy may allow the run directory while restricting the installation directory.
+  // Required Worker mechanisms: persistence patch, then the model route patch when selected.
+  const patches: string[] = [];
   const sessionPatch = path.join(input.runDirectory, "dsh-session.patch.yml");
   fs.copyFileSync(input.dshPatch, sessionPatch);
   patches.push(sessionPatch);
   if (model) {
-    let routeProvider = provider;
+    let routeProvider = "deepseek-official";
     let routeModel = model;
-    if (!routeProvider) {
-      const slash = model.indexOf("/");
-      if (slash > 0) {
-        routeProvider = model.slice(0, slash);
-        routeModel = model.slice(slash + 1);
-      } else {
-        routeProvider =
-          nonBlank(input.baseEnvironment.CLOUDCLI_DSH_PROVIDER) ??
-          "deepseek-official";
-      }
+    const slash = model.indexOf("/");
+    if (slash > 0) {
+      routeProvider = model.slice(0, slash);
+      routeModel = model.slice(slash + 1);
     }
     const file = path.join(input.runDirectory, "model.patch.yml");
     fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
@@ -220,12 +191,9 @@ function preparePi(input: PrepareInput): NativeLaunch {
   const defaults = nativeHome("pi", input.dataDirectory, input.baseEnvironment);
   const resolvedHome = previous ? previous.home : defaults.home;
   const sessionsRoot = previous ? previous.sessionsRoot : defaults.sessionsRoot;
-  // Admission resolved request > environment; resume uses recorded values only.
+  // The full native model identifier is passed through; the CLI resolves it.
   const model = nonBlank(input.run.model);
-  const provider = nonBlank(input.run.provider);
   const effort = nonBlank(input.run.effort);
-  if (provider && !model)
-    throw new WorkerFailure("MODEL_REQUIRED", "Pi provider 需要同时选择模型");
   if (effort && !(PI_THINKING_LEVELS as readonly string[]).includes(effort))
     throw new WorkerFailure("THINKING_INVALID", "不支持的 Pi thinking 级别");
   const sessionFile = previous
@@ -248,7 +216,6 @@ function preparePi(input: PrepareInput): NativeLaunch {
     sessionFile!,
   ];
   if (model) argv.push("--model", model);
-  if (provider) argv.push("--provider", provider);
   if (effort) argv.push("--thinking", effort);
   return {
     argv,
@@ -282,7 +249,11 @@ function prepareCodex(input: PrepareInput): NativeLaunch {
       continue;
     argv.push(arg);
   }
-  const provider = nonBlank(input.run.provider);
+  const provider =
+    nonBlank(input.run.provider) ??
+    (input.run.legacyCodexProvider === true
+      ? nonBlank(input.codexLegacyProvider)
+      : null);
   const effort = nonBlank(input.run.effort);
   // Explicit selections come after configured args so they win over configured defaults.
   if (model) argv.push("--model", model);
@@ -341,60 +312,383 @@ function readPiHeader(
 }
 
 type UsageBuckets = {
-  input: number | null;
-  output: number | null;
-  total: number | null;
+  inputTokens: number | null;
+  outputTokens: number | null;
+  cacheReadTokens: number | null;
+  cacheWriteTokens: number | null;
+  totalTokens: number | null;
   samples: number;
+  partial: boolean;
+  totalUnknown: boolean;
 };
 
 function emptyBuckets(): UsageBuckets {
-  return { input: null, output: null, total: null, samples: 0 };
+  return {
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    totalTokens: null,
+    samples: 0,
+    partial: false,
+    totalUnknown: false,
+  };
 }
 
-/** Sums only fully valid samples; an unknown counter stays null rather than becoming zero. */
+/** Validates one native counter exactly once; a reported zero is kept. */
+function counter(value: unknown): number | null {
+  return Number.isSafeInteger(value) && (value as number) >= 0
+    ? (value as number)
+    : null;
+}
+
+function addCounter(current: number | null, value: number | null): number | null {
+  if (value === null) return current;
+  return current === null ? value : current + value;
+}
+
+/**
+ * Adds one native sample per field. Missing fields mark the aggregate partial but never discard
+ * the other known subtotals. Native total wins; the fallback sum is only used when the same
+ * sample reports input, output, cache read, and cache write together.
+ */
 function addUsage(
   buckets: UsageBuckets,
   sample: unknown,
-  keys: { input: string; output: string; total: string },
+  keys: {
+    input: string;
+    output: string;
+    cacheRead: string;
+    cacheWrite: string;
+    total: string;
+  },
 ): void {
-  if (!sample || typeof sample !== "object" || Array.isArray(sample)) return;
-  const record = sample as Record<string, unknown>;
-  const input = record[keys.input];
-  const output = record[keys.output];
-  if (
-    !Number.isSafeInteger(input) ||
-    (input as number) < 0 ||
-    !Number.isSafeInteger(output) ||
-    (output as number) < 0
-  )
+  if (!sample || typeof sample !== "object" || Array.isArray(sample)) {
+    buckets.partial = true;
     return;
-  const total = record[keys.total];
-  const validTotal =
-    Number.isSafeInteger(total) && (total as number) >= 0 ? (total as number) : null;
-  if (buckets.samples === 0) {
-    buckets.input = input as number;
-    buckets.output = output as number;
-    buckets.total = validTotal;
-  } else {
-    buckets.input =
-      buckets.input === null ? null : buckets.input + (input as number);
-    buckets.output =
-      buckets.output === null ? null : buckets.output + (output as number);
-    buckets.total =
-      buckets.total === null || validTotal === null
-        ? null
-        : buckets.total + validTotal;
+  }
+  const record = sample as Record<string, unknown>;
+  const input = counter(record[keys.input]);
+  const output = counter(record[keys.output]);
+  const cacheRead = counter(record[keys.cacheRead]);
+  const cacheWrite = counter(record[keys.cacheWrite]);
+  const nativeTotal = counter(record[keys.total]);
+  const reported = [input, output, cacheRead, cacheWrite, nativeTotal].filter(
+    (value) => value !== null,
+  ).length;
+  if (!reported) {
+    buckets.partial = true;
+    return;
   }
   buckets.samples++;
+  if (input === null || output === null || cacheRead === null || cacheWrite === null)
+    buckets.partial = true;
+  buckets.inputTokens = addCounter(buckets.inputTokens, input);
+  buckets.outputTokens = addCounter(buckets.outputTokens, output);
+  buckets.cacheReadTokens = addCounter(buckets.cacheReadTokens, cacheRead);
+  buckets.cacheWriteTokens = addCounter(buckets.cacheWriteTokens, cacheWrite);
+  if (nativeTotal !== null) {
+    if (!buckets.totalUnknown)
+      buckets.totalTokens = addCounter(buckets.totalTokens, nativeTotal);
+  } else if (
+    input !== null &&
+    output !== null &&
+    cacheRead !== null &&
+    cacheWrite !== null
+  ) {
+    if (!buckets.totalUnknown)
+      buckets.totalTokens = addCounter(
+        buckets.totalTokens,
+        input + output + cacheRead + cacheWrite,
+      );
+  } else {
+    // A total that cannot be reconstructed from this same sample poisons the aggregate total;
+    // later samples must not patch it with differently scoped subtotals.
+    buckets.totalUnknown = true;
+    buckets.totalTokens = null;
+    buckets.partial = true;
+  }
 }
 
-function toUsage(buckets: UsageBuckets): WorkerUsage | null {
+function toUsage(
+  buckets: UsageBuckets,
+  scope: WorkerUsage["scope"],
+  partial = false,
+): WorkerUsage | null {
   if (buckets.samples === 0) return null;
   return {
-    inputTokens: buckets.input,
-    outputTokens: buckets.output,
-    totalTokens: buckets.total,
+    inputTokens: buckets.inputTokens,
+    outputTokens: buckets.outputTokens,
+    cacheReadTokens: buckets.cacheReadTokens,
+    cacheWriteTokens: buckets.cacheWriteTokens,
+    totalTokens: buckets.totalTokens,
+    scope,
+    partial: buckets.partial || partial,
   };
+}
+
+function emptyCounters(): WorkerTokenCounters {
+  return {
+    inputTokens: null,
+    outputTokens: null,
+    cacheReadTokens: null,
+    cacheWriteTokens: null,
+    totalTokens: null,
+  };
+}
+
+/** Known all-zero baseline for a brand-new Codex thread. */
+export function zeroCodexCounters(): WorkerTokenCounters {
+  return {
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+  };
+}
+
+function readCodexCounters(value: unknown): WorkerTokenCounters | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const inputTokens = counter(record.input_tokens);
+  const outputTokens = counter(record.output_tokens);
+  const cacheReadTokens = counter(record.cached_input_tokens);
+  const cacheWriteTokens = counter(record.cache_write_input_tokens);
+  const nativeTotal = counter(record.total_tokens);
+  if (
+    inputTokens === null &&
+    outputTokens === null &&
+    cacheReadTokens === null &&
+    cacheWriteTokens === null &&
+    nativeTotal === null
+  )
+    return null;
+  return {
+    inputTokens,
+    outputTokens,
+    cacheReadTokens,
+    cacheWriteTokens,
+    // Only a reported native total is kept here; fallback synthesis needs run-scope proof.
+    totalTokens: nativeTotal,
+  };
+}
+
+type CounterDiff = {
+  counters: WorkerTokenCounters;
+  comparable: number;
+  negative: boolean;
+};
+
+/** Compares each field independently; unknown on either side stays unknown. */
+function diffCounters(
+  snapshot: WorkerTokenCounters,
+  baseline: WorkerTokenCounters,
+): CounterDiff {
+  const counters = emptyCounters();
+  let comparable = 0;
+  let negative = false;
+  for (const key of [
+    "inputTokens",
+    "outputTokens",
+    "cacheReadTokens",
+    "cacheWriteTokens",
+    "totalTokens",
+  ] as const) {
+    if (snapshot[key] === null || baseline[key] === null) continue;
+    comparable++;
+    const value = snapshot[key]! - baseline[key]!;
+    if (value < 0) negative = true;
+    else counters[key] = value;
+  }
+  return { counters, comparable, negative };
+}
+
+/**
+ * Resolves final Codex usage. A trusted baseline yields per-field run diffs; a missing total is
+ * derived from confirmed run-scope input + output. Session fallback derives only from its own
+ * snapshot. Negative diffs and missing baselines remain explicitly non-run.
+ */
+function codexSnapshotUsage(
+  snapshot: WorkerTokenCounters,
+  baseline: WorkerCodexUsageBaseline | null,
+  partial: boolean,
+): WorkerUsage {
+  if (baseline?.counters) {
+    const diff = diffCounters(snapshot, baseline.counters);
+    if (!diff.negative && diff.comparable > 0) {
+      const counters = { ...diff.counters };
+      if (
+        counters.totalTokens === null &&
+        counters.inputTokens !== null &&
+        counters.outputTokens !== null
+      )
+        counters.totalTokens = counters.inputTokens + counters.outputTokens;
+      return {
+        ...counters,
+        scope: "run",
+        partial:
+          partial ||
+          counters.inputTokens === null ||
+          counters.outputTokens === null ||
+          counters.cacheReadTokens === null ||
+          counters.cacheWriteTokens === null ||
+          counters.totalTokens === null,
+      };
+    }
+  }
+  const counters = { ...snapshot };
+  if (
+    counters.totalTokens === null &&
+    counters.inputTokens !== null &&
+    counters.outputTokens !== null
+  )
+    counters.totalTokens = counters.inputTokens + counters.outputTokens;
+  return {
+    ...counters,
+    scope: "session",
+    partial:
+      partial ||
+      Boolean(baseline) ||
+      counters.inputTokens === null ||
+      counters.outputTokens === null ||
+      counters.cacheReadTokens === null ||
+      counters.cacheWriteTokens === null ||
+      counters.totalTokens === null,
+  };
+}
+
+type CodexRolloutReport = {
+  lastTotal: WorkerTokenCounters | null;
+  increments: WorkerTokenCounters | null;
+  partial: boolean;
+};
+
+type CodexRolloutScan = CodexRolloutReport & { eof: number };
+
+/**
+ * Parses token_count reports at or after a byte offset from one buffer snapshot. The returned
+ * EOF is the same snapshot's end, so baseline counters and their read position cannot diverge.
+ */
+function scanCodexRollout(
+  file: string,
+  offset: number,
+  end?: number,
+): CodexRolloutScan | null {
+  let buffer: Buffer;
+  try {
+    buffer = fs.readFileSync(file);
+  } catch {
+    return null;
+  }
+  const eof = buffer.length;
+  const limit = Math.min(eof, end ?? eof);
+  if (limit <= offset)
+    return { lastTotal: null, increments: null, partial: false, eof };
+  const text = buffer.subarray(offset, limit).toString("utf8");
+  let lastTotal: WorkerTokenCounters | null = null;
+  let increments: WorkerTokenCounters | null = null;
+  let incrementNativeTotal = 0;
+  let allNativeTotal = true;
+  let incrementIoTotal = 0;
+  let allInputOutput = true;
+  let incrementMissing = false;
+  for (const raw of text.split("\n")) {
+    if (!raw.trim()) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(raw);
+    } catch {
+      continue;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const payload =
+      record.payload && typeof record.payload === "object" && !Array.isArray(record.payload)
+        ? (record.payload as Record<string, unknown>)
+        : null;
+    if (payload?.type !== "token_count" && record.type !== "token_count") continue;
+    const info =
+      payload?.info && typeof payload.info === "object" && !Array.isArray(payload.info)
+        ? (payload.info as Record<string, unknown>)
+        : record.info && typeof record.info === "object" && !Array.isArray(record.info)
+          ? (record.info as Record<string, unknown>)
+          : null;
+    if (!info) continue;
+    const total = readCodexCounters(info.total_token_usage);
+    if (total) lastTotal = total;
+    const last = readCodexCounters(info.last_token_usage);
+    if (last) {
+      if (!increments) increments = emptyCounters();
+      if (last.totalTokens === null) allNativeTotal = false;
+      else incrementNativeTotal += last.totalTokens;
+      if (last.inputTokens === null || last.outputTokens === null)
+        allInputOutput = false;
+      else incrementIoTotal += last.inputTokens + last.outputTokens;
+      for (const key of [
+        "inputTokens",
+        "outputTokens",
+        "cacheReadTokens",
+        "cacheWriteTokens",
+      ] as const) {
+        if (last[key] === null) {
+          incrementMissing = true;
+          continue;
+        }
+        increments[key] =
+          increments[key] === null ? last[key] : increments[key]! + last[key]!;
+      }
+    }
+  }
+  if (increments) {
+    // Never mix native totals from some samples with derived totals from others.
+    if (allNativeTotal) increments.totalTokens = incrementNativeTotal;
+    else if (allInputOutput) increments.totalTokens = incrementIoTotal;
+    else {
+      increments.totalTokens = null;
+      incrementMissing = true;
+    }
+  }
+  return { lastTotal, increments, partial: incrementMissing, eof };
+}
+
+/**
+ * Reads the last cumulative Codex snapshot at launch time and the rollout EOF offset. New
+ * threads use an explicit zero baseline instead of this helper.
+ */
+export function codexBaseline(file: string | null): WorkerCodexUsageBaseline {
+  if (!file) return { counters: null, offset: 0 };
+  const scan = scanCodexRollout(file, 0);
+  if (!scan) return { counters: null, offset: 0 };
+  return { counters: scan.lastTotal, offset: scan.eof };
+}
+
+/** Finds the rollout file of a known Codex thread under its fixed sessions root. */
+export function findCodexSessionFile(
+  sessionsRoot: string,
+  threadId: string | null,
+): string | null {
+  if (!threadId || path.basename(threadId) !== threadId) return null;
+  const walk = (directory: string, depth: number): string | null => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        if (entry.name.includes(threadId) && entry.name.endsWith(".jsonl"))
+          return path.join(directory, entry.name);
+        continue;
+      }
+      if (!entry.isDirectory() || depth >= 5) continue;
+      const found = walk(path.join(directory, entry.name), depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(sessionsRoot, 0);
 }
 
 function lines(file: string): { value: unknown; number: number }[] {
@@ -477,6 +771,8 @@ export function parseDsh(
           addUsage(buckets, event.usage, {
             input: "inputTokens",
             output: "outputTokens",
+            cacheRead: "cacheReadTokens",
+            cacheWrite: "cacheWriteTokens",
             total: "totalTokens",
           });
         else if (event.phase === "turn_end") turnEnd = event.reason;
@@ -514,7 +810,7 @@ export function parseDsh(
       ? findDshSessionFile(sessionsRoot, validatedSessionId)
       : null,
     finalText,
-    usage: toUsage(buckets),
+    usage: toUsage(buckets, "run", error !== null),
     error,
   };
 }
@@ -612,6 +908,15 @@ export function parsePi(
         const record = message as Record<string, unknown>;
         if (record.role !== "assistant") break;
         lastMessage = record;
+        // Pi reports the completed model call here; turn_end is emitted only after any tool
+        // execution and would lose usage when a tool phase is cancelled.
+        addUsage(buckets, record.usage, {
+          input: "input",
+          output: "output",
+          cacheRead: "cacheRead",
+          cacheWrite: "cacheWrite",
+          total: "totalTokens",
+        });
         if (!Array.isArray(record.content)) {
           fail("assistant 内容无效");
           break;
@@ -638,19 +943,8 @@ export function parsePi(
         finalText = blocks.join("\n");
         break;
       }
-      case "turn_end": {
-        const message = event.message;
-        const sample =
-          message && typeof message === "object"
-            ? (message as Record<string, unknown>).usage
-            : null;
-        addUsage(buckets, sample, {
-          input: "input",
-          output: "output",
-          total: "totalTokens",
-        });
+      case "turn_end":
         break;
-      }
       case "agent_end":
         ended = true;
         willRetry = event.willRetry;
@@ -685,24 +979,46 @@ export function parsePi(
     nativeSessionId: sessionId,
     nativeSessionFile: sessionId ? sessionFile : null,
     finalText,
-    usage: toUsage(buckets),
+    usage: toUsage(buckets, "run", error !== null),
     error,
   };
 }
+
+function codexRolloutUsage(
+  file: string | null,
+  baseline: WorkerCodexUsageBaseline | null,
+): WorkerUsage | null {
+  if (!file) return null;
+  const report = scanCodexRollout(file, baseline?.offset ?? 0);
+  if (!report) return null;
+  if (report.lastTotal)
+    return codexSnapshotUsage(report.lastTotal, baseline, true);
+  if (report.increments)
+    return { ...report.increments, scope: "run", partial: true };
+  return null;
+}
+
+export type CodexUsageContext = {
+  baseline: WorkerCodexUsageBaseline | null;
+  sessionFile: string | null;
+  sessionsRoot: string;
+};
 
 /** Parses Codex exec JSONL, keeping a validated thread id even when the turn later fails. */
 export function parseCodex(
   file: string,
   expectedSessionId: string | null,
+  usageContext: CodexUsageContext | null = null,
 ): NativeExecution {
   let threadId: string | null = null;
   let validatedSessionId: string | null = null;
   let threadEvents = 0;
   let finalText: string | null = null;
   let completed = false;
+  let identityMismatch = false;
   let error: string | null = null;
   let recoverableError: string | null = null;
-  const buckets = emptyBuckets();
+  let lastSnapshot: WorkerTokenCounters | null = null;
   const fail = (message: string) => {
     if (error === null) error = message;
   };
@@ -725,9 +1041,10 @@ export function parseCodex(
         else if (threadId !== null) fail("出现多个 thread.started 事件");
         else {
           threadId = id;
-          if (expectedSessionId !== null && id !== expectedSessionId)
+          if (expectedSessionId !== null && id !== expectedSessionId) {
+            identityMismatch = true;
             fail("Codex resume 返回了不同 thread_id");
-          else validatedSessionId = id;
+          } else validatedSessionId = id;
         }
         break;
       }
@@ -742,34 +1059,9 @@ export function parseCodex(
       }
       case "turn.completed": {
         completed = true;
-        // The CLI reports session-cumulative usage on cold resume; keep the event value.
-        const usage = event.usage;
-        if (usage && typeof usage === "object" && !Array.isArray(usage)) {
-          const record = usage as Record<string, unknown>;
-          const input = record.input_tokens;
-          const output = record.output_tokens;
-          if (
-            Number.isSafeInteger(input) &&
-            (input as number) >= 0 &&
-            Number.isSafeInteger(output) &&
-            (output as number) >= 0
-          ) {
-            const total = (input as number) + (output as number);
-            if (buckets.samples === 0) {
-              buckets.input = input as number;
-              buckets.output = output as number;
-              buckets.total = total;
-            } else {
-              buckets.input =
-                buckets.input === null ? null : buckets.input + (input as number);
-              buckets.output =
-                buckets.output === null ? null : buckets.output + (output as number);
-              buckets.total =
-                buckets.total === null ? null : buckets.total + total;
-            }
-            buckets.samples++;
-          }
-        }
+        // Cold resume reports a session-cumulative snapshot; only the last one is authoritative.
+        const snapshot = readCodexCounters(event.usage);
+        if (snapshot) lastSnapshot = snapshot;
         break;
       }
       case "turn.failed": {
@@ -801,12 +1093,79 @@ export function parseCodex(
   if (!threadId) fail("缺少 thread.started 事件");
   if (!completed)
     fail(recoverableError ?? "缺少成功的 turn.completed 事件");
+  // A mismatched resume must never combine the requested thread's baseline with another
+  // thread's rollout. At most the actual stdout snapshot survives, without run-scope diffing.
+  const rolloutFile = identityMismatch
+    ? null
+    : usageContext?.sessionFile ??
+      (threadId
+        ? findCodexSessionFile(usageContext?.sessionsRoot ?? "", threadId)
+        : null);
+  let baseline = identityMismatch ? null : usageContext?.baseline ?? null;
+  if (baseline?.counters && baseline.counters.totalTokens !== null) {
+    const newThreadZero =
+      baseline.offset === 0 &&
+      baseline.counters.inputTokens === 0 &&
+      baseline.counters.outputTokens === 0 &&
+      baseline.counters.cacheReadTokens === 0 &&
+      baseline.counters.cacheWriteTokens === 0 &&
+      baseline.counters.totalTokens === 0;
+    if (!newThreadZero) {
+      // A persisted old baseline may have synthesized T. Only a raw rollout total before the
+      // saved offset confirms that T as native.
+      const evidence = rolloutFile
+        ? scanCodexRollout(rolloutFile, 0, baseline.offset)
+        : null;
+      if (
+        (evidence?.lastTotal?.totalTokens ?? null) !== baseline.counters.totalTokens
+      )
+        baseline = {
+          ...baseline,
+          counters: { ...baseline.counters, totalTokens: null },
+        };
+    }
+  }
+  if (
+    !identityMismatch &&
+    lastSnapshot !== null &&
+    lastSnapshot.totalTokens === null &&
+    baseline &&
+    rolloutFile
+  ) {
+    const candidate = scanCodexRollout(rolloutFile, baseline.offset)?.lastTotal;
+    const cacheCompatible =
+      (candidate?.cacheReadTokens == null ||
+        lastSnapshot.cacheReadTokens == null ||
+        candidate.cacheReadTokens === lastSnapshot.cacheReadTokens) &&
+      (candidate?.cacheWriteTokens == null ||
+        lastSnapshot.cacheWriteTokens == null ||
+        candidate.cacheWriteTokens === lastSnapshot.cacheWriteTokens);
+    if (
+      candidate?.totalTokens !== null &&
+      candidate?.totalTokens !== undefined &&
+      candidate.inputTokens !== null &&
+      candidate.inputTokens === lastSnapshot.inputTokens &&
+      candidate.outputTokens !== null &&
+      candidate.outputTokens === lastSnapshot.outputTokens &&
+      cacheCompatible
+    )
+      lastSnapshot = { ...lastSnapshot, totalTokens: candidate.totalTokens };
+  }
+  const usage = identityMismatch
+    ? lastSnapshot !== null
+      ? codexSnapshotUsage(lastSnapshot, null, error !== null)
+      : null
+    : lastSnapshot !== null
+      ? codexSnapshotUsage(lastSnapshot, baseline, error !== null)
+      : baseline
+        ? codexRolloutUsage(rolloutFile, baseline)
+        : null;
   return {
     success: error === null,
     nativeSessionId: validatedSessionId,
-    nativeSessionFile: null,
+    nativeSessionFile: rolloutFile,
     finalText,
-    usage: toUsage(buckets),
+    usage,
     error,
   };
 }

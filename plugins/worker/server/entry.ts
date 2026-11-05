@@ -68,6 +68,12 @@ app.get(
 );
 
 app.get(
+  "/catalog/pi",
+  uiOnly,
+  route(() => service.piCatalog()),
+);
+
+app.get(
   "/workers/:workerId",
   uiOnly,
   route((req) => service.get(String(req.params.workerId))),

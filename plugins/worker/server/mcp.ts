@@ -14,13 +14,19 @@ const taskRoleValues = WORKER_TASK_ROLES.map((role) => role.value) as [
 
 const startShape = {
   taskName: z.string(),
-  // Omitted selects by taskRole among enabled types, then the configured default type.
+  // Omitted routes among enabled configs by role, then the default config.
+  configId: z
+    .string()
+    .optional()
+    .describe(
+      "指定 worker 配置 id（稳定标识）；必须存在且启用。省略时按已启用配置路由：先按 type 过滤，再按 taskRole 匹配，候选中优先默认配置，否则取列表首项；无角色匹配时回退到 type 约束的候选",
+    ),
   type: z.enum(["dsh", "pi", "codex"]).optional(),
   taskRole: z
     .enum(taskRoleValues)
     .optional()
     .describe(
-      "任务角色：testing 测试、development 开发、ui_design UI设计、plan_review 方案审核、code_review 代码审核。省略 type 时仅匹配已启用且接受该角色的类型；无匹配或未提供 role 时使用默认类型。UI设计仅负责界面、视觉和交互",
+      "任务角色：testing 测试、development 开发、ui_design UI设计、plan_review 方案审核、code_review 代码审核。仅用于新建任务的配置路由，在已启用配置中选择接受该角色的配置；无匹配时按 type 约束或默认配置回退。UI设计仅负责界面、视觉和交互",
     ),
   prompt: z.string(),
   workspace: z.object({
@@ -31,7 +37,7 @@ const startShape = {
   }),
   writePaths: z.array(z.string()),
   model: z.string().optional(),
-  provider: z.string().optional(),
+  provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/DSH 请使用完整 model"),
   effort: z.string().optional(),
   timeoutSeconds,
   requestId: z.string(),
@@ -65,7 +71,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_context",
     {
-      description: "获取当前父会话的 owner、已保存计划、并发设置、活动任务与待确认通知摘要；计划须结合实际 Worker 状态核对，派发后由运行提醒或终态通知唤醒后检查进展或验收",
+      description: "获取当前父会话的 owner、已保存计划、配置与并发设置、活动任务与待确认通知摘要；配置暴露 id/name/type/roles/model/effort 与 Codex 服务，不暴露凭据。计划须结合实际 Worker 状态核对，派发后由运行提醒或终态通知唤醒后检查进展或验收",
       inputSchema: {},
     },
     async () => {
@@ -138,7 +144,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "异步启动一个 DSH、Pi 或 Codex 子任务；省略 type 时按 taskRole 自动匹配已启用类型，无匹配或未提供 taskRole 时回退默认类型，显式 type 必须已启用。UI设计角色只负责界面、视觉和交互，技术方案与架构由主会话产出，方案审核只审核已有方案。必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
+      description: "异步启动一个 DSH、Pi 或 Codex 子任务；优先使用显式 configId（须存在且启用），省略时按角色在已启用配置中路由，再回退默认配置，显式 type 必须与配置一致。UI设计角色只负责界面、视觉和交互，技术方案与架构由主会话产出，方案审核只审核已有方案。必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
       inputSchema: startShape,
     },
     async (input) => {
@@ -158,7 +164,7 @@ export function createWorkerMcpServer(
         workerId: z.string(),
         prompt: z.string(),
         model: z.string().optional(),
-        provider: z.string().optional(),
+        provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/DSH 请使用完整 model"),
         effort: z.string().optional(),
         timeoutSeconds,
         requestId: z.string(),
