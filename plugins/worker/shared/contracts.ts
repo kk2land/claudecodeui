@@ -517,7 +517,7 @@ export type WorkerCodexSettings = {
  * original record instead of reading these settings again.
  *
  * The schema-2 migration creates the initial fixed configs `dsh-default`, `pi-default`, and
- * `codex-default` (names "DSH default", "Pi default", "Codex default") from the previous
+ * `codex-default` (names "dsh#1", "pi#1", "codex#1") from the previous
  * per-type maps and defaults, and sets `defaultConfigId` to the initial config matching the
  * previous `defaultWorkerType` (initially `dsh-default`).
  */

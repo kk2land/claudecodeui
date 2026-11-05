@@ -18,9 +18,9 @@ export const INITIAL_CONFIG_IDS: Record<WorkerType, string> = {
 
 /** Display names of the fixed initial configs; renaming them keeps the id unchanged. */
 export const INITIAL_CONFIG_NAMES: Record<WorkerType, string> = {
-  dsh: "DSH default",
-  pi: "Pi default",
-  codex: "Codex default",
+  dsh: "dsh#1",
+  pi: "pi#1",
+  codex: "codex#1",
 };
 
 const TYPES: WorkerType[] = ["dsh", "pi", "codex"];

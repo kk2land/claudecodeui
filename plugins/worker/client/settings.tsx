@@ -105,13 +105,29 @@ function parseEnv(text: string): {
 }
 
 /**
- * Deep-copies a config so draft edits never mutate the saved snapshot. The default keeps a
- * fresh id and a distinct name for duplication; initialization passes the stored id.
+ * Default name for a new config of `type`: `type#1` when no canonical name exists yet, else
+ * one past the highest `type#<n>` in the current list.
+ */
+function nextConfigName(configs: WorkerConfig[], type: WorkerType): string {
+  let highest = 0;
+  for (const config of configs) {
+    if (config.type !== type) continue;
+    const match = new RegExp("^" + type + "#(\\d+)$").exec(config.name.trim());
+    if (!match) continue;
+    const index = Number(match[1]);
+    if (Number.isSafeInteger(index) && index > highest) highest = index;
+  }
+  return type + "#" + (highest + 1);
+}
+
+/**
+ * Deep-copies a config so draft edits never mutate the saved snapshot. Duplication passes a
+ * fresh id and a distinct name; initialization passes the stored id and name.
  */
 function cloneConfig(
   config: WorkerConfig,
-  name = config.name + " 副本",
-  id = newConfigId(),
+  name: string,
+  id: string,
 ): WorkerConfig {
   const { codex, ...rest } = config;
   return {
@@ -131,10 +147,10 @@ function cloneConfig(
   };
 }
 
-function blankConfig(type: WorkerType): WorkerConfig {
+function blankConfig(type: WorkerType, name: string, id: string): WorkerConfig {
   return {
-    id: newConfigId(),
-    name: TYPE_LABELS[type] + " 配置",
+    id,
+    name,
     type,
     enabled: true,
     roles: [],
@@ -473,25 +489,28 @@ export function SettingsView({
     });
 
   const addConfig = (type: WorkerType) => {
-    const config = blankConfig(type);
-    if (type === "codex") setEnvDraft((current) => ({ ...current, [config.id]: "" }));
+    const id = newConfigId();
+    if (type === "codex") setEnvDraft((current) => ({ ...current, [id]: "" }));
     setDraft((current) => ({
-      configs: [...current.configs, config],
-      defaultConfigId: current.defaultConfigId || config.id,
+      configs: [
+        ...current.configs,
+        blankConfig(type, nextConfigName(current.configs, type), id),
+      ],
+      defaultConfigId: current.defaultConfigId || id,
     }));
   };
 
   const duplicate = (config: WorkerConfig) => {
-    const copy = cloneConfig(config);
+    const id = newConfigId();
     // Copy the raw draft text of the source config, including an emptied or still-invalid
     // textarea, so the copy saves exactly what the user currently sees.
-    if (copy.type === "codex")
-      setEnvDraft((current) => ({
-        ...current,
-        [copy.id]: current[config.id] ?? "",
-      }));
+    if (config.type === "codex")
+      setEnvDraft((current) => ({ ...current, [id]: current[config.id] ?? "" }));
     setDraft((current) => ({
-      configs: [...current.configs, copy],
+      configs: [
+        ...current.configs,
+        cloneConfig(config, nextConfigName(current.configs, config.type), id),
+      ],
       defaultConfigId: current.defaultConfigId,
     }));
   };
@@ -1073,7 +1092,7 @@ export function SettingsView({
         })}
         </div>
         <div className="worker-form-wide worker-config-add">
-          <span className="worker-muted">新增配置（执行引擎固定为 DSH / Pi / Codex）</span>
+          <span className="worker-muted">新增配置</span>
           <div className="worker-config-add-actions">
             {WORKER_TYPES.map((type) => (
               <button

@@ -164,7 +164,7 @@ test("legacy Codex resume keeps its old provider fallback without fabricating hi
   // The constructor migration has already run, so the very first state read is consistent.
   const first = service.state().workers.find((worker) => worker.id === legacy.id)!;
   assert.equal(first.configId, "codex-default");
-  assert.equal(first.configName, "Codex default");
+  assert.equal(first.configName, "codex#1");
   assert.equal(first.latestRun?.provider, null);
   assert.equal(first.latestRun?.legacyCodexProvider, true);
 

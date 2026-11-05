@@ -638,7 +638,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增配置");
     assert.equal(
       (byLabel(mounted.container, "配置 4 名称") as HTMLInputElement).value,
-      "DSH 配置",
+      "dsh#1",
     );
     await typeInto(
       byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
@@ -659,7 +659,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 名称")), "复制 Codex 配置");
     assert.equal(
       (byLabel(mounted.container, "配置 5 名称") as HTMLInputElement).value,
-      "Codex default 副本",
+      "codex#1",
     );
     assert.equal(
       (byLabel(mounted.container, "配置 5 Codex 环境变量") as HTMLTextAreaElement).value,
@@ -680,7 +680,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       () =>
         [...defaultSelect.options]
           .find((option) => option.value === defaultSelect.value)
-          ?.textContent?.includes("Codex default 副本") === true,
+          ?.textContent?.includes("codex#1") === true,
       "复制配置设为默认",
     );
     button(mounted.container, "保存设置").click();
@@ -693,7 +693,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     assert.equal(body.retentionDays, 1);
     assert.deepEqual(
       body.configs.map((config) => config.name),
-      ["DSH default", "Pi default", "Codex default", "后备 Pi", "Codex default 副本"],
+      ["DSH default", "Pi default", "Codex default", "后备 Pi", "codex#1"],
     );
     assert.equal(new Set(body.configs.map((config) => config.id)).size, 5);
     const copied = body.configs[4]!;

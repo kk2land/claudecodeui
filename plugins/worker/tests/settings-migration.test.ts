@@ -267,7 +267,7 @@ test("migration backfills worker config identity and run selection from spec arg
 
   const settings = store.settings();
   assert.equal(store.worker("worker-legacy")?.configId, "codex-default");
-  assert.equal(store.worker("worker-legacy")?.configName, "Codex default");
+  assert.equal(store.worker("worker-legacy")?.configName, "codex#1");
   const migrated = store.run("run-legacy")!;
   assert.equal(migrated.model, "argv-model");
   assert.equal(migrated.provider, "magpie");

@@ -807,7 +807,6 @@
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
-  margin-left: auto;
 }
 .worker-config-add > span {
   font-size: 12px;
@@ -921,8 +920,5 @@
   }
   .worker-drag-handle {
     width: 20px;
-  }
-  .worker-config-add-actions {
-    margin-left: 0;
   }
 }

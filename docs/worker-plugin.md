@@ -151,7 +151,7 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 ## Worker 配置：引擎、启用、角色、并发、模型与 Codex 服务
 
 执行引擎固定为 `dsh`、`pi`、`codex` 三种。用户可以管理多个具名 Worker 配置；新安装直接使用三个初始配置
-`dsh-default`（DSH default）、`pi-default`（Pi default）、`codex-default`（Codex default），
+`dsh-default`（dsh#1）、`pi-default`（pi#1）、`codex-default`（codex#1），
 `defaultConfigId` 为 `dsh-default`。从旧设置迁移时保留原 `defaultWorkerType`，映射为对应初始配置的
 `defaultConfigId`；只有旧值缺失或无效时才回退 `dsh-default`，迁移结果不会一律改成 DSH。每个配置包含
 `id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`model`、
@@ -183,11 +183,11 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
     {
       "schemaVersion": 2,
       "configs": [
-        { "id": "dsh-default", "name": "DSH default", "type": "dsh", "enabled": true,
+        { "id": "dsh-default", "name": "dsh#1", "type": "dsh", "enabled": true,
           "roles": [], "concurrency": 3, "model": null, "effort": null },
-        { "id": "pi-default", "name": "Pi default", "type": "pi", "enabled": true,
+        { "id": "pi-default", "name": "pi#1", "type": "pi", "enabled": true,
           "roles": [], "concurrency": 3, "model": null, "effort": null },
-        { "id": "codex-default", "name": "Codex default", "type": "codex", "enabled": true,
+        { "id": "codex-default", "name": "codex#1", "type": "codex", "enabled": true,
           "roles": [], "concurrency": 3, "model": null, "effort": null,
           "codex": { "modelProvider": "magpie", "env": { "CODEX_PROXY_BYPASS": "1" },
                      "legacyExtraArgs": [] } }
