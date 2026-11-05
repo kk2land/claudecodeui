@@ -32,7 +32,7 @@ description: 通过 MCP 委派或管理 CloudCLI Worker 子任务。用于明确
 - 使用已确认的上下文，不猜身份；先保存计划再派发，接受后回填 worker/run 标识。交接须自包含目标、背景、约束、依赖、验收、中途交付与停止条件，明确 `writePaths`（相对 cwd；只读为 `[]`）。需要示例时读 [协作案例与模板](references/workflows.md)，已有事实直接提供。新建可显式指定 `configId`；省略时按 `type`/`taskRole` 在已启用配置中路由。
 - `worker_start` 显式选 `workspace.mode`：`existing` 的写入不重叠，`worktree` 隔离并可指定 `baseRef`。脏源默认拒绝；仅已授权、确认不依赖未提交改动且记录基线后用 `allowDirtySource: true`。
 - 每次启动/续接用新 `requestId`，仅同一操作和载荷重试时复用；不重复派发同一目标。新建按主要交付物选单一 `taskRole`：`testing`/`development`/`ui_design`/`plan_review`/`code_review`，不按关键词猜。UI设计仅负责界面/视觉/交互，方案设计由主代理负责，方案审核仅审已有方案。
-- `configId`/`type`/`model`/`provider`/`effort` 仅传用户明确选择；省略时按已启用配置路由：`configId` 最优先（须存在且启用），否则可选 `type` 先过滤引擎，再由 `taskRole` 匹配配置，优先默认配置，最后取列表首项。`type` 只是引擎过滤条件，不能替代配置；显式 `type` 必须与 `configId` 一致。reasoning 对应 `effort`，合法组合以 MCP schema 和服务端为准。
+- `configId`/`type`/`model`/`provider`/`effort` 仅传用户明确选择；省略时按已启用配置路由：`configId` 最优先（须存在且启用），否则可选 `type` 先过滤引擎，再由 `taskRole` 取列表中第一个匹配配置（默认配置不覆盖前面的匹配项）；无匹配或未传角色时优先默认配置（若在候选中），否则取列表首项。设置页的配置拖动顺序就是该路由顺序。`type` 只是引擎过滤条件，不能替代配置；显式 `type` 必须与 `configId` 一致。reasoning 对应 `effort`，合法组合以 MCP schema 和服务端为准。
 - `worker_resume` 用原 workerId、cwd、home 和原生会话，不传 `taskRole`；模型/effort 沿用原 run，除非用户指定覆盖。只读任务不得续接为写入任务。
 - 按本轮交付设置 `timeoutSeconds`，长任务分阶段续接；`null` 须说明原因与停止条件。提示词给出命令预算：长命令后台执行，同步等待不超过 60 秒；测试超时但进程未退出时停止本任务进程并保留日志。
 

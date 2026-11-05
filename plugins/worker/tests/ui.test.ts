@@ -1977,3 +1977,329 @@ test("DOM: Codex directory loading/failure is shown on an explicit-service card 
     mounted.unmount();
   }
 });
+
+function configCards(root: ParentNode): HTMLDetailsElement[] {
+  return [...root.querySelectorAll(".worker-type-settings")] as HTMLDetailsElement[];
+}
+function configCardNames(root: ParentNode): string[] {
+  return configCards(root).map((card) =>
+    textOf(card.querySelector(".worker-type-identity strong")),
+  );
+}
+function dragHandles(root: ParentNode): HTMLElement[] {
+  return [...root.querySelectorAll(".worker-drag-handle")] as HTMLElement[];
+}
+async function fireDrag(
+  target: Element,
+  type: string,
+  relatedTarget?: Element | null,
+) {
+  const view = target.ownerDocument.defaultView as unknown as {
+    Event: new (type: string, init?: { bubbles?: boolean }) => Event;
+    MouseEvent: new (
+      type: string,
+      init?: { bubbles?: boolean; relatedTarget?: EventTarget | null },
+    ) => Event;
+  };
+  // MouseEvent carries relatedTarget, which dragleave needs to distinguish crossing children
+  // from actually leaving the config list.
+  target.dispatchEvent(
+    relatedTarget === undefined
+      ? new view.Event(type, { bubbles: true })
+      : new view.MouseEvent(type, { bubbles: true, relatedTarget }),
+  );
+  await delay(0);
+}
+
+test("DOM: reorder buttons keep id-keyed drafts and save the new config order", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openSettings(mounted);
+    assert.deepEqual(configCardNames(mounted.container), [
+      "DSH default",
+      "Pi default",
+      "Codex default",
+    ]);
+
+    // Draft edits stay attached to their config id, not to a list position.
+    await typeInto(
+      byLabel(mounted.container, "配置 1 名称") as HTMLInputElement,
+      "DSH 首选",
+    );
+    await typeInto(
+      byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement,
+      "SORT_KEEP=1",
+    );
+
+    assert.equal(
+      (byLabel(mounted.container, "配置 1 上移 DSH 首选") as HTMLButtonElement).disabled,
+      true,
+    );
+    (byLabel(mounted.container, "配置 3 上移 Codex default") as HTMLButtonElement).click();
+    await waitFor(
+      () =>
+        configCardNames(mounted.container).join("|") ===
+        "DSH 首选|Codex default|Pi default",
+      "按钮上移",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "配置 3 下移 Pi default") as HTMLButtonElement).disabled,
+      true,
+    );
+
+    // The moved card keeps its name input, env text, default id and open state.
+    assert.equal(
+      (byLabel(mounted.container, "配置 2 名称") as HTMLInputElement).value,
+      "Codex default",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "配置 2 Codex 环境变量") as HTMLTextAreaElement).value,
+      "SORT_KEEP=1",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
+      "dsh-default",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "配置 1 DSH 首选")!.closest("details") as HTMLDetailsElement)
+        .open,
+      true,
+    );
+
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存排序");
+    const body = callsTo(mounted, "/settings")[0]!.body as {
+      configs: Array<{ id: string; name: string; codex?: { env: Record<string, string> } }>;
+      defaultConfigId: string;
+    };
+    assert.deepEqual(
+      body.configs.map((config) => config.id),
+      ["dsh-default", "codex-default", "pi-default"],
+    );
+    assert.deepEqual(
+      body.configs.map((config) => config.name),
+      ["DSH 首选", "Codex default", "Pi default"],
+    );
+    assert.equal(body.configs[1]!.codex!.env.SORT_KEEP, "1");
+    assert.equal(body.defaultConfigId, "dsh-default");
+
+    // The saved order is what the reloaded editor shows.
+    await waitFor(
+      () =>
+        configCardNames(mounted.container).join("|") ===
+        "DSH 首选|Codex default|Pi default",
+      "保存后顺序一致",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: drag handle reorders with target feedback and a cancelled drag changes nothing", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openSettings(mounted);
+    const initialOrder = configCardNames(mounted.container);
+    assert.deepEqual(initialOrder, ["DSH default", "Pi default", "Codex default"]);
+
+    await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
+    await waitFor(
+      () => configCards(mounted.container)[0]!.getAttribute("data-dragging") === "true",
+      "拖动反馈",
+    );
+    await fireDrag(configCards(mounted.container)[2]!, "dragover");
+    await waitFor(
+      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
+      "目标反馈",
+    );
+    await fireDrag(configCards(mounted.container)[2]!, "drop");
+    await waitFor(
+      () =>
+        configCardNames(mounted.container).join("|") ===
+        "Pi default|Codex default|DSH default",
+      "拖放排序",
+    );
+    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(
+      configCards(mounted.container).some((card) => card.getAttribute("data-dragging")),
+      false,
+    );
+
+    // Dragging the default config away keeps its id as default and keeps its card open.
+    assert.equal(
+      (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
+      "dsh-default",
+    );
+    const defaultCard = byLabel(mounted.container, "配置 3 DSH default")!.closest(
+      "details",
+    ) as HTMLDetailsElement;
+    assert.equal(defaultCard.open, true);
+
+    // A cancelled drag (dragend without drop) must not move or drop any config.
+    await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
+    await fireDrag(dragHandles(mounted.container)[0]!, "dragend");
+    assert.deepEqual(configCardNames(mounted.container), [
+      "Pi default",
+      "Codex default",
+      "DSH default",
+    ]);
+    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(
+      configCards(mounted.container).some(
+        (card) => card.getAttribute("data-dragging") === "true",
+      ),
+      false,
+    );
+
+    // The handle never toggles the card, and the move buttons cover keyboard/mobile use.
+    (dragHandles(mounted.container)[2]!).click();
+    await delay(0);
+    assert.equal(defaultCard.open, true);
+    assert.equal(
+      (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
+      "dsh-default",
+    );
+    assert.equal(configCards(mounted.container).length, 3);
+
+    (byLabel(mounted.container, "配置 1 下移 Pi default") as HTMLButtonElement).click();
+    await waitFor(
+      () =>
+        configCardNames(mounted.container).join("|") ===
+        "Codex default|Pi default|DSH default",
+      "按钮下移",
+    );
+    assert.equal(defaultCard.open, true);
+    assert.equal(configCards(mounted.container).length, 3);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: crossing cards keeps the drop outline and only leaving the list clears it", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openSettings(mounted);
+    const list = mounted.container.querySelector(
+      ".worker-settings-configs",
+    ) as HTMLElement;
+    const hasTarget = () =>
+      configCards(mounted.container).some(
+        (card) => card.getAttribute("data-drop-target") === "true",
+      );
+
+    await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
+    await fireDrag(configCards(mounted.container)[1]!, "dragover");
+    await waitFor(
+      () => configCards(mounted.container)[1]!.getAttribute("data-drop-target") === "true",
+      "目标高亮",
+    );
+
+    // Leaving the previous card for the next one, or leaving a card into its own child,
+    // must keep the outline on the new target.
+    await fireDrag(configCards(mounted.container)[0]!, "dragleave", configCards(mounted.container)[1]);
+    await fireDrag(
+      configCards(mounted.container)[1]!,
+      "dragleave",
+      configCards(mounted.container)[1]!.querySelector("summary"),
+    );
+    assert.equal(
+      configCards(mounted.container)[1]!.getAttribute("data-drop-target"),
+      "true",
+    );
+
+    // Actually leaving the config list clears the target.
+    await fireDrag(
+      list,
+      "dragleave",
+      mounted.container.querySelector(".worker-heading"),
+    );
+    await waitFor(() => !hasTarget(), "离开列表清空目标");
+
+    // Re-entering a card restores the outline, and the drop still applies the order.
+    await fireDrag(configCards(mounted.container)[2]!, "dragover");
+    await waitFor(
+      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
+      "重新进入目标",
+    );
+    await fireDrag(configCards(mounted.container)[2]!, "drop");
+    await waitFor(
+      () =>
+        configCardNames(mounted.container).join("|") ===
+        "Pi default|Codex default|DSH default",
+      "拖放排序",
+    );
+    assert.equal(hasTarget(), false);
+    assert.equal(configCards(mounted.container).length, 3);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: dragenter moves the target outline before any dragover", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openSettings(mounted);
+    const list = mounted.container.querySelector(
+      ".worker-settings-configs",
+    ) as HTMLElement;
+
+    await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
+    await fireDrag(configCards(mounted.container)[1]!, "dragover");
+    await waitFor(
+      () => configCards(mounted.container)[1]!.getAttribute("data-drop-target") === "true",
+      "旧目标高亮",
+    );
+
+    // Only a dragenter on the new card: the outline must move before the next dragover.
+    await fireDrag(configCards(mounted.container)[2]!, "dragenter");
+    assert.equal(
+      configCards(mounted.container)[2]!.getAttribute("data-drop-target"),
+      "true",
+    );
+    assert.equal(
+      configCards(mounted.container)[1]!.getAttribute("data-drop-target"),
+      null,
+    );
+
+    // The old target's leave (relatedTarget = new card) must not clear the new outline.
+    await fireDrag(
+      configCards(mounted.container)[1]!,
+      "dragleave",
+      configCards(mounted.container)[2],
+    );
+    assert.equal(
+      configCards(mounted.container)[2]!.getAttribute("data-drop-target"),
+      "true",
+    );
+
+    // Leaving the whole list still clears, and re-entering restores the target.
+    await fireDrag(
+      list,
+      "dragleave",
+      mounted.container.querySelector(".worker-heading"),
+    );
+    await waitFor(
+      () =>
+        !configCards(mounted.container).some(
+          (card) => card.getAttribute("data-drop-target") === "true",
+        ),
+      "离开列表清空目标",
+    );
+    await fireDrag(configCards(mounted.container)[2]!, "dragenter");
+    await waitFor(
+      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
+      "重新进入目标",
+    );
+
+    await fireDrag(configCards(mounted.container)[2]!, "drop");
+    await waitFor(
+      () =>
+        configCardNames(mounted.container).join("|") ===
+        "Pi default|Codex default|DSH default",
+      "拖放排序",
+    );
+    assert.equal(configCards(mounted.container).length, 3);
+  } finally {
+    mounted.unmount();
+  }
+});

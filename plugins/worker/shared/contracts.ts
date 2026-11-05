@@ -124,10 +124,11 @@ export type WorkerStartInput = {
    * Configuration to use for a new worker. An explicit `configId` wins over `type`/`taskRole`,
    * must exist and be enabled, and must agree with an explicit `type`. When omitted, routing
    * considers only enabled configs: an optional explicit `type` narrows the list first, then
-   * `taskRole` selects matching configs, preferring the default config and otherwise the first
-   * in list order; with no role match it falls back to the type-constrained candidates. The
-   * chosen config is recorded on the worker. An omitted key is left out of the replay
-   * fingerprint entirely (never recorded as null), so a replay keeps its original config.
+   * `taskRole` takes the first matching config in the persisted `configs` order; with no role
+   * match, or no `taskRole`, the default config wins when it is a candidate, otherwise the first
+   * candidate is used. The chosen config is recorded on the worker. An omitted key is left out
+   * of the replay fingerprint entirely (never recorded as null), so a replay keeps its original
+   * config.
    */
   configId?: string;
   /**
@@ -139,8 +140,8 @@ export type WorkerStartInput = {
   type?: WorkerType;
   /**
    * Requested task role; one of `WORKER_TASK_ROLES`. A role only narrows which enabled config an
-   * omitted `configId`/`type` selects, so it applies to new workers only: a resume keeps the
-   * worker's recorded config and type.
+   * omitted `configId`/`type` selects, taking the first match in `configs` order, so it applies to
+   * new workers only: a resume keeps the worker's recorded config and type.
    */
   taskRole?: WorkerTaskRole;
   prompt: string;
@@ -431,6 +432,11 @@ export type WorkerNotification = {
  * history still references it, and a config's `type` cannot change while any worker or run
  * history still references it (see `WorkerConfigUsage.referenced`). `configs` is the single
  * canonical source of per-engine settings; there is no separate `engine` field copying `type`.
+ *
+ * The `configs` array order is the persisted routing priority: a `taskRole` start takes the
+ * first enabled matching config in list order. The settings UI reorders the list by dragging
+ * and saving the whole `configs` array, so no order field or extra API is needed; reordering
+ * never changes `defaultConfigId`.
  *
  * `model`/`effort` are the configured defaults used only when a request omits explicit
  * selections; null means the runner's own default. Pi stores the complete native model id,

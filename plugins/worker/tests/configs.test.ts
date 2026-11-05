@@ -114,7 +114,7 @@ test("canonical settings persist only canonical fields and project per-engine de
   assert.equal(reopened.settings().retentionDays, 4);
 });
 
-test("config routing filters by enabled configs, type, role, default, then list order", async (t) => {
+test("config routing filters by enabled configs, type, role, then default and list order", async (t) => {
   const root = temporaryRoot("worker-configs-routing-");
   const { service } = createService(t, root);
   const configs = [
@@ -131,7 +131,8 @@ test("config routing filters by enabled configs, type, role, default, then list 
     return result.worker;
   };
 
-  // Default config wins among role matches.
+  // Both DSH and Pi accept `testing`; the first list entry is selected, which here is also the
+  // default config.
   assert.equal((await start({ type: undefined, taskRole: "testing" })).configId, "dsh-default");
   // Only the matching config for the role.
   assert.equal((await start({ type: undefined, taskRole: "plan_review" })).configId, "pi-plan");
@@ -165,6 +166,76 @@ test("config routing filters by enabled configs, type, role, default, then list 
     () => start({ type: "pi" }),
     /该 worker 类型已禁用/,
   );
+
+  for (const workerId of started)
+    await waitStatus(service, workerId, ["completed"]);
+});
+
+test("role routing follows persisted config order instead of the default config", async (t) => {
+  const root = temporaryRoot("worker-configs-order-");
+  const { service, data } = createService(t, root);
+  const piA = pi({ id: "pi-a", name: "Pi A", roles: ["testing"], concurrency: 1 });
+  const dshDefault = dsh({ roles: ["testing"], concurrency: 1 });
+  // The default config is deliberately after another config that accepts the same role.
+  service.updateSettings({
+    configs: [piA, dshDefault],
+    defaultConfigId: "dsh-default",
+  });
+  const started: string[] = [];
+  const start = async (overrides: Parameters<typeof startInput>[0] = {}) => {
+    const result = await service.start(
+      "owner-1",
+      startInput({ type: undefined, ...overrides }),
+    );
+    started.push(result.worker.id);
+    return result;
+  };
+
+  // First matching config in list order wins; the default does not override it.
+  assert.equal((await start({ taskRole: "testing" })).worker.configId, "pi-a");
+  // Without a role the default still wins over the first list entry.
+  assert.equal((await start()).worker.configId, "dsh-default");
+  // An unmatched role falls back to the default, not to the first candidate.
+  assert.equal((await start({ taskRole: "code_review" })).worker.configId, "dsh-default");
+  // Explicit type narrows the candidates before the role match, in either direction.
+  assert.equal((await start({ type: "pi", taskRole: "testing" })).worker.configId, "pi-a");
+  assert.equal((await start({ type: "dsh", taskRole: "testing" })).worker.configId, "dsh-default");
+
+  // A disabled earlier entry is skipped in favour of the next match.
+  service.updateSettings({
+    configs: [{ ...piA, enabled: false }, dshDefault],
+    defaultConfigId: "dsh-default",
+  });
+  assert.equal((await start({ taskRole: "testing" })).worker.configId, "dsh-default");
+
+  // Reordering through the canonical settings save changes selection, and the new order persists.
+  service.updateSettings({
+    configs: [dshDefault, piA],
+    defaultConfigId: "dsh-default",
+  });
+  assert.equal((await start({ taskRole: "testing" })).worker.configId, "dsh-default");
+  const reopened = new WorkerStore(data).settings();
+  assert.deepEqual(
+    reopened.configs.map((config) => config.id),
+    ["dsh-default", "pi-a"],
+  );
+  assert.equal(reopened.defaultConfigId, "dsh-default");
+
+  // Replaying an accepted request keeps its original config after the order changes.
+  const request = startInput({
+    type: undefined,
+    taskRole: "testing",
+    requestId: "config-order-replay",
+  });
+  const original = await service.start("owner-1", request);
+  started.push(original.worker.id);
+  service.updateSettings({
+    configs: [piA, dshDefault],
+    defaultConfigId: "dsh-default",
+  });
+  const replayed = await service.start("owner-1", request);
+  assert.equal(replayed.run.id, original.run.id);
+  assert.equal(replayed.worker.configId, "dsh-default");
 
   for (const workerId of started)
     await waitStatus(service, workerId, ["completed"]);

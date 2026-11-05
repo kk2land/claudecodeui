@@ -1,8 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowLeft,
+  ChevronDown,
   ChevronRight,
+  ChevronUp,
   Copy,
+  GripVertical,
   Plus,
   RefreshCw,
   Trash2,
@@ -243,6 +246,9 @@ export function SettingsView({
     ),
   );
   const [busy, setBusy] = useState(false);
+  // Native HTML5 drag feedback: the config being dragged and the card currently under the
+  // pointer. Only the drag handle is draggable; the order only changes on drop (or a move button).
+  const [dragState, setDragState] = useState<{ id: string; overId: string | null } | null>(null);
 
   const [dshCatalog, setDshCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
   const [codexCatalog, setCodexCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
@@ -446,6 +452,26 @@ export function SettingsView({
   const update = (id: string, patch: Partial<WorkerConfig>) =>
     setDraft((current) => patchConfig(current, id, patch));
 
+  /**
+   * Moves one draft config to an absolute position. Every per-config draft (env text, default
+   * id, selections) is keyed by config id, so reordering only changes the array order.
+   */
+  const moveConfig = (id: string, toIndex: number) =>
+    setDraft((current) => {
+      const fromIndex = current.configs.findIndex((config) => config.id === id);
+      if (
+        fromIndex < 0 ||
+        toIndex < 0 ||
+        toIndex >= current.configs.length ||
+        fromIndex === toIndex
+      )
+        return current;
+      const configs = [...current.configs];
+      const [moved] = configs.splice(fromIndex, 1);
+      configs.splice(toIndex, 0, moved!);
+      return { ...current, configs };
+    });
+
   const addConfig = (type: WorkerType) => {
     const config = blankConfig(type);
     if (type === "codex") setEnvDraft((current) => ({ ...current, [config.id]: "" }));
@@ -590,32 +616,51 @@ export function SettingsView({
           </p>
         </div>
       </header>
-      <div className="worker-form">
-        <label className="worker-form-wide">
-          默认 Worker 配置
-          <select
-            aria-label="默认 Worker 配置"
-            value={draft.defaultConfigId}
-            onChange={(event) =>
-              setDraft((current) => ({
-                ...current,
-                defaultConfigId: event.target.value,
-              }))
-            }
-          >
-            {!defaultConfig ? <option value="">请选择默认配置</option> : null}
-            {draft.configs.map((config) => (
-              <option key={config.id} value={config.id} disabled={!config.enabled}>
-                {config.name + " · " + TYPE_LABELS[config.type]}
-                {config.enabled ? "" : "（已停用）"}
-              </option>
-            ))}
-          </select>
-          <small>
-            默认配置必须已启用；没有匹配角色的新任务使用它。满载仍按原有 FIFO 排队。
-          </small>
-        </label>
+      <div className="worker-form worker-settings-form">
+        <section className="worker-settings-block">
+          <label>
+            默认 Worker 配置
+            <select
+              aria-label="默认 Worker 配置"
+              value={draft.defaultConfigId}
+              onChange={(event) =>
+                setDraft((current) => ({
+                  ...current,
+                  defaultConfigId: event.target.value,
+                }))
+              }
+            >
+              {!defaultConfig ? <option value="">请选择默认配置</option> : null}
+              {draft.configs.map((config) => (
+                <option key={config.id} value={config.id} disabled={!config.enabled}>
+                  {config.name + " · " + TYPE_LABELS[config.type]}
+                  {config.enabled ? "" : "（已停用）"}
+                </option>
+              ))}
+            </select>
+            <small>
+              默认配置必须已启用；没有匹配角色的新任务使用它。满载仍按原有 FIFO 排队。
+            </small>
+          </label>
+        </section>
 
+        <p className="worker-sort-note">
+          配置顺序决定角色匹配：任务角色命中时，从上到下使用第一个已启用且类型匹配的配置；
+          排序在保存后生效。拖动左侧手柄，或用上移/下移按钮调整。
+        </p>
+
+        <div
+          className="worker-settings-configs"
+          onDragLeave={(event) => {
+            const next = event.relatedTarget as Node | null;
+            // Crossing between cards (or their children) keeps the target outline; only leaving
+            // the whole list clears it. The functional update avoids a stale overId write-back.
+            if (!next || event.currentTarget.contains(next)) return;
+            setDragState((current) =>
+              current ? { ...current, overId: null } : current,
+            );
+          }}
+        >
         {draft.configs.map((config, index) => {
           const position = index + 1;
           const configUsage = usage[config.id];
@@ -665,13 +710,88 @@ export function SettingsView({
           });
           const efforts = effortOptionsFor(models, config.model, config.effort);
           const isDefault = draft.defaultConfigId === config.id;
+          // Highlight this card as soon as a drag enters it (dragenter fires before the first
+          // dragover); dragover then keeps the highlight and allows the drop.
+          const markDropTarget = () => {
+            if (!dragState || dragState.id === config.id || dragState.overId === config.id)
+              return;
+            setDragState({ ...dragState, overId: config.id });
+          };
           return (
             <details
               className="worker-type-settings worker-form-wide"
               key={config.id}
               open={isDefault}
+              data-dragging={dragState?.id === config.id ? "true" : undefined}
+              data-drop-target={
+                dragState && dragState.id !== config.id && dragState.overId === config.id
+                  ? "true"
+                  : undefined
+              }
+              onDragEnter={markDropTarget}
+              onDragOver={(event) => {
+                if (!dragState || dragState.id === config.id) return;
+                event.preventDefault();
+                if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                markDropTarget();
+              }}
+              onDrop={(event) => {
+                if (!dragState) return;
+                event.preventDefault();
+                moveConfig(dragState.id, index);
+                setDragState(null);
+              }}
             >
               <summary aria-label={"配置 " + position + " " + config.name}>
+                <span className="worker-sort">
+                  <span
+                    className="worker-drag-handle"
+                    draggable
+                    aria-hidden="true"
+                    title="拖动调整配置顺序"
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                    }}
+                    onDragStart={(event) => {
+                      event.stopPropagation();
+                      if (event.dataTransfer) {
+                        event.dataTransfer.effectAllowed = "move";
+                        event.dataTransfer.setData("text/plain", config.id);
+                      }
+                      setDragState({ id: config.id, overId: null });
+                    }}
+                    onDragEnd={() => setDragState(null)}
+                  >
+                    <GripVertical size={14} />
+                  </span>
+                  <button
+                    type="button"
+                    className="worker-sort-button"
+                    aria-label={"配置 " + position + " 上移 " + config.name}
+                    disabled={index === 0}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      moveConfig(config.id, index - 1);
+                    }}
+                  >
+                    <ChevronUp size={14} />
+                  </button>
+                  <button
+                    type="button"
+                    className="worker-sort-button"
+                    aria-label={"配置 " + position + " 下移 " + config.name}
+                    disabled={index === draft.configs.length - 1}
+                    onClick={(event) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      moveConfig(config.id, index + 1);
+                    }}
+                  >
+                    <ChevronDown size={14} />
+                  </button>
+                </span>
                 <span className="worker-type-identity">
                   <strong>{config.name || "未命名配置"}</strong>
                   <span className="worker-badge worker-muted">
@@ -694,6 +814,8 @@ export function SettingsView({
                 <ChevronRight size={16} className="worker-type-chevron" aria-hidden="true" />
               </summary>
               <div className="worker-type-fields">
+                <div className="worker-config-main">
+                <div className="worker-config-row worker-config-identity">
                 <label>
                   配置名称
                   <input
@@ -753,6 +875,7 @@ export function SettingsView({
                     }
                   />
                 </label>
+                </div>
                 <label className="worker-checkbox worker-form-wide">
                   <input
                     type="checkbox"
@@ -769,35 +892,7 @@ export function SettingsView({
                     </small>
                   </span>
                 </label>
-                <div
-                  className="worker-form-wide worker-roles"
-                  role="group"
-                  aria-label={"配置 " + position + " 倾向任务（可多选）"}
-                >
-                  <span className="worker-roles-label">倾向任务（可多选）</span>
-                  {WORKER_TASK_ROLES.map((role) => (
-                    <label className="worker-checkbox" key={role.value}>
-                      <input
-                        type="checkbox"
-                        aria-label={
-                          "配置 " + position + " 任务角色 " + role.label
-                        }
-                        checked={config.roles.includes(role.value as WorkerTaskRole)}
-                        onChange={() =>
-                          update(config.id, {
-                            roles: config.roles.includes(role.value as WorkerTaskRole)
-                              ? config.roles.filter((item) => item !== role.value)
-                              : [...config.roles, role.value as WorkerTaskRole],
-                          })
-                        }
-                      />
-                      <span>
-                        {TASK_ROLE_LABELS[role.value as WorkerTaskRole]}
-                        <small>{role.description}</small>
-                      </span>
-                    </label>
-                  ))}
-                </div>
+                <div className="worker-config-row">
                 {config.type === "codex" ? (
                   <label>
                     Codex 模型服务
@@ -853,6 +948,7 @@ export function SettingsView({
                     ))}
                   </select>
                 </label>
+                </div>
                 {catalogProblems.length ? (
                   catalogProblems.map((problem) => (
                     <div
@@ -939,63 +1035,102 @@ export function SettingsView({
                     <small>删除只移除配置；历史任务与日志保留，但之后无法用该配置续接。</small>
                   ) : null}
                 </div>
+                </div>
+                <div className="worker-config-side">
+                  <div
+                    className="worker-roles"
+                    role="group"
+                    aria-label={"配置 " + position + " 倾向任务（可多选）"}
+                  >
+                    <span className="worker-roles-label">倾向任务（可多选）</span>
+                    {WORKER_TASK_ROLES.map((role) => (
+                      <label className="worker-checkbox" key={role.value}>
+                        <input
+                          type="checkbox"
+                          aria-label={
+                            "配置 " + position + " 任务角色 " + role.label
+                          }
+                          checked={config.roles.includes(role.value as WorkerTaskRole)}
+                          onChange={() =>
+                            update(config.id, {
+                              roles: config.roles.includes(role.value as WorkerTaskRole)
+                                ? config.roles.filter((item) => item !== role.value)
+                                : [...config.roles, role.value as WorkerTaskRole],
+                            })
+                          }
+                        />
+                        <span>
+                          {TASK_ROLE_LABELS[role.value as WorkerTaskRole]}
+                          <small>{role.description}</small>
+                        </span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
               </div>
             </details>
           );
         })}
-
+        </div>
         <div className="worker-form-wide worker-config-add">
           <span className="worker-muted">新增配置（执行引擎固定为 DSH / Pi / Codex）</span>
-          {WORKER_TYPES.map((type) => (
-            <button
-              key={type}
-              type="button"
-              aria-label={"新增 " + TYPE_LABELS[type] + " 配置"}
-              onClick={() => addConfig(type)}
-            >
-              <Plus size={13} /> {TYPE_LABELS[type]}
-            </button>
-          ))}
+          <div className="worker-config-add-actions">
+            {WORKER_TYPES.map((type) => (
+              <button
+                key={type}
+                type="button"
+                aria-label={"新增 " + TYPE_LABELS[type] + " 配置"}
+                onClick={() => addConfig(type)}
+              >
+                <Plus size={13} /> {TYPE_LABELS[type]}
+              </button>
+            ))}
+          </div>
         </div>
 
-        <label className="worker-form-wide">
-          日志和运行记录保留天数
-          <input
-            type="number"
-            min="1"
-            step="1"
-            aria-label="日志和运行记录保留天数"
-            value={retentionDays}
-            onChange={(event) => setRetentionDays(event.target.value)}
-          />
-          <small>
-            默认 1 天，从每次运行结束起计算，到期自动删除日志和运行记录。
-            运行中或状态未知的任务、原生会话和工作目录保留。
-          </small>
-        </label>
-        <p>
-          每个配置的并发按 (父会话, 项目, 配置) 独立计算；启动中、运行中、停止中和状态未知的
-          run 都占用额度，超过额度按 FIFO 排队。角色只影响新任务选择哪个配置；没有匹配时使用默认配置。
-          模型或 reasoning 留空表示沿用执行器现有配置；未知或目录外已保存的值会显示为“当前已保存”，
-          普通保存不会清掉它们。软提醒默认 {settings.softReminderSeconds} 秒 /{" "}
-          {settings.softReminderSteps} 步，硬超时
-          {settings.hardTimeoutSeconds === null
-            ? "默认关闭"
-            : "默认 " + settings.hardTimeoutSeconds + " 秒"}
-          。
-        </p>
-        {validationMessage ? (
-          <p className="worker-error" role="alert">
-            {validationMessage}
+        <section className="worker-settings-block">
+          <label>
+            日志和运行记录保留天数
+            <input
+              type="number"
+              min="1"
+              step="1"
+              aria-label="日志和运行记录保留天数"
+              value={retentionDays}
+              onChange={(event) => setRetentionDays(event.target.value)}
+            />
+            <small>
+              默认 1 天，从每次运行结束起计算，到期自动删除日志和运行记录。
+              运行中或状态未知的任务、原生会话和工作目录保留。
+            </small>
+          </label>
+        </section>
+        <footer className="worker-settings-footer">
+          <p>
+            每个配置的并发按 (父会话, 项目, 配置) 独立计算；启动中、运行中、停止中和状态未知的
+            run 都占用额度，超过额度按 FIFO 排队。角色只影响新任务选择哪个配置，按列表顺序取第一个命中项；
+            没有匹配时使用默认配置。
+            模型或 reasoning 留空表示沿用执行器现有配置；未知或目录外已保存的值会显示为“当前已保存”，
+            普通保存不会清掉它们。软提醒默认 {settings.softReminderSeconds} 秒 /{" "}
+            {settings.softReminderSteps} 步，硬超时
+            {settings.hardTimeoutSeconds === null
+              ? "默认关闭"
+              : "默认 " + settings.hardTimeoutSeconds + " 秒"}
+            。
           </p>
-        ) : null}
-        <button
-          className="worker-primary worker-form-wide"
-          disabled={busy || Boolean(validationMessage)}
-          onClick={() => void save()}
-        >
-          {busy ? "保存中…" : "保存设置"}
-        </button>
+          {validationMessage ? (
+            <p className="worker-error" role="alert">
+              {validationMessage}
+            </p>
+          ) : null}
+          <button
+            className="worker-primary worker-settings-save"
+            disabled={busy || Boolean(validationMessage)}
+            onClick={() => void save()}
+          >
+            {busy ? "保存中…" : "保存设置"}
+          </button>
+        </footer>
       </div>
     </>
   );

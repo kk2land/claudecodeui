@@ -964,9 +964,10 @@ export class WorkerService {
 
   /**
    * Chooses the config for a new worker. An explicit `configId` is authoritative; otherwise only
-   * enabled configs route, optionally narrowed by an explicit `type`, then by `taskRole`, with
-   * the default config preferred inside the candidate set and list order breaking ties. No role
-   * match falls back to the type-constrained candidates.
+   * enabled configs route, optionally narrowed by an explicit `type`, then by `taskRole`. A role
+   * match takes the first matching config in persisted list order (the list order the settings UI
+   * maintains); no role match, or no `taskRole`, falls back to the default config when it is in
+   * the candidate set, otherwise to the first candidate.
    */
   private resolveStartConfig(
     input: WorkerStartInput,
@@ -999,8 +1000,9 @@ export class WorkerService {
       const matches = candidates.filter((config) =>
         config.roles.includes(input.taskRole!),
       );
-      if (matches.length)
-        return preferred && matches.includes(preferred) ? preferred : matches[0]!;
+      // The persisted configs order is the routing priority, so the default config does not
+      // override an earlier role match.
+      if (matches.length) return matches[0]!;
     }
     return preferred ?? candidates[0]!;
   }

@@ -543,16 +543,120 @@
 .worker-form-wide {
   grid-column: 1 / -1;
 }
+/* Settings view only: use the available width and group the form into blocks. Other forms that
+   reuse `.worker-form` keep their narrower measure. */
+.worker-settings-form {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 14px;
+  max-width: none;
+  container-type: inline-size;
+}
+.worker-settings-form select,
+.worker-settings-form input[type="text"],
+.worker-settings-form input[type="number"] {
+  height: 36px;
+}
+.worker-settings-configs {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+.worker-settings-block {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 8px;
+  padding: 12px 14px;
+  border: 1px solid var(--worker-border);
+  border-radius: 8px;
+  background: var(--worker-bg);
+  min-width: 0;
+}
+.worker-settings-block > label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 5px;
+  align-content: start;
+  font-size: 12px;
+  min-width: 0;
+}
+.worker-settings-block select {
+  width: 100%;
+  min-width: 0;
+  max-width: 420px;
+}
+.worker-settings-block input[type="number"] {
+  max-width: 140px;
+}
+.worker-settings-footer {
+  display: grid;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--worker-border);
+}
+.worker-settings-footer p {
+  margin: 0;
+}
+.worker-settings-save {
+  justify-self: end;
+  min-width: 148px;
+}
+.worker-sort-note {
+  margin: 0;
+  padding: 0 2px;
+  color: var(--worker-muted);
+  font-size: 12px;
+}
 .worker-type-settings {
   min-width: 0;
   border: 1px solid var(--worker-border);
   border-radius: 8px;
   background: var(--worker-bg);
 }
-.worker-type-settings > summary {
-  display: flex;
+/* Reorder feedback: the dragged card dims, the drop target is outlined in the accent colour. */
+.worker-type-settings[data-dragging="true"] {
+  opacity: 0.55;
+}
+.worker-type-settings[data-drop-target="true"] {
+  border-color: var(--worker-blue);
+  box-shadow: 0 0 0 2px var(--worker-blue-soft);
+}
+.worker-sort {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
+  gap: 2px;
+}
+.worker-drag-handle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 28px;
+  border-radius: 5px;
+  color: var(--worker-muted);
+  cursor: grab;
+  user-select: none;
+}
+.worker-drag-handle:hover {
+  background: var(--worker-soft);
+  color: var(--worker-ink);
+}
+.worker-drag-handle:active {
+  cursor: grabbing;
+}
+.worker-plugin .worker-sort-button {
+  width: 24px;
+  min-height: 26px;
+  padding: 0;
+  color: var(--worker-muted);
+}
+.worker-plugin .worker-sort-button:hover:not(:disabled) {
+  color: var(--worker-ink);
+}
+.worker-type-settings > summary {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, auto) auto;
+  align-items: center;
+  gap: 6px 12px;
   padding: 13px 14px;
   border-radius: 8px;
   cursor: pointer;
@@ -571,15 +675,21 @@
   gap: 8px;
 }
 .worker-type-identity {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  flex-wrap: wrap;
+  min-width: 0;
 }
 .worker-type-identity strong {
   min-width: 42px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-weight: 600;
 }
 .worker-type-overview {
   flex: 1;
   justify-content: flex-end;
+  gap: 12px;
   min-width: 0;
   font-size: 11.5px;
   color: var(--worker-muted);
@@ -601,28 +711,76 @@
 }
 .worker-type-fields {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr));
-  gap: 12px;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: 14px;
   padding: 14px;
   border-top: 1px solid var(--worker-border);
 }
-.worker-type-fields > label,
-.worker-type-fields input,
-.worker-type-fields textarea {
+.worker-config-main {
+  display: grid;
+  gap: 12px;
+  align-content: start;
   min-width: 0;
+}
+.worker-config-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  align-items: start;
+  gap: 12px;
+  min-width: 0;
+}
+.worker-config-row > label,
+.worker-config-main input,
+.worker-config-main select,
+.worker-config-main textarea {
+  min-width: 0;
+}
+/* Each label sizes to its own content so a long hint never stretches a neighbouring control. */
+.worker-config-row > label {
+  align-content: start;
+}
+.worker-config-identity input[type="number"] {
+  max-width: 150px;
+}
+.worker-config-main > label.worker-checkbox {
+  grid-column: 1 / -1;
+}
+.worker-config-side {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+  min-width: 0;
+}
+/* Wide cards split the fields from the multi-select roles, so the pane's width is used and the
+   vertical scroll stays shorter. Narrow cards fall back to one column. */
+@container (min-width: 900px) {
+  .worker-type-fields {
+    grid-template-columns: minmax(0, 1fr) minmax(230px, 290px);
+    gap: 16px;
+  }
+  .worker-config-side {
+    padding-left: 16px;
+    border-left: 1px solid var(--worker-border);
+  }
 }
 .worker-roles {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr));
-  gap: 6px;
-  padding: 8px 10px;
+  grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr));
+  gap: 8px 10px;
+  align-content: start;
+  padding: 10px 12px;
   border: 1px solid var(--worker-border);
-  border-radius: 6px;
+  border-radius: 8px;
+  background: var(--worker-softer);
 }
 .worker-roles-label {
   grid-column: 1 / -1;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--worker-border);
   color: var(--worker-muted);
   font-size: 12px;
+  font-weight: 500;
 }
 .worker-roles small {
   display: block;
@@ -637,7 +795,19 @@
   display: flex;
   align-items: center;
   flex-wrap: wrap;
+  gap: 8px 12px;
+  min-width: 0;
+}
+.worker-config-add {
+  padding: 10px 12px;
+  border: 1px dashed var(--worker-border);
+  border-radius: 8px;
+}
+.worker-config-add-actions {
+  display: flex;
+  flex-wrap: wrap;
   gap: 8px;
+  margin-left: auto;
 }
 .worker-config-add > span {
   font-size: 12px;
@@ -736,10 +906,23 @@
 }
 @media (max-width: 540px) {
   .worker-type-settings > summary {
-    gap: 8px;
+    gap: 6px 8px;
     padding: 12px;
   }
   .worker-type-model {
     display: none;
+  }
+  .worker-settings-save {
+    justify-self: stretch;
+    width: 100%;
+  }
+  .worker-plugin .worker-sort-button {
+    width: 22px;
+  }
+  .worker-drag-handle {
+    width: 20px;
+  }
+  .worker-config-add-actions {
+    margin-left: 0;
   }
 }
