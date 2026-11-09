@@ -59,8 +59,8 @@ type RuntimeSideQuestion = {
 const appServer = codexAppServer as unknown as AppServerSideQuestion;
 const runtime = codexRuntime as unknown as RuntimeSideQuestion;
 
-type Mode = 'complete' | 'failed' | 'fork-error' | 'hang' | 'server-request' | 'plugin-list-error'
-  | 'initialize-hang' | 'completed-only' | 'turn-start-hold';
+type Mode = 'complete' | 'failed' | 'fork-error' | 'fork-delayed' | 'hang' | 'server-request'
+  | 'plugin-list-error' | 'initialize-hang' | 'completed-only' | 'turn-start-hold';
 
 /**
  * The fake app-server. `mode` decides how the turn goes; everything received
@@ -164,7 +164,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       send({ jsonrpc: '2.0', id: message.id, error: { code: -32600, message: 'thread not found: ${PARENT_THREAD}' } });
       return;
     }
-    send({ jsonrpc: '2.0', id: message.id, result: { thread: { id: FORK, path: null, ephemeral: true }, model: 'gpt-5.6', cwd: '/' } });
+    // The fork exists but its id arrives only after the question was dismissed.
+    const forkReply = { jsonrpc: '2.0', id: message.id, result: { thread: { id: FORK, path: null, ephemeral: true }, model: 'gpt-5.6', cwd: '/' } };
+    if (MODE === 'fork-delayed') {
+      setTimeout(() => send(forkReply), 300);
+      return;
+    }
+    send(forkReply);
   } else if (message.method === 'turn/start') {
     if (MODE === 'turn-start-hold') {
       // The fork is loaded but the turn acknowledgement never arrives, so a
@@ -444,9 +450,31 @@ test('an agent message that arrives only as item/completed, with no deltas, is t
   });
 });
 
-test('a failed turn rejects with the turn\'s error message', { concurrency: false }, async () => {
-  await withFakeAppServer('failed', async () => {
+test('a completed turn unloads the fork instead of leaving it loaded, and does not interrupt the finished turn', { concurrency: false }, async () => {
+  // Measured on native 0.165.0: a successful question left its ephemeral fork
+  // in thread/loaded/list forever, because settle only interrupted a running
+  // turn. A completed turn needs no interrupt, but the fork still needs the
+  // unload the app's own thread-close path sends.
+  await withFakeAppServer('complete', async ({ received }) => {
+    await appServer.askSideQuestion!(askInput(), () => {});
+    await settle();
+    const lines = await received();
+    assert.deepEqual(
+      lines.filter((line) => line.method === 'thread/unsubscribe').map((line) => line.params),
+      [{ threadId: FORK_THREAD }],
+      'only this fork is unloaded, not the parent',
+    );
+    assert.equal(lines.some((line) => line.method === 'turn/interrupt'), false, 'a finished turn is not interrupted');
+  });
+});
+
+test('a failed turn rejects with the turn\'s error message and still unloads the fork', { concurrency: false }, async () => {
+  await withFakeAppServer('failed', async ({ received }) => {
     await assert.rejects(appServer.askSideQuestion!(askInput(), () => {}), /model overloaded/);
+    await settle();
+    const lines = await received();
+    assert.deepEqual(lines.find((line) => line.method === 'thread/unsubscribe')?.params, { threadId: FORK_THREAD });
+    assert.equal(lines.some((line) => line.method === 'turn/interrupt'), false, 'a failed turn is already over');
   });
 });
 
@@ -476,10 +504,43 @@ test('an aborted signal interrupts only the fork turn and rejects, leaving the s
 
     const interrupt = (await received()).find((line) => line.method === 'turn/interrupt');
     assert.deepEqual(interrupt?.params, { threadId: FORK_THREAD, turnId: TURN_ID }, 'only the fork turn is interrupted');
+    assert.deepEqual(
+      (await received()).find((line) => line.method === 'thread/unsubscribe')?.params,
+      { threadId: FORK_THREAD },
+      'the interrupted fork is also unloaded, without waiting for the interrupt',
+    );
 
     let alive = false;
     try { process.kill(pid, 0); alive = true; } catch { alive = false; }
     assert.equal(alive, true, 'the shared app-server child outlives the dismissed question');
+  });
+});
+
+test('a dismiss while thread/fork is unanswered unloads the fork when its id arrives late', { concurrency: false, timeout: 30000 }, async () => {
+  // Aborting before the fork id is known leaves settle nothing to release. If
+  // the fork response then arrives, the loaded fork must be unloaded here or it
+  // stays on the shared process with no turn and no future reference.
+  await withFakeAppServer('fork-delayed', async ({ received }) => {
+    const controller = new AbortController();
+    const pending = appServer.askSideQuestion!(askInput({ signal: controller.signal }), () => {});
+    const outcome = pending.then(() => 'resolved', (error: unknown) => error);
+    for (let attempt = 0; attempt < 200 && !(await received()).some((line) => line.method === 'thread/fork'); attempt += 1) {
+      await settle();
+    }
+    assert.ok((await received()).some((line) => line.method === 'thread/fork'), 'thread/fork was sent and left unanswered');
+
+    controller.abort();
+    const settled = await outcome;
+    assert.ok(settled instanceof Error, `the ask rejects right after the abort (got ${String(settled)})`);
+    assert.match(settled.message, /aborted/);
+
+    let lines = await received();
+    for (let attempt = 0; attempt < 200 && !lines.some((line) => line.method === 'thread/unsubscribe'); attempt += 1) {
+      await settle();
+      lines = await received();
+    }
+    assert.deepEqual(lines.find((line) => line.method === 'thread/unsubscribe')?.params, { threadId: FORK_THREAD });
+    assert.equal(lines.some((line) => line.method === 'turn/start'), false, 'no turn starts on a dismissed fork');
   });
 });
 
@@ -504,7 +565,11 @@ test('a dismiss while turn/start is unanswered unloads the ephemeral fork instea
     assert.ok(settled instanceof Error, `the ask rejects right after the abort (got ${String(settled)})`);
     assert.match(settled.message, /aborted/);
 
-    const lines = await received();
+    let lines = await received();
+    for (let attempt = 0; attempt < 200 && !lines.some((line) => line.method === 'thread/unsubscribe'); attempt += 1) {
+      await settle();
+      lines = await received();
+    }
     assert.deepEqual(lines.find((line) => line.method === 'thread/unsubscribe')?.params, { threadId: FORK_THREAD });
     assert.equal(lines.some((line) => line.method === 'turn/interrupt'), false, 'no turn id existed to interrupt');
     assert.equal(lines.some((line) => line.method === 'thread/fork' && line.params.threadId !== PARENT_THREAD), false);

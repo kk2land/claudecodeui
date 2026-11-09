@@ -165,11 +165,13 @@ export const codexAppServer = {
  * and the `transport()` seam above is what the tests replace, so the question
  * protocol has no second public entry point.
  *
- * Cancellation is independent of the parent: an abort interrupts this fork's
- * turn (or unloads the fork when the turn id is not known yet) and rejects
- * with `CODEX_SIDE_QUESTION_ABORTED`. Because the shared child also serves the
- * parent, a cancelled or failed side question never stops that process —
- * unlike a transient client, whose child died with the request.
+ * Cancellation is independent of the parent: settling (abort, timeout, failure
+ * or a normal answer) always unloads this ephemeral fork, and an abort while
+ * its turn is still running also interrupts that turn; both are fire-and-forget
+ * so a turn that never acknowledges cannot keep the fork loaded. The ask rejects
+ * with `CODEX_SIDE_QUESTION_ABORTED` on abort. Because the shared child also
+ * serves the parent, a cancelled or failed side question never stops that
+ * process — unlike a transient client, whose child died with the request.
  */
 async function askSideQuestionOn(
   transport: CodexAppServerTransport,
@@ -234,6 +236,8 @@ async function askSideQuestionOn(
     let settled = false;
     let forkThreadId: string | null = null;
     let forkTurnId: string | null = null;
+    // A turn that already reported turn/completed needs no interrupt.
+    let forkTurnFinished = false;
     let removeNotificationListener: (() => void) | null = null;
     let removeExitListener: (() => void) | null = null;
 
@@ -250,9 +254,11 @@ async function askSideQuestionOn(
     input.signal.addEventListener('abort', onAbort);
 
     /**
-     * Releases this question's listeners and, when it is still running,
-     * interrupts its own fork turn. Fire-and-forget: the outcome is already
-     * decided, and a failed interrupt only leaves an ephemeral turn to expire.
+     * Releases this question's listeners and its ephemeral fork, interrupting
+     * the fork's own turn when it is still running. Fire-and-forget: the
+     * outcome is already decided, and a failed interrupt or unload only leaves
+     * an ephemeral thread to expire. `thread/unsubscribe` does not wait for the
+     * interrupt, so a turn that never acknowledges is still released at once.
      */
     function settle(action: () => void) {
       if (settled) {
@@ -263,15 +269,16 @@ async function askSideQuestionOn(
       input.signal.removeEventListener('abort', onAbort);
       removeNotificationListener?.();
       removeExitListener?.();
-      if (forkThreadId && forkTurnId) {
-        // A running fork turn: interrupt just that turn.
-        void transport.request('turn/interrupt', { threadId: forkThreadId, turnId: forkTurnId }).catch(() => {});
-      } else if (forkThreadId) {
-        // Dismissed while `turn/start` was still unanswered, so there is no
-        // turn id to interrupt yet. The fork is ephemeral and never listed
-        // anywhere else, so unloading it is the whole cleanup: `thread/unsubscribe`
+      if (forkThreadId) {
+        if (forkTurnId && !forkTurnFinished) {
+          // A running fork turn: interrupt just that turn.
+          void transport.request('turn/interrupt', { threadId: forkThreadId, turnId: forkTurnId }).catch(() => {});
+        }
+        // The fork is ephemeral and never needed again once this question
+        // settles, so unloading it is the whole cleanup: `thread/unsubscribe`
         // releases the loaded thread on the shared process (the app's own unload
-        // path) without touching the parent.
+        // path) without touching the parent. A normal turn/completed sent no
+        // interrupt; it still needs this unload or the fork stays loaded.
         void transport.request('thread/unsubscribe', { threadId: forkThreadId }).catch(() => {});
       }
       action();
@@ -307,12 +314,16 @@ async function askSideQuestionOn(
           features: { plugins: false },
         },
       }).then((forkResult) => {
-        if (settled) {
-          return;
-        }
-
         const typedForkResult = forkResult as { thread?: { id?: unknown } } | undefined;
         forkThreadId = typeof typedForkResult?.thread?.id === 'string' ? typedForkResult.thread.id : null;
+        if (settled) {
+          // Dismissed while `thread/fork` was still answered late: the fork is
+          // loaded now but no turn will ever start on it, so release it here.
+          if (forkThreadId) {
+            void transport.request('thread/unsubscribe', { threadId: forkThreadId }).catch(() => {});
+          }
+          return;
+        }
         if (!forkThreadId) {
           settle(() => reject(new AppError('Codex reported a side-question fork without a thread id.', {
             code: 'FORK_FAILED',
@@ -371,6 +382,7 @@ async function askSideQuestionOn(
           }
 
           if (frame.method === 'turn/completed') {
+            forkTurnFinished = true;
             if (typeof params.turn?.id === 'string') {
               forkTurnId = params.turn.id;
             }
