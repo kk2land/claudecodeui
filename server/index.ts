@@ -173,7 +173,11 @@ app.get('/health', (req, res) => {
         status: 'ok',
         timestamp: new Date().toISOString(),
         installMode,
-        version: RUNNING_VERSION
+        version: RUNNING_VERSION,
+        // Only the `super` deployment may be told about upstream releases; every
+        // other role (and an unset role) reports no capability, so the UI never
+        // asks GitHub for a latest release. The raw role itself is never sent.
+        canCheckUpdates: process.env.CLOUDCLI_ROLE === 'super'
     });
 });
 

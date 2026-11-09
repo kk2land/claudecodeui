@@ -199,6 +199,10 @@ const pluginAssetPath = (pluginName: string, assetFile: string) =>
 // import a named method instead of assembling URLs of their own.
 
 export const api = {
+  // Public deployment probe. It reports install mode, running version and
+  // update-check capability, so it stays unauthenticated and outside `/api`.
+  health: () => fetch('/health'),
+
   // Auth endpoints (no token required)
   auth: {
     status: () => fetch('/api/auth/status'),

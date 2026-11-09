@@ -1,5 +1,6 @@
 import { useState, useEffect } from 'react';
 
+import { api } from '@/shared/api';
 import { APP_VERSION } from '@/shared/constants';
 import type { InstallMode, ReleaseInfo } from '@/shared/types';
 
@@ -30,12 +31,17 @@ export const useVersionCheck = (owner: string, repo: string) => {
   const [installMode, setInstallMode] = useState<InstallMode>('git');
   const [runningVersion, setRunningVersion] = useState<string | null>(null);
   const [restartRequired, setRestartRequired] = useState(false);
+  // Whether the deployment is allowed to look for upstream releases. Stays
+  // false until `/health` explicitly answers `canCheckUpdates: true`, so a
+  // failed probe or any other role hides the update notification entirely.
+  const [canCheckUpdates, setCanCheckUpdates] = useState(false);
 
   useEffect(() => {
     const fetchHealth = async () => {
       try {
-        const response = await fetch('/health');
+        const response = await api.health();
         const data = await response.json();
+        setCanCheckUpdates(data.canCheckUpdates === true);
         if (data.installMode === 'npm' || data.installMode === 'git') {
           setInstallMode(data.installMode);
         }
@@ -56,6 +62,12 @@ export const useVersionCheck = (owner: string, repo: string) => {
   }, []);
 
   useEffect(() => {
+    // Nothing is fetched from GitHub unless the deployment advertised the
+    // capability; the update fields stay at their hidden defaults.
+    if (!canCheckUpdates) {
+      return;
+    }
+
     const checkVersion = async () => {
       try {
         const response = await fetch(`https://api.github.com/repos/${owner}/${repo}/releases/latest`);
@@ -93,7 +105,7 @@ export const useVersionCheck = (owner: string, repo: string) => {
     checkVersion();
     const interval = setInterval(checkVersion, 5 * 60 * 1000); // Check every 5 minutes
     return () => clearInterval(interval);
-  }, [owner, repo]);
+  }, [canCheckUpdates, owner, repo]);
 
   return { updateAvailable, latestVersion, currentVersion: APP_VERSION, releaseInfo, installMode, runningVersion, restartRequired };
 };
