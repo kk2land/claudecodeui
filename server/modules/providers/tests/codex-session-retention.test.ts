@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { mkdir, mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
@@ -116,8 +115,8 @@ test('a failed or malformed native list never starts a partially collected delet
 });
 
 test('pinned app-server retains opened chats through their policy boundaries and preserves retained fork history', { timeout: 30_000 }, async (t) => {
-  const require = createRequire(import.meta.url);
-  const launcher = require.resolve('@openai/codex-app-server-compat/bin/codex.js');
+  const launcher = codexAppServerTransport.status.launcherPath;
+  assert.ok(launcher, 'the pinned Codex app-server launcher must be installed');
   const home = path.join(root, 'codex-home');
   const directory = path.join(home, 'sessions', '2026', '08', '01');
   await mkdir(directory, { recursive: true });

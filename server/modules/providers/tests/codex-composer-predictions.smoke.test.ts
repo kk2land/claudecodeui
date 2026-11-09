@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test, { type TestContext } from 'node:test';
@@ -11,7 +10,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
-import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import { codexAppServerTransport, CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type {
   AnyRecord,
@@ -50,10 +49,8 @@ const PREDICTION_CONFIG: CodexPredictionConfiguration = {
  * unloads the fork — no account, no paid model, no network beyond 127.0.0.1.
  */
 async function verifyNativePrediction(t: TestContext, workerEnabled: boolean): Promise<void> {
-  const require = createRequire(import.meta.url);
-  let launcher: string;
-  try { launcher = require.resolve('@openai/codex-app-server-compat/bin/codex.js'); }
-  catch { t.skip('The pinned Codex package is not installed.'); return; }
+  const launcher = codexAppServerTransport.status.launcherPath;
+  assert.ok(launcher, 'The pinned Codex app-server launcher must be installed.');
   if (process.platform === 'win32') { t.skip('The POSIX process probe is covered on macOS/Linux.'); return; }
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-pred-smoke-'));
 

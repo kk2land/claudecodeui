@@ -1,7 +1,6 @@
 import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -355,13 +354,8 @@ test('a session detached by an edit reports no token usage of its own', { concur
  * than a pointer at the original.
  */
 test('codex app-server forks a real thread at a turn', { concurrency: false }, async (t) => {
-  const require_ = createRequire(import.meta.url);
-  try {
-    require_.resolve('@openai/codex-app-server-compat/bin/codex.js');
-  } catch {
-    t.skip('the Codex CLI package is not installed');
-    return;
-  }
+  const launcher = codexAppServerTransport.status.launcherPath;
+  assert.ok(launcher, 'the pinned Codex app-server launcher must be installed');
 
   const fixture = path.join(
     process.cwd(),
