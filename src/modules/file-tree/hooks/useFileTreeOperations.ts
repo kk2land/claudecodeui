@@ -5,6 +5,7 @@ import JSZip from 'jszip';
 import { api } from '@/shared/api';
 import { saveBlob } from '@/modules/android-bridge';
 import type { FileTreeNode,Project } from '@/shared/types';
+import { copyTextToClipboard } from '@/shared/utils';
 
 // Invalid filename characters
 const INVALID_FILENAME_CHARS = /[<>:"/\\|?*\x00-\x1f]/;
@@ -238,14 +239,17 @@ export function useFileTreeOperations({
     }
   }, [selectedProject, newItemParent, newItemType, newItemName, validateFilename, showToast, t, onRefresh, handleCancelCreate]);
 
-  // Copy path to clipboard
+  // Copy path to clipboard. The shared helper falls back to `execCommand('copy')` when the
+  // Clipboard API is missing (plain-HTTP access) or rejects the write (some mobile browsers);
+  // a single toast reports its outcome once it is known.
   const handleCopyPath = useCallback((item: FileTreeNode) => {
-    navigator.clipboard.writeText(item.path).catch(() => {
-      // Clipboard API may fail in some contexts (e.g., non-HTTPS)
-      showToast(t('fileTree.toast.copyFailed', 'Failed to copy path'), 'error');
-      return;
+    void copyTextToClipboard(item.path).then((didCopy) => {
+      if (didCopy) {
+        showToast(t('fileTree.toast.pathCopied', 'Path copied to clipboard'), 'success');
+      } else {
+        showToast(t('fileTree.toast.copyFailed', 'Failed to copy path'), 'error');
+      }
     });
-    showToast(t('fileTree.toast.pathCopied', 'Path copied to clipboard'), 'success');
   }, [showToast, t]);
 
   // Download a single file
@@ -300,9 +304,11 @@ export function useFileTreeOperations({
     // Generate ZIP file
     const zipBlob = await zip.generateAsync({ type: 'blob' });
     const saved = await saveBlob(zipBlob, `${folder.name}.zip`);
-    if (saved) {
-      showToast(t('fileTree.toast.folderDownloaded', 'Folder downloaded as ZIP'), 'success');
+    if (!saved) {
+      // The user cancelled the Android system picker; the ZIP is discarded.
+      return;
     }
+    showToast(t('fileTree.toast.folderDownloaded', 'Folder downloaded as ZIP'), 'success');
   }, [selectedProject, showToast, t]);
 
   // Download file or folder. Declared after the two helpers it dispatches to so

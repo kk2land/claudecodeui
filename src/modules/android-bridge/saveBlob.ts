@@ -1,4 +1,5 @@
 import { getAndroidBridge, isAndroidBridgeErrorCode } from '@/modules/android-bridge/androidBridge';
+import { downloadBlob } from '@/shared/utils';
 
 /**
  * Saves one Blob through the Android system document picker when the native
@@ -27,13 +28,8 @@ export async function saveBlob(blob: Blob, fileName: string): Promise<boolean> {
     }
   }
 
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement('a');
-  anchor.href = url;
-  anchor.download = fileName;
-  document.body.appendChild(anchor);
-  anchor.click();
-  document.body.removeChild(anchor);
-  URL.revokeObjectURL(url);
+  // Browser path reuses the shared download helper, including its deferred
+  // object-URL revoke, which Firefox and Safari need after click().
+  downloadBlob(blob, fileName);
   return true;
 }

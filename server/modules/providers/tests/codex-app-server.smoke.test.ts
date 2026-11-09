@@ -15,6 +15,13 @@ import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-
 import { createCodexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
 import type { AnyRecord, ProviderRuntimeContext, SessionRuntimeSettings } from '@/shared/index.js';
 
+// The native app-server runs the pinned compatible CLI (`@openai/codex-app-server-compat`),
+// not the root package whose model catalog and SDK runs stay on the main-branch release.
+const compatTransportIdentity = new CodexAppServerTransport().status;
+const APP_SERVER_COMPAT_CLI_VERSION = compatTransportIdentity.cliVersion ?? '';
+const APP_SERVER_COMPAT_LAUNCHER = compatTransportIdentity.launcherPath ?? '';
+
+
 async function until(check: () => boolean, description: string) {
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline) {
@@ -34,7 +41,7 @@ test('pinned app-server steers, stops a real background process, forks and persi
   });
   const require = createRequire(import.meta.url);
   let launcher: string;
-  try { launcher = require.resolve('@openai/codex/bin/codex.js'); }
+  try { launcher = APP_SERVER_COMPAT_LAUNCHER; }
   catch { t.skip('The pinned Codex package is not installed.'); return; }
   if (process.platform === 'win32') { t.skip('The POSIX process probe is covered on macOS/Linux.'); return; }
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-native-smoke-'));
@@ -100,8 +107,8 @@ test('pinned app-server steers, stops a real background process, forks and persi
     assert.ok(events.some((event) => event.kind === 'complete' && event.aborted));
     await until(() => { try { process.kill(processId!, 0); return false; } catch { return true; } }, 'native background terminal cleanup');
     const snapshot = await transport.request('thread/read', { threadId, includeTurns: true });
-    assert.equal(snapshot.thread.cliVersion, '0.165.0');
-    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, '0.165.0');
+    assert.equal(snapshot.thread.cliVersion, APP_SERVER_COMPAT_CLI_VERSION);
+    assert.equal(runtime.getState('app-smoke').diagnostics?.cliVersion, APP_SERVER_COMPAT_CLI_VERSION);
     assert.equal(snapshot.thread.turns.at(-1)?.status, 'interrupted');
     const fork = await transport.request('thread/fork', { threadId, cwd: root });
     assert.notEqual(fork.thread.id, threadId); await stat(fork.thread.path);
@@ -142,7 +149,7 @@ test('pinned app-server steers, stops a real background process, forks and persi
 test('pinned native runtime reloads SDK additions after a confirmed runtime handoff', { timeout: 30_000 }, async (t) => {
   const require = createRequire(import.meta.url);
   let launcher: string;
-  try { launcher = require.resolve('@openai/codex/bin/codex.js'); }
+  try { launcher = APP_SERVER_COMPAT_LAUNCHER; }
   catch { t.skip('The pinned Codex package is not installed.'); return; }
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-runtime-handoff-'));
   const inputs: AnyRecord[][] = [];

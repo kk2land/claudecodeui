@@ -117,7 +117,7 @@ test('a failed or malformed native list never starts a partially collected delet
 
 test('pinned app-server retains opened chats through their policy boundaries and preserves retained fork history', { timeout: 30_000 }, async (t) => {
   const require = createRequire(import.meta.url);
-  const launcher = require.resolve('@openai/codex/bin/codex.js');
+  const launcher = require.resolve('@openai/codex-app-server-compat/bin/codex.js');
   const home = path.join(root, 'codex-home');
   const directory = path.join(home, 'sessions', '2026', '08', '01');
   await mkdir(directory, { recursive: true });

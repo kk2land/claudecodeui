@@ -669,10 +669,17 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     turn.writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId: session.id, exitCode: status === 'failed' ? 1 : 0, aborted: status === 'interrupted' }),
       goalActive: session.state.goal?.status === 'active', stopping: session.stopRequested, turnId: turn.id,
       success });
-    if (!session.stopRequested && session.state.goal?.status !== 'active') {
-      const notice = { userId: turn.writer.userId ?? null, provider: 'codex', sessionId: session.options.sessionId ?? session.id, sessionName: session.options.sessionSummary ?? null };
-      if (status === 'failed') notifyRunFailed({ ...notice, error: error ?? 'Codex turn failed.' });
-      else if (status === 'completed') notifyRunStopped({ ...notice, stopReason: session.state.goal?.status ?? 'completed' });
+    // Exactly one terminal notice per actual run: a goal-continued turn belongs
+    // to the same run, so only the turn that ends it reports, and the goal guard
+    // keeps automatic continuations from sending their own.
+    const notice = { userId: turn.writer.userId ?? null, provider: 'codex', sessionId: session.options.sessionId ?? session.id, sessionName: session.options.sessionSummary ?? null };
+    if (status === 'failed') {
+      if (session.state.goal?.status !== 'active') notifyRunFailed({ ...notice, error: error ?? 'Codex turn failed.' });
+    } else if (session.stopRequested) {
+      // A Stop ends this run; the same one-shot path the SDK adapter reports.
+      notifyRunStopped({ ...notice, stopReason: 'aborted' });
+    } else if (status === 'completed' && session.state.goal?.status !== 'active') {
+      notifyRunStopped({ ...notice, stopReason: session.state.goal?.status ?? 'completed' });
     }
     // Only an ordinary, successful, still-live turn asks for a suggestion. A
     // failed, interrupted, stopping or goal-continued turn, or a runtime the

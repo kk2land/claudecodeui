@@ -75,6 +75,8 @@ async function harness(
   const runtime: ProviderRuntimeGateway = {
     hasRuntime: () => true,
     hasBackgroundWork: () => false,
+    steer: async () => false,
+    askSideQuestion: async () => ({ status: 'error', error: 'DSH has no side questions.', answer: '' }),
     // DSH never fabricates the Codex app-server state shape.
     getState: () => undefined,
     getManagedState: () => managedState,

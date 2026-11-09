@@ -84,6 +84,11 @@ test('an ordinary browser has no bridge and keeps the anchor download fallback',
   assert.equal(await saveBlob(new Blob(['zip'], { type: 'application/zip' }), 'folder.zip'), true);
   assert.equal(createObjectURL.mock.calls.length, 1);
   assert.equal(click.mock.calls.length, 1);
+
+  // The shared helper revokes on a later task so Firefox and Safari can read
+  // the object URL after click(); let it run while the URL stub is installed.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(revokeObjectURL.mock.calls.length, 1);
 });
 
 test('saveBlob uses the native picker and treats cancellation as a quiet false', async () => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import childProcess from 'node:child_process';
 import { EventEmitter } from 'node:events';
-import { syncBuiltinESMExports } from 'node:module';
+import { createRequire, syncBuiltinESMExports } from 'node:module';
 import type { ChildProcessWithoutNullStreams } from 'node:child_process';
 import { PassThrough, Writable } from 'node:stream';
 import test from 'node:test';
@@ -10,6 +10,13 @@ import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-ap
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { AppError } from '@/shared/index.js';
 import type { CodexRpcFrame, SessionRuntimeSettings } from '@/shared/index.js';
+
+// The native app-server runs the pinned compatible CLI (`@openai/codex-app-server-compat`),
+// not the root package whose model catalog and SDK runs stay on the main-branch release.
+const compatTransportIdentity = new CodexAppServerTransport().status;
+const APP_SERVER_COMPAT_CLI_VERSION = compatTransportIdentity.cliVersion ?? '';
+const APP_SERVER_COMPAT_LAUNCHER = compatTransportIdentity.launcherPath ?? '';
+
 
 function fakeProcess(pid = 43210) {
   const child = new EventEmitter() as ChildProcessWithoutNullStreams;
@@ -545,7 +552,7 @@ test('closing during the retry wait ends the request with the original error and
 });
 
 test('default production transport reports the bundled CLI without spawning or sending RPC', async (t) => {
-  // A lazy `status` read must expose the bundled 0.165.0 identity so a mounted
+  // A lazy `status` read must expose the bundled compat identity so a mounted
   // session can opt into predictions before the first send, while spawning
   // nothing and sending no RPC.
   const spawned = t.mock.method(childProcess, 'spawn', () => { throw new Error('must not spawn'); });
@@ -558,14 +565,14 @@ test('default production transport reports the bundled CLI without spawning or s
     assert.equal(status.startedAt, null);
     assert.equal(status.pendingRequests, 0);
     assert.ok(status.launcherPath && status.launcherPath.endsWith('codex.js'), 'bundled launcher path is known');
-    assert.equal(status.cliVersion, '0.165.0');
+    assert.equal(status.cliVersion, APP_SERVER_COMPAT_CLI_VERSION);
     assert.equal(spawned.mock.callCount(), 0, 'reading status must never spawn the process');
 
     // The runtime surfaces the same installed-build capability from that status.
     let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
     const runtime = new CodexAppServerRuntime(transport, { get: () => settings, update: (_, patch) => (settings = { ...settings, ...patch }) }, 100, () => {});
     assert.equal(runtime.getState('cold-session').predictionSupported, true);
-    assert.equal(runtime.getState('cold-session').diagnostics?.cliVersion, '0.165.0');
+    assert.equal(runtime.getState('cold-session').diagnostics?.cliVersion, APP_SERVER_COMPAT_CLI_VERSION);
     assert.equal(spawned.mock.callCount(), 0);
     await runtime.close();
   } finally {

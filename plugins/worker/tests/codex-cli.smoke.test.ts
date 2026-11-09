@@ -10,6 +10,13 @@ import { createService, startInput, temporaryRoot, waitStatus } from "./helpers.
 
 const require = createRequire(import.meta.url);
 
+/** The root dependency pin is the single source of truth for the smoke-tested CLI version. */
+const pinnedCliVersion = (
+  JSON.parse(
+    fs.readFileSync(new URL("../../../package.json", import.meta.url), "utf8"),
+  ) as { dependencies: Record<string, string> }
+).dependencies["@openai/codex"];
+
 /** Uses the pinned local Codex CLI and a localhost Responses endpoint; no account or paid model. */
 test("real Codex exec starts, reconnects, resumes the same thread, and honors explicit selection", { timeout: 60_000 }, async (t) => {
   let executable: string;
@@ -26,8 +33,8 @@ test("real Codex exec starts, reconnects, resumes the same thread, and honors ex
     t.skip("The pinned Codex CLI binary is not runnable.");
     return;
   }
-  if (!version.includes("0.165.0")) {
-    t.skip("The pinned Codex CLI 0.165.0 is not available: " + version);
+  if (!version.includes(pinnedCliVersion)) {
+    t.skip("The pinned Codex CLI " + pinnedCliVersion + " is not available: " + version);
     return;
   }
 
@@ -169,7 +176,7 @@ test("real Codex exec starts, reconnects, resumes the same thread, and honors ex
   const resumedRun = resumed.latestRun!;
   assert.equal(resumedRun.nativeSessionId, firstRun.nativeSessionId);
   assert.equal(resumedRun.finalText, "real resume answer");
-  // The 0.165 CLI reports session-cumulative usage on a cold resume (18/8); the launch baseline
+  // The pinned CLI reports session-cumulative usage on a cold resume (18/8); the launch baseline
   // turns that into this run's real 7/3.
   assert.equal(resumedRun.usage?.inputTokens, 7);
   assert.equal(resumedRun.usage?.outputTokens, 3);

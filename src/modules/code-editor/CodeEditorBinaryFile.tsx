@@ -1,5 +1,5 @@
-import { Download } from 'lucide-react';
 import { useState } from 'react';
+import { Download, Loader2 } from 'lucide-react';
 
 import type { CodeEditorFile } from '@/shared/types';
 
@@ -9,18 +9,24 @@ type CodeEditorBinaryFileProps = {
   isFullscreen: boolean;
   onClose: () => void;
   onToggleFullscreen: () => void;
-  // Rejects when the original bytes could not be fetched or saved; the notice
-  // then stays visible so a failed download never looks like a success.
+  /** Saves the file's original bytes; rejects when the download fails. */
   onDownload: () => Promise<void>;
   title: string;
   message: string;
   labels: {
     download: string;
-    downloadError: string;
+    downloading: string;
+    downloadFailed: string;
+    close: string;
   };
 };
 
-/** Rendered by CodeEditor inside the code-editor module when the opened file is binary and cannot be edited as text. */
+/**
+ * Rendered by CodeEditor inside the code-editor module when the opened file is
+ * binary and cannot be edited as text. Offers the original file as a download,
+ * since a file opened from a chat link would otherwise have to be found again
+ * in the Files tab.
+ */
 export default function CodeEditorBinaryFile({
   file,
   isSidebar,
@@ -32,38 +38,36 @@ export default function CodeEditorBinaryFile({
   message,
   labels,
 }: CodeEditorBinaryFileProps) {
-  // Download failures have no toast in this module; the notice below the title
-  // bar is the only visible feedback, so it must outlive the click.
-  const [downloadError, setDownloadError] = useState<string | null>(null);
+  // CodeEditor keys this view by file, so a download still in flight when
+  // another file opens settles on an unmounted view, never on the new file.
+  const [isDownloading, setIsDownloading] = useState(false);
+  const [downloadFailed, setDownloadFailed] = useState(false);
 
-  const requestDownload = async () => {
-    setDownloadError(null);
+  const startDownload = async () => {
+    if (isDownloading) return;
+    setIsDownloading(true);
+    setDownloadFailed(false);
     try {
       await onDownload();
     } catch (error) {
       console.error('Error downloading file:', error);
-      setDownloadError(labels.downloadError);
+      setDownloadFailed(true);
+    } finally {
+      setIsDownloading(false);
     }
   };
 
-  const downloadButton = (
+  const headerDownloadButton = (
     <button
       type="button"
-      onClick={() => void requestDownload()}
-      className="flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
+      onClick={() => void startDownload()}
+      disabled={isDownloading}
+      className="flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 hover:text-gray-900 disabled:opacity-50 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
       title={labels.download}
+      aria-label={labels.download}
     >
       <Download className="h-4 w-4" />
     </button>
-  );
-
-  const errorNotice = downloadError && (
-    <div
-      role="alert"
-      className="border-b border-red-200 bg-red-50 px-3 py-1.5 text-xs text-red-700 dark:border-red-900/40 dark:bg-red-900/20 dark:text-red-300"
-    >
-      {downloadError}
-    </div>
   );
 
   const binaryContent = (
@@ -78,12 +82,31 @@ export default function CodeEditorBinaryFile({
           <h3 className="mb-2 text-lg font-medium text-foreground">{title}</h3>
           <p className="text-sm text-muted-foreground">{message}</p>
         </div>
-        <button
-          onClick={onClose}
-          className="mt-4 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90"
-        >
-          Close
-        </button>
+        <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
+          <button
+            type="button"
+            onClick={() => void startDownload()}
+            disabled={isDownloading}
+            className="flex items-center gap-2 rounded-md bg-primary px-4 py-2 text-sm text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-60"
+          >
+            {isDownloading
+              ? <Loader2 className="h-4 w-4 animate-spin" />
+              : <Download className="h-4 w-4" />}
+            {isDownloading ? labels.downloading : labels.download}
+          </button>
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md border border-border px-4 py-2 text-sm text-foreground transition-colors hover:bg-muted"
+          >
+            {labels.close}
+          </button>
+        </div>
+        {downloadFailed && (
+          <p role="alert" className="text-sm text-red-600 dark:text-red-400">
+            {labels.downloadFailed}
+          </p>
+        )}
       </div>
     </div>
   );
@@ -96,12 +119,12 @@ export default function CodeEditorBinaryFile({
             <h3 className="truncate text-sm font-medium text-gray-900 dark:text-white">{file.name}</h3>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            {downloadButton}
+            {headerDownloadButton}
             <button
               type="button"
               onClick={onClose}
               className="flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
-              title="Close"
+              title={labels.close}
             >
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -109,7 +132,6 @@ export default function CodeEditorBinaryFile({
             </button>
           </div>
         </div>
-        {errorNotice}
         {binaryContent}
       </div>
     );
@@ -131,7 +153,7 @@ export default function CodeEditorBinaryFile({
             <h3 className="truncate text-sm font-medium text-gray-900 dark:text-white">{file.name}</h3>
           </div>
           <div className="flex shrink-0 items-center gap-0.5">
-            {downloadButton}
+            {headerDownloadButton}
             <button
               type="button"
               onClick={onToggleFullscreen}
@@ -152,7 +174,7 @@ export default function CodeEditorBinaryFile({
               type="button"
               onClick={onClose}
               className="flex items-center justify-center rounded-md p-1.5 text-gray-600 hover:bg-gray-100 hover:text-gray-900 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-white"
-              title="Close"
+              title={labels.close}
             >
               <svg className="h-4 w-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
@@ -160,7 +182,6 @@ export default function CodeEditorBinaryFile({
             </button>
           </div>
         </div>
-        {errorNotice}
         {binaryContent}
       </div>
     </div>

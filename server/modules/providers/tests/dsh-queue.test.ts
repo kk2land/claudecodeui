@@ -56,6 +56,8 @@ for (const firstPrompt of ['first', 'fail', 'stop']) test(`DSH queue preserves t
   let queuedPoll: Promise<number> | undefined;
   const gateway: ProviderRuntimeGateway = {
     hasRuntime: () => true, hasBackgroundWork: () => false,
+    steer: async () => false,
+    askSideQuestion: async () => ({ status: 'error', error: 'DSH has no side questions.', answer: '' }),
     isQueueBlocked: (id) => runtime.isQueueBlocked(id),
     abort: (_provider, id) => runtime.abort(id), stopBackgroundTask: async () => false,
     resolveToolApproval: () => {}, getPendingApprovalsForSession: () => [],

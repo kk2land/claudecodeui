@@ -52,7 +52,7 @@ const PREDICTION_CONFIG: CodexPredictionConfiguration = {
 async function verifyNativePrediction(t: TestContext, workerEnabled: boolean): Promise<void> {
   const require = createRequire(import.meta.url);
   let launcher: string;
-  try { launcher = require.resolve('@openai/codex/bin/codex.js'); }
+  try { launcher = require.resolve('@openai/codex-app-server-compat/bin/codex.js'); }
   catch { t.skip('The pinned Codex package is not installed.'); return; }
   if (process.platform === 'win32') { t.skip('The POSIX process probe is covered on macOS/Linux.'); return; }
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-pred-smoke-'));

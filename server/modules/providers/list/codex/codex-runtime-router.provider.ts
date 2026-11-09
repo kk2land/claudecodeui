@@ -2,7 +2,13 @@ import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { codexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
-import type { IProviderRuntime } from '@/shared/index.js';
+import type {
+  IProviderRuntime,
+  ProviderRuntimeContext,
+  SideQuestionOutcome,
+  SideQuestionRequest,
+  SideQuestionSink,
+} from '@/shared/index.js';
 import { AppError, createNormalizedMessage } from '@/shared/index.js';
 
 type RouterDependencies = {
@@ -120,6 +126,24 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
     listActiveSessions: () => native.listActiveSessions(),
     permissions: native.permissions,
     close: () => native.close(),
+    /**
+     * Answers a side question on an ephemeral, read-only fork of the parent
+     * Codex thread. The fork runs on the shared app-server connection, so it
+     * works while the parent is mid-turn in either runtime mode and never
+     * addresses `activeCodexSessions` — the SDK adapter owns that fork protocol
+     * because it is the same `thread/fork` an SDK session's branch uses.
+     * Cancellation is per question: the parent turn and process are untouched.
+     */
+    async askSideQuestion(
+      request: SideQuestionRequest,
+      sink: SideQuestionSink,
+      context: ProviderRuntimeContext,
+    ): Promise<SideQuestionOutcome> {
+      if (!sdk.askSideQuestion) {
+        return { status: 'error', error: 'Codex has no side questions.', answer: '' };
+      }
+      return sdk.askSideQuestion(request, sink, context);
+    },
   };
 }
 

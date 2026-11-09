@@ -478,16 +478,21 @@ for (const width of [412, 1024]) {
     assert.equal(onAbortSession.mock.calls.length, 1);
 
     await act(async () => { fireEvent.change(textarea, { target: { value: 'Follow-up instructions' } }); });
-    assert.ok(screen.getByRole('button', { name: 'Queue next message' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    // With input present the send menu replaces the one-tap button; Queue and
+    // Stop are its rows, so the follow-up stays queueable and Stop reachable.
+    const openSendMenu = () => fireEvent.click(screen.getByRole('button', { name: 'Send options' }));
+    openSendMenu();
+    assert.ok(screen.getByRole('menuitem', { name: /Queue/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Stop/ }));
     assert.equal(onAbortSession.mock.calls.length, 2);
     assert.equal(textarea.value, 'Follow-up instructions');
 
     await act(async () => { fireEvent.change(textarea, { target: { value: '' } }); });
     view.rerender(<Harness codexControls={codex} overrides={{ ...overrides,
       attachedFiles: [new File(['notes'], 'notes.txt', { type: 'text/plain' })] }} />);
-    assert.ok(screen.getByRole('button', { name: 'Queue next message' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+    openSendMenu();
+    assert.ok(screen.getByRole('menuitem', { name: /Queue/ }));
+    fireEvent.click(screen.getByRole('menuitem', { name: /Stop/ }));
     assert.equal(onAbortSession.mock.calls.length, 3);
     assert.equal(vi.mocked(codex.control).mock.calls.length, 0);
   });

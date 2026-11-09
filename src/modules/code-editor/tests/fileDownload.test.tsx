@@ -82,7 +82,8 @@ const serveBytes = (bytes: Uint8Array, type = 'application/octet-stream') => {
 };
 
 const assertOriginalBytesDownloaded = async (file: CodeEditorFile, bytes: Uint8Array) => {
-  fireEvent.click(await screen.findByTitle('actions.download'));
+  // The binary pane's contract labels come from main's binaryFile group.
+  fireEvent.click(await screen.findByTitle(/Download original file|binaryFile\.download/));
   await waitFor(() => assert.equal(saveBlob.mock.calls.length, 1));
 
   // The text endpoint would decode the bytes; the download must never use it.
@@ -161,7 +162,7 @@ test('a failed download shows an error and saves nothing', async () => {
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
 
   render(<CodeEditor file={apkFile} onClose={() => undefined} />);
-  fireEvent.click(await screen.findByTitle('actions.download'));
+  fireEvent.click(await screen.findByTitle(/Download original file|binaryFile\.download/));
 
   const alert = await screen.findByRole('alert');
   assert.ok(alert.textContent?.trim().length);

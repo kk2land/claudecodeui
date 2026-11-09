@@ -27,6 +27,8 @@ async function harness(runTest: (h: {
   const socket = Object.assign(new EventEmitter(), { readyState: 1, send: (text: string) => frames.push(JSON.parse(text)) });
   const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: 't1', phase: 'running', goal: null, questions: [] };
   const runtime: ProviderRuntimeGateway = { hasRuntime: () => true, hasBackgroundWork: () => false,
+    steer: async () => false,
+    askSideQuestion: async () => ({ status: 'error', error: 'No side questions here.', answer: '' }),
     getState: () => state, getPendingApprovalsForSession: () => [], resolveToolApproval: () => {}, stopBackgroundTask: async () => false,
     abort: async () => false, run: async (_provider, content, options) => { calls.push({ run: content, options }); },
     control: async (provider, sid, action, options) => { calls.push({ provider, sid, action, options }); return state; } };

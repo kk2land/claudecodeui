@@ -357,7 +357,7 @@ test('a session detached by an edit reports no token usage of its own', { concur
 test('codex app-server forks a real thread at a turn', { concurrency: false }, async (t) => {
   const require_ = createRequire(import.meta.url);
   try {
-    require_.resolve('@openai/codex/bin/codex.js');
+    require_.resolve('@openai/codex-app-server-compat/bin/codex.js');
   } catch {
     t.skip('the Codex CLI package is not installed');
     return;

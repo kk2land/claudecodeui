@@ -26,6 +26,11 @@ test('DSH advertises live ACP context usage alongside both supported transports'
   assert.equal(capabilities.supportsFiles, true);
   assert.equal(capabilities.supportsTokenUsage, true);
   assert.deepEqual(capabilities.runtimeManagement?.modes, ['acp', 'headless']);
+  assert.equal(capabilities.supportsPermissionRequests, true);
+  // No native side conversation or steerable turn on ACP/headless.
+  assert.equal(capabilities.supportsSideQuestions, false);
+  assert.equal(capabilities.supportsSteering, false);
+  assert.equal(capabilities.nativeControls, undefined);
 });
 
 test('provider visibility normalizes environment entries without removing capabilities', () => {
@@ -105,4 +110,30 @@ test('Codex account rate limits require an explicit environment opt-in', () => {
     if (original === undefined) delete process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED;
     else process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED = original;
   }
+});
+
+test('side questions are supported by claude, codex and opencode, not by cursor', () => {
+  // Cursor has no headless way to ask on the side; its menu then offers only
+  // Queue · Stop / Send anyway.
+  const expected: Record<LLMProvider, boolean> = {
+    claude: true,
+    codex: true,
+    cursor: false,
+    dsh: false,
+    opencode: true,
+  };
+  for (const [provider, supported] of Object.entries(expected) as Array<[LLMProvider, boolean]>) {
+    const capabilities = providerCapabilitiesService.getProviderCapabilities(provider) as unknown as Record<string, unknown>;
+    assert.equal(capabilities.supportsSideQuestions, supported, `${provider}: supportsSideQuestions`);
+  }
+});
+
+test('steering is a Claude and OpenCode transport feature, distinct from Codex native controls', () => {
+  // Claude keeps streaming input open, so a message joins the running turn.
+  assert.equal(providerCapabilitiesService.getProviderCapabilities('claude').supportsSteering, true);
+  // Codex's steer is a native app-server control, not the generic chat.steer path.
+  assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').supportsSteering, false);
+  assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.steer, true);
+  assert.equal(providerCapabilitiesService.getProviderCapabilities('cursor').supportsSteering, false);
+  assert.equal(providerCapabilitiesService.getProviderCapabilities('dsh').supportsSteering, false);
 });

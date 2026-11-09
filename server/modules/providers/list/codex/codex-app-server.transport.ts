@@ -155,9 +155,13 @@ export class CodexAppServerTransport implements CodexRpcClient {
    */
   private readBundledIdentity(): void {
     try {
-      const require = createRequire(import.meta.url);
-      const launcher = require.resolve('@openai/codex/bin/codex.js');
-      const version = (require('@openai/codex/package.json') as { version: string }).version;
+      // The app-server runs the `@openai/codex-app-server-compat` SDK alias's pinned CLI
+      // because 0.166 refuses a thread from another provider's process, which would break
+      // per-session model-provider switching and same-thread resumes; the alias keeps that
+      // CLI nested so the root `codex` bin stays on the main-branch release.
+      const requireFromCompatSdk = createRequire(import.meta.resolve('@openai/codex-app-server-compat'));
+      const launcher = requireFromCompatSdk.resolve('@openai/codex/bin/codex.js');
+      const version = (requireFromCompatSdk('@openai/codex/package.json') as { version: string }).version;
       if (!this.launcherPath) this.launcherPath = launcher;
       if (!this.cliVersion) this.cliVersion = version;
     } catch {

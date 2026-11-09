@@ -131,6 +131,8 @@ test('Codex queued input uses the latest session model and remains queued if pro
     const received: string[] = [];
     const runtime: ProviderRuntimeGateway = {
       hasRuntime: () => true, hasBackgroundWork: () => false, abort: async () => true,
+      steer: async () => false,
+      askSideQuestion: async () => ({ status: 'error', error: 'No side questions.', answer: '' }),
       stopBackgroundTask: async () => false, resolveToolApproval: () => {}, getPendingApprovalsForSession: () => [],
       isQueueBlocked: (id) => sessionRuntimeDb.get(id).queueHeld,
       async run(_provider, command, options) {

@@ -14,6 +14,13 @@ import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import type { AnyRecord, ProviderRuntimeContext } from '@/shared/index.js';
 
+// The native app-server runs the pinned compatible CLI (`@openai/codex-app-server-compat`),
+// not the root package whose model catalog and SDK runs stay on the main-branch release.
+const compatTransportIdentity = new CodexAppServerTransport().status;
+const APP_SERVER_COMPAT_CLI_VERSION = compatTransportIdentity.cliVersion ?? '';
+const APP_SERVER_COMPAT_LAUNCHER = compatTransportIdentity.launcherPath ?? '';
+
+
 /** Uses an isolated Codex home and two local Responses endpoints; no credentials or paid inference. */
 test('pinned Codex preserves model services across switching, forking, and independent session resumes', { timeout: 30_000 }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'codex-model-provider-smoke-'));
@@ -51,7 +58,7 @@ test('pinned Codex preserves model services across switching, forking, and indep
   // a developer validate that same release without replacing a local launcher.
   const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
   const transport = new CodexAppServerTransport({ spawn: () => spawn(binary || process.execPath,
-    [...(binary ? [] : [require.resolve('@openai/codex/bin/codex.js')]), 'app-server', '-c', 'thread_unload_delay_secs=0', '-c', 'features.goals=false'],
+    [...(binary ? [] : [APP_SERVER_COMPAT_LAUNCHER]), 'app-server', '-c', 'thread_unload_delay_secs=0', '-c', 'features.goals=false'],
     { cwd: root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: root } }), timeoutMs: 10_000 });
   const previousDatabasePath = process.env.DATABASE_PATH;
   closeConnection();
@@ -94,7 +101,7 @@ test('pinned Codex preserves model services across switching, forking, and indep
     await runtime.run('next-input', { ...options('one'), model: 'stale-queued-model' }, writer('one'), context);
     assert.equal(bindings.get('one'), originalThread);
     assert.equal(runtime.getState('one').activeModelSelection?.modelProvider, 'beta');
-    assert.equal(runtime.getState('one').diagnostics?.cliVersion, '0.165.0');
+    assert.equal(runtime.getState('one').diagnostics?.cliVersion, APP_SERVER_COMPAT_CLI_VERSION);
     assert.equal(runtime.getState('two').activeModelSelection?.modelProvider, 'alpha');
     await runtime.run('other-session-again', options('two'), writer('two'), context);
     assert.deepEqual(requests.map((request) => request.url), ['/alpha/responses', '/alpha/responses', '/beta/responses', '/alpha/responses']);

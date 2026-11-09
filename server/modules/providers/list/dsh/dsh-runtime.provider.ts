@@ -168,7 +168,12 @@ export class DshRuntimeProvider implements IProviderRuntime {
         // No owner mutation or asynchronous cleanup may follow the terminal.
         owner.busy = false;
         if (!deferred && owner.processStopped) {
+          notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'aborted' });
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: 0, aborted: true }));
+        } else if (!deferred && owner.aborted) {
+          // One terminal notice per run: the failure path above already
+          // reported, and an abort with no failure reports exactly once here.
+          notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'aborted' });
         } else if (!deferred && !owner.aborted) {
           if (exitCode === 0) notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'completed' });
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode }));

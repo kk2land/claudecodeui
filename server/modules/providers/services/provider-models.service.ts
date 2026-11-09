@@ -99,6 +99,11 @@ const readCustomModelEffortLevels = (provider: LLMProvider): string[] => (
  * provider pointed at a gateway lists only what that gateway serves. The flag
  * only applies while at least one custom model exists: an empty catalog would
  * leave the composer and the runtimes with no model at all.
+ *
+ * A custom row whose id later became a built-in (a user added a new model by
+ * hand, then an update shipped it) is left out while the built-ins are listed:
+ * ids must stay unique in a picker, and lookups already found the built-in
+ * first. The row is kept, so it returns if the built-in is ever removed.
  */
 const mergeProviderModels = (
   provider: LLMProvider,
@@ -109,6 +114,7 @@ const mergeProviderModels = (
   const customOptions = custom.map(toCustomProviderModelOption);
   const customIds = new Set(customOptions.map((option) => option.value));
   const listOnlyCustomModels = customModelsOnly && customOptions.length > 0;
+  const builtInIds = new Set(predefined.OPTIONS.map((option) => option.value));
   return {
     OPTIONS: listOnlyCustomModels
       ? customOptions
