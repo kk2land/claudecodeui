@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import fsSync, { promises as fs } from 'node:fs';
 import path from 'node:path';
 
@@ -71,6 +72,35 @@ export function buildStoredImageRecords(files: UploadedImageFile[]): StoredImage
  */
 export function buildStoredAttachmentRecords(files: UploadedAttachmentFile[]): StoredImageAsset[] {
   return buildStoredImageRecords(files);
+}
+
+
+/**
+ * Copies source files into the global chat assets folder under unique direct
+ * child names. Used by the Todos module to turn its private attachments into
+ * ordinary chat descriptors without moving the originals.
+ */
+export async function copyFilesIntoChatAssets(files: Array<{
+  sourcePath: string;
+  name: string;
+  mimeType?: string;
+}>): Promise<StoredImageAsset[]> {
+  const assetsDir = await ensureImageAssetsDir();
+  const stored: StoredImageAsset[] = [];
+  for (const file of files) {
+    const safeName = file.name.replace(/[^a-zA-Z0-9.-]/g, '_') || 'attachment';
+    const filename = `${Date.now()}-${randomUUID().slice(0, 8)}-${safeName}`;
+    const destination = path.join(assetsDir, filename);
+    await fs.copyFile(file.sourcePath, destination);
+    const stats = await fs.stat(destination);
+    stored.push({
+      name: file.name,
+      path: toPosixPath(destination),
+      size: stats.size,
+      mimeType: file.mimeType || mime.lookup(file.name) || 'application/octet-stream',
+    });
+  }
+  return stored;
 }
 
 /**

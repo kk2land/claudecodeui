@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 
 import { api, readApiJson } from '@/shared/api';
-import { readDraftText, writeDraftText } from '@/shared/chatDrafts';
+import { migrateDraftScope } from '@/shared/chatDrafts';
 import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
 import { useSessionWorkerActivity } from '@/modules/chat/hooks/useSessionWorkerActivity';
 import type { LLMProvider, Project, ProviderRuntimeAction, ProviderRuntimeControls, ProviderRuntimeState, SessionEstablishedContext } from '@/shared/types';
@@ -56,10 +56,10 @@ export function useProviderRuntimeControls({ provider, sessionId, project, chatA
             if (currentScope.current !== scope && currentScope.current !== `${provider}:${id}`) return false;
             if (!established) {
               established = true;
-              // The new chat's latest draft must exist under its session key before navigation.
+              // The new chat's latest draft must exist under its session key
+              // before navigation, todo sources included; the project queue stays.
               const draftScope = `project:${project.projectId}`;
-              writeDraftText(id, readDraftText(draftScope));
-              writeDraftText(draftScope, '');
+              migrateDraftScope(draftScope, id);
               onSessionEstablished(id, { provider, project, summary: body.data.sessionName?.trim() || initialMessage });
             }
             return true;

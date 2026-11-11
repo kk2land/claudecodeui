@@ -20,7 +20,7 @@ import {
     setCodexWorkerBridge,
     setDshWorkerBridge,
 } from '@/modules/providers/index.js';
-import { broadcastCodexRateLimits, chatRunRegistry, createWebSocketServer, onChatRunCompleted } from '@/modules/websocket/index.js';
+import { broadcastCodexRateLimits, broadcastToConnectedClients, chatRunRegistry, createWebSocketServer, onChatRunCompleted } from '@/modules/websocket/index.js';
 
 import { getConnectableHost } from '../shared/networkHosts.js';
 
@@ -37,6 +37,7 @@ import { settingsRoutes } from './modules/settings/index.js';
 import { createSystemModule } from './modules/system/index.js';
 import { createAgentModule } from './modules/agent/index.js';
 import projectModuleRoutes from './modules/projects/projects.routes.js';
+import { setTodosBroadcastSink, todoRetentionService, todosRoutes } from './modules/todos/index.js';
 import notificationRoutes from './modules/notifications/notifications.routes.js';
 import { userRoutes } from './modules/user/index.js';
 import {
@@ -63,6 +64,8 @@ import browserUseMcpRoutes from './modules/browser-use/browser-use-mcp.routes.js
 import { browserUseService } from './modules/browser-use/browser-use.service.js';
 import { initializeDatabase, sessionsDb } from './modules/database/index.js';
 import { configureWebPush } from './modules/notifications/index.js';
+
+setTodosBroadcastSink((payload) => broadcastToConnectedClients(payload));
 
 const __dirname = getModuleDirectory(import.meta.url);
 // The server source runs from /server, while the compiled output runs from /dist-server/server.
@@ -193,6 +196,10 @@ app.use('/api/auth', authRoutes);
 
 // File Tree API Routes (protected)
 app.use('/api/file-tree', authenticateToken, fileTreeRoutes);
+
+// Project todo routes share the /api/projects prefix; their paths are disjoint
+// from the project routes mounted next.
+app.use('/api/projects', authenticateToken, todosRoutes);
 
 // Projects API Routes (protected)
 app.use('/api/projects', authenticateToken, projectModuleRoutes);
@@ -411,6 +418,7 @@ async function startServer() {
             // Start watching the projects folder for changes
             await initializeSessionsWatcher();
             sessionRetentionService.start();
+            todoRetentionService.start();
             // Sends anything that came due while the server was not running,
             // then keeps polling.
             initializeScheduledMessageDispatcher(providerRuntimeService, {
@@ -432,6 +440,7 @@ async function startServer() {
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
             await sessionRetentionService.close().catch((error) => console.error('[SessionRetention] Shutdown failed', error));
+            todoRetentionService.close();
             // Seal Worker delivery and let the plugin confirm child cleanup before
             // the provider process and the plugin server are stopped.
             await workerModule.shutdown().catch((error) => console.error('[Workers] Shutdown failed', error));

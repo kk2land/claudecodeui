@@ -6,6 +6,9 @@ export { credentialsDb } from '@/modules/database/repositories/credentials.js';
 export { githubTokensDb } from '@/modules/database/repositories/github-tokens.js';
 export { notificationChannelEndpointsDb } from '@/modules/database/repositories/notification-channel-endpoints.js';
 export { notificationPreferencesDb } from '@/modules/database/repositories/notification-preferences.js';
+// projectTodosDb: used by the Todos module for private per-user project todo rows.
+export { projectTodosDb } from './repositories/project-todos.db.js';
+export type { ProjectTodoAttachmentRecord, ProjectTodoRecord, ProjectTodosRepository } from './repositories/project-todos.db.js';
 // providerModelsDb: used by Providers to persist user-managed custom model rows.
 export { providerModelsDb } from '@/modules/database/repositories/provider-models.js';
 // projectsDb: used by Projects, Worktrees, Git, WebSocket, and notification modules to persist and resolve project records.

@@ -227,7 +227,8 @@ CREATE TABLE IF NOT EXISTS user_preferences (
  *
  * `draft_scope` is a session id, or `project:<projectId>` for a chat that has
  * not been sent yet and therefore has no session. Storing this server-side is
- * what lets a message typed on a laptop be finished on a phone.
+ * what lets a message typed on a laptop be finished on a phone. `draft_meta`
+ * holds the JSON todo sources and attachments that travel with the draft.
  */
 export const SESSION_DRAFTS_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS session_drafts (
@@ -238,10 +239,36 @@ CREATE TABLE IF NOT EXISTS session_drafts (
     queue_status TEXT NOT NULL DEFAULT 'queued',
     queue_request_id TEXT,
     queue_error TEXT,
+    draft_meta TEXT,
     updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (user_id, draft_scope),
     FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 );
+`;
+
+/**
+ * Per-user, per-project todo rows with their private attachment descriptors.
+ *
+ * `attachments_json` keeps each attachment's private id plus the stored file
+ * name inside that todo's own folder. `state_changed_at` drives the seven-day
+ * retention window for submitted/deleted rows; pending rows never expire.
+ */
+export const PROJECT_TODOS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS project_todos (
+    id TEXT PRIMARY KEY NOT NULL,
+    user_id INTEGER NOT NULL,
+    project_id TEXT NOT NULL,
+    content TEXT NOT NULL DEFAULT '',
+    attachments_json TEXT NOT NULL DEFAULT '[]',
+    status TEXT NOT NULL DEFAULT 'pending',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    state_changed_at TEXT NOT NULL,
+    submitted_session_id TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_project_todos_user_project
+ON project_todos(user_id, project_id, status);
 `;
 
 /** Database initialization and migrations persist session runtimes and queue holds, plus Codex's native mode. */
@@ -344,6 +371,8 @@ ON provider_models(provider, sort_order, id);
 ${USER_PREFERENCES_TABLE_SCHEMA_SQL}
 
 ${SESSION_DRAFTS_TABLE_SCHEMA_SQL}
+
+${PROJECT_TODOS_TABLE_SCHEMA_SQL}
 
 ${SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL}
 

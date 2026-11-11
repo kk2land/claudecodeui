@@ -3,6 +3,8 @@ import type { Readable } from 'node:stream';
 
 import type { CodexWorkerBridge, WorkerIpcRequest } from '../../plugins/worker/shared/contracts.js';
 
+import type { ChatAttachmentDescriptor } from './image-attachments.js';
+
 //----------------- HTTP RESPONSE SHAPES ------------
 /**
  * Canonical success envelope used by backend APIs that return a structured payload.
@@ -1471,6 +1473,8 @@ export type QueuedChatMessage = {
   content: string;
   options?: Record<string, unknown>;
   attachments: unknown[];
+  /** Todo ids this turn came from, preserved so a real send can submit them. */
+  todoIds?: string[];
 };
 
 // ---------------------------
@@ -2167,6 +2171,85 @@ export type ProviderRuntimeGateway = SideQuestionRuntime & {
 
 // ---------------------------
 
+//----------------- PROJECT TODO ------------
+/**
+ * Lifecycle state of a per-user, per-project todo item.
+ *
+ * `pending` is permanent until submitted or deleted. `submitted` and `deleted`
+ * are retained for seven days after `stateChangedAt`, then hidden and removed
+ * with their private files; during that window they can be restored to
+ * `pending`. The Projects Todo module owns every transition.
+ */
+export type ProjectTodoStatus = 'pending' | 'submitted' | 'deleted';
+
+/**
+ * One file attached to a project todo, identified by its private todo-store id.
+ *
+ * The Todo module copies this file into the chat asset store when a prepared
+ * todo is sent, so this descriptor never points at a chat asset path.
+ */
+export type ProjectTodoAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+/**
+ * One project todo as returned by the Todo API and stored by the Todo module.
+ *
+ * `content` may be empty when the todo carries attachments only. Every
+ * timestamp is an ISO-8601 string. `submittedSessionId` is the stable app
+ * session id, never a provider-native id, and is null while pending.
+ */
+export type ProjectTodo = {
+  id: string;
+  projectId: string;
+  content: string;
+  attachments: ProjectTodoAttachment[];
+  status: ProjectTodoStatus;
+  createdAt: string;
+  updatedAt: string;
+  stateChangedAt: string;
+  submittedSessionId: string | null;
+};
+
+/**
+ * Todo references and their current attachments saved beside a chat draft.
+ *
+ * The User module persists this as `session_drafts.draft_meta`; it rides along
+ * with the draft and each queued/steered message so a sent turn can mark its
+ * source todos submitted. Attachments are the same descriptors the composer
+ * already holds for the chat send.
+ */
+export type TodoDraftMeta = {
+  todoIds: string[];
+  attachments: ChatAttachmentDescriptor[];
+};
+
+/**
+ * One multipart file the Todo routes accepted and the service must archive.
+ *
+ * The route keeps only transport metadata; the service owns copying the temp
+ * file into the todo folder and removing it afterwards.
+ */
+export type TodoUploadFile = {
+  tempPath: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+/**
+ * A todo turned into sendable chat input by the Todo prepare endpoint.
+ *
+ * `text` is the literal content the composer will send, and the meta carries
+ * the source todo ids plus copied chat attachments. Sending is what submits
+ * the todos; preparing never changes their state.
+ */
+export type PreparedProjectTodo = TodoDraftMeta & { text: string };
+
+// ---------------------------
 //----------------- DURABLE CHAT DRAFTS ------------
 /**
  * One chat scope's unsent state: the text still in the composer, plus the FIFO
@@ -2184,6 +2267,8 @@ export type SessionDraftRecord = {
   queuedMessage: unknown | null;
   /** The pending FIFO queue, oldest first (never more than MAX_QUEUED_MESSAGES). */
   queuedMessages: unknown[];
+  /** Todo sources and attachments saved with this draft; null when the draft has none. */
+  meta: TodoDraftMeta | null;
   updatedAt: string;
   queuedDelivery: { status: string; requestId: string | null; error: string | null };
 };

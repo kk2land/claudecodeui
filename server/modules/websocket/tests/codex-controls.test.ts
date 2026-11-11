@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { closeConnection, initializeDatabase, projectTodosDb, projectsDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
 import { handleChatConnection, runDetachedChatTurn } from '@/modules/websocket/services/chat-websocket.service.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
@@ -13,7 +13,7 @@ import type { AnyRecord, CodexSessionState, ProviderRuntimeGateway } from '@/sha
 import { AppError } from '@/shared/index.js';
 
 async function harness(runTest: (h: {
-  userId: number; sessionId: string; runtime: ProviderRuntimeGateway; frames: AnyRecord[];
+  userId: number; sessionId: string; projectId: string; runtime: ProviderRuntimeGateway; frames: AnyRecord[];
   socket: EventEmitter; calls: AnyRecord[]; state: CodexSessionState;
   send(control: AnyRecord, requestId?: string): void;
 }) => Promise<void>) {
@@ -23,6 +23,9 @@ async function harness(runTest: (h: {
   const sessionId = 'app-codex';
   const userId = Number(userDb.createUser('codex-test', 'hash').id);
   sessionsDb.createAppSession(sessionId, 'codex', root);
+  const createdProject = projectsDb.createProjectPath(root);
+  assert.ok(createdProject.project);
+  const projectId = createdProject.project.project_id;
   const frames: AnyRecord[] = []; const calls: AnyRecord[] = [];
   const socket = Object.assign(new EventEmitter(), { readyState: 1, send: (text: string) => frames.push(JSON.parse(text)) });
   const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: 't1', phase: 'running', goal: null, questions: [] };
@@ -34,7 +37,7 @@ async function harness(runTest: (h: {
     control: async (provider, sid, action, options) => { calls.push({ provider, sid, action, options }); return state; } };
   handleChatConnection(socket as never, { user: { id: userId } } as never, { runtime });
   const send = (control: AnyRecord, requestId = 'request-1') => socket.emit('message', JSON.stringify({ type: 'chat.control', sessionId, requestId, control }));
-  try { await runTest({ userId, sessionId, runtime, frames, socket, calls, state, send }); }
+  try { await runTest({ userId, sessionId, projectId, runtime, frames, socket, calls, state, send }); }
   finally {
     connectedClients.clear(); chatRunRegistry.clearAll(); closeConnection();
     if (previous === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previous;
@@ -450,5 +453,46 @@ test('native turn continuation transfers subscribers and changes replay executio
     assert.equal(current.status, 'running');
     h.socket.emit('message', JSON.stringify({ type: 'chat.subscribe', sessions: [{ sessionId: h.sessionId, executionId: run.executionId, lastSeq: 999 }] })); await settle();
     assert.equal(h.frames.filter((frame) => frame.content === 'second').length, 2);
+  });
+});
+
+const todoQueued = { ...queued, options: { todoIds: ['todo-steer'] } };
+function createSteerTodo(userId: number, projectId: string): void {
+  projectTodosDb.create({ id: 'todo-steer', userId, projectId, content: 'todo', attachments: [], createdAt: new Date().toISOString() });
+}
+
+test('a native steer confirms its todo source only after the control RPC succeeds', async () => {
+  await harness(async (h) => {
+    createSteerTodo(h.userId, h.projectId);
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: todoQueued });
+    h.send({ action: 'steer', messageId: todoQueued.id, expectedTurnId: 't1' }); await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'accepted');
+    assert.equal(projectTodosDb.get(h.userId, h.projectId, 'todo-steer')?.status, 'submitted');
+  });
+});
+
+test('a rejected native steer leaves its todo source pending', async () => {
+  await harness(async (h) => {
+    createSteerTodo(h.userId, h.projectId);
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: todoQueued });
+    h.runtime.control = async () => { throw new AppError('Turn ended', { code: 'STALE_TURN', statusCode: 409 }); };
+    h.send({ action: 'steer', messageId: todoQueued.id, expectedTurnId: 't1' }); await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'rejected');
+    assert.equal(projectTodosDb.get(h.userId, h.projectId, 'todo-steer')?.status, 'pending');
+  });
+});
+
+test('an unknown native steer keeps its todo source pending until a native echo confirms', async () => {
+  await harness(async (h) => {
+    createSteerTodo(h.userId, h.projectId);
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: todoQueued });
+    h.runtime.control = async () => { throw new AppError('No response', { code: 'CODEX_APP_SERVER_TIMEOUT', statusCode: 504 }); };
+    h.send({ action: 'steer', messageId: todoQueued.id, expectedTurnId: 't1' }); await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'unknown');
+    assert.equal(projectTodosDb.get(h.userId, h.projectId, 'todo-steer')?.status, 'pending');
+    // A late native echo accepts the queue receipt, but only the steer RPC is
+    // the todo-submission proof, so the source stays pending.
+    sessionDraftsDb.confirmSteer(h.sessionId, 'request-1');
+    assert.equal(projectTodosDb.get(h.userId, h.projectId, 'todo-steer')?.status, 'pending');
   });
 });

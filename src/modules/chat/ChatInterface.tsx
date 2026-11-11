@@ -25,6 +25,7 @@ import { useCodexControls } from '@/modules/chat/hooks/useCodexControls';
 import { useCodexModelProviders } from '@/modules/chat/hooks/useCodexModelProviders';
 import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
+import { ProjectTodoDialog } from '@/modules/todos';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
 import {
   useProcessingSessions,
@@ -296,6 +297,15 @@ function ChatInterface({
     beginEditMessage,
     cancelEditMessage,
     composerPrediction,
+    todoDialogOpen,
+    setTodoDialogOpen,
+    selectProjectTodo,
+    detachTodoSource,
+    removeStoredTodoAttachment,
+    todoNotice,
+    todoSourceIds,
+    storedAttachments,
+    localTodoCommand,
   } = useChatComposerState({
     selectedProject,
     selectedSession,
@@ -600,7 +610,9 @@ function ChatInterface({
               // Editing replaces the turn and everything after it, so it is only
               // offered when the session is idle — a half-truncated transcript with
               // a live stream writing into it is not recoverable.
-              onEditMessage={supportsMessageEditing && !isProcessing ? beginEditMessage : undefined}
+              // A linked source draft must be sent as-is; editing an earlier turn
+              // would replace its conversation with that history message.
+              onEditMessage={supportsMessageEditing && !isProcessing && todoSourceIds.length === 0 ? beginEditMessage : undefined}
               onForkFromMessage={supportsSessionForking ? handleForkFromMessage : undefined}
               onLoadFullTranscript={loadFullTranscript}
             />
@@ -669,6 +681,12 @@ function ChatInterface({
           supportsSteering={supportsSteering}
           pendingSteers={pendingSteers}
           attachedFiles={attachedFiles}
+          todoSourceIds={todoSourceIds}
+          storedAttachments={storedAttachments}
+          onRemoveStoredAttachment={removeStoredTodoAttachment}
+          onDetachTodoSource={detachTodoSource}
+          todoNotice={todoNotice}
+          localTodoCommand={localTodoCommand}
           onRemoveAttachment={(index) =>
             setAttachedFiles((previous) =>
               previous.filter((_, currentIndex) => currentIndex !== index),
@@ -711,6 +729,17 @@ function ChatInterface({
         />}
         </div>
       </div>
+
+      {selectedProject && (
+        <ProjectTodoDialog
+          projectId={selectedProject.projectId}
+          projectName={selectedProject.displayName || selectedProject.projectId}
+          open={todoDialogOpen}
+          onOpenChange={setTodoDialogOpen}
+          onSelectTodo={selectProjectTodo}
+          onNavigateToSession={onNavigateToSession}
+        />
+      )}
 
       <CommandResultModal
         payload={commandModalPayload}

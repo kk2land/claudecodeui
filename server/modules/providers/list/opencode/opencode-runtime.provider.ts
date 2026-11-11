@@ -1107,6 +1107,9 @@ async function runOpenCodeTurn(
       return;
     }
     emittedParts.add(part.id);
+    // A finished assistant text part is OpenCode's raw proof the prompt was
+    // accepted; reasoning, tool results and step markers do not count.
+    if (lineType === 'text') options.onInputAccepted?.();
 
     for (const message of context.normalizeMessage(
       { type: lineType, timestamp: Date.now(), sessionID: part.sessionID, part },

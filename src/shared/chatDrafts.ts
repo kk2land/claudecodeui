@@ -1,6 +1,6 @@
 import { api } from '@/shared/api';
 import { MAX_QUEUED_MESSAGES } from '@/shared/constants';
-import type { PendingChatSend, QueuedDelivery, QueuedSendOptions } from '@/shared/types';
+import type { ChatAttachment, PendingChatSend, QueuedDelivery, QueuedSendOptions, TodoDraftMeta } from '@/shared/types';
 
 /**
  * Unsent composer text and queued messages, stored in `auth.db` rather than in
@@ -33,6 +33,11 @@ type StoredQueuedMessage = {
 
 type DraftRecord = {
   text: string;
+  /**
+   * Todo ids and copied attachments saved alongside the draft. Absent when the
+   * draft has no todo sources; a cleared draft drops the field entirely.
+   */
+  meta?: TodoDraftMeta;
   /** The pending FIFO queue, oldest first. Empty when nothing is queued. */
   queuedMessages: StoredQueuedMessage[];
   queuedDelivery?: QueuedDelivery;
@@ -83,10 +88,14 @@ const knownQueuedTickets = new Map<string, Set<string>>();
 const pendingTextScopes = new Set<string>();
 // Only explicit queue mutations may send a queue snapshot to the server.
 const pendingQueueScopes = new Set<string>();
+// Todo sources follow the draft through its own debounced save.
+const pendingMetaScopes = new Set<string>();
 // Hydration must not replace queue changes newer than the snapshot it requested.
 const queueRevisions = new Map<string, number>();
 // Composer edits and completed text saves invalidate older hydration snapshots.
 const textRevisions = new Map<string, number>();
+// Todo sources are revised independently of text so neither save overwrites the other.
+const metaRevisions = new Map<string, number>();
 let serverWriteTimer: ReturnType<typeof setTimeout> | null = null;
 // A transient failure retries even when the user has stopped typing.
 let serverRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -97,8 +106,39 @@ const isRecord = (value: unknown): value is Record<string, unknown> => (
   Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 );
 
+/** Keeps only the JSON-safe attachment fields a draft may carry across a mirror or the API. */
+const normalizeChatAttachment = (value: unknown): ChatAttachment | null => {
+  if (!isRecord(value)) return null;
+  const attachment: ChatAttachment = {};
+  if (typeof value.path === 'string' && value.path) attachment.path = value.path;
+  if (typeof value.name === 'string' && value.name) attachment.name = value.name;
+  if (typeof value.mimeType === 'string' && value.mimeType) attachment.mimeType = value.mimeType;
+  if (typeof value.size === 'number' && Number.isFinite(value.size)) attachment.size = value.size;
+  return Object.keys(attachment).length > 0 ? attachment : null;
+};
+
+/** Reads todo sources from a mirror or server payload, dropping malformed entries. */
+const normalizeDraftMeta = (value: unknown): TodoDraftMeta | undefined => {
+  if (!isRecord(value)) return undefined;
+  const todoIds = Array.isArray(value.todoIds)
+    ? value.todoIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : [];
+  const attachments = Array.isArray(value.attachments)
+    ? value.attachments.map(normalizeChatAttachment).filter((item): item is ChatAttachment => item !== null)
+    : [];
+  return todoIds.length > 0 || attachments.length > 0 ? { todoIds, attachments } : undefined;
+};
+
+/**
+ * A draft is empty only when it carries no text, no queue and no todo sources.
+ * A todo with copied attachments can be a whole draft on its own.
+ */
 const isEmptyDraft = (draft: DraftRecord): boolean => (
-  draft.text === '' && draft.queuedMessages.length === 0
+  draft.text === '' && !draft.meta && draft.queuedMessages.length === 0
+);
+
+const sameDraftMeta = (a: TodoDraftMeta | undefined, b: TodoDraftMeta | undefined): boolean => (
+  a === b || JSON.stringify(a ?? null) === JSON.stringify(b ?? null)
 );
 
 const readQueuedMessageId = (message: StoredQueuedMessage): string | null => (
@@ -204,8 +244,10 @@ function readMirror(): Map<string, DraftRecord> {
       if (!isRecord(value)) {
         continue;
       }
+      const meta = normalizeDraftMeta(value.meta);
       restored.set(scope, {
         text: typeof value.text === 'string' ? value.text : '',
+        ...(meta ? { meta } : {}),
         // A mirror written before the queue existed holds the legacy singleton.
         queuedMessages: normalizeQueuedMessages(value.queuedMessages ?? value.queuedMessage),
       });
@@ -213,11 +255,12 @@ function readMirror(): Map<string, DraftRecord> {
       // a cached queue the server may already have dispatched after a reload.
       if (value.unsavedText === true) pendingTextScopes.add(scope);
       if (value.unsavedQueue === true) pendingQueueScopes.add(scope);
+      if (value.unsavedMeta === true) pendingMetaScopes.add(scope);
       if (Array.isArray(value.knownQueuedMessageIds)) {
         const known = value.knownQueuedMessageIds.filter((id): id is string => typeof id === 'string' && id.length > 0);
         if (known.length > 0) knownQueuedTickets.set(scope, new Set(known));
       }
-      if (value.unsavedText === true || value.unsavedQueue === true) pendingScopes.add(scope);
+      if (value.unsavedText === true || value.unsavedQueue === true || value.unsavedMeta === true) pendingScopes.add(scope);
     }
     return restored;
   } catch {
@@ -228,24 +271,28 @@ function readMirror(): Map<string, DraftRecord> {
 function writeMirror(): void {
   try {
     const scopes = new Set([
-      ...drafts.keys(), ...pendingScopes, ...pendingTextScopes, ...pendingQueueScopes, ...writingScopes.keys(),
+      ...drafts.keys(), ...pendingScopes, ...pendingTextScopes, ...pendingQueueScopes, ...pendingMetaScopes,
+      ...writingScopes.keys(),
     ]);
     const mirror = new Map<string, DraftRecord & {
       unsavedText?: boolean;
       unsavedQueue?: boolean;
+      unsavedMeta?: boolean;
       knownQueuedMessageIds?: string[];
     }>();
     for (const scope of scopes) {
       const draft = drafts.get(scope) ?? EMPTY_DRAFT;
       const unsavedText = pendingTextScopes.has(scope) || writingTextScopes.has(scope);
       const unsavedQueue = pendingQueueScopes.has(scope) || writingQueueScopes.has(scope);
+      const unsavedMeta = pendingMetaScopes.has(scope) || writingMetaScopes.has(scope);
       const known = unsavedQueue ? [...(knownQueuedTickets.get(scope) ?? [])] : [];
       // An empty record carries an unsaved cancellation across reloads.
-      if (isEmptyDraft(draft) && !unsavedText && !unsavedQueue) continue;
+      if (isEmptyDraft(draft) && !unsavedText && !unsavedQueue && !unsavedMeta) continue;
       mirror.set(scope, {
         ...draft,
         ...(unsavedText ? { unsavedText: true } : {}),
         ...(unsavedQueue ? { unsavedQueue: true } : {}),
+        ...(unsavedMeta ? { unsavedMeta: true } : {}),
         ...(known.length > 0 ? { knownQueuedMessageIds: known } : {}),
       });
     }
@@ -274,6 +321,8 @@ const writingScopes = new Map<string, number>();
 const writingTextScopes = new Map<string, number>();
 // Queue edits stay protected until every outstanding snapshot has settled.
 const writingQueueScopes = new Map<string, number>();
+// Todo sources stay protected until their own save settles.
+const writingMetaScopes = new Map<string, number>();
 function flushServerWrites(): Promise<void> {
   if (serverWriteTimer !== null) clearTimeout(serverWriteTimer);
   serverWriteTimer = null;
@@ -288,21 +337,24 @@ function flushServerWrites(): Promise<void> {
       draft,
       textChanged: pendingTextScopes.has(scope),
       queueChanged,
+      metaChanged: pendingMetaScopes.has(scope),
       knownQueuedMessageIds: queueChanged ? captureKnownQueuedTickets(scope, draft?.queuedMessages) : undefined,
     };
   });
   pendingScopes.clear();
   pendingTextScopes.clear();
   pendingQueueScopes.clear();
-  for (const { scope, textChanged, queueChanged } of entries) {
+  pendingMetaScopes.clear();
+  for (const { scope, textChanged, queueChanged, metaChanged } of entries) {
     writingScopes.set(scope, (writingScopes.get(scope) ?? 0) + 1);
     if (textChanged) writingTextScopes.set(scope, (writingTextScopes.get(scope) ?? 0) + 1);
     if (queueChanged) writingQueueScopes.set(scope, (writingQueueScopes.get(scope) ?? 0) + 1);
+    if (metaChanged) writingMetaScopes.set(scope, (writingMetaScopes.get(scope) ?? 0) + 1);
   }
   const result = writeChain.catch(() => {}).then(async () => {
     let failure: unknown;
     let retryableFailure = false;
-    for (const { scope, draft, textChanged, queueChanged, knownQueuedMessageIds } of entries) {
+    for (const { scope, draft, textChanged, queueChanged, metaChanged, knownQueuedMessageIds } of entries) {
       if (generation !== draftGeneration) throw new Error('Draft save cancelled after sign-out.');
       let response: Response | undefined;
       try {
@@ -313,6 +365,8 @@ function flushServerWrites(): Promise<void> {
             queuedMessages: draft?.queuedMessages ?? [],
             knownQueuedMessageIds: knownQueuedMessageIds ?? [],
           } : {}),
+          // Omitting `meta` keeps the server copy; null clears it.
+          ...(metaChanged ? { meta: draft?.meta ?? null } : {}),
         });
         if (response && !response.ok) throw new Error(`Draft save failed (${response.status})`);
         if (generation === draftGeneration) {
@@ -322,6 +376,7 @@ function flushServerWrites(): Promise<void> {
             settleKnownQueuedTickets(scope, knownQueuedMessageIds ?? []);
           }
           if (textChanged) textRevisions.set(scope, (textRevisions.get(scope) ?? 0) + 1);
+          if (metaChanged) metaRevisions.set(scope, (metaRevisions.get(scope) ?? 0) + 1);
         }
       } catch (error) {
         failure ??= error;
@@ -332,7 +387,10 @@ function flushServerWrites(): Promise<void> {
           // they fail too, so they must not be replayed after they succeed.
           if (textChanged && (writingTextScopes.get(scope) ?? 0) === 1) pendingTextScopes.add(scope);
           if (queueChanged && (writingQueueScopes.get(scope) ?? 0) === 1) pendingQueueScopes.add(scope);
-          if (pendingTextScopes.has(scope) || pendingQueueScopes.has(scope)) pendingScopes.add(scope);
+          if (metaChanged && (writingMetaScopes.get(scope) ?? 0) === 1) pendingMetaScopes.add(scope);
+          if (pendingTextScopes.has(scope) || pendingQueueScopes.has(scope) || pendingMetaScopes.has(scope)) {
+            pendingScopes.add(scope);
+          }
           // Only transient errors schedule retries; validation and conflict
           // responses remain pending for a later edit or explicit save.
           retryableFailure ||= !response || response.status === 408 || response.status === 429 || response.status >= 500;
@@ -342,7 +400,7 @@ function flushServerWrites(): Promise<void> {
           const remaining = (writingScopes.get(scope) ?? 1) - 1;
           if (remaining) writingScopes.set(scope, remaining);
           else writingScopes.delete(scope);
-          for (const [changed, scopes] of [[textChanged, writingTextScopes], [queueChanged, writingQueueScopes]] as const) {
+          for (const [changed, scopes] of [[textChanged, writingTextScopes], [queueChanged, writingQueueScopes], [metaChanged, writingMetaScopes]] as const) {
             if (!changed) continue;
             const remainingWrites = (scopes.get(scope) ?? 1) - 1;
             if (remainingWrites) scopes.set(scope, remainingWrites);
@@ -415,6 +473,11 @@ export function adoptQueuedChatMessage(args: {
   const receiptOptions = isRecord(args.queuedMessage.options)
     ? args.queuedMessage.options as QueuedSendOptions
     : undefined;
+  // Todo sources are canonical under `options.todoIds`; a send that only kept
+  // them on `PendingChatSend` still hands them to the adopted queue ticket.
+  const todoIds = Array.isArray(receiptOptions?.todoIds)
+    ? receiptOptions.todoIds.filter((id): id is string => typeof id === 'string' && id.length > 0)
+    : pending?.todoIds;
   const normalized = normalizeQueuedMessage({
     id: args.messageId,
     content: typeof args.queuedMessage.content === 'string'
@@ -423,6 +486,7 @@ export function adoptQueuedChatMessage(args: {
     options: {
       ...(pending?.options ?? {}),
       ...(receiptOptions ?? {}),
+      ...(todoIds && todoIds.length > 0 ? { todoIds } : {}),
       clientMessageId: args.clientMessageId,
     },
     attachments: Array.isArray(args.queuedMessage.attachments)
@@ -499,7 +563,7 @@ export function readQueuedDelivery(scope: string): QueuedDelivery | null {
   return drafts.get(scope)?.queuedDelivery ?? null;
 }
 
-function queueServerWrite(scope: string): void {
+function scheduleServerWrite(scope: string): void {
   pendingScopes.add(scope);
 
   if (serverWriteTimer !== null) {
@@ -520,13 +584,31 @@ function flushServerWritesNow(): void {
  * Applies a local draft change. A queue change normally schedules its server
  * snapshot; server-owned acknowledgements pass `persistQueue: false` because
  * the backend already stored them and a composer snapshot must not overwrite
- * the authoritative queue.
+ * the authoritative queue. `meta` follows the same rule: omitting the key
+ * keeps the current sources, `null` explicitly clears them.
  */
-function updateDraft(scope: string, update: Partial<DraftRecord>, persistQueue = true): void {
+function updateDraft(
+  scope: string,
+  update: Partial<Pick<DraftRecord, 'text' | 'queuedMessages'>> & { meta?: TodoDraftMeta | null },
+  persistQueue = true,
+): void {
   const current = drafts.get(scope) ?? EMPTY_DRAFT;
-  const next: DraftRecord = { ...current, ...update };
+  const metaProvided = 'meta' in update;
+  // Callers pass a typed value already; only an empty source list collapses to
+  // "no meta". Shape filtering belongs to the mirror and server boundaries.
+  const nextMeta = metaProvided
+    ? (update.meta && (update.meta.todoIds.length > 0 || update.meta.attachments.length > 0) ? update.meta : undefined)
+    : current.meta;
+  const next: DraftRecord = {
+    ...current,
+    ...(update.text !== undefined ? { text: update.text } : {}),
+    ...(update.queuedMessages !== undefined ? { queuedMessages: update.queuedMessages } : {}),
+    ...(nextMeta ? { meta: nextMeta } : {}),
+  };
+  if (!nextMeta) delete next.meta;
+  const metaChanged = metaProvided && !sameDraftMeta(nextMeta, current.meta);
 
-  if (next.text === current.text && next.queuedMessages === current.queuedMessages) {
+  if (next.text === current.text && next.queuedMessages === current.queuedMessages && !metaChanged) {
     return;
   }
 
@@ -551,8 +633,12 @@ function updateDraft(scope: string, update: Partial<DraftRecord>, persistQueue =
     if (persistQueue) pendingQueueScopes.add(scope);
     queueRevisions.set(scope, (queueRevisions.get(scope) ?? 0) + 1);
   }
+  if (metaChanged) {
+    pendingMetaScopes.add(scope);
+    metaRevisions.set(scope, (metaRevisions.get(scope) ?? 0) + 1);
+  }
   writeMirror();
-  if (persistQueue) queueServerWrite(scope);
+  if (persistQueue) scheduleServerWrite(scope);
   notifyListeners();
 }
 
@@ -563,6 +649,46 @@ export function readDraftText(scope: string): string {
 
 export function writeDraftText(scope: string, text: string): void {
   updateDraft(scope, { text });
+}
+
+/**
+ * Reads the todo sources saved with one scope's draft, or null when it has
+ * none. Returned arrays are copies so callers can consume them freely.
+ */
+export function readDraftMeta(scope: string): TodoDraftMeta | null {
+  const meta = drafts.get(scope)?.meta;
+  return meta ? { todoIds: [...meta.todoIds], attachments: meta.attachments.map((item) => ({ ...item })) } : null;
+}
+
+/**
+ * Saves the todo sources for one scope's draft and persists them with the next
+ * debounced write; `null` clears them. The echo or send that consumes a draft
+ * is expected to call this with null through {@link clearDraftInput}.
+ */
+export function writeDraftMeta(scope: string, meta: TodoDraftMeta | null): void {
+  updateDraft(scope, { meta });
+}
+
+/**
+ * Clears the current input — text and todo sources — while leaving the pending
+ * queue untouched. Used after a send consumes the draft and by an in-place
+ * todo source removal once its text is gone.
+ */
+export function clearDraftInput(scope: string): void {
+  updateDraft(scope, { text: '', meta: null });
+}
+
+/**
+ * Moves a chat draft's text and todo sources from one scope to another, for a
+ * new session that adopts the `project:<id>` draft. Both pending queues stay
+ * where they are: the new session must not inherit another composer's FIFO,
+ * and the project scope may still own unsent queued turns.
+ */
+export function migrateDraftScope(fromScope: string, toScope: string): void {
+  if (fromScope === toScope) return;
+  const source = drafts.get(fromScope) ?? EMPTY_DRAFT;
+  updateDraft(toScope, { text: source.text, meta: source.meta ?? null });
+  updateDraft(fromScope, { text: '', meta: null });
 }
 
 /**
@@ -665,12 +791,14 @@ export async function hydrateChatDrafts(): Promise<void> {
   const generation = draftGeneration;
   const queueRevisionsAtRequest = new Map(queueRevisions);
   const textRevisionsAtRequest = new Map(textRevisions);
+  const metaRevisionsAtRequest = new Map(metaRevisions);
   let serverDrafts: Array<{
     scope?: unknown;
     text?: unknown;
     queuedMessage?: unknown;
     queuedMessages?: unknown;
     queuedDelivery?: QueuedDelivery;
+    meta?: unknown;
   }> = [];
 
   try {
@@ -698,9 +826,11 @@ export async function hydrateChatDrafts(): Promise<void> {
       continue;
     }
 
+    const meta = normalizeDraftMeta(draft.meta);
     merged.set(scope, {
       queuedDelivery: draft.queuedDelivery,
       text: typeof draft.text === 'string' ? draft.text : '',
+      ...(meta ? { meta } : {}),
       // `queuedMessages` is authoritative when present; the head field is the
       // fallback for a server that has not been upgraded yet.
       queuedMessages: normalizeQueuedMessages(draft.queuedMessages ?? draft.queuedMessage),
@@ -715,18 +845,25 @@ export async function hydrateChatDrafts(): Promise<void> {
   const textChangedDuringRequest = (scope: string) => (
     (textRevisions.get(scope) ?? 0) !== (textRevisionsAtRequest.get(scope) ?? 0)
   );
+  const metaChangedDuringRequest = (scope: string) => (
+    (metaRevisions.get(scope) ?? 0) !== (metaRevisionsAtRequest.get(scope) ?? 0)
+  );
   const localScopes = new Set([
     ...pendingScopes,
     ...writingScopes.keys(),
     ...[...queueRevisions.keys()].filter(queueChangedDuringRequest),
     ...[...textRevisions.keys()].filter(textChangedDuringRequest),
+    ...[...metaRevisions.keys()].filter(metaChangedDuringRequest),
   ]);
   for (const scope of localScopes) {
     const local = drafts.get(scope) ?? EMPTY_DRAFT;
     const server = merged.get(scope) ?? EMPTY_DRAFT;
+    const meta = pendingMetaScopes.has(scope) || writingMetaScopes.has(scope) || metaChangedDuringRequest(scope)
+      ? local.meta : server.meta;
     const next: DraftRecord = {
       text: pendingTextScopes.has(scope) || writingTextScopes.has(scope) || textChangedDuringRequest(scope)
         ? local.text : server.text,
+      ...(meta ? { meta } : {}),
       queuedMessages: pendingQueueScopes.has(scope) || writingQueueScopes.has(scope) || queueChangedDuringRequest(scope)
         ? local.queuedMessages : server.queuedMessages,
       queuedDelivery: server.queuedDelivery,
@@ -774,6 +911,7 @@ export function resetChatDrafts(): void {
   writingScopes.clear();
   writingTextScopes.clear();
   writingQueueScopes.clear();
+  writingMetaScopes.clear();
   drafts = new Map();
   queuedMessageFiles.clear();
   knownQueuedTickets.clear();
@@ -782,8 +920,10 @@ export function resetChatDrafts(): void {
   pendingScopes.clear();
   pendingTextScopes.clear();
   pendingQueueScopes.clear();
+  pendingMetaScopes.clear();
   queueRevisions.clear();
   textRevisions.clear();
+  metaRevisions.clear();
   if (serverWriteTimer !== null) {
     clearTimeout(serverWriteTimer);
     serverWriteTimer = null;

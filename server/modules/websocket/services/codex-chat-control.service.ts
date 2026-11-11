@@ -1,4 +1,5 @@
 import { sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
+import { markTodosSubmitted } from '@/modules/todos/index.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { AppError } from '@/shared/index.js';
 import type {
@@ -78,6 +79,9 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
   const numericUserId = Number(userId);
   const response = { kind: 'control_result' as const, sessionId, requestId };
   let steering = false;
+  // Todo sources of the steered queue entry, consumed only after the native
+  // steer RPC succeeds; an unknown/rejected outcome keeps them pending.
+  let steeringTodoIds: string[] = [];
 
   try {
     const session = sessionId && sessionsDb.getSessionById(sessionId);
@@ -109,6 +113,10 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
         }
         steering = true;
         const message = claim.queuedMessage as AnyRecord;
+        const claimedOptions = message.options && typeof message.options === 'object' ? message.options as AnyRecord : {};
+        steeringTodoIds = Array.isArray(claimedOptions.todoIds)
+          ? [...new Set(claimedOptions.todoIds.filter((id): id is string => typeof id === 'string' && Boolean(id.trim())))]
+          : [];
         action = { action: 'steer', expectedTurnId: raw.expectedTurnId, requestId, content: typeof message.content === 'string' ? message.content : '',
           attachments: filterAttachments(message.attachments ?? message.images) };
       } else {
@@ -133,7 +141,10 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
       run.writer.updateWebSocket(connection);
       const options = { ...(input.options ?? {}), sessionId, cwd: session.project_path, projectPath: session.project_path };
       await runtime.control('codex', sessionId, action, options, run.writer);
-      if (steering) sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, 'accepted');
+      if (steering) {
+        sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, 'accepted');
+        if (steeringTodoIds.length) markTodosSubmitted({ userId: numericUserId, sessionId, todoIds: steeringTodoIds });
+      }
     }
     return { ...response, ok: true, delivery: steering ? 'accepted' : undefined,
       codexState: runtime.getState?.('codex', sessionId) };

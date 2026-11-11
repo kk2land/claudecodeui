@@ -41,6 +41,8 @@ type StoredQueueEntry = { id?: string; content: string; options?: Record<string,
 
 let serverDrafts: Array<{ scope: string; text: string; queuedMessages: StoredQueueEntry[] }> = [];
 let saveDraftBodies: Array<Record<string, unknown>> = [];
+/** Counts only asset uploads, so a restored descriptor can be shown to skip a second upload. */
+let assetUploads = 0;
 let emit: ((event: ServerEvent) => void) | null = null;
 
 const subscribe = (listener: (event: ServerEvent) => void) => {
@@ -60,10 +62,12 @@ beforeEach(() => {
   resetChatDrafts();
   serverDrafts = [];
   saveDraftBodies = [];
+  assetUploads = 0;
   emit = null;
   vi.stubGlobal('fetch', vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
     const path = String(url);
     if (path.includes('/api/assets/files')) {
+      assetUploads += 1;
       const form = init?.body as FormData;
       return json({
         attachments: (form.getAll('files') as File[]).map((file) => ({
@@ -299,7 +303,7 @@ test('chat_queued converts the optimistic turn into one queue card without resen
   assert.equal(refreshed.view.result.current.composer.queuedDrafts[0]?.id, 'queued-1');
 });
 
-test('an ACK arriving after hydrate adds its file to the existing card without a queue PUT', async () => {
+test('an ACK arriving after hydrate fills its card and edits without a second upload', async () => {
   const { view, sent, submit, send } = renderHarness();
   const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
   await submit('hydrated before ACK', [file]);
@@ -331,13 +335,17 @@ test('an ACK arriving after hydrate adds its file to the existing card without a
   );
 
   await act(async () => { view.result.current.composer.editQueuedDraft('early-ticket'); });
-  assert.equal(view.result.current.composer.attachedFiles[0], file);
+  // The ticket was already uploaded: editing restores its descriptor and drops
+  // the browser File, so the resend cannot upload the same file again.
+  assert.deepEqual(view.result.current.composer.attachedFiles, []);
+  assert.deepEqual(view.result.current.composer.storedAttachments, [UPLOADED]);
   await act(async () => {
     await view.result.current.composer.handleSubmit({ preventDefault: () => undefined } as never);
   });
   const resent = sent.filter((entry) => entry.type === 'chat.send')[1];
   assert.ok(resent);
   assert.deepEqual((resent.options as Record<string, unknown>).attachments, [UPLOADED]);
+  assert.equal(assetUploads, 1, 'editing the acknowledged card does not upload its file again');
 });
 
 test('a dispatched echo retires the queue card and leaves exactly one transcript row', async () => {
@@ -432,7 +440,7 @@ test('multiple accepted sends remain distinct FIFO cards with their own attachme
   assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 2);
 });
 
-test('a queue-limit refusal restores the prompt and files without idling the running turn', async () => {
+test('a queue-limit refusal restores the prompt and its uploaded descriptor without idling the running turn', async () => {
   const onSessionIdle = vi.fn();
   const onSessionProcessing = vi.fn();
   const { view, sent, submit, send } = renderHarness({ onSessionIdle, onSessionProcessing });
@@ -454,7 +462,8 @@ test('a queue-limit refusal restores the prompt and files without idling the run
   });
 
   await waitFor(() => assert.equal(view.result.current.composer.input, 'must not be lost'));
-  assert.equal(view.result.current.composer.attachedFiles[0], file, 'the original browser file is still attached');
+  assert.deepEqual(view.result.current.composer.attachedFiles, [], 'the restored send uses its uploaded descriptor, not a duplicate File');
+  assert.deepEqual(view.result.current.composer.storedAttachments, [UPLOADED]);
   assert.deepEqual(readQueuedMessages(SESSION_A.id), []);
   assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1, 'refusal never auto-resends');
   assert.equal(onSessionIdle.mock.calls.length, 0, 'the current turn is not marked idle');
@@ -462,6 +471,15 @@ test('a queue-limit refusal restores the prompt and files without idling the run
   assert.ok(view.result.current.store.getMessages(SESSION_A.id).some(
     (row) => row.kind === 'error' && /queue is full/i.test(String(row.content)),
   ));
+
+  // A direct retry reuses the uploaded descriptor exactly once.
+  await act(async () => {
+    await view.result.current.composer.handleSubmit({ preventDefault: () => undefined } as never);
+  });
+  const retried = sent.filter((entry) => entry.type === 'chat.send')[1];
+  assert.ok(retried);
+  assert.deepEqual((retried.options as Record<string, unknown>).attachments, [UPLOADED]);
+  assert.equal(assetUploads, 1, 'the refused send is not uploaded a second time');
 });
 
 
@@ -484,7 +502,8 @@ test('an idle refusal with an authoritative idle state restores input and ends i
   });
 
   await waitFor(() => assert.equal(view.result.current.composer.input, 'idle refused'));
-  assert.equal(view.result.current.composer.attachedFiles[0], file);
+  assert.deepEqual(view.result.current.composer.attachedFiles, []);
+  assert.deepEqual(view.result.current.composer.storedAttachments, [UPLOADED]);
   assert.equal(onSessionIdle.mock.calls.length, 1, 'the native idle snapshot ends the optimistic turn');
   assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1, 'refusal never auto-resends');
   assert.equal(
@@ -538,7 +557,7 @@ test('MESSAGE_ALREADY_SENT keeps the accepted user row without restoring or rese
   assert.equal(rows[0]?.content, 'accepted once');
 });
 
-test('editing an acknowledged queue card keeps the original browser file for resend', async () => {
+test('editing an acknowledged queue card resends through its uploaded descriptor', async () => {
   const { view, sent, submit, send } = renderHarness();
   const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
   await submit('deploy with notes', [file]);
@@ -557,7 +576,9 @@ test('editing an acknowledged queue card keeps the original browser file for res
   await act(async () => { view.result.current.composer.editQueuedDraft(queuedId); });
 
   assert.equal(view.result.current.composer.input, 'deploy with notes');
-  assert.equal(view.result.current.composer.attachedFiles[0], file, 'the acknowledged card retains its browser file');
+  // The card is already uploaded: restore its descriptor, never a second File.
+  assert.deepEqual(view.result.current.composer.attachedFiles, []);
+  assert.deepEqual(view.result.current.composer.storedAttachments, [UPLOADED]);
   assert.deepEqual(view.result.current.composer.queuedDrafts, []);
 
   await act(async () => {
@@ -568,8 +589,9 @@ test('editing an acknowledged queue card keeps the original browser file for res
   assert.deepEqual(
     (resent.options as Record<string, unknown>).attachments,
     [UPLOADED],
-    'editing and resending uploads the retained file again',
+    'editing and resending reuses the uploaded descriptor',
   );
+  assert.equal(assetUploads, 1, 'editing and resending does not upload the file again');
 });
 
 test('an in-flight queue PUT preserves a ticket accepted after its snapshot', async () => {
@@ -686,7 +708,7 @@ test('a DSH ACP Worker receipt becomes one queue card without keeping the optimi
   assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1, 'the accepted DSH message is not resent');
 });
 
-test('a refused DSH ACP Worker send restores its prompt and files without idling the turn', async () => {
+test('a refused DSH ACP Worker send restores its prompt and descriptor without idling the turn', async () => {
   const onSessionIdle = vi.fn();
   const { view, sent, submit, send } = renderHarness({ provider: 'dsh', workerQueueEnabled: true, onSessionIdle });
   const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
@@ -704,7 +726,8 @@ test('a refused DSH ACP Worker send restores its prompt and files without idling
   });
 
   await waitFor(() => assert.equal(view.result.current.composer.input, 'DSH prompt must survive'));
-  assert.equal(view.result.current.composer.attachedFiles[0], file, 'the original DSH browser file is still attached');
+  assert.deepEqual(view.result.current.composer.attachedFiles, [], 'the refused DSH send restores its uploaded descriptor instead of a duplicate File');
+  assert.deepEqual(view.result.current.composer.storedAttachments, [UPLOADED]);
   assert.deepEqual(readQueuedMessages(SESSION_A.id), []);
   assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1, 'the refused DSH send is never auto-resent');
   assert.equal(onSessionIdle.mock.calls.length, 0, 'the DSH refusal does not idle an active turn');

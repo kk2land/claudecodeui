@@ -8,6 +8,7 @@ import {
   PROVIDER_MODELS_TABLE_SCHEMA_SQL,
   QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL,
   PUSH_SUBSCRIPTIONS_TABLE_SCHEMA_SQL,
+  PROJECT_TODOS_TABLE_SCHEMA_SQL,
   SESSION_DRAFTS_TABLE_SCHEMA_SQL,
   SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL,
   SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL,
@@ -530,6 +531,12 @@ const migrateCodexSessionControls = (db: Database): void => {
   `);
 };
 
+/** Stores todo sources beside a draft so a pure-attachment or source-only draft survives empty cleanup. */
+const addSessionDraftMetaColumn = (db: Database): void => {
+  const columns = getTableInfo(db, 'session_drafts').map((column) => column.name);
+  addColumnToTableIfNotExists(db, 'session_drafts', columns, 'draft_meta', 'TEXT DEFAULT NULL');
+};
+
 /** Expands the existing constraint while retaining upstream columns, rows, indexes, and triggers. */
 const migrateDshProviderModels = (db: Database): void => {
   const table = db.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'provider_models'").get() as { sql: string };
@@ -611,6 +618,8 @@ export const runMigrations = (db: Database) => {
     db.exec(USER_PREFERENCES_TABLE_SCHEMA_SQL);
     db.exec(SESSION_DRAFTS_TABLE_SCHEMA_SQL);
     migrateCodexSessionControls(db);
+    addSessionDraftMetaColumn(db);
+    db.exec(PROJECT_TODOS_TABLE_SCHEMA_SQL);
     db.exec(SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL);
     addSupersededTranscriptPathColumn(db);
 

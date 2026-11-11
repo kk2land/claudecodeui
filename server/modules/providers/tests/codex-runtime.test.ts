@@ -5,7 +5,7 @@ import test from 'node:test';
 import { Codex } from '@openai/codex-sdk';
 import type { Thread, ThreadOptions } from '@openai/codex-sdk';
 
-import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
+import { codexEventProvesAcceptance, codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import type { ProviderRuntimeContext } from '@/shared/index.js';
 
 for (const resumed of [false, true]) {
@@ -92,3 +92,24 @@ for (const command of ['', '  \n\t']) {
     ]);
   });
 }
+
+/**
+ * The SDK acceptance classification runs on raw events. The full run path needs
+ * the Codex CLI binary, which this environment does not provide, so only the
+ * event decision is exercised here; the wiring is the same call the loop makes.
+ */
+const accepting = (event: Record<string, unknown>) => codexEventProvesAcceptance(event);
+
+test('Codex SDK accepts a real assistant item or successful turn result', () => {
+  assert.equal(accepting({ type: 'item.completed', item: { type: 'agent_message', id: 'm1', text: 'done' } }), true);
+  assert.equal(accepting({ type: 'item.completed', item: { type: 'command_execution', id: 'c1', status: 'completed' } }), true);
+  assert.equal(accepting({ type: 'item.completed', item: { type: 'mcp_tool_call', id: 't1', status: 'completed' } }), true);
+  assert.equal(accepting({ type: 'turn.completed', usage: {} }), true);
+});
+
+test('Codex SDK never accepts start markers, error items or a failed turn', () => {
+  assert.equal(accepting({ type: 'thread.started', thread_id: 'native-thread' }), false);
+  assert.equal(accepting({ type: 'turn.started' }), false);
+  assert.equal(accepting({ type: 'item.completed', item: { type: 'error', id: 'e1', message: 'boom' } }), false);
+  assert.equal(accepting({ type: 'turn.failed', error: { message: 'boom' } }), false);
+});

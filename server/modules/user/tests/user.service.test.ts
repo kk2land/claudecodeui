@@ -291,3 +291,91 @@ test('saveDraft validates and forwards the optional known ticket set', () => {
     );
   }
 });
+
+test('saveDraft passes validated todo meta through with the queue', () => {
+  const saved: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    drafts: { ...noDrafts, saveDraft: (...args) => saved.push(args) },
+  }));
+
+  service.saveDraft(5, 'session-1', {
+    text: 'do it',
+    queuedMessages: [],
+    meta: { todoIds: ['todo-1', 'todo-1'], attachments: [{ path: 'asset.png', name: 'asset.png' }] },
+  });
+
+  assert.deepEqual(saved[0][2], {
+    text: 'do it',
+    queuedMessages: [],
+    meta: { todoIds: ['todo-1'], attachments: [{ path: 'asset.png', name: 'asset.png' }] },
+  });
+});
+
+test('saveDraft omits meta when absent and clears it on null', () => {
+  const saved: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    drafts: { ...noDrafts, saveDraft: (...args) => saved.push(args) },
+  }));
+
+  service.saveDraft(5, 'session-1', { text: 'a', queuedMessages: [] });
+  service.saveDraft(5, 'session-1', { text: 'b', queuedMessages: [], meta: null });
+
+  assert.equal('meta' in (saved[0][2] as Record<string, unknown>), false);
+  assert.equal((saved[1][2] as Record<string, unknown>).meta, null);
+});
+
+test('saveDraft text-only writes keep an explicit meta and drop an invalid attachment path', () => {
+  const textOnly: unknown[][] = [];
+  const service = createUserService(createDependencies({
+    drafts: { ...noDrafts, saveDraftText: (...args) => textOnly.push(args) },
+  }));
+
+  service.saveDraft(5, 'session-1', { text: 'typing' });
+  service.saveDraft(5, 'session-1', {
+    text: 'typing',
+    meta: { todoIds: ['todo-1'], attachments: [{ path: '../escape.png' }, { path: 'cli/missing.png' }] },
+  });
+  service.saveDraft(5, 'session-1', { text: 'typing', meta: null });
+
+  assert.equal(textOnly[0].length, 3);
+  assert.deepEqual(textOnly[1][3], { todoIds: ['todo-1'], attachments: [] });
+  assert.equal(textOnly[2][3], null);
+});
+
+test('saveDraft rejects malformed meta shapes and todo ids', () => {
+  const service = createUserService(createDependencies());
+
+  assert.throws(
+    () => service.saveDraft(5, 'session-1', { text: 'x', meta: { todoIds: 'todo-1', attachments: [] } }),
+    /meta\.todoIds/,
+  );
+  assert.throws(
+    () => service.saveDraft(5, 'session-1', { text: 'x', meta: { todoIds: [1], attachments: [] } }),
+    /meta\.todoIds/,
+  );
+  assert.throws(
+    () => service.saveDraft(5, 'session-1', { text: 'x', meta: [] }),
+    /meta must be an object or null/,
+  );
+});
+
+test('queued messages keep their todo source ids in options', () => {
+  const queued: unknown[] = [];
+  const service = createUserService(createDependencies({
+    drafts: {
+      ...noDrafts,
+      appendQueuedMessage: (_userId, _scope, message) => {
+        queued.push(message);
+        return { queuedMessage: message, appended: false };
+      },
+    },
+  }));
+
+  service.appendQueuedMessage(5, 'session-1', {
+    content: 'todo text',
+    options: { todoIds: ['todo-1', 'todo-1'], model: 'x' },
+    attachments: [],
+  });
+
+  assert.deepEqual((queued[0] as { options: unknown }).options, { todoIds: ['todo-1'], model: 'x' });
+});

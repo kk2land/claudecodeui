@@ -1,6 +1,10 @@
 export { WS_OPEN_STATE, connectedClients, broadcastToConnectedClients } from './services/websocket-state.service.js';
 export { createWebSocketServer } from './services/websocket-server.service.js';
 export { chatRunRegistry } from './services/chat-run-registry.service.js';
+// filterAttachmentsToUploadStore: the single upload-store boundary a chat send
+// and the User module's draft meta both use, so neither can point a run at an
+// arbitrary file.
+export { filterAttachmentsToUploadStore } from './services/chat-websocket.service.js';
 // onChatRunCompleted: injected by the server composition root into the
 // scheduled-messages dispatcher, so a terminal turn starts the next queued
 // user prompt without a deep import into this module.

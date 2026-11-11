@@ -18,7 +18,7 @@ import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { DEFAULT_EFFORT_VALUE, MAX_QUEUED_MESSAGES, MCP_ELICITATION_TOOL_NAME } from '@/shared/constants';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
-import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, CodexModelProviderControls, ComposerPredictionControls, PendingSteer, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, ChatAttachment, CodexControls, CodexModelProviderControls, ComposerPredictionControls, PendingSteer, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -116,6 +116,16 @@ type ChatComposerProps = {
   pendingSteers?: PendingSteer[];
   attachedFiles: File[];
   onRemoveAttachment: (index: number) => void;
+  /** Todo ids linked to this draft; while set, the text is literal todo content. */
+  todoSourceIds?: string[];
+  /** Attachments already stored with the linked todos, sent without re-upload. */
+  storedAttachments?: ChatAttachment[];
+  onRemoveStoredAttachment?: (index: number) => void;
+  onDetachTodoSource?: () => void;
+  /** Short local feedback for a todo save or append; never a chat turn. */
+  todoNotice?: string | null;
+  /** Set by the composer hook when this input runs the local `/todo` command. */
+  localTodoCommand?: boolean;
   fileErrors: Map<string, string>;
   showFileDropdown: boolean;
   filteredFiles: MentionableFile[];
@@ -208,6 +218,12 @@ export default function ChatComposer({
   pendingSteers = NO_PENDING_STEERS,
   attachedFiles,
   onRemoveAttachment,
+  todoSourceIds = [],
+  storedAttachments = [],
+  onRemoveStoredAttachment,
+  onDetachTodoSource,
+  todoNotice,
+  localTodoCommand = false,
   fileErrors,
   showFileDropdown,
   filteredFiles,
@@ -391,10 +407,14 @@ export default function ChatComposer({
   const hasQueuedDraft = pendingDrafts.length > 0;
   const queueFull = pendingDrafts.length >= MAX_QUEUED_MESSAGES;
   const modelRequired = codexControls?.state?.runtime === 'app-server' && codexControls.state.modelSelection?.model === null;
+  // Only linked todo ids are a "source"; stored attachments without ids are
+  // ordinary draft files and keep the normal provider/validation behaviour.
+  const hasTodoSource = todoSourceIds.length > 0;
   // A full queue still routes a submit through the queue action: the hook
   // rejects it visibly and keeps the text. Falling through to `onAbortSession`
   // would stop the running turn instead of refusing the fourth message.
-  const canQueueDraft = !modelRequired && isLoading && Boolean(input.trim() || attachedFiles.length > 0);
+  const canQueueDraft = !localTodoCommand && !modelRequired && isLoading
+    && Boolean(input.trim() || attachedFiles.length > 0 || storedAttachments.length > 0);
   // A draft turns the main Stop button into Queue; retain the inline Stop in that case.
   const showInlineActivity = hasControlPanel && !hasPendingPermissions && (!hasBlockingCodexQuestion || canQueueDraft);
   const submitHint = modelRequired ? t('codex.modelRequired') : queueFull && isLoading
@@ -417,7 +437,7 @@ export default function ChatComposer({
         ? t('input.stop')
         : t('input.send');
   // The send menu's rows gate on the same "is there anything to send" test.
-  const hasAnyInput = Boolean(input.trim() || attachedFiles.length > 0);
+  const hasAnyInput = Boolean(input.trim() || attachedFiles.length > 0 || storedAttachments.length > 0);
 
   // A visible native suggestion is painted through the textarea's own
   // placeholder, so its value, draft and mention highlight stay untouched until
@@ -455,32 +475,43 @@ export default function ChatComposer({
   const submitButton = (
     <PromptInputSubmit
       onClick={
-        canQueueDraft
+        localTodoCommand
           ? (e: MouseEvent<HTMLButtonElement>) => {
               e.preventDefault();
               onSubmit(e);
             }
-          : isLoading
-            ? onAbortSession
-            : isRecording
-              ? (e: MouseEvent<HTMLButtonElement>) => {
-                  e.preventDefault();
-                  voiceStop({ send: true });
-                }
-              : undefined
+          : canQueueDraft
+            ? (e: MouseEvent<HTMLButtonElement>) => {
+                e.preventDefault();
+                onSubmit(e);
+              }
+            : isLoading
+              // A composer that still has content must never turn its submit
+              // control into Stop; only an empty composer is one-tap abort.
+              ? hasAnyInput
+                ? (e: MouseEvent<HTMLButtonElement>) => { e.preventDefault(); }
+                : onAbortSession
+              : isRecording
+                ? (e: MouseEvent<HTMLButtonElement>) => {
+                    e.preventDefault();
+                    voiceStop({ send: true });
+                  }
+                : undefined
       }
       disabled={
         isTranscribing
           ? true
-          : !isLoading && modelRequired
-            ? true
-            : isLoading
-              // The empty composer's one-tap Stop follows the same interruption
-              // rule as the send menu's Stop row.
-              ? !hasAnyInput && !canAbortSession
-              : isRecording
-                ? false
-                : !hasAnyInput
+          : localTodoCommand
+            ? !hasAnyInput
+            : !isLoading && modelRequired
+              ? true
+              : isLoading
+                // The empty composer's one-tap Stop follows the same interruption
+                // rule as the send menu's Stop row.
+                ? !hasAnyInput && !canAbortSession
+                : isRecording
+                  ? false
+                  : !hasAnyInput
       }
       aria-label={submitAriaLabel}
       title={submitAriaLabel}
@@ -540,7 +571,7 @@ export default function ChatComposer({
       {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} hasQueuedDraft={hasQueuedDraft} providerLabel={providerLabel} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
       <BackgroundSendDialog
         prompt={backgroundSendPrompt}
-        supportsSideQuestions={supportsSideQuestions}
+        supportsSideQuestions={supportsSideQuestions && !hasTodoSource}
         hasText={Boolean(input.trim())}
         onResolve={onResolveBackgroundSendPrompt}
       />
@@ -556,6 +587,33 @@ export default function ChatComposer({
             unavailableReason={composerPrediction.unavailableReason}
             className="max-w-full"
           />
+        </div>
+      )}
+
+      {(hasTodoSource || todoNotice) && (
+        <div className="mx-auto mb-2 flex max-w-[54.25rem] flex-wrap items-center gap-2 rounded-xl border border-primary/25 bg-primary/5 px-3 py-2 text-xs">
+          {hasTodoSource && (
+            <>
+              <span className="font-medium text-foreground">
+                {t('projectTodo.sourceLabel', { count: todoSourceIds.length, defaultValue: 'Linked todos: {{count}}' })}
+              </span>
+              <span className="text-muted-foreground">
+                {t('projectTodo.sourceActionsHint', {
+                  defaultValue: 'Linked todos support send, queue, or insert into the current task',
+                })}
+              </span>
+              {onDetachTodoSource && (
+                <button
+                  type="button"
+                  onClick={onDetachTodoSource}
+                  className="ml-auto shrink-0 rounded-md px-2 py-1 font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                >
+                  {t('projectTodo.detachSources', { defaultValue: 'Unlink todos (text and attachments stay)' })}
+                </button>
+              )}
+            </>
+          )}
+          {todoNotice && <span className="min-w-0 flex-1 truncate text-muted-foreground" role="status">{todoNotice}</span>}
         </div>
       )}
 
@@ -661,7 +719,7 @@ export default function ChatComposer({
             </div>
           )}
 
-          {attachedFiles.length > 0 && (
+          {(attachedFiles.length > 0 || storedAttachments.length > 0) && (
             <PromptInputHeader>
               <div className="rounded-xl bg-muted/40 p-2">
                 <div className="flex flex-wrap gap-2">
@@ -672,6 +730,30 @@ export default function ChatComposer({
                       onRemove={() => onRemoveAttachment(index)}
                       error={fileErrors.get(file.name)}
                     />
+                  ))}
+                  {storedAttachments.map((attachment, index) => (
+                    <div
+                      key={`stored-${attachment.path ?? attachment.name ?? index}`}
+                      className="flex h-10 max-w-full items-center gap-2 rounded-lg border border-border/50 bg-background/80 px-2 text-xs"
+                    >
+                      <PaperclipIcon className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden />
+                      <span className="min-w-0 truncate" title={attachment.name ?? attachment.path}>
+                        {attachment.name ?? attachment.path}
+                      </span>
+                      {onRemoveStoredAttachment && (
+                        <button
+                          type="button"
+                          onClick={() => onRemoveStoredAttachment(index)}
+                          aria-label={t('input.attachments.removeAttachment', {
+                            name: attachment.name ?? attachment.path ?? '',
+                            defaultValue: 'Remove {{name}}',
+                          })}
+                          className="shrink-0 rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                        >
+                          <XIcon className="h-3 w-3" aria-hidden />
+                        </button>
+                      )}
+                    </div>
                   ))}
                 </div>
               </div>
@@ -835,7 +917,7 @@ export default function ChatComposer({
             {!isMobile && (
               <>
                 <ScheduleMessagePopover
-                  disabled={!input.trim() || modelRequired}
+                  disabled={!input.trim() || modelRequired || hasTodoSource}
                   onSchedule={onScheduleMessage}
                 />
 
@@ -881,7 +963,7 @@ export default function ChatComposer({
               </button>
             )}
 
-            {(isLoading || activity?.background) && hasAnyInput && !isRecording && !isTranscribing ? (
+            {!localTodoCommand && (isLoading || activity?.background) && hasAnyInput && !isRecording && !isTranscribing ? (
               // The caret menu replaces the plain button only when there is
               // something to send: an empty composer during a turn keeps the
               // one-tap Stop, and during background work the plain disabled ↑.
@@ -890,7 +972,7 @@ export default function ChatComposer({
                 hasInput={hasAnyInput}
                 hasText={Boolean(input.trim())}
                 canAbortSession={canAbortSession}
-                supportsSideQuestions={supportsSideQuestions}
+                supportsSideQuestions={supportsSideQuestions && !hasTodoSource}
                 supportsSteering={supportsSteering}
                 sendByCtrlEnter={sendByCtrlEnter}
                 onSelect={(choice) => {
@@ -977,7 +1059,7 @@ export default function ChatComposer({
                   {t('schedule.trigger')}
                 </span>
                 <ScheduleMessagePopover
-                  disabled={!input.trim() || modelRequired}
+                  disabled={!input.trim() || modelRequired || hasTodoSource}
                   onSchedule={(scheduledFor) => { close(); onScheduleMessage(scheduledFor); }}
                   inline
                 />

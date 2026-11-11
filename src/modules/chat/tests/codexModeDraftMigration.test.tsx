@@ -5,7 +5,7 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useCodexControls } from '@/modules/chat/hooks/useCodexControls';
 import { api } from '@/shared/api';
-import { readDraftText, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
+import { readDraftMeta, readDraftText, resetChatDrafts, writeDraftMeta, writeDraftText } from '@/shared/chatDrafts';
 import type { CodexSessionState, Project, ServerEvent } from '@/shared/types';
 
 const { listeners, subscribe } = vi.hoisted(() => ({
@@ -111,7 +111,9 @@ test('switching a new chat to Plan mode moves its draft into the allocated sessi
   const creation = deferredResponse();
   const create = vi.spyOn(api.providers, 'createSession').mockReturnValue(creation.promise);
   const hook = renderComposer();
+  const todoMeta = { todoIds: ['todo-1'], attachments: [{ path: '/store/notes.md', name: 'notes.md' }] };
   await act(async () => { hook.result.current.composer.setInput('write the handler'); });
+  await act(async () => { writeDraftMeta('project:project-1', todoMeta); });
   expect(readDraftText('project:project-1')).toBe('write the handler');
 
   let changing!: Promise<void>;
@@ -124,7 +126,9 @@ test('switching a new chat to Plan mode moves its draft into the allocated sessi
   expect(hook.result.current.sessionId).toBe('created');
   expect(hook.result.current.composer.input).toBe('write the handler and tests');
   expect(readDraftText('created')).toBe('write the handler and tests');
+  expect(readDraftMeta('created')).toEqual(todoMeta);
   expect(readDraftText('project:project-1')).toBe('');
+  expect(readDraftMeta('project:project-1')).toBeNull();
   expect(hook.established).toHaveBeenCalledTimes(1);
   expect(hook.send).toHaveBeenCalledWith(expect.objectContaining({
     type: 'chat.control', sessionId: 'created', control: { action: 'mode', mode: 'plan' },

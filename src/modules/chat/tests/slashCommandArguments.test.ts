@@ -72,7 +72,8 @@ const renderComposer = (provider: LLMProvider = 'claude', codexControls?: CodexC
 
 const renderLoadedComposer = async () => {
   const composer = renderComposer();
-  await waitFor(() => assert.equal(composer.view.result.current.slashCommandsCount, 2));
+  // Two project commands plus the locally injected `/todo`.
+  await waitFor(() => assert.equal(composer.view.result.current.slashCommandsCount, 3));
   return composer;
 };
 
@@ -218,7 +219,8 @@ for (const expandedBody of ['/plan review the change', '/goal pause']) {
       control: vi.fn(), steer: vi.fn(),
     };
     const { view, chatSends } = renderComposer('codex', codex);
-    await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 4));
+    // Two project commands, `/plan`, `/goal` and the locally injected `/todo`.
+    await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 5));
     await act(async () => { view.result.current.setInput('/echo hi'); });
     await act(async () => { await view.result.current.handleSubmit({ preventDefault() {} } as never); });
     await waitFor(() => assert.equal(chatSends().length, 1));

@@ -52,6 +52,13 @@ type NativeTurn = {
    */
   workerBatchId?: string;
   /**
+   * Server-owned delivery proof bound to this exact turn. Fired once by either
+   * the matching `turn/started` notification or a `turn/start` acknowledgement
+   * that returned this turn's id. Absent on turns this adapter did not submit
+   * (for example an autonomous goal continuation), so those never inherit it.
+   */
+  onInputAccepted?: () => void;
+  /**
    * The input this adapter submitted for the turn, and the ID sent with it.
    * Native user items may arrive without `clientId`; correlation uses this
    * record so the first input keeps the composer's identity. Absent for turns
@@ -340,6 +347,18 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     }
   }
 
+  /**
+   * The session-held copy of run options never keeps the per-run delivery
+   * callback. It closes over the run's todo ids/user id, while the gateway can
+   * only delete its own runtime-options key; the current turn still binds the
+   * callback from the raw options passed to `run`.
+   */
+  private persistedOptions(options: AnyRecord): AnyRecord {
+    const persisted = { ...options };
+    delete persisted.onInputAccepted;
+    return persisted;
+  }
+
   private async ensure(sessionId: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext,
     selection = this.settings.get(sessionId).modelSelection): Promise<NativeSession> {
     let session = this.sessions.get(sessionId);
@@ -353,12 +372,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     }
     if (session) {
       session.writer = writer;
-      session.options = { ...session.options, ...options };
+      session.options = { ...session.options, ...this.persistedOptions(options) };
       await session.setup;
       return session;
     }
     session = {
-      id: sessionId, threadId: providerId, writer, context, options, startedAt: Date.now(),
+      id: sessionId, threadId: providerId, writer, context, options: this.persistedOptions(options), startedAt: Date.now(),
       state: { ...this.getState(sessionId), runtime: 'app-server', phase: 'starting', error: undefined }, model: '', modelProvider: null,
       setup: null, goalMutation: null, turn: null, prediction: null, composerPredictionsOptIn: false, historyReady: Boolean(providerId), completedTurns: new Set(), children: new Set(), stop: null, stopRequested: Boolean(providerId) && this.settings.get(sessionId).queueHeld,
     };
@@ -580,6 +599,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       : undefined;
     const turn = this.newTurn(session, writer, null,
       workerWakeup ? session.composerPredictionsOptIn : options.composerPredictions === true, workerBatchId);
+    // Only this run's own turn carries the callback; the once behaviour lives
+    // in the gateway, and a later turn starts without it.
+    turn.onInputAccepted = typeof options.onInputAccepted === 'function'
+      ? options.onInputAccepted as () => void
+      : undefined;
     this.publish(session);
     try {
       // Recorded before the RPC but inside the guarded block: item notifications
@@ -611,6 +635,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (!result?.turn?.id) throw new Error('Codex did not return a turn id.');
       session.historyReady = true;
       turn.id = result.turn.id;
+      // A returned turn id is native proof this exact input was accepted. A
+      // short turn may already have completed before this acknowledgement; the
+      // matching `turn/started` then already consumed the same callback.
+      const acceptOnAck = turn.onInputAccepted;
+      if (acceptOnAck) { turn.onInputAccepted = undefined; acceptOnAck(); }
       if (!turn.terminal) {
         session.state.turnId = turn.id;
         session.state.phase = session.stopRequested ? 'stopping' : 'running';
@@ -1018,6 +1047,14 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (session.turn!.id && session.turn!.id !== turnId) return;
       session.historyReady = true;
       session.turn!.id = turnId;
+      // The matching native turn exists: this turn's submitted input was
+      // accepted even if `turn/start` has not acknowledged yet (short turns can
+      // finish first). Consumed once here so a later acknowledgement is a no-op.
+      if (session.turn!.onInputAccepted) {
+        const acceptOnStart = session.turn!.onInputAccepted;
+        session.turn!.onInputAccepted = undefined;
+        acceptOnStart();
+      }
       session.state.turnId = turnId;
       session.state.phase = session.stopRequested ? 'stopping' : 'running';
       // A running native turn proves the start was accepted; retire the stale

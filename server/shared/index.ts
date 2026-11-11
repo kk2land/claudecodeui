@@ -1,8 +1,13 @@
 export {
   appendFilesInputTag,
   buildCodexInputItems,
+  getGlobalImageAssetsDir,
   normalizeImageDescriptors,
   parseFilesInputTag,
+} from './image-attachments.js';
+
+export type {
+  ChatAttachmentDescriptor,
 } from './image-attachments.js';
 
 export type {
@@ -43,6 +48,10 @@ export type {
   ProviderRuntimeState,
   ProviderRuntimeWriter,
   ProviderSessionModel,
+  PreparedProjectTodo,
+  ProjectTodo,
+  ProjectTodoAttachment,
+  ProjectTodoStatus,
   QueuedChatMessage,
   QueuedSessionMessageRecord,
   RealtimeClientConnection,
@@ -59,6 +68,8 @@ export type {
   InMemorySideQuestionsStore,
   SubagentActivity,
   SubagentInfo,
+  TodoDraftMeta,
+  TodoUploadFile,
   WorkflowAgentActivity,
   CodexWorkerBridge,
   CodexWorkerPrepareSessionInput,

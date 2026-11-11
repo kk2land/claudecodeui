@@ -17,7 +17,7 @@ import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
 import { MAX_QUEUED_MESSAGES, PROVIDER_PERMISSION_PREFERENCE_KEYS } from '@/shared/constants';
 import { readUserPreference } from '@/shared/userSettings';
-import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, PendingSteer, QueuedDraft, SessionActivityMap, StatusCommandData, SteerOutcome,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, CodexControls, ComposerPredictionControls, CommandModalPayload, CostCommandData, HelpCommandData, MarkSessionProcessing, ModelCommandData, PendingSteer, ProjectTodo, QueuedDraft, SessionActivityMap, StatusCommandData, SteerOutcome,QueuedSendOptions,ChatAttachment,ChatMessage,PendingPermissionRequest,PermissionMode,SessionEstablishedContext,Project,ProjectSession,LLMProvider,SlashCommand,TodoDraftMeta,PreparedProjectTodo } from '@/shared/types';
 import { grantClaudeToolPermission } from '@/modules/chat/utils/chatPermissions';
 import {
   getAndroidBridge,
@@ -26,14 +26,17 @@ import {
 } from '@/modules/android-bridge';
 import {
   QueueLimitError,
+  clearDraftInput,
   clearQueuedMessage,
   hydrateChatDrafts,
+  readDraftMeta,
   readDraftText,
   readQueuedMessageFiles,
   readQueuedMessages,
   rememberPendingChatSend,
   subscribeToChatDrafts,
   takeRejectedChatSends,
+  writeDraftMeta,
   writeDraftText,
   writeQueuedMessage,
   writeQueuedMessages,
@@ -46,6 +49,7 @@ import { useSlashCommands } from '@/modules/chat/hooks/useSlashCommands';
 import { useComposerPrediction } from '@/modules/chat/hooks/useComposerPrediction';
 import { useComposerPredictionsPreference } from '@/modules/chat/hooks/useComposerPredictionsPreference';
 import { useAskSideQuestion } from '@/modules/chat/hooks/useSideQuestions';
+import { appendPreparedTodo, parseComposerTodoCommand } from '@/modules/chat/utils/todoCommands';
 
 type UseChatComposerStateArgs = {
   selectedProject: Project | null;
@@ -376,6 +380,32 @@ export function useChatComposerState({
     };
   });
   const input = inputState.value;
+  // Todo ids and copied attachments saved with this draft. They belong to the
+  // same scope as `inputState`; a source draft keeps them through text edits and
+  // restores them on a scope switch, so a send can submit the todo it came from.
+  const [draftMetaState, setDraftMetaState] = useState<{ scope: string | null; meta: TodoDraftMeta | null }>(() => {
+    if (typeof window === 'undefined') {
+      return { scope: null, meta: null };
+    }
+    const initialScope = selectedSession?.id || currentSessionId
+      || (selectedProject ? `project:${selectedProject.projectId}` : null);
+    return { scope: initialScope, meta: initialScope ? readDraftMeta(initialScope) : null };
+  });
+  // Read at submit time; a source added or detached must apply to the very next
+  // send without waiting for a re-render of the submit callback.
+  const draftMetaRef = useRef(draftMetaState.meta);
+  draftMetaRef.current = draftMetaState.meta;
+  const todoSourceIds = draftMetaState.meta?.todoIds ?? [];
+  const storedAttachments = draftMetaState.meta?.attachments ?? [];
+  // The project todo list opened by the local `/todo` command.
+  const [todoDialogOpen, setTodoDialogOpen] = useState(false);
+  // Short local confirmation for saving/appending a todo; never a chat turn.
+  const [todoNotice, setTodoNotice] = useState<string | null>(null);
+  useEffect(() => {
+    if (todoNotice !== t('projectTodo.saved', { defaultValue: 'Todo saved' })) return;
+    const timer = window.setTimeout(() => setTodoNotice(null), 3000);
+    return () => window.clearTimeout(timer);
+  }, [todoNotice, t]);
   const [attachedFiles, setAttachedFiles] = useState<File[]>([]);
   // Mirrors the latest attachment list so a share/picker insertion can reject
   // synchronously when the composer is already full, without racing state.
@@ -383,6 +413,14 @@ export function useChatComposerState({
   useEffect(() => {
     attachedFilesRef.current = attachedFiles;
   }, [attachedFiles]);
+  // Parsed once here; the composer only consumes the boolean so the UI and the
+  // submit path can never disagree about what counts as a local command.
+  const localTodoCommand = useMemo(() => (
+    !editingAnchorId && Boolean(parseComposerTodoCommand(input, {
+      hasSources: todoSourceIds.length > 0,
+      hasAttachments: attachedFiles.length > 0 || storedAttachments.length > 0,
+    }))
+  ), [attachedFiles.length, editingAnchorId, input, storedAttachments.length, todoSourceIds.length]);
   const [fileErrors, setFileErrors] = useState<Map<string, string>>(new Map());
   const [isTextareaExpanded, setIsTextareaExpanded] = useState(false);
   const [commandModalPayload, setCommandModalPayload] = useState<CommandModalPayload | null>(null);
@@ -614,6 +652,15 @@ export function useChatComposerState({
       if (!command || !selectedProject) {
         return;
       }
+      // A draft linked to project todos keeps its body literal: running any
+      // command here would overwrite or clear the todo text while the send
+      // still carries its todo ids. Stored attachments alone are not a source.
+      if ((draftMetaRef.current?.todoIds.length ?? 0) > 0) {
+        setTodoNotice(t('projectTodo.sourceActionsHint', {
+          defaultValue: 'Linked todos support send, queue, or insert into the current task',
+        }));
+        return;
+      }
 
       try {
         const effectiveInput = rawInput ?? input;
@@ -689,6 +736,7 @@ export function useChatComposerState({
       selectedProject,
       selectedSession?.id,
       addMessage,
+      t,
       tokenBudget,
     ],
   );
@@ -728,6 +776,149 @@ export function useChatComposerState({
     textareaRef,
     onExecuteCommand: executeCommand,
   });
+
+  /** Applies todo sources for one scope and mirrors them into the draft store. */
+  const applyDraftMeta = useCallback((scope: string | null, meta: TodoDraftMeta | null) => {
+    draftMetaRef.current = meta;
+    setDraftMetaState({ scope, meta });
+    if (scope) writeDraftMeta(scope, meta);
+  }, []);
+
+  /**
+   * Clears the todo source link but keeps the text and every attachment it
+   * added. Stored attachments with no todo ids are ordinary draft files, so
+   * the meta becomes null only when nothing at all is left.
+   */
+  const detachTodoSource = useCallback(() => {
+    const current = draftMetaRef.current;
+    const meta = current && current.attachments.length > 0
+      ? { todoIds: [], attachments: current.attachments }
+      : null;
+    applyDraftMeta(draftScopeRef.current, meta);
+    setTodoNotice(null);
+  }, [applyDraftMeta]);
+
+  /**
+   * Clears the composer's current input — text and todo sources — while leaving
+   * its queue untouched. Used after a send, queue or successful todo save.
+   */
+  const clearComposerDraft = useCallback((scope: string | null) => {
+    draftMetaRef.current = null;
+    setDraftMetaState({ scope, meta: null });
+    if (scope) clearDraftInput(scope);
+  }, []);
+
+  /** Removes one copied todo attachment from the draft, dropping the source when nothing is left. */
+  const removeStoredTodoAttachment = useCallback((index: number) => {
+    const current = draftMetaRef.current;
+    if (!current) return;
+    const attachments = current.attachments.filter((_, position) => position !== index);
+    const meta = current.todoIds.length > 0 || attachments.length > 0
+      ? { todoIds: current.todoIds, attachments }
+      : null;
+    applyDraftMeta(draftScopeRef.current, meta);
+  }, [applyDraftMeta]);
+
+  /**
+   * Saves the composer text and its current files/stored attachments as a
+   * project todo. Nothing is cleared and no session is touched until the
+   * server accepts it; a failure keeps every part of the input intact.
+   */
+  const createProjectTodo = useCallback(async (content: string): Promise<boolean> => {
+    const project = selectedProject;
+    const scope = draftScopeRef.current;
+    if (!project) return false;
+    const files = attachedFilesRef.current;
+    const stored = draftMetaRef.current?.attachments ?? [];
+    const formData = new FormData();
+    formData.append('content', content);
+    files.forEach((file) => formData.append('files', file));
+    if (stored.length > 0) formData.append('storedAttachments', JSON.stringify(stored));
+    try {
+      const response = await api.todos.create(project.projectId, formData);
+      if (!response.ok) throw new Error(`Todo save failed (${response.status})`);
+    } catch (error) {
+      console.error('Failed to save project todo:', error);
+      addMessage({
+        type: 'error',
+        content: t('projectTodo.saveFailed', { defaultValue: 'Failed to save the todo. Your input is kept.' }),
+        timestamp: new Date(),
+      });
+      return false;
+    }
+    if (draftScopeRef.current !== scope) return true;
+    setInput('');
+    inputValueRef.current = '';
+    setAttachedFiles([]);
+    setFileErrors(new Map());
+    draftMetaRef.current = null;
+    setDraftMetaState({ scope, meta: null });
+    resetCommandMenuState();
+    setIsTextareaExpanded(false);
+    if (textareaRef.current) textareaRef.current.style.height = 'auto';
+    // A save is a send-like action: clear the draft's text and sources, but
+    // leave its pending queue alone.
+    if (scope) clearDraftInput(scope);
+    setTodoNotice(t('projectTodo.saved', { defaultValue: 'Todo saved' }));
+    return true;
+  }, [addMessage, resetCommandMenuState, selectedProject, setInput, t]);
+
+  /**
+   * Appends one selected todo's prepared text and attachments to the composer.
+   * Rejects duplicates and anything that would exceed the attachment cap, so
+   * the current input is never partially replaced.
+   */
+  const selectProjectTodo = useCallback(async (todo: ProjectTodo): Promise<boolean> => {
+    const project = selectedProject;
+    const scope = draftScopeRef.current;
+    if (!project || todo.projectId !== project.projectId) return false;
+    const current = draftMetaRef.current;
+    if (current?.todoIds.includes(todo.id)) {
+      // Idempotent: show the notice, focus what is already there and close the
+      // list. Nothing is inserted twice and nothing is marked submitted.
+      setTodoNotice(t('projectTodo.alreadyAdded', { defaultValue: 'This todo is already in the current input.' }));
+      setTodoDialogOpen(false);
+      textareaRef.current?.focus();
+      return true;
+    }
+    try {
+      const prepared = await api.todos.prepare(project.projectId, [todo.id]);
+      if (!prepared.ok) throw new Error(`Prepare failed (${prepared.status})`);
+      const body = await prepared.json() as { draft?: PreparedProjectTodo };
+      if (!body.draft) throw new Error('No prepared draft returned.');
+      // The project or session may have changed while the request was in flight.
+      if (draftScopeRef.current !== scope) return false;
+      // One atomic check over the final composer: existing stored descriptors
+      // plus the prepared ones plus the browser files already attached.
+      const appended = appendPreparedTodo(
+        { text: inputValueRef.current, meta: draftMetaRef.current },
+        body.draft,
+        attachedFilesRef.current.length,
+      );
+      if (!appended) {
+        setTodoNotice(t('projectTodo.attachmentLimit', { defaultValue: 'Up to 10 files, 10 MB each.' }));
+        return false;
+      }
+      setInput(appended.text);
+      inputValueRef.current = appended.text;
+      // Persist the text before notifying about the sources, so the draft
+      // subscription cannot restore the pre-append text over it.
+      if (scope) writeDraftText(scope, appended.text);
+      applyDraftMeta(scope, appended.meta);
+      setTodoDialogOpen(false);
+      setTodoNotice(null);
+      textareaRef.current?.focus();
+      return true;
+    } catch (error) {
+      console.error('Failed to append project todo:', error);
+      addMessage({
+        type: 'error',
+        content: t('projectTodo.appendFailed', { defaultValue: 'Failed to add the todo. Try again.' }),
+        timestamp: new Date(),
+      });
+      return false;
+    }
+  }, [addMessage, applyDraftMeta, selectedProject, setInput, t]);
 
   const {
     showFileDropdown,
@@ -794,7 +985,9 @@ export function useChatComposerState({
       }
     });
 
-    const availableSlots = Math.max(0, MAX_ATTACHMENT_COUNT - attachedFilesRef.current.length);
+    // Stored todo attachments count toward the same cap as browser files.
+    const storedCount = draftMetaRef.current?.attachments.length ?? 0;
+    const availableSlots = Math.max(0, MAX_ATTACHMENT_COUNT - attachedFilesRef.current.length - storedCount);
     const acceptedFiles = validFiles.slice(0, availableSlots);
     if (acceptedFiles.length > 0) {
       attachedFilesRef.current = [...attachedFilesRef.current, ...acceptedFiles].slice(0, MAX_ATTACHMENT_COUNT);
@@ -878,7 +1071,7 @@ export function useChatComposerState({
   // on: Codex native app-server, advertised support, and the persisted switch.
   // Captured per send so a queued message keeps the choice it was composed with.
   const composerPredictions = composerPredictionsEligible && composerPredictionsPreference.enabled;
-  const buildSendOptions = useCallback((currentInput: string): QueuedSendOptions => {
+  const buildSendOptions = useCallback((currentInput: string, todoIdsOverride?: string[]): QueuedSendOptions => {
     const getToolsSettings = () => readUserPreference(
       PROVIDER_PERMISSION_PREFERENCE_KEYS[provider],
       {
@@ -889,7 +1082,9 @@ export function useChatComposerState({
     );
 
     const toolsSettings = getToolsSettings();
-
+    // A caller that already snapshotted the submission's sources passes them in;
+    // reading the live draft here would lose them after a scope migration.
+    const todoIds = todoIdsOverride ?? draftMetaRef.current?.todoIds ?? [];
     return {
       ...(provider === 'codex' && codexMode ? { collaborationMode: codexMode } : {}),
       // Explicit per-turn opt-in; the backend never requests a prediction for a
@@ -901,6 +1096,9 @@ export function useChatComposerState({
       toolsSettings,
       skipPermissions: toolsSettings?.skipPermissions || false,
       sessionSummary: getNotificationSessionSummary(selectedSession, currentInput),
+      // Canonical todo sources for the send that consumes this draft; only a
+      // server-side acceptance may mark them submitted.
+      ...(todoIds.length > 0 ? { todoIds } : {}),
     };
   }, [
     codexMode,
@@ -1073,13 +1271,11 @@ export function useChatComposerState({
         if (textareaRef.current) {
           textareaRef.current.style.height = 'auto';
         }
-        if (draftScopeRef.current) {
-          writeDraftText(draftScopeRef.current, '');
-        }
+        clearComposerDraft(draftScopeRef.current);
       }
       return true;
     },
-    [addMessage, queueFullMessage, recordSentMessage, resetCommandMenuState, setInput],
+    [addMessage, clearComposerDraft, queueFullMessage, recordSentMessage, resetCommandMenuState, setInput],
   );
 
   // Every change to the pending steers goes through here so the ref the
@@ -1095,7 +1291,7 @@ export function useChatComposerState({
   // composer at once, as a sent message does, and waits as a card until the
   // agent reads it. Attachments must already be uploaded.
   const steerIntoRunningTurn = useCallback(
-    (message: { content: string; attachments: File[]; uploadedAttachments: unknown[] }, steerSessionKey: string) => {
+    (message: { content: string; attachments: File[]; uploadedAttachments: unknown[]; todoIds?: string[] }, steerSessionKey: string) => {
       const messageId = createSteerMessageId();
       updatePendingSteers((current) => [...current, {
         messageId,
@@ -1103,6 +1299,7 @@ export function useChatComposerState({
         content: message.content,
         attachments: message.attachments,
         uploadedAttachments: message.uploadedAttachments,
+        ...(message.todoIds?.length ? { todoIds: message.todoIds } : {}),
         status: 'sending',
       }]);
       sendMessage({
@@ -1110,7 +1307,10 @@ export function useChatComposerState({
         sessionId: steerSessionKey,
         messageId,
         content: message.content,
-        options: { attachments: message.uploadedAttachments },
+        options: {
+          attachments: message.uploadedAttachments,
+          ...(message.todoIds?.length ? { todoIds: message.todoIds } : {}),
+        },
       });
       recordSentMessage(message.content, steerSessionKey);
 
@@ -1124,16 +1324,15 @@ export function useChatComposerState({
         if (textareaRef.current) {
           textareaRef.current.style.height = 'auto';
         }
-        if (draftScopeRef.current) {
-          writeDraftText(draftScopeRef.current, '');
-        }
+        clearComposerDraft(draftScopeRef.current);
       } else if (readDraftText(steerSessionKey) === message.content) {
         // The user changed sessions during the upload; the composer they left
         // must not still hold the message as its draft.
         writeDraftText(steerSessionKey, '');
+        writeDraftMeta(steerSessionKey, null);
       }
     },
-    [recordSentMessage, resetCommandMenuState, sendMessage, setInput, updatePendingSteers],
+    [clearComposerDraft, recordSentMessage, resetCommandMenuState, sendMessage, setInput, updatePendingSteers],
   );
 
   /**
@@ -1168,7 +1367,12 @@ export function useChatComposerState({
         content: steer.content,
         attachments: steer.attachments,
         uploadedAttachments: steer.uploadedAttachments,
-        options: buildSendOptions(steer.content),
+        options: {
+          // The refused steer carries its own sources; the live draft may
+          // already belong to a different message.
+          ...buildSendOptions(steer.content, steer.todoIds ?? []),
+          ...(steer.todoIds?.length ? { todoIds: steer.todoIds } : {}),
+        },
       }, steer.sessionKey, { fromComposer: false });
     },
     [buildSendOptions, queueMessage, updatePendingSteers],
@@ -1197,9 +1401,26 @@ export function useChatComposerState({
       .join('\n\n');
     setInput(restored);
     inputValueRef.current = restored;
-    setAttachedFiles((current) => [...unread.flatMap((steer) => steer.attachments), ...current]);
+    setAttachedFiles((current) => [
+      // An accepted-but-unread steer restores its descriptors when it has them
+      // (see the meta merge below) and only falls back to its browser files
+      // when it never uploaded any; restoring both would upload a second copy.
+      ...unread.flatMap((steer) => (steer.uploadedAttachments.length > 0 ? [] : steer.attachments)),
+      ...current,
+    ]);
     writeDraftText(sessionKey, restored);
-  }, [isLoading, sessionKey, setInput, updatePendingSteers]);
+    // The unread steers still belong to this draft: keep their todo sources and
+    // uploaded descriptors so the next send or queue can submit them.
+    const unreadTodoIds = [...new Set(unread.flatMap((steer) => steer.todoIds ?? []))];
+    const unreadAttachments = unread.flatMap((steer) => steer.uploadedAttachments) as ChatAttachment[];
+    if (unreadTodoIds.length > 0 || unreadAttachments.length > 0) {
+      const previousMeta = draftMetaRef.current;
+      applyDraftMeta(sessionKey, {
+        todoIds: [...new Set([...(previousMeta?.todoIds ?? []), ...unreadTodoIds])],
+        attachments: [...(previousMeta?.attachments ?? []), ...unreadAttachments],
+      });
+    }
+  }, [applyDraftMeta, isLoading, sessionKey, setInput, updatePendingSteers]);
 
   // Cards belong to the session they were sent into; switching away drops
   // them (the messages themselves are already the run's, on the server).
@@ -1225,20 +1446,68 @@ export function useChatComposerState({
       let currentInput = queuedSubmission?.content ?? inputValueRef.current;
       const currentAttachments = queuedSubmission?.attachments ?? attachedFiles;
       const previouslyUploadedAttachments = queuedSubmission?.uploadedAttachments ?? [];
+      // Snapshot this submission's todo sources before any await or draft-scope
+      // migration. A DSH new chat migrates the project draft inside
+      // `prepareSessionForSend`, which clears the live meta; reading it again
+      // after that would silently drop the sources. A queued entry owns its
+      // sources in its own persisted options.
+      const queuedTodoIds = queuedSubmission?.options?.todoIds;
+      const submissionTodoIds = queuedSubmission
+        ? (Array.isArray(queuedTodoIds) ? queuedTodoIds.filter((id): id is string => typeof id === 'string') : [])
+        : [...(draftMetaRef.current?.todoIds ?? [])];
+      const hasTodoSources = submissionTodoIds.length > 0;
+      // Stored descriptors belong to the draft being edited; a queued entry that
+      // is merely being re-dispatched must never inherit them.
+      const draftStoredAttachments: ChatAttachment[] = queuedSubmission
+        ? []
+        : (draftMetaRef.current?.attachments ?? []);
       if (
         (
           !currentInput.trim()
           && currentAttachments.length === 0
           && previouslyUploadedAttachments.length === 0
+          && (queuedSubmission ? true : (draftMetaRef.current?.attachments.length ?? 0) === 0)
         )
         || !selectedProject
       ) {
         return;
       }
 
+      // A draft carrying todo sources treats its text as literal todo content:
+      // leading slashes stay literal, and only the explicit final `/todo` line
+      // (handled by the parser) opens the list.
+      const localTodoCommand = !queuedSubmission && !editingAnchorId && !submitOptions?.skipCommandInterception
+        ? parseComposerTodoCommand(currentInput, {
+            hasSources: hasTodoSources,
+            hasAttachments: currentAttachments.length > 0 || draftStoredAttachments.length > 0,
+          })
+        : null;
+      if (localTodoCommand) {
+        if (localTodoCommand.kind === 'open') {
+          if (localTodoCommand.text !== currentInput) {
+            setInput(localTodoCommand.text);
+            inputValueRef.current = localTodoCommand.text;
+            if (draftScopeRef.current) writeDraftText(draftScopeRef.current, localTodoCommand.text);
+          }
+          setTodoDialogOpen(true);
+          return;
+        }
+        if (
+          localTodoCommand.text.trim()
+          || currentAttachments.length > 0
+          || previouslyUploadedAttachments.length > 0
+          || draftStoredAttachments.length > 0
+        ) {
+          await createProjectTodo(localTodoCommand.text);
+          return;
+        }
+        setTodoDialogOpen(true);
+        return;
+      }
+
       // Native controls precede the busy queue branch; pause must never wait behind a turn.
       let planTask = false;
-      if (provider === 'codex' && codexControls && !queuedSubmission && !submitOptions?.skipCommandInterception) {
+      if (!hasTodoSources && !editingAnchorId && provider === 'codex' && codexControls && !queuedSubmission && !submitOptions?.skipCommandInterception) {
         const command = /^(\/plan|\/goal)(?:\s+([\s\S]*))?$/.exec(currentInput.trimEnd());
         if (command) {
           const argument = command[2]?.trim() ?? '';
@@ -1279,7 +1548,7 @@ export function useChatComposerState({
       // would otherwise allocate a session and send the raw `/btw ...` text
       // as a turn. A queued re-dispatch never carries this prefix, so it is
       // skipped.
-      if (!queuedSubmission && !submitOptions?.skipCommandInterception) {
+      if (!hasTodoSources && !editingAnchorId && !queuedSubmission && !submitOptions?.skipCommandInterception) {
         const btwMatch = currentInput.trim().match(/^\/btw(?:\s+([\s\S]*))?$/i);
         if (btwMatch) {
           askSideQuestionAndClear(sessionKey, btwMatch[1] ?? '');
@@ -1315,7 +1584,7 @@ export function useChatComposerState({
           && supportsSteering
           && Boolean(sessionKey)
           && !currentInput.trimStart().startsWith('/');
-        const queuedOptions = { ...buildSendOptions(currentInput), ...(planTask ? { collaborationMode: 'plan' } : {}) };
+        const queuedOptions = { ...buildSendOptions(currentInput, submissionTodoIds), ...(planTask ? { collaborationMode: 'plan' } : {}) };
         const queuedSessionKey = sessionKey;
         let uploadedAttachments: unknown[] = [];
         try {
@@ -1331,11 +1600,13 @@ export function useChatComposerState({
           return;
         }
 
+        const mergedAttachments = [...draftStoredAttachments, ...uploadedAttachments];
         if (steersIntoTurn && queuedSessionKey) {
           steerIntoRunningTurn({
             content: currentInput,
             attachments: currentAttachments,
-            uploadedAttachments,
+            uploadedAttachments: mergedAttachments,
+            ...(submissionTodoIds.length ? { todoIds: submissionTodoIds } : {}),
           }, queuedSessionKey);
           return;
         }
@@ -1343,7 +1614,7 @@ export function useChatComposerState({
         queueMessage({
           content: currentInput,
           attachments: currentAttachments,
-          uploadedAttachments,
+          uploadedAttachments: mergedAttachments,
           options: queuedOptions,
         }, queuedSessionKey);
         return;
@@ -1353,7 +1624,7 @@ export function useChatComposerState({
       // Also accept exact "help" as a convenience alias for users who expect CLI-style help.
       const commandInput = currentInput.trimEnd();
       const isHelpAlias = commandInput.trim().toLowerCase() === 'help';
-      if (!planTask && !submitOptions?.skipCommandInterception && (commandInput.startsWith('/') || isHelpAlias)) {
+      if (!hasTodoSources && !editingAnchorId && !planTask && !submitOptions?.skipCommandInterception && (commandInput.startsWith('/') || isHelpAlias)) {
         // The name ends at the first whitespace of any kind, so "/cmd" followed
         // by a line break still runs /cmd (the Claude Code CLI splits the same way).
         const firstWhitespace = commandInput.search(/\s/);
@@ -1403,6 +1674,9 @@ export function useChatComposerState({
           return;
         }
       }
+      // Only new browser files were uploaded; stored todo attachments already
+      // have durable descriptors and are sent alongside them.
+      uploadedAttachments = [...draftStoredAttachments, ...uploadedAttachments];
 
       const resolvedProjectPath = selectedProject.fullPath || selectedProject.path || '';
       const sessionSummary = getNotificationSessionSummary(selectedSession, currentInput);
@@ -1481,7 +1755,8 @@ export function useChatComposerState({
       if (backgroundActivity?.background) {
         const work = ownBackgroundTasks(backgroundActivity.tasks ?? [])
           .map((task) => describeBackgroundTask(task, t));
-        const choice = submitOptions?.presetBackgroundChoice ?? await askBeforeSendingOverBackgroundWork(work, !editingAnchorId);
+        const choice = submitOptions?.presetBackgroundChoice
+          ?? await askBeforeSendingOverBackgroundWork(work, !editingAnchorId);
         if (choice === 'cancel' || sessionKeyRef.current !== targetSessionId) {
           return;
         }
@@ -1507,8 +1782,9 @@ export function useChatComposerState({
           queueMessage({
             content: currentInput,
             attachments: currentAttachments,
+            // `uploadedAttachments` already merged the draft's stored descriptors.
             uploadedAttachments,
-            options: { ...buildSendOptions(currentInput), ...(planTask ? { collaborationMode: 'plan' } : {}) },
+            options: { ...buildSendOptions(currentInput, submissionTodoIds), ...(planTask ? { collaborationMode: 'plan' } : {}) },
           }, targetSessionId);
           return;
         }
@@ -1542,7 +1818,7 @@ export function useChatComposerState({
       setTimeout(() => scrollToBottom(), 100);
 
       const sendOptions = {
-        ...(queuedSubmission?.options ?? buildSendOptions(messageContent)),
+        ...(queuedSubmission?.options ?? buildSendOptions(messageContent, submissionTodoIds)),
         clientMessageId,
         ...(planTask ? { collaborationMode: 'plan' } : {}),
         attachments: uploadedAttachments,
@@ -1568,6 +1844,7 @@ export function useChatComposerState({
           options: sendOptions,
           files: currentAttachments,
           attachments: uploadedAttachments,
+          ...(submissionTodoIds.length ? { todoIds: submissionTodoIds } : {}),
         });
       }
       // One message shape for every provider. The backend resolves the
@@ -1601,11 +1878,9 @@ export function useChatComposerState({
         textareaRef.current.style.height = 'auto';
       }
 
-      if (draftScopeRef.current) {
-        writeDraftText(draftScopeRef.current, '');
-      }
+      clearComposerDraft(draftScopeRef.current);
       // Runtime selection can migrate the draft before React adopts the new session scope.
-      if (prepareSessionForSend) writeDraftText(targetSessionId, '');
+      if (prepareSessionForSend) clearComposerDraft(targetSessionId);
     },
     [
       selectedSession,
@@ -1622,6 +1897,8 @@ export function useChatComposerState({
       onSessionProcessing,
       onSessionEstablished,
       provider,
+      clearComposerDraft,
+      createProjectTodo,
       queueMessage,
       recordSentMessage,
       resetCommandMenuState,
@@ -1749,9 +2026,26 @@ export function useChatComposerState({
     }
     setInput(target.content);
     inputValueRef.current = target.content;
-    setAttachedFiles(target.attachments);
+    // Persist the text before notifying about sources, so the draft
+    // subscription cannot restore the previous draft's body over it.
+    const scope = draftScopeRef.current;
+    if (scope) writeDraftText(scope, target.content);
+    // Uploaded descriptors are durable: restore them as the draft's stored
+    // attachments and leave the browser files out, so re-sending cannot upload
+    // a second copy. A legacy entry without descriptors keeps its File[] to be
+    // uploaded again. Sources are canonical in the queued options, and a plain
+    // entry clears whatever the pre-edit draft still carried.
+    const targetTodoIds = Array.isArray(target.options?.todoIds)
+      ? target.options.todoIds.filter((id): id is string => typeof id === 'string')
+      : [];
+    const targetUploaded = (target.uploadedAttachments ?? []) as ChatAttachment[];
+    const restoredFromDescriptors = targetUploaded.length > 0;
+    setAttachedFiles(restoredFromDescriptors ? [] : target.attachments);
+    applyDraftMeta(scope, restoredFromDescriptors || targetTodoIds.length > 0
+      ? { todoIds: targetTodoIds, attachments: targetUploaded }
+      : null);
     textareaRef.current?.focus();
-  }, [queuedDrafts, sessionKey, setInput]);
+  }, [applyDraftMeta, queuedDrafts, sessionKey, setInput]);
 
   /** Removes one queued entry (the head when no id is given) and its durable record. */
   const deleteQueuedDraft = useCallback((queuedDraftId?: string, queuedDraftPosition?: number) => {
@@ -1803,12 +2097,30 @@ export function useChatComposerState({
           ? previous.value.trim() ? `${previous.value}\n\n${rejectedText}` : rejectedText
           : previous.value;
         inputValueRef.current = value;
+        // Persist before merging sources below: that write notifies this same
+        // subscription, which must read the restored text rather than the
+        // cleared draft it replaced.
+        if (value) writeDraftText(draftScope, value);
         return { scope: draftScope, value };
       });
       setAttachedFiles((previous) => {
-        const files = rejected.flatMap((send) => send.files);
+        // A send that already uploaded its files restores the descriptors only,
+        // so a retry cannot upload the same files again under new paths. A send
+        // without descriptors (the upload never happened) keeps its File[]s.
+        const files = rejected.flatMap((send) => (send.attachments.length > 0 ? [] : send.files));
         return files.length === 0 ? previous : [...previous, ...files.filter((file) => !previous.includes(file))];
       });
+      // A refused send's todo sources and uploaded descriptors come back with
+      // it, so retrying submits the same todos instead of losing them.
+      const rejectedTodoIds = [...new Set(rejected.flatMap((send) => send.todoIds ?? []))];
+      const rejectedAttachments = rejected.flatMap((send) => send.attachments) as ChatAttachment[];
+      if (rejectedTodoIds.length > 0 || rejectedAttachments.length > 0) {
+        const previousMeta = draftMetaRef.current;
+        applyDraftMeta(draftScope, {
+          todoIds: [...new Set([...(previousMeta?.todoIds ?? []), ...rejectedTodoIds])],
+          attachments: [...(previousMeta?.attachments ?? []), ...rejectedAttachments],
+        });
+      }
     };
 
     const restoreDraft = () => {
@@ -1820,12 +2132,21 @@ export function useChatComposerState({
         inputValueRef.current = savedInput;
         return { scope: draftScope, value: savedInput };
       });
+      // Todo sources travel with the draft scope: refresh them before a
+      // rejected send merges its own sources in.
+      const savedMeta = readDraftMeta(draftScope);
+      draftMetaRef.current = savedMeta;
+      setDraftMetaState((previous) => (
+        previous.scope === draftScope && JSON.stringify(previous.meta) === JSON.stringify(savedMeta)
+          ? previous
+          : { scope: draftScope, meta: savedMeta }
+      ));
       restoreRejectedSends();
     };
 
     restoreDraft();
     return subscribeToChatDrafts(restoreDraft);
-  }, [draftScope]);
+  }, [applyDraftMeta, draftScope]);
 
   // Only persist text that was typed for the scope it is about to be written
   // to; see the inputState declaration for why the scope travels with the text.
@@ -1978,6 +2299,7 @@ export function useChatComposerState({
 
       setInput(newValue);
       inputValueRef.current = newValue;
+      setTodoNotice(null);
       setCursorPosition(cursorPos);
 
       if (!newValue.trim()) {
@@ -2034,7 +2356,9 @@ export function useChatComposerState({
         // or mention instead of asking the side question.
         if (event.altKey && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
           event.preventDefault();
-          askSideQuestionAndClear(sessionKey, inputValueRef.current);
+          // Todo source drafts keep every slash/action literal; a side question
+          // would consume the todo text instead of sending it.
+          if (!draftMetaRef.current) askSideQuestionAndClear(sessionKey, inputValueRef.current);
           return;
         }
       }
@@ -2134,13 +2458,28 @@ export function useChatComposerState({
   const handleClearInput = useCallback(() => {
     setInput('');
     inputValueRef.current = '';
+    // The clear control only empties typed text and its todo sources; browser
+    // files and their errors keep the behavior they had before this feature.
+    setTodoNotice(null);
+    clearComposerDraft(draftScopeRef.current);
     resetCommandMenuState();
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
       textareaRef.current.focus();
     }
     setIsTextareaExpanded(false);
-  }, [resetCommandMenuState]);
+  }, [clearComposerDraft, resetCommandMenuState]);
+
+  // Removing the last text, file and stored attachment leaves no draft for a
+  // todo source to submit; drop the ids so the next unrelated message cannot
+  // claim them.
+  useEffect(() => {
+    if (!draftScope || inputState.scope !== draftScope) return;
+    const meta = draftMetaRef.current;
+    if (inputState.value !== '' || attachedFiles.length > 0) return;
+    if (!meta || meta.todoIds.length === 0 || meta.attachments.length > 0) return;
+    applyDraftMeta(draftScope, null);
+  }, [applyDraftMeta, attachedFiles.length, draftScope, inputState]);
 
   const handleAbortSession = useCallback(() => {
     if (!canAbortSession) {
@@ -2299,5 +2638,14 @@ export function useChatComposerState({
     commandModalPayload,
     closeCommandModal,
     showCostModal,
+    todoDialogOpen,
+    setTodoDialogOpen,
+    selectProjectTodo,
+    detachTodoSource,
+    removeStoredTodoAttachment,
+    todoNotice,
+    todoSourceIds,
+    storedAttachments,
+    localTodoCommand,
   };
 }

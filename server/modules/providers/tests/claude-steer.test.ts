@@ -85,6 +85,7 @@ function createScriptedQuery(): { createQuery: NonNullable<ProviderRuntimeContex
 
 async function withRun(
   runTest: (context: { script: Scripted; sent: NormalizedMessage[] }) => Promise<void>,
+  extraOptions: AnyRecord = {},
 ): Promise<void> {
   const cwd = await mkdtemp(path.join(os.tmpdir(), 'claude-steer-'));
   const { createQuery, script } = createScriptedQuery();
@@ -101,7 +102,7 @@ async function withRun(
   };
 
   try {
-    const done = queryClaudeSDK('run four commands', { sessionId: SESSION_ID, cwd }, writer as never, context);
+    const done = queryClaudeSDK('run four commands', { sessionId: SESSION_ID, cwd, ...extraOptions }, writer as never, context);
     await waitFor(() => script.stdin.length > 0);
     await runTest({ script, sent });
     script.end();
@@ -259,4 +260,98 @@ test('history leaves the CLI\'s own queued notes out', () => {
   };
 
   assert.deepEqual(sessions.normalizeMessage(row, SESSION_ID), []);
+});
+
+const assistantText = (model = 'claude-sonnet-5-5') => ({
+  type: 'assistant', session_id: NATIVE_ID, parent_tool_use_id: null,
+  message: { role: 'assistant', model, content: [{ type: 'text', text: 'hello' }] },
+});
+
+test('main-run acceptance needs real model output, not synthetic or API-error rows', async () => {
+  let accepted = 0;
+  await withRun(async ({ script }) => {
+    script.emit(init());
+    script.emit({ ...assistantText('<synthetic>') });
+    script.emit({ ...assistantText(), isApiErrorMessage: true });
+    script.emit({ type: 'system', subtype: 'compact_boundary' });
+    await settle();
+    assert.equal(accepted, 0);
+    script.emit(assistantText());
+    await waitFor(() => accepted === 1);
+    // A local/empty result carries no model usage, so it adds no second proof.
+    script.emit(result());
+    await settle();
+  }, { onInputAccepted: () => { accepted += 1; } });
+  assert.equal(accepted, 1);
+});
+
+test('a successful result is acceptance proof only when it reports model usage', async () => {
+  let usageAccepted = 0;
+  await withRun(async ({ script }) => {
+    script.emit(init());
+    script.emit({ type: 'result', subtype: 'success', session_id: NATIVE_ID, usage: { input_tokens: 5, output_tokens: 2 } });
+  }, { onInputAccepted: () => { usageAccepted += 1; } });
+  assert.equal(usageAccepted, 1);
+
+  let localAccepted = 0;
+  await withRun(async ({ script }) => {
+    script.emit(init());
+    script.emit(result());
+  }, { onInputAccepted: () => { localAccepted += 1; } });
+  assert.equal(localAccepted, 0);
+});
+
+test('a steered todo source is consumed only by the matching replay echo', async () => {
+  for (const echoedId of [STEER_ID, 'ffffffff-6d1a-4c2b-9e7f-1a2b3c4d5e6f']) {
+    let accepted = 0;
+    await withRun(async ({ script }) => {
+      script.emit(init());
+      script.emit(toolUse('toolu_echo'));
+      script.emit(toolResult('toolu_echo'));
+      await settle();
+      assert.equal(await steerClaudeSDKSession(SESSION_ID, 'skip the rest', {
+        messageId: STEER_ID, onInputAccepted: () => { accepted += 1; },
+      }), true);
+      await waitFor(() => script.stdin.length === 2);
+      script.emit(echo(echoedId, [{ type: 'text', text: 'skip the rest' }]));
+      await settle();
+      assert.equal(accepted, echoedId === STEER_ID ? 1 : 0);
+      script.emit(result());
+    });
+  }
+});
+
+test('a steered source left unread is never consumed by later output', async () => {
+  let accepted = 0;
+  await withRun(async ({ script }) => {
+    script.emit(init());
+    script.emit(toolUse('toolu_unread'));
+    script.emit(toolResult('toolu_unread'));
+    await settle();
+    assert.equal(await steerClaudeSDKSession(SESSION_ID, 'never read', {
+      messageId: STEER_ID, onInputAccepted: () => { accepted += 1; },
+    }), true);
+    await waitFor(() => script.stdin.length === 2);
+    script.emit(result());
+    await settle();
+    // Background/follow-up activity after the turn must not consume it either.
+    script.emit(assistantText());
+    await settle();
+    assert.equal(accepted, 0);
+  });
+});
+
+test('a refused steer never installs acceptance and keeps its source pending', async () => {
+  let accepted = 0;
+  await withRun(async ({ script }) => {
+    script.emit(init());
+    script.emit(result());
+    await settle();
+    assert.equal(await steerClaudeSDKSession(SESSION_ID, 'too late', {
+      messageId: STEER_ID, onInputAccepted: () => { accepted += 1; },
+    }), false);
+    script.emit(assistantText());
+    await settle();
+    assert.equal(accepted, 0);
+  });
 });

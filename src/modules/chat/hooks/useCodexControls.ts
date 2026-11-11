@@ -5,7 +5,7 @@ import { api } from '@/shared/api';
 import { createUuid } from '@/shared/utils';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
-import { hydrateChatDrafts, persistQueuedMessage, readDraftText, readQueuedDelivery, readQueuedMessage, readQueuedMessages, subscribeToChatDrafts, writeDraftText, writeQueuedMessages } from '@/shared/chatDrafts';
+import { hydrateChatDrafts, migrateDraftScope, persistQueuedMessage, readQueuedDelivery, readQueuedMessage, readQueuedMessages, subscribeToChatDrafts, writeQueuedMessages } from '@/shared/chatDrafts';
 import type { CodexControls, CodexControlAction, CodexSessionState, Project, SessionEstablishedContext } from '@/shared/types';
 
 const CONFIRMATION_PENDING_MESSAGE = 'Confirmation pending. Reconnect to check the saved state.';
@@ -150,10 +150,10 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
         if (!id) throw new Error('No session id returned.');
         if (creation.current !== entry) throw new Error('The Codex selection or project changed while creating the session.');
         // The new chat's latest draft must live under its session key before
-        // navigation, or switching to Plan mode drops what the user typed.
+        // navigation, todo sources included, or switching to Plan mode drops
+        // what the user typed. The project scope's queue is left untouched.
         const draftScope = `project:${project.projectId}`;
-        writeDraftText(id, readDraftText(draftScope));
-        writeDraftText(draftScope, '');
+        migrateDraftScope(draftScope, id);
         onSessionEstablished(id, { provider: 'codex', project, summary: body.data?.sessionName || 'Codex' });
         succeeded = true;
         return id as string;

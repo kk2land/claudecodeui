@@ -4,6 +4,7 @@ import path from 'node:path';
 import type { WebSocket } from 'ws';
 
 import { sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
+import { markTodosSubmitted } from '@/modules/todos/index.js';
 import {
   MAX_CONCURRENT_SIDE_QUESTIONS_PER_SESSION,
   providerCapabilitiesService,
@@ -230,6 +231,14 @@ function queueBusyChatSend(
   delete clientOptions.workerSource;
   delete clientOptions.workerFinalGuard;
   delete clientOptions.userTurn;
+  // The turn keeps its todo sources through the queue; validation happens here
+  // once, and the dispatcher re-checks at send time before any provider call.
+  try {
+    readTodoIdsAtBoundary(clientOptions);
+  } catch (error) {
+    sendProtocolError(ws, 'INVALID_TODO_IDS', (error as Error).message, sessionId);
+    return true;
+  }
   const clientMessageId = typeof clientOptions.clientMessageId === 'string' && clientOptions.clientMessageId.trim()
     ? clientOptions.clientMessageId.trim()
     : randomUUID();
@@ -373,6 +382,24 @@ function resolveSendTarget(
 }
 
 /**
+ * Reads the todo source ids of one client turn (POST /api/todos prepare output).
+ *
+ * Wire shape: `options.todoIds: string[]`. Anything malformed is a client bug,
+ * so it is refused rather than silently sent without its sources. The value is
+ * server-owned after this check and never forwarded to provider runtimes.
+ */
+function readTodoIdsAtBoundary(options: AnyRecord): string[] {
+  const value = options.todoIds;
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new AppError('todoIds must be an array of non-empty strings', {
+      code: 'INVALID_TODO_IDS', statusCode: 400,
+    });
+  }
+  return [...new Set((value as string[]).map((id) => id.trim()))];
+}
+
+/**
  * The attachments a send names, from any of the option keys clients use,
  * narrowed to files in the upload store and with duplicates dropped.
  */
@@ -429,6 +456,29 @@ async function dispatchRun(
     if (ws) sendProtocolError(ws, 'RUN_IN_PROGRESS', 'Pause the active goal or confirm the stop before starting another turn.', sessionId);
     return { started: false, error: 'A run was already in progress for this session.' };
   }
+  // Validate every server-owned input that can be refused before reserving the
+  // session. This frame is then rejected without a run slot, a queue-hold
+  // change, a rewind, or any provider call.
+  const clientOptions: AnyRecord = { ...(data.options ?? {}) };
+  // Server-owned wake-up markers are never accepted from chat.send/edit JSON.
+  // Only the detached dispatcher below re-adds them after a trusted check.
+  delete clientOptions.workerWakeup;
+  delete clientOptions.workerSource;
+  delete clientOptions.workerFinalGuard;
+  delete clientOptions.userTurn;
+  // Todo sources are consumed here and replaced by a server-owned acceptance
+  // callback; no provider runtime ever sees the ids or a client callback.
+  let todoIds: string[];
+  try {
+    todoIds = readTodoIdsAtBoundary(clientOptions);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (ws) sendProtocolError(ws, 'INVALID_TODO_IDS', message, sessionId);
+    return { started: false, error: message };
+  }
+  delete clientOptions.todoIds;
+  delete clientOptions.onInputAccepted;
+
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
@@ -456,13 +506,6 @@ async function dispatchRun(
     sessionRuntimeDb.update(sessionId, { queueHeld: false });
   }
 
-  const clientOptions: AnyRecord = { ...(data.options ?? {}) };
-  // Server-owned wake-up markers are never accepted from chat.send/edit JSON.
-  // Only the detached dispatcher below re-adds them after a trusted check.
-  delete clientOptions.workerWakeup;
-  delete clientOptions.workerSource;
-  delete clientOptions.workerFinalGuard;
-  delete clientOptions.userTurn;
   if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection) {
     // Queue entries retain their old options. The session's confirmed choice
     // owns every not-yet-started turn, so stale options cannot overwrite it.
@@ -507,6 +550,27 @@ async function dispatchRun(
   // detached/automatic wake-up never counts as an explicit user turn.
   runtimeOptions.userTurn = Boolean(ws);
   delete runtimeOptions.workerFinalGuard;
+  // Todo sources become submitted only when the provider's own raw events prove
+  // it took this turn's input. The callback is server-owned, fires at most once
+  // per run, and is dropped in `finally` so a later automatic turn (nextTurn)
+  // can never inherit this run's sources.
+  //
+  // The run's own lifecycle is the terminal fence: a runtime may keep its query
+  // alive after the app-facing `complete` (Claude background work), and output
+  // arriving then belongs to a later/automatic turn, never to this input.
+  const numericUserId = Number(userId);
+  if (todoIds.length && Number.isSafeInteger(numericUserId)) {
+    let accepted = false;
+    runtimeOptions.onInputAccepted = () => {
+      if (accepted || run.status !== 'running') return;
+      accepted = true;
+      try {
+        markTodosSubmitted({ userId: numericUserId, sessionId, todoIds });
+      } catch (error) {
+        console.error('[Chat] Failed to mark todo sources submitted', { sessionId, error });
+      }
+    };
+  }
   // The Codex app-server consults this immediately before creating its native
   // turn, covering a user message that arrived after the Worker gate above.
   if (workerWakeup && workerFinalGuard) runtimeOptions.deferTurn = workerFinalGuard;
@@ -555,6 +619,9 @@ async function dispatchRun(
       console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
     }
   } finally {
+    // The acceptance callback belongs to this run only; it must never fire for
+    // an automatic follow-up turn that reuses the runtime options object.
+    delete runtimeOptions.onInputAccepted;
     // Safety net: a runtime that crashed (or resolved) without emitting its
     // terminal `complete` would otherwise leave the session stuck in
     // "processing" forever on every connected client. Scoped to THIS run —
@@ -845,6 +912,7 @@ const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{
  */
 async function handleChatSteer(
   ws: WebSocket,
+  userId: string | number | null,
   data: AnyRecord,
   dependencies: ChatWebSocketDependencies
 ): Promise<void> {
@@ -865,12 +933,40 @@ async function handleChatSteer(
     return;
   }
 
+  let todoIds: string[];
+  try {
+    todoIds = readTodoIdsAtBoundary(clientOptions);
+  } catch (error) {
+    sendProtocolError(ws, 'INVALID_TODO_IDS', (error as Error).message, sessionId, { messageId });
+    return;
+  }
+
+  // A steered todo turn is submitted only when the provider echoes that exact
+  // message (Claude's replay user message, Codex's accepted steer RPC). The
+  // callback is server-owned and bound to this message id and app session.
+  const numericUserId = Number(userId);
+  let accepted = false;
+  const onInputAccepted = todoIds.length && Number.isSafeInteger(numericUserId)
+    ? () => {
+      if (accepted) return;
+      accepted = true;
+      try {
+        markTodosSubmitted({ userId: numericUserId, sessionId, todoIds });
+      } catch (error) {
+        console.error('[Chat] Failed to mark steered todo sources submitted', { sessionId, error });
+      }
+    }
+    : undefined;
+
   const run = chatRunRegistry.getRun(sessionId);
   const steered = run?.status === 'running'
     ? await dependencies.runtime.steer(provider, sessionId, content, {
       images: attachments.filter(isImageAttachmentDescriptor),
       files: attachments.filter((descriptor) => !isImageAttachmentDescriptor(descriptor)),
       messageId,
+      // Server-owned: the adapter calls this only when the provider proves it
+      // read this exact message. A client field of the same name is ignored.
+      ...(onInputAccepted ? { onInputAccepted } : {}),
     })
     : false;
 
@@ -1248,7 +1344,7 @@ export function handleChatConnection(
           handleChatSideQuestion(ws, data, dependencies);
           return;
         case 'chat.steer':
-          await handleChatSteer(ws, data, dependencies);
+          await handleChatSteer(ws, userId, data, dependencies);
           return;
         case 'chat.abort':
           await handleChatAbort(ws, data, dependencies);

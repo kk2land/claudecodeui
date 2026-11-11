@@ -318,6 +318,42 @@ export type QueueItemStatus = 'completed' | 'in_progress' | 'pending';
 
 // ---------------------------
 
+//----------------- PROJECT TODO ------------
+/** Lifecycle state of a per-user, per-project todo; submitted and deleted rows stay restorable for seven days after `stateChangedAt`. */
+export type ProjectTodoStatus = 'pending' | 'submitted' | 'deleted';
+
+/** One file attached to a project todo, addressed by the todo store's own attachment id rather than a chat asset path. */
+export type ProjectTodoAttachment = {
+  id: string;
+  name: string;
+  mimeType: string;
+  size: number;
+};
+
+/** One project todo as the Todo API returns it; `content` may be empty when only attachments were given, and every timestamp is an ISO-8601 string. */
+export type ProjectTodo = {
+  id: string;
+  projectId: string;
+  content: string;
+  attachments: ProjectTodoAttachment[];
+  status: ProjectTodoStatus;
+  createdAt: string;
+  updatedAt: string;
+  stateChangedAt: string;
+  /** App session id that submitted the todo; null while pending. */
+  submittedSessionId: string | null;
+};
+
+/** Todo ids and their current chat attachments saved alongside a draft, queue entry or steer so the send that consumes it can submit those todos. */
+export type TodoDraftMeta = {
+  todoIds: string[];
+  attachments: ChatAttachment[];
+};
+
+/** A todo prepared for sending: the literal `text` the composer submits plus the source ids and copied attachments that follow the draft. */
+export type PreparedProjectTodo = TodoDraftMeta & { text: string };
+
+// ---------------------------
 //----------------- CHAT MESSAGES AND PERMISSIONS ------------
 
 /** Permission preset a provider runs a turn under ('default', 'acceptEdits', 'auto', 'bypassPermissions' or 'plan'), chosen in the composer and sent with each message; the backend capability matrix decides which values a given provider accepts. */
@@ -867,6 +903,8 @@ export type QueuedDraft = {
    * permission settings while another session is being viewed.
    */
   options?: QueuedSendOptions;
+  /** Todo ids this queued turn came from, kept until the real send submits them. */
+  todoIds?: string[];
 };
 
 /**
@@ -884,6 +922,8 @@ export type PendingChatSend = {
   files: File[];
   /** Uploaded descriptors already carried by the send. */
   attachments: unknown[];
+  /** Todo ids carried by the send, so only a real acceptance submits them. */
+  todoIds?: string[];
 };
 
 /**
@@ -902,6 +942,8 @@ export type PendingSteer = {
   attachments: File[];
   /** Descriptors uploaded before it was sent, reused if it has to be queued instead. */
   uploadedAttachments: unknown[];
+  /** Todo ids kept with the steer so an accepted turn can submit them. */
+  todoIds?: string[];
   status: 'sending' | 'accepted';
 };
 

@@ -55,6 +55,28 @@ const CODEX_IMAGE_ONLY_PROMPT = 'Please analyze the attached image(s).';
  */
 const PROGRESSIVE_CODEX_ITEM_TYPES = new Set(['command_execution', 'mcp_tool_call', 'todo_list']);
 
+/**
+ * SDK item types that prove the model actually produced output for this turn:
+ * assistant prose, reasoning, tool calls, file edits, web searches and plans.
+ * Error items never count, so a failed/refused turn keeps its todos pending.
+ */
+const ACCEPTING_CODEX_ITEM_TYPES = new Set([
+  'agent_message', 'reasoning', 'command_execution', 'file_change', 'mcp_tool_call', 'web_search', 'todo_list',
+]);
+
+/**
+ * Whether one raw SDK event proves the run's input was accepted.
+ *
+ * The Codex runtime uses it to confirm todo sources; tests assert the
+ * classification without needing the CLI binary. Start markers, error items
+ * and failed turns are excluded.
+ */
+export function codexEventProvesAcceptance(event: AnyRecord): boolean {
+  if (event.type === 'turn.completed') return true;
+  return (event.type === 'item.started' || event.type === 'item.updated' || event.type === 'item.completed')
+    && ACCEPTING_CODEX_ITEM_TYPES.has(event.item?.type);
+}
+
 function readUsageNumber(value: unknown) {
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : 0;
@@ -407,6 +429,11 @@ async function queryCodex(
           break;
         }
       }
+
+      // Raw SDK proof that this input was accepted: a real model item or the
+      // SDK's own successful turn result. Start markers, errors and failed
+      // turns are excluded; an aborted loop above never reaches this.
+      if (codexEventProvesAcceptance(event)) options.onInputAccepted?.();
 
       // Progress events used to be dropped, so a long shell command or a
       // growing plan showed nothing until it finished. They are forwarded now;

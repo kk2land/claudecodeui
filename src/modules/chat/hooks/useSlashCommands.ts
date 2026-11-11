@@ -43,6 +43,18 @@ const saveCommandHistory = (projectName: string, history: Record<string, number>
 const isPromiseLike = (value: unknown): value is Promise<unknown> =>
   Boolean(value) && typeof (value as Promise<unknown>).then === 'function';
 
+/**
+ * Local application commands injected by the frontend itself, as opposed to
+ * provider/project commands fetched from the server. They open UI instead of
+ * running a provider turn, so the completion menu only ever inserts them.
+ */
+const isApplicationCommand = (command: SlashCommand): boolean =>
+  command.type === 'application' || command.metadata?.application === true;
+
+/** Completion inserts these into the input instead of executing them. */
+const isInsertOnlyCommand = (command: SlashCommand): boolean =>
+  isSkillCommand(command) || Boolean(command.metadata?.nativeControl) || isApplicationCommand(command);
+
 const filterSlashCommands = (
   commands: SlashCommand[],
   query: string,
@@ -123,7 +135,30 @@ export function useSlashCommands({
       { name: '/plan', description: t('codex.planCommand'), type: 'built-in', metadata: { nativeControl: true } },
       ...(goalsEnabled ? [{ name: '/goal', description: t('codex.goalCommand'), type: 'built-in', metadata: { nativeControl: true } }] : []),
     ] : [];
-    return [...nativeCommands, ...projectCommands.filter((command) => !(provider === 'codex' && !goalsEnabled && command.name === '/goal') && !nativeCommands.some((native) => native.name === command.name))].sort((commandA, commandB) => {
+    // `/todo` is a local application command: it is available as soon as a
+    // project is selected, without waiting for the provider command API or
+    // model list. It wins the dedupe below over a provider command of the same
+    // name, because the local command opens the project todo dialog.
+    const applicationCommands: SlashCommand[] = [{
+      name: '/todo',
+      description: t('projectTodo.commandDescription'),
+      type: 'application',
+      metadata: { application: true, local: true, opensProjectTodoDialog: true },
+    }];
+    const mergedCommands: SlashCommand[] = [];
+    const seenCommandNames = new Set<string>();
+    for (const command of [
+      ...nativeCommands,
+      ...applicationCommands,
+      ...projectCommands.filter((command) => !(provider === 'codex' && !goalsEnabled && command.name === '/goal')),
+    ]) {
+      if (seenCommandNames.has(command.name)) {
+        continue;
+      }
+      seenCommandNames.add(command.name);
+      mergedCommands.push(command);
+    }
+    return mergedCommands.sort((commandA, commandB) => {
       const commandAUsage = parsedHistory[commandA.name] || 0;
       const commandBUsage = parsedHistory[commandB.name] || 0;
       return commandBUsage - commandAUsage;
@@ -219,7 +254,7 @@ export function useSlashCommands({
 
   const selectCommandFromKeyboard = useCallback(
     (command: SlashCommand) => {
-      if (isSkillCommand(command) || command.metadata?.nativeControl) {
+      if (isInsertOnlyCommand(command)) {
         insertCommandIntoInput(command);
         return;
       }
@@ -241,7 +276,7 @@ export function useSlashCommands({
       }
 
       trackCommandUsage(command);
-      if (isSkillCommand(command) || command.metadata?.nativeControl) {
+      if (isInsertOnlyCommand(command)) {
         insertCommandIntoInput(command);
         return;
       }
@@ -311,7 +346,18 @@ export function useSlashCommands({
         return false;
       }
 
-      if (!filteredCommands.length) {
+      // `filteredCommands` lags the typed text by the query debounce, so a fast
+      // Enter could act on the previous query's first row. Resolve the slash
+      // word at the caret against the live list instead; only an explicit
+      // Arrow selection is read from the rendered menu.
+      const typedSlashToken = slashPosition >= 0
+        ? input.slice(slashPosition).match(/^\/\S*/)?.[0] ?? ''
+        : '';
+      const menuCommands = typedSlashToken
+        ? filterSlashCommands(slashCommands, typedSlashToken)
+        : filteredCommands;
+
+      if (!menuCommands.length) {
         if (event.key === 'Escape') {
           event.preventDefault();
           resetCommandMenuState();
@@ -323,7 +369,7 @@ export function useSlashCommands({
       if (event.key === 'ArrowDown') {
         event.preventDefault();
         setSelectedCommandIndex((previousIndex) =>
-          previousIndex < filteredCommands.length - 1 ? previousIndex + 1 : 0,
+          previousIndex < menuCommands.length - 1 ? previousIndex + 1 : 0,
         );
         return true;
       }
@@ -331,20 +377,35 @@ export function useSlashCommands({
       if (event.key === 'ArrowUp') {
         event.preventDefault();
         setSelectedCommandIndex((previousIndex) =>
-          previousIndex > 0 ? previousIndex - 1 : filteredCommands.length - 1,
+          previousIndex > 0 ? previousIndex - 1 : menuCommands.length - 1,
         );
         return true;
       }
 
       if (event.key === 'Tab' || event.key === 'Enter') {
-        event.preventDefault();
         // Until the user arrows through the menu nothing is highlighted, so both
-        // keys act on the first match — the entry the menu renders at the top.
-        const targetCommand = filteredCommands[selectedCommandIndex >= 0 ? selectedCommandIndex : 0];
+        // keys act on the first live match — what the menu shows once the query
+        // debounce catches up.
+        const targetCommand = menuCommands[selectedCommandIndex >= 0 ? selectedCommandIndex : 0]
+          ?? menuCommands[0];
         if (!targetCommand) {
+          event.preventDefault();
           return true;
         }
 
+        // An exact local command (`/todo` on its own, with or without a draft
+        // line around it) is a real send, not a completion: let the composer's
+        // own Enter handler run it once instead of consuming the key here.
+        if (
+          event.key === 'Enter'
+          && isApplicationCommand(targetCommand)
+          && typedSlashToken === targetCommand.name
+        ) {
+          resetCommandMenuState();
+          return false;
+        }
+
+        event.preventDefault();
         // Tab is completion, not submission: it only writes "<name> " into the
         // input and closes the menu, so an argument can still be typed before
         // Enter runs the command. Enter keeps executing the highlighted entry.
@@ -367,10 +428,13 @@ export function useSlashCommands({
     [
       showCommandMenu,
       filteredCommands,
+      input,
       insertCommandIntoInput,
       resetCommandMenuState,
       selectCommandFromKeyboard,
       selectedCommandIndex,
+      slashCommands,
+      slashPosition,
     ],
   );
 

@@ -75,7 +75,8 @@ const setUp = async (typedInput: string) => {
     { initialProps: { input: '' } },
   );
 
-  await waitFor(() => assert.equal(result.current.slashCommandsCount, 2));
+  // `/help` and the firewall command, plus the locally injected `/todo`.
+  await waitFor(() => assert.equal(result.current.slashCommandsCount, 3));
 
   // Mirror the composer: the textarea reports the typed text, then the hook is
   // told where the caret is so it can open and filter the menu.
@@ -156,6 +157,43 @@ describe('slash command menu keyboard selection', () => {
     await waitFor(() => {
       assert.equal(textarea.selectionStart, `${FIREWALL_COMMAND} `.length);
     });
+  });
+
+  it('executes the typed provider command on a fast Enter before the query debounce', async () => {
+    const setInputCalls: string[] = [];
+    const executedCommands: SlashCommand[] = [];
+    const typedInput = '/firewall-re';
+    const textarea = document.createElement('textarea');
+    document.body.appendChild(textarea);
+    textarea.value = typedInput;
+    textarea.setSelectionRange(typedInput.length, typedInput.length);
+    const { result } = renderHook(() => useSlashCommands({
+      selectedProject: project,
+      provider: 'claude',
+      input: typedInput,
+      setInput: (value) => {
+        setInputCalls.push(value as string);
+      },
+      textareaRef: { current: textarea },
+      onExecuteCommand: (command) => {
+        executedCommands.push(command);
+      },
+    }));
+
+    // Wait for the server command list, not for the query debounce.
+    await waitFor(() => assert.equal(result.current.slashCommandsCount, 3));
+    act(() => {
+      result.current.handleCommandInputChange(typedInput, typedInput.length);
+    });
+
+    const enter = keyEvent('Enter');
+    act(() => {
+      result.current.handleCommandMenuKeyDown(enter.event);
+    });
+
+    assert.equal(enter.wasPrevented(), true);
+    assert.deepEqual(executedCommands.map((command) => command.name), [FIREWALL_COMMAND]);
+    assert.deepEqual(setInputCalls, []);
   });
 
   it('still executes the highlighted command on Enter', async () => {

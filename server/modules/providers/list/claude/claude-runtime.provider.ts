@@ -61,6 +61,24 @@ const notificationEvent = createNotificationEvent as (event: AnyRecord) => unkno
 
 type ClaudeQuery = ReturnType<NonNullable<ProviderRuntimeContext['createQuery']>>;
 
+/**
+ * Whether a raw Claude `result` shows a real model request served this turn.
+ *
+ * The SDK reports cumulative usage only for requests that reached the model; a
+ * local slash-command result and an empty turn carry none. Callers use this as
+ * the fallback delivery proof when no assistant output arrived.
+ */
+function claudeResultUsedModel(message: AnyRecord): boolean {
+  const count = (value: unknown): number => typeof value === 'number' && Number.isFinite(value) ? value : 0;
+  const usage = message.usage as AnyRecord | undefined;
+  if (usage && (count(usage.input_tokens) + count(usage.output_tokens)
+    + count(usage.cache_read_input_tokens) + count(usage.cache_creation_input_tokens)) > 0) {
+    return true;
+  }
+  const modelUsage = message.modelUsage as AnyRecord | undefined;
+  return Boolean(modelUsage && Object.keys(modelUsage).length > 0);
+}
+
 /** The run's writer: the WebSocket writer adds a socket swap for reconnects. */
 type ClaudeRuntimeWriter = ProviderRuntimeWriter & { updateWebSocket?(rawWs: unknown): void };
 
@@ -98,6 +116,11 @@ type SteerRequest = {
   images?: unknown;
   files?: unknown;
   messageId: string;
+  /**
+   * Server-owned proof callback: called only when the CLI echoes this exact
+   * message (matched uuid) as read. Optional so older callers keep working.
+   */
+  onAccepted?: () => void;
 };
 
 type SteerInput = (request: SteerRequest) => Promise<boolean>;
@@ -1292,7 +1315,10 @@ async function queryClaudeSDK(
   // turn; a turn that ends before one runs it as a follow-up turn instead.
   // Refused once the turn has been reported complete: the client then sends
   // it as an ordinary new turn.
-  const steerIntoTurn: SteerInput = async ({ command: steerCommand, images, files, messageId }) => {
+  // Acceptance itself is not decided here: only the CLI's replay echo of this
+  // uuid proves it was read, and that is where `onAccepted` fires.
+  const steeredAcceptance = new Map<string, () => void>();
+  const steerIntoTurn: SteerInput = async ({ command: steerCommand, images, files, messageId, onAccepted }) => {
     if (turnCompleteSent) {
       return false;
     }
@@ -1303,10 +1329,12 @@ async function queryClaudeSDK(
     }
     pendingSteerIds.add(messageId);
     steeredMessageIds.add(messageId);
+    if (onAccepted) steeredAcceptance.set(messageId, onAccepted);
     const pushed = pushPromptMessage({ ...steerMessage, priority: 'next', uuid: messageId });
     if (!pushed) {
       pendingSteerIds.delete(messageId);
       steeredMessageIds.delete(messageId);
+      steeredAcceptance.delete(messageId);
     }
     return pushed;
   };
@@ -1654,6 +1682,13 @@ async function queryClaudeSDK(
         const echoedId = typeof message.uuid === 'string' ? message.uuid : '';
         pendingSteerIds.delete(echoedId);
         if (steeredMessageIds.has(echoedId)) {
+          // The CLI read this exact message: this is the only delivery proof a
+          // steer gets, so the todo sources are submitted here and nowhere else.
+          const accepted = steeredAcceptance.get(echoedId);
+          if (accepted) {
+            steeredAcceptance.delete(echoedId);
+            accepted();
+          }
           if (steerFollowUpTimer && pendingSteerIds.size === 0) {
             clearTimeout(steerFollowUpTimer);
             steerFollowUpTimer = null;
@@ -1693,6 +1728,10 @@ async function queryClaudeSDK(
         && message.message.model !== '<synthetic>'
       ) {
         mainThreadModel = message.message.model;
+        // A main-thread assistant message from a real model is the first raw
+        // proof the run's input was accepted. Synthetic limit/API-error rows,
+        // compaction, init/status and subagent output never reach this branch.
+        if ((message as AnyRecord).isApiErrorMessage !== true) options.onInputAccepted?.();
       }
 
       // Only a turn's `result` states the window of the model that served it.
@@ -1755,6 +1794,16 @@ async function queryClaudeSDK(
       }
 
       if (message.type === 'result') {
+        // A successful result is only a delivery proof when it reports usage
+        // from a real model request. A local/slash-command result carries none,
+        // and is_error / synthetic failures never count.
+        if (
+          message.subtype === 'success'
+          && (message as AnyRecord).is_error !== true
+          && claudeResultUsedModel(message as AnyRecord)
+        ) {
+          options.onInputAccepted?.();
+        }
         const abortPending = sessionKey() ? abortedSessionIds.has(sessionKey()) : false;
         if (pendingSteerIds.size > 0 && !abortPending) {
           // The turn ended before Claude reached a tool-call boundary, so the
@@ -1934,7 +1983,10 @@ async function steerClaudeSDKSession(sessionId: string, command: string, options
   const messageId = typeof options.messageId === 'string' && options.messageId
     ? options.messageId
     : crypto.randomUUID();
-  return session.steerInput({ command, images: options.images, files: options.files, messageId });
+  const onAccepted = typeof options.onInputAccepted === 'function'
+    ? options.onInputAccepted as () => void
+    : undefined;
+  return session.steerInput({ command, images: options.images, files: options.files, messageId, onAccepted });
 }
 
 /**

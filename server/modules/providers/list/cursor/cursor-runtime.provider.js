@@ -235,6 +235,9 @@ async function spawnCursor(command, options = {}, ws, context) {
             case 'assistant':
               // Accumulate assistant message chunks
               if (response.message && response.message.content && response.message.content.length > 0) {
+                // A real main-thread assistant message is the raw proof Cursor
+                // accepted this turn's input; init/status/result never call it.
+                options.onInputAccepted?.();
                 const normalized = context.normalizeMessage(response, capturedSessionId || sessionId || null);
                 for (const msg of normalized) ws.send(msg);
               }

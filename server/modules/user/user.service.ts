@@ -1,5 +1,6 @@
 import { AppError, MAX_QUEUED_MESSAGES } from '@/shared/index.js';
-import type { QueuedChatMessage } from '@/shared/index.js';
+import type { ChatAttachmentDescriptor, QueuedChatMessage, TodoDraftMeta } from '@/shared/index.js';
+import { filterAttachmentsToUploadStore } from '@/modules/websocket/index.js';
 
 type GitConfig = {
   git_name: string | null;
@@ -14,6 +15,8 @@ type DraftRecord = {
   queuedMessage: unknown | null;
   /** The whole pending queue, oldest first. */
   queuedMessages: unknown[];
+  /** Todo sources and their attachments saved beside the draft, or null. */
+  meta: TodoDraftMeta | null;
   updatedAt: string;
 };
 
@@ -35,8 +38,10 @@ type UserDependencies = {
       queuedMessages: unknown[];
       /** Tickets the browser saw; omitted keeps the legacy whole-queue replacement. */
       knownQueuedMessageIds?: string[];
+      /** Omitted keeps the stored meta; null clears it. */
+      meta?: TodoDraftMeta | null;
     }): void;
-    saveDraftText(userId: number, scope: string, text: string): void;
+    saveDraftText(userId: number, scope: string, text: string, meta?: TodoDraftMeta | null): void;
     appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage): { queuedMessage: QueuedChatMessage; appended: boolean } | null;
     clearQueuedMessage(userId: number, scope: string): void;
     deleteDraft(userId: number, scope: string): void;
@@ -164,9 +169,46 @@ const readQueuedMessageInput = (value: unknown): QueuedChatMessage => {
   }
   return {
     content,
-    ...(isPlainObject(message.options) ? { options: message.options } : {}),
+    ...(isPlainObject(message.options) ? { options: readQueuedMessageOptions(message.options) } : {}),
     attachments,
   };
+};
+
+/**
+ * Keeps the composer's send options, normalizing the todo source ids a queued
+ * turn carries so a real send can submit them later. Unknown keys pass through
+ * unchanged, as every other option does.
+ */
+const readQueuedMessageOptions = (options: Record<string, unknown>): Record<string, unknown> => (
+  'todoIds' in options ? { ...options, todoIds: readTodoIds(options.todoIds) } : options
+);
+
+/** Reads the todo source ids the composer selected; each must be a non-empty string. */
+const readTodoIds = (value: unknown): string[] => {
+  if (!Array.isArray(value) || value.some((id) => typeof id !== 'string' || !id.trim())) {
+    throw new AppError('meta.todoIds must be an array of non-empty strings', {
+      code: 'INVALID_TODO_IDS',
+      statusCode: 400,
+    });
+  }
+  return [...new Set((value as string[]).map((id) => id.trim()))];
+};
+
+/**
+ * Reads the draft's todo sources (POST /api/todos prepare output).
+ *
+ * Attachments go through the same upload-store boundary a chat send uses, so a
+ * draft can never point a later provider run at an arbitrary file. Omitted
+ * keeps the stored value and null clears it; nothing else is accepted.
+ */
+const readTodoDraftMeta = (value: unknown): TodoDraftMeta | null | undefined => {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (!isRecord(value)) {
+    throw new AppError('meta must be an object or null', { code: 'INVALID_DRAFT_META', statusCode: 400 });
+  }
+  const attachments: ChatAttachmentDescriptor[] = filterAttachmentsToUploadStore(value.attachments);
+  return { todoIds: readTodoIds(value.todoIds), attachments };
 };
 
 const readPreferenceUpdates = (body: unknown): Record<string, unknown> => {
@@ -281,8 +323,10 @@ export function createUserService(dependencies: UserDependencies) {
         queuedMessage?: unknown;
         queuedMessages?: unknown;
         knownQueuedMessageIds?: unknown;
+        meta?: unknown;
       };
       const text = typeof payload.text === 'string' ? payload.text : '';
+      const meta = readTodoDraftMeta(payload.meta);
 
       if (text.length > MAX_DRAFT_TEXT_LENGTH) {
         throw new AppError('Draft text is too long to store', {
@@ -295,7 +339,8 @@ export function createUserService(dependencies: UserDependencies) {
       // queued message can be stale (already claimed by the dispatcher, or added
       // to from another tab), so a save without one leaves the stored one alone.
       if (payload.queuedMessages === undefined && payload.queuedMessage === undefined) {
-        dependencies.drafts.saveDraftText(userId, scope, text);
+        if (meta === undefined) dependencies.drafts.saveDraftText(userId, scope, text);
+        else dependencies.drafts.saveDraftText(userId, scope, text, meta);
         return { success: true };
       }
 
@@ -305,6 +350,7 @@ export function createUserService(dependencies: UserDependencies) {
         text,
         queuedMessages,
         ...(knownQueuedMessageIds ? { knownQueuedMessageIds } : {}),
+        ...(meta === undefined ? {} : { meta }),
       });
       // A saved queue may be the first thing waiting on an otherwise idle
       // session (for example a stale busy badge); try it right away.

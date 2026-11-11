@@ -1499,3 +1499,70 @@ test('context usage uses last request and accepts updates after completion', asy
   h.event('thread/tokenUsage/updated', { tokenUsage: { ...tokenUsage, last: { ...tokenUsage.last, totalTokens: 14000 } } });
   assert.equal(h.events.filter((event) => event.text === 'token_budget').at(-1)?.tokenBudget.used, 14000);
 });
+
+test('a short native turn confirms the input from turn/started before turn/start acknowledges', async () => {
+  const h = harness(200);
+  let acknowledge: ((value: AnyRecord) => void) | null = null;
+  h.handlers.set('turn/start', () => new Promise((resolve) => { acknowledge = resolve; }));
+  let accepted = 0;
+  const running = h.run('short turn', { onInputAccepted: () => { accepted += 1; } });
+  await eventually(() => h.calls.some(({ method }) => method === 'turn/start'));
+
+  // The whole turn arrives before the RPC acknowledgement does.
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  h.finish('turn-1');
+  assert.equal(accepted, 1);
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+
+  acknowledge!({ turn: { id: 'turn-1' } });
+  await running;
+  assert.equal(accepted, 1, 'the acknowledgement and a repeated notification must not confirm twice');
+});
+
+test('an explicit turn/start rejection never confirms the input', async () => {
+  const h = harness(200);
+  h.handlers.set('turn/start', async () => {
+    throw new AppError('Codex rejected the turn.', { code: 'CODEX_APP_SERVER_REJECTED', statusCode: 409 });
+  });
+  let accepted = 0;
+  await assert.rejects(h.run('rejected turn', { onInputAccepted: () => { accepted += 1; } }), /rejected the turn/);
+  assert.equal(accepted, 0);
+});
+
+test('a tool-only native turn confirms without assistant text', async () => {
+  const h = harness(200);
+  let accepted = 0;
+  const running = h.run('run a command', { onInputAccepted: () => { accepted += 1; } });
+  await eventually(() => h.calls.some(({ method }) => method === 'turn/start'));
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  // The only real output is a tool call; no assistant prose ever arrives.
+  h.event('item/completed', {
+    turnId: 'turn-1',
+    item: { type: 'command_execution', id: 'cmd-1', command: 'ls', status: 'completed', exit_code: 0 },
+  });
+  h.finish('turn-1');
+  await running;
+  assert.equal(accepted, 1);
+});
+
+test('the session-held options never keep a run callback, for a new and an existing session', async () => {
+  const h = harness(200);
+  const sessions = (h.runtime as unknown as { sessions: Map<string, AnyRecord> }).sessions;
+  let firstAccepted = 0;
+  const first = h.run('first turn', { onInputAccepted: () => { firstAccepted += 1; } });
+  await eventually(() => h.calls.some(({ method }) => method === 'turn/start'));
+  h.event('turn/started', { turn: { id: 'turn-1' } });
+  h.finish('turn-1');
+  await first;
+  assert.equal(firstAccepted, 1);
+  assert.equal('onInputAccepted' in sessions.get('app-session')!.options, false);
+
+  let secondAccepted = 0;
+  const second = h.run('second turn', { onInputAccepted: () => { secondAccepted += 1; } });
+  await eventually(() => h.calls.filter(({ method }) => method === 'turn/start').length === 2);
+  h.event('turn/started', { turn: { id: 'turn-2' } });
+  h.finish('turn-2');
+  await second;
+  assert.equal(secondAccepted, 1);
+  assert.equal('onInputAccepted' in sessions.get('app-session')!.options, false);
+});

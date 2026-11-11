@@ -2,6 +2,7 @@ import { promises as fs } from 'node:fs';
 import path from 'node:path';
 
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
+import { deleteProjectTodos } from '@/modules/todos/index.js';
 import { AppError } from '@/shared/utils.js';
 
 function uniqueJsonlPathsFromSessions(
@@ -81,6 +82,9 @@ export async function deleteOrArchiveProject(projectId: string, force: boolean):
     return;
   }
 
+  // The todos module removes its private folders and rows first; a failure
+  // aborts the hard delete before any project row disappears.
+  await deleteProjectTodos(projectId);
   await deleteSessionJsonlFilesForProjectPath(row.project_path);
   sessionsDb.deleteSessionsByProjectPath(row.project_path);
   projectsDb.deleteProjectById(projectId);

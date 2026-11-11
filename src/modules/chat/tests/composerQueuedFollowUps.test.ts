@@ -106,7 +106,7 @@ test('typing after dispatch does not restore the consumed head or overwrite the 
   assert.deepEqual(server.get('session-1')?.queuedMessages.map(({ content }) => content), ['B']);
 });
 
-test('editing a later card preserves other turns and restores its browser files', async () => {
+test('editing a later card preserves other turns and restores its uploaded file once', async () => {
   const { view, submit } = render();
   const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
   await submit('A');
@@ -114,11 +114,14 @@ test('editing a later card preserves other turns and restores its browser files'
   await submit('C');
   await act(async () => { view.result.current.editQueuedDraft(view.result.current.queuedDrafts[1].id); });
   assert.equal(view.result.current.input, 'B');
-  assert.equal(view.result.current.attachedFiles[0], file);
+  // The queue already uploaded this file: restoring its descriptor (not the
+  // browser File) keeps a retry from uploading a second copy.
+  assert.deepEqual(view.result.current.attachedFiles, []);
+  assert.deepEqual(view.result.current.storedAttachments, [{ name: 'notes.txt', path: '/uploads/notes.txt' }]);
   await waitFor(() => assert.deepEqual(server.get('session-1')?.queuedMessages.map(({ content }) => content), ['A', 'C']));
 });
 
-test("foreground refresh adopts another tab's new entry and retains this tab's files", async () => {
+test("foreground refresh adopts another tab's new entry and retains this tab's uploaded file", async () => {
   const { view, submit } = render();
   const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
   await submit('A', [file]);
@@ -126,7 +129,8 @@ test("foreground refresh adopts another tab's new entry and retains this tab's f
   await act(async () => { document.dispatchEvent(new Event('visibilitychange')); });
   await waitFor(() => assert.equal(view.result.current.queuedDrafts.length, 2));
   await act(async () => { view.result.current.editQueuedDraft(view.result.current.queuedDrafts[0].id); });
-  assert.equal(view.result.current.attachedFiles[0], file);
+  assert.deepEqual(view.result.current.attachedFiles, []);
+  assert.deepEqual(view.result.current.storedAttachments, [{ name: 'notes.txt', path: '/uploads/notes.txt' }]);
   assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), ['B']);
 });
 

@@ -5,7 +5,7 @@ import {
 } from '@/shared/authToken';
 import { IS_PLATFORM } from '@/shared/utils';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
-import type { ProviderRuntimeAction } from '@/shared/types';
+import type { ProviderRuntimeAction, TodoDraftMeta } from '@/shared/types';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -528,6 +528,47 @@ export const api = {
       get(`/api/assets/images/${encodeURIComponent(filename)}`, options),
   },
 
+  // Per-user, per-project todos. Bodies are multipart for create/update with
+  // `content` text and `files` uploads; edit keeps `keepAttachmentIds` as a JSON
+  // array and saves already-uploaded chat descriptors as `storedAttachments`.
+  // Every method returns the raw Response; callers unwrap the envelopes below.
+  todos: {
+    /** Response: `{ todos: ProjectTodo[] }`. */
+    list: (projectId: string) =>
+      get(`/api/projects/${encodeURIComponent(projectId)}/todos`),
+    /** Multipart `content` + `files`. Response: `{ todo: ProjectTodo }`. */
+    create: (projectId: string, formData: FormData) =>
+      authenticatedFetch(`/api/projects/${encodeURIComponent(projectId)}/todos`, {
+        method: 'POST',
+        headers: {}, // Let the browser set the multipart boundary
+        body: formData,
+      }),
+    /** Multipart `content`, `files`, `keepAttachmentIds`, `storedAttachments`. Response: `{ todo: ProjectTodo }`. */
+    update: (projectId: string, todoId: string, formData: FormData) =>
+      authenticatedFetch(
+        `/api/projects/${encodeURIComponent(projectId)}/todos/${encodeURIComponent(todoId)}`,
+        { method: 'PUT', headers: {}, body: formData },
+      ),
+    /** Response: `{ success: true }`. */
+    remove: (projectId: string, todoId: string) =>
+      del(`/api/projects/${encodeURIComponent(projectId)}/todos/${encodeURIComponent(todoId)}`),
+    /** Restores a submitted/deleted todo to pending. Response: `{ todo: ProjectTodo }`. */
+    restore: (projectId: string, todoId: string) =>
+      post(`/api/projects/${encodeURIComponent(projectId)}/todos/${encodeURIComponent(todoId)}/restore`),
+    /**
+     * Copies the selected todos' files into chat assets and returns what to
+     * append. Body `{ todoIds: string[] }`. Response: `{ draft: PreparedProjectTodo }`.
+     */
+    prepare: (projectId: string, todoIds: string[]) =>
+      post(`/api/projects/${encodeURIComponent(projectId)}/todos/prepare`, { todoIds }),
+    /** Response: the attachment blob, read with `response.blob()`. */
+    attachment: (projectId: string, todoId: string, attachmentId: string) =>
+      get(
+        `/api/projects/${encodeURIComponent(projectId)}/todos/${encodeURIComponent(todoId)}`
+          + `/attachments/${encodeURIComponent(attachmentId)}`,
+      ),
+  },
+
   // TaskMaster endpoints — all addressed by DB projectId post-migration.
   taskmaster: {
     // Update a task
@@ -568,6 +609,8 @@ export const api = {
       queuedMessage?: unknown;
       /** Tickets this queue snapshot's edit saw; omitted keeps legacy whole-queue replacement. */
       knownQueuedMessageIds?: string[];
+      /** Todo sources/attachments saved with the draft; undefined keeps, null clears. */
+      meta?: TodoDraftMeta | null;
     }) =>
       put('/api/user/drafts', { scope, ...draft }),
     // Appends an independent turn to the scope's FIFO queue on the server.

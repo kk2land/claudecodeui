@@ -11,7 +11,7 @@ import { afterEach, beforeEach, test, vi } from 'vitest';
  * mirror once at module scope.
  */
 
-type SavedDraft = { scope: string; text: string; queuedMessages?: unknown[]; knownQueuedMessageIds?: string[] };
+type SavedDraft = { scope: string; text: string; queuedMessages?: unknown[]; knownQueuedMessageIds?: string[]; meta?: unknown };
 
 const savedDrafts: SavedDraft[] = [];
 const deletedScopes: string[] = [];
@@ -30,7 +30,7 @@ vi.mock('@/shared/api', () => ({
           headers: { 'Content-Type': 'application/json' },
         });
       },
-      saveDraft: async (scope: string, draft: { text: string; queuedMessages?: unknown[]; knownQueuedMessageIds?: string[] }) => {
+      saveDraft: async (scope: string, draft: { text: string; queuedMessages?: unknown[]; knownQueuedMessageIds?: string[]; meta?: unknown }) => {
         savedDrafts.push({ scope, ...draft });
         return new Response('{}', { status: 200 });
       },
@@ -730,4 +730,164 @@ test('clearing the last text survives reload before its debounce has sent a requ
   await vi.advanceTimersByTimeAsync(1_500);
   assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '' }]);
   assert.deepEqual(deletedScopes, []);
+});
+
+const todoMeta = { todoIds: ['todo-1'], attachments: [{ path: '/store/a.md', name: 'a.md', size: 3 }] };
+
+test('a meta-only write persists and notifies without touching text', async () => {
+  const store = await loadStore();
+  let notifications = 0;
+  store.subscribeToChatDrafts(() => { notifications += 1; });
+
+  store.writeDraftMeta('session-a', todoMeta);
+
+  assert.deepEqual(store.readDraftMeta('session-a'), todoMeta);
+  assert.equal(store.readDraftText('session-a'), '');
+  assert.equal(notifications, 1);
+  await vi.advanceTimersByTimeAsync(1_500);
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', meta: todoMeta }]);
+});
+
+test('text and queue writes keep todo sources without resending them', async () => {
+  const store = await loadStore();
+  store.writeDraftMeta('session-a', todoMeta);
+  await vi.advanceTimersByTimeAsync(1_500);
+  savedDrafts.length = 0;
+
+  store.writeDraftText('session-a', 'with sources');
+  await vi.advanceTimersByTimeAsync(1_500);
+  store.writeQueuedMessage('session-a', { content: 'next', attachments: [] });
+  await vi.advanceTimersByTimeAsync(0);
+
+  assert.deepEqual(store.readDraftMeta('session-a'), todoMeta);
+  assert.deepEqual(savedDrafts, [
+    { scope: 'session-a', text: 'with sources' },
+    {
+      scope: 'session-a',
+      text: 'with sources',
+      queuedMessages: [{ content: 'next', attachments: [] }],
+      knownQueuedMessageIds: [],
+    },
+  ]);
+});
+
+test('an old server that has no meta cannot erase local todo sources', async () => {
+  serverDrafts = [{ scope: 'session-a', text: 'old server copy', queuedMessages: [] }];
+  const store = await loadStore();
+  store.writeDraftMeta('session-a', todoMeta);
+
+  await store.hydrateChatDrafts();
+
+  assert.deepEqual(store.readDraftMeta('session-a'), todoMeta);
+});
+
+test('hydrating a server draft without meta reads as no sources', async () => {
+  serverDrafts = [{ scope: 'session-a', text: 'plain', queuedMessages: [] }];
+  const store = await loadStore();
+
+  await store.hydrateChatDrafts();
+
+  assert.equal(store.readDraftMeta('session-a'), null);
+});
+
+test('clearing todo sources keeps the pending queue', async () => {
+  const store = await loadStore();
+  store.writeDraftText('session-a', 'attached');
+  store.writeDraftMeta('session-a', todoMeta);
+  store.writeQueuedMessage('session-a', { content: 'still queued', attachments: [] });
+  await vi.advanceTimersByTimeAsync(1_500);
+  savedDrafts.length = 0;
+
+  store.writeDraftMeta('session-a', null);
+  await vi.advanceTimersByTimeAsync(1_500);
+
+  assert.equal(store.readDraftMeta('session-a'), null);
+  assert.equal(store.readDraftText('session-a'), 'attached');
+  assert.equal(store.readQueuedMessage('session-a')?.content, 'still queued');
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: 'attached', meta: null }]);
+});
+
+test('attachment-only todo sources are a draft, not an empty record', async () => {
+  const store = await loadStore();
+  const attachmentOnly = { todoIds: [], attachments: [{ path: '/store/shot.png', name: 'shot.png' }] };
+  store.writeDraftMeta('session-a', attachmentOnly);
+
+  const resumed = await loadStore();
+  assert.deepEqual(resumed.readDraftMeta('session-a'), attachmentOnly);
+  assert.equal(resumed.readDraftText('session-a'), '');
+});
+
+test('clearing the input drops text and sources but leaves the queue', async () => {
+  const store = await loadStore();
+  store.writeDraftText('session-a', 'send me');
+  store.writeDraftMeta('session-a', todoMeta);
+  store.writeQueuedMessage('session-a', { content: 'queued twice', attachments: [] });
+  await vi.advanceTimersByTimeAsync(1_500);
+  savedDrafts.length = 0;
+
+  store.clearDraftInput('session-a');
+  await vi.advanceTimersByTimeAsync(1_500);
+
+  assert.equal(store.readDraftText('session-a'), '');
+  assert.equal(store.readDraftMeta('session-a'), null);
+  assert.equal(store.readQueuedMessage('session-a')?.content, 'queued twice');
+  assert.deepEqual(savedDrafts, [{ scope: 'session-a', text: '', meta: null }]);
+});
+
+test('a new session migration moves text and sources while both queues stay put', async () => {
+  const store = await loadStore();
+  store.writeDraftText('project:p1', 'write the handler');
+  store.writeDraftMeta('project:p1', todoMeta);
+  store.writeQueuedMessage('project:p1', { id: 'project-ticket', content: 'project queue', attachments: [] });
+  store.writeQueuedMessage('session-new', { id: 'session-ticket', content: 'session queue', attachments: [] });
+  await vi.advanceTimersByTimeAsync(1_500);
+  savedDrafts.length = 0;
+
+  store.migrateDraftScope('project:p1', 'session-new');
+  await vi.advanceTimersByTimeAsync(1_500);
+
+  assert.equal(store.readDraftText('session-new'), 'write the handler');
+  assert.deepEqual(store.readDraftMeta('session-new'), todoMeta);
+  assert.equal(store.readDraftText('project:p1'), '');
+  assert.equal(store.readDraftMeta('project:p1'), null);
+  assert.deepEqual(store.readQueuedMessages('project:p1').map((entry) => entry.id), ['project-ticket']);
+  assert.deepEqual(store.readQueuedMessages('session-new').map((entry) => entry.id), ['session-ticket']);
+  assert.deepEqual(savedDrafts, [
+    { scope: 'session-new', text: 'write the handler', meta: todoMeta },
+    { scope: 'project:p1', text: '', meta: null },
+  ]);
+});
+
+test('signing out clears todo sources with the rest of the cache', async () => {
+  const store = await loadStore();
+  store.writeDraftMeta('session-a', todoMeta);
+  await vi.advanceTimersByTimeAsync(1_500);
+
+  store.resetChatDrafts();
+
+  assert.equal(store.readDraftMeta('session-a'), null);
+  const resumed = await loadStore();
+  assert.equal(resumed.readDraftMeta('session-a'), null);
+});
+
+test('an adopted queue ticket keeps the todo ids the send carried', async () => {
+  const store = await loadStore();
+  store.rememberPendingChatSend({
+    sessionId: 'session-a',
+    clientMessageId: 'client-1',
+    content: 'queued from a todo',
+    options: { clientMessageId: 'client-1' },
+    files: [],
+    attachments: [],
+    todoIds: ['todo-1'],
+  });
+
+  store.adoptQueuedChatMessage({
+    scope: 'session-a',
+    clientMessageId: 'client-1',
+    messageId: 'ticket-1',
+    queuedMessage: { content: 'queued from a todo', options: {} },
+  });
+
+  assert.deepEqual(store.readQueuedMessage('session-a')?.options?.todoIds, ['todo-1']);
 });

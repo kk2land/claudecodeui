@@ -39,6 +39,12 @@ type DshOwner = {
   worker?: Awaited<ReturnType<DshWorkerBridge['prepareSession']>>;
   cliVersion?: string;
   processStopped?: boolean;
+  /**
+   * Server-owned delivery proof for this run only: set from the run options,
+   * called once the agent emits real model output, and cleared when the run
+   * settles so an automatic next turn can never inherit it.
+   */
+  onInputAccepted?: () => void;
 };
 type DshApproval = { owner: DshOwner; message: AnyRecord; options: AnyRecord[]; resolve(value: unknown): void };
 
@@ -81,6 +87,9 @@ export class DshRuntimeProvider implements IProviderRuntime {
     clearTimeout(owner.idle);
     owner.writer = writer; owner.busy = true; owner.aborted = false; owner.startedAt = Date.now();
     owner.approvalBypass = options.permissionMode === 'bypassPermissions';
+    owner.onInputAccepted = typeof options.onInputAccepted === 'function'
+      ? options.onInputAccepted as () => void
+      : undefined;
     this.owners.set(id, owner);
     owner.done = this.execute(owner, command, options, context, previous);
     return owner.done;
@@ -167,6 +176,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
         // next turn. Publish it only after teardown and this busy guard end.
         // No owner mutation or asynchronous cleanup may follow the terminal.
         owner.busy = false;
+        owner.onInputAccepted = undefined;
         if (!deferred && owner.processStopped) {
           notifyRunStopped({ userId: owner.writer.userId, provider: 'dsh', sessionId: options.sessionId ?? owner.id, stopReason: 'aborted' });
           owner.writer.send(createCompleteMessage({ provider: 'dsh', sessionId: owner.id, exitCode: 0, aborted: true }));
@@ -279,6 +289,12 @@ export class DshRuntimeProvider implements IProviderRuntime {
       child.onFrame = (frame) => {
         if (frame.method === 'session/update' && frame.params?.sessionId === owner.nativeId && owner.busy && !owner.aborted) {
           for (const message of this.events.normalize(frame.params, owner.id)) {
+            // Real agent text is the first raw proof this prompt was accepted;
+            // init/status/usage updates and thoughts alone do not count.
+            if (message.kind === 'text' && message.role === 'assistant' && message.content) {
+              owner.onInputAccepted?.();
+              owner.onInputAccepted = undefined;
+            }
             // usage_update is the only authoritative DSH context reading; keep
             // it for this app session so the token-usage refresh can reuse it.
             if (message.kind === 'status' && message.text === 'token_budget' && message.tokenBudget) {
@@ -388,7 +404,11 @@ export class DshRuntimeProvider implements IProviderRuntime {
       } else if (event.type === 'status' && event.phase === 'step_start') { step++; text = ''; }
       else if (event.type === 'text' || event.type === 'final') {
         if (event.type === 'final') { final = true; text = event.text; } else text += event.text ?? '';
-        if (text) owner.writer.send(createNormalizedMessage({ id: `dsh:${runId}:text:${step}`, provider: 'dsh', sessionId: owner.id, kind: 'text', role: 'assistant', content: text }));
+        if (text) {
+          owner.onInputAccepted?.();
+          owner.onInputAccepted = undefined;
+          owner.writer.send(createNormalizedMessage({ id: `dsh:${runId}:text:${step}`, provider: 'dsh', sessionId: owner.id, kind: 'text', role: 'assistant', content: text }));
+        }
       } else for (const message of this.events.normalize(event, owner.id)) owner.writer.send(message);
     };
     child.child.stdin?.end(prompt);

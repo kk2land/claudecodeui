@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import type { SessionDraftRecord, QueuedSessionMessageRecord, QueuedChatMessage } from '@/shared/index.js';
+import type { SessionDraftRecord, QueuedSessionMessageRecord, QueuedChatMessage, TodoDraftMeta } from '@/shared/index.js';
 import { getConnection } from '@/modules/database/connection.js';
 import { AppError, MAX_QUEUED_MESSAGES, readQueuedMessages, serializeQueuedMessages } from '@/shared/index.js';
 
@@ -8,6 +8,7 @@ type DraftRow = {
   draft_scope: string;
   draft_text: string;
   queued_message: string | null;
+  draft_meta: string | null;
   updated_at: string;
   queue_status: string;
   queue_request_id: string | null;
@@ -34,6 +35,11 @@ type SavedDraft = {
    * added meanwhile.
    */
   knownQueuedMessageIds?: string[];
+  /**
+   * Todo sources and attachments to store with the draft. Omitted keeps the
+   * stored value so text/queue writes cannot erase it; null explicitly clears it.
+   */
+  meta?: TodoDraftMeta | null;
 };
 
 /**
@@ -129,6 +135,17 @@ type EnqueuedChatMessage = {
  */
 const CLAIMED_RECEIPT_STATUSES = "('dispatching', 'accepted', 'steering', 'unknown')";
 
+/** Decodes meta already validated at the API boundary. */
+function readTodoDraftMeta(raw: string | null): TodoDraftMeta | null {
+  return raw ? JSON.parse(raw) as TodoDraftMeta : null;
+}
+
+/** Serializes meta for `session_drafts.draft_meta`; an empty meta stores NULL. */
+function serializeTodoDraftMeta(meta: TodoDraftMeta | null): string | null {
+  if (!meta || (!meta.todoIds.length && !meta.attachments.length)) return null;
+  return JSON.stringify(meta);
+}
+
 function toRecord(row: DraftRow): SessionDraftRecord {
   const queuedMessages = readQueuedMessages(row.queued_message);
   return {
@@ -138,6 +155,7 @@ function toRecord(row: DraftRow): SessionDraftRecord {
     // next dispatcher pass will claim.
     queuedMessage: queuedMessages[0] ?? null,
     queuedMessages,
+    meta: readTodoDraftMeta(row.draft_meta),
     updatedAt: row.updated_at,
     queuedDelivery: { status: row.queue_status, requestId: row.queue_request_id, error: row.queue_error },
   };
@@ -146,12 +164,20 @@ function toRecord(row: DraftRow): SessionDraftRecord {
 /** Draft routes and chat scheduling share these atomic queue operations. */
 export const sessionDraftsDb = {
   /** User's debounced composer edits leave the dispatcher-owned queue untouched. */
-  saveDraftText(userId: number, scope: string, text: string): void {
+  saveDraftText(userId: number, scope: string, text: string, meta?: TodoDraftMeta | null): void {
     const db = getConnection();
-    db.prepare(`INSERT INTO session_drafts (user_id, draft_scope, draft_text, updated_at)
-      VALUES (?, ?, ?, CURRENT_TIMESTAMP)
-      ON CONFLICT(user_id, draft_scope) DO UPDATE SET
-        draft_text = excluded.draft_text, updated_at = CURRENT_TIMESTAMP`).run(userId, scope, text);
+    if (meta === undefined) {
+      db.prepare(`INSERT INTO session_drafts (user_id, draft_scope, draft_text, updated_at)
+        VALUES (?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id, draft_scope) DO UPDATE SET
+          draft_text = excluded.draft_text, updated_at = CURRENT_TIMESTAMP`).run(userId, scope, text);
+    } else {
+      db.prepare(`INSERT INTO session_drafts (user_id, draft_scope, draft_text, draft_meta, updated_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(user_id, draft_scope) DO UPDATE SET
+          draft_text = excluded.draft_text, draft_meta = excluded.draft_meta,
+          updated_at = CURRENT_TIMESTAMP`).run(userId, scope, text, serializeTodoDraftMeta(meta));
+    }
     sessionDraftsDb.deleteEmptyDraft(userId, scope);
   },
 
@@ -260,7 +286,7 @@ export const sessionDraftsDb = {
     const db = getConnection();
     const rows = db
       .prepare(
-        `SELECT draft_scope, draft_text, queued_message, updated_at, queue_status, queue_request_id, queue_error
+        `SELECT draft_scope, draft_text, queued_message, draft_meta, updated_at, queue_status, queue_request_id, queue_error
          FROM session_drafts
          WHERE user_id = ?
          ORDER BY datetime(updated_at) DESC`
@@ -407,7 +433,8 @@ export const sessionDraftsDb = {
     getConnection()
       .prepare(
         `DELETE FROM session_drafts
-         WHERE user_id = ? AND draft_scope = ? AND draft_text = '' AND queued_message IS NULL`
+         WHERE user_id = ? AND draft_scope = ? AND draft_text = '' AND queued_message IS NULL
+           AND draft_meta IS NULL`
       )
       .run(userId, scope);
   },
@@ -427,8 +454,8 @@ export const sessionDraftsDb = {
     draft: SavedDraft
   ): void {
     const db = getConnection();
-    const existing = db.prepare('SELECT queued_message, queue_status FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
-      .get(userId, scope) as { queued_message: string | null; queue_status: string } | undefined;
+    const existing = db.prepare('SELECT queued_message, draft_meta, queue_status FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
+      .get(userId, scope) as { queued_message: string | null; draft_meta: string | null; queue_status: string } | undefined;
     const snapshot = draft.queuedMessages ?? (draft.queuedMessage == null ? [] : [draft.queuedMessage]);
     // A legacy snapshot is still the whole queue. A ticket-aware snapshot only
     // replaces/removes what the browser saw, preserving server-side additions.
@@ -471,17 +498,23 @@ export const sessionDraftsDb = {
     }
 
     const text = draft.text ?? '';
-    if (!text && serialized === null) {
+    // Omitted meta keeps the stored JSON verbatim; null clears it. A draft with
+    // only attachments or todo sources must survive the empty-row cleanup.
+    const draftMeta = draft.meta === undefined
+      ? existing?.draft_meta ?? null
+      : serializeTodoDraftMeta(draft.meta);
+    if (!text && serialized === null && draftMeta === null) {
       db.prepare('DELETE FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
         .run(userId, scope);
       return;
     }
 
     db.prepare(
-      `INSERT INTO session_drafts (user_id, draft_scope, draft_text, queued_message, updated_at)
-       VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+      `INSERT INTO session_drafts (user_id, draft_scope, draft_text, queued_message, draft_meta, updated_at)
+       VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
        ON CONFLICT(user_id, draft_scope) DO UPDATE SET
          draft_text = excluded.draft_text,
+         draft_meta = excluded.draft_meta,
          queue_status = CASE WHEN session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_status ELSE 'queued' END,
          queue_request_id = CASE WHEN session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_request_id ELSE NULL END,
          queue_error = CASE WHEN session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_error ELSE NULL END,
@@ -491,7 +524,8 @@ export const sessionDraftsDb = {
       userId,
       scope,
       text,
-      serialized
+      serialized,
+      draftMeta
     );
   },
 

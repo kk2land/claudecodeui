@@ -6,7 +6,7 @@ import '@/modules/i18n';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { api } from '@/shared/api';
-import { readDraftText, resetChatDrafts, writeDraftText } from '@/shared/chatDrafts';
+import { readDraftMeta, readDraftText, resetChatDrafts, writeDraftMeta, writeDraftText } from '@/shared/chatDrafts';
 import type { Project, ProviderRuntimeState } from '@/shared/types';
 
 vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
@@ -78,10 +78,12 @@ test('choosing a runtime migrates the latest new-chat draft and preserves its at
   const control = vi.spyOn(api.providers, 'controlRuntime').mockReturnValue(change.promise);
   const hook = renderComposer();
   const attachment = new File(['notes'], 'notes.txt', { type: 'text/plain' });
+  const todoMeta = { todoIds: ['todo-2'], attachments: [{ path: '/store/spec.md', name: 'spec.md' }] };
   await act(async () => {
     hook.result.current.composer.setInput('initial draft');
     hook.result.current.composer.setAttachedFiles([attachment]);
   });
+  await act(async () => { writeDraftMeta('project:project-1', todoMeta); });
   let changing!: Promise<void>;
   act(() => { changing = hook.result.current.runtime.control({ action: 'runtime', runtime: 'acp' }); });
   await waitFor(() => expect(control).toHaveBeenCalledTimes(1));
@@ -91,7 +93,9 @@ test('choosing a runtime migrates the latest new-chat draft and preserves its at
   expect(hook.result.current.composer.input).toBe('updated while changing runtime');
   expect(hook.result.current.composer.attachedFiles).toEqual([attachment]);
   expect(readDraftText('created')).toBe('updated while changing runtime');
+  expect(readDraftMeta('created')).toEqual(todoMeta);
   expect(readDraftText('project:project-1')).toBe('');
+  expect(readDraftMeta('project:project-1')).toBeNull();
   expect(hook.established).toHaveBeenCalledTimes(1);
   expect(hook.send).not.toHaveBeenCalled();
 });
@@ -260,4 +264,56 @@ test('a send finishing its attachment upload reuses the session already establis
   expect(create).toHaveBeenCalledTimes(1);
   expect(hook.established).toHaveBeenCalledTimes(1);
   expect(hook.send).toHaveBeenCalledWith(expect.objectContaining({ sessionId: 'created', content: 'read the attachment' }));
+});
+
+test('a new-chat first send keeps the todo sources it started with across runtime migration', async () => {
+  const create = vi.spyOn(api.providers, 'createSession').mockResolvedValue(createdSession());
+  const change = deferredResponse();
+  const control = vi.spyOn(api.providers, 'controlRuntime').mockReturnValue(change.promise);
+  const fetch = vi.mocked(globalThis.fetch);
+  const fallback = fetch.getMockImplementation()!;
+  fetch.mockImplementation((url, options) => String(url) === '/api/assets/files' && options?.method === 'POST'
+    ? Promise.resolve(new Response(JSON.stringify({
+      attachments: [{ name: 'notes.txt', path: '/uploads/notes.txt', mimeType: 'text/plain' }],
+    })))
+    : fallback(url, options));
+  const hook = renderComposer();
+  const todoMeta = { todoIds: ['todo-2'], attachments: [{ path: '/store/spec.md', name: 'spec.md' }] };
+  await act(async () => {
+    // Sources first: writing meta re-reads the draft text, so the text must be
+    // set afterwards to stay the submitted one.
+    writeDraftMeta('project:project-1', todoMeta);
+    hook.result.current.composer.setInput('first todo message');
+    hook.result.current.composer.setAttachedFiles([new File(['notes'], 'notes.txt', { type: 'text/plain' })]);
+  });
+  let changing!: Promise<void>;
+  let sending!: Promise<void>;
+  act(() => {
+    sending = hook.result.current.composer.handleSubmit(submitEvent());
+    changing = hook.result.current.runtime.control({ action: 'runtime', runtime: 'acp' });
+  });
+  await waitFor(() => expect(control).toHaveBeenCalledTimes(1));
+  expect(hook.send).not.toHaveBeenCalled();
+  // While the send waits for the runtime change, the draft's sources change.
+  // The in-flight send must still submit the snapshot it started with, and the
+  // migration that clears the project draft must not lose its attachments.
+  await act(async () => {
+    writeDraftMeta('project:project-1', { todoIds: ['todo-other'], attachments: [] });
+  });
+  await act(async () => { change.resolve(selectedRuntime()); await Promise.all([changing, sending]); });
+
+  expect(create).toHaveBeenCalledTimes(1);
+  expect(hook.established).toHaveBeenCalledTimes(1);
+  expect(hook.send).toHaveBeenCalledTimes(1);
+  expect(hook.send).toHaveBeenCalledWith(expect.objectContaining({
+    type: 'chat.send',
+    sessionId: 'created',
+    content: 'first todo message',
+  }));
+  const sent = hook.send.mock.calls[0][0] as { options: { todoIds?: string[]; attachments?: unknown[] } };
+  expect(sent.options.todoIds).toEqual(['todo-2']);
+  expect(sent.options.attachments).toEqual([
+    { path: '/store/spec.md', name: 'spec.md' },
+    { name: 'notes.txt', path: '/uploads/notes.txt', mimeType: 'text/plain' },
+  ]);
 });
