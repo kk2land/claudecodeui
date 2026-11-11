@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import type { ReactNode } from 'react';
 import { Download, Loader2 } from 'lucide-react';
 
 import type { CodeEditorFile } from '@/shared/types';
@@ -11,6 +12,8 @@ type CodeEditorBinaryFileProps = {
   onToggleFullscreen: () => void;
   /** Saves the file's original bytes; rejects when the download fails. */
   onDownload: () => Promise<void>;
+  /** Read-only image content supplied by CodeEditor, sharing the file controls. */
+  preview?: ReactNode;
   title: string;
   message: string;
   labels: {
@@ -23,7 +26,8 @@ type CodeEditorBinaryFileProps = {
 
 /**
  * Rendered by CodeEditor inside the code-editor module when the opened file is
- * binary and cannot be edited as text. Offers the original file as a download,
+ * binary and cannot be edited as text, optionally with an image preview.
+ * Offers the original file as a download,
  * since a file opened from a chat link would otherwise have to be found again
  * in the Files tab.
  */
@@ -34,6 +38,7 @@ export default function CodeEditorBinaryFile({
   onClose,
   onToggleFullscreen,
   onDownload,
+  preview,
   title,
   message,
   labels,
@@ -102,13 +107,19 @@ export default function CodeEditorBinaryFile({
             {labels.close}
           </button>
         </div>
-        {downloadFailed && (
-          <p role="alert" className="text-sm text-red-600 dark:text-red-400">
-            {labels.downloadFailed}
-          </p>
-        )}
       </div>
     </div>
+  );
+
+  const fileContent = (
+    <>
+      {preview ?? binaryContent}
+      {downloadFailed && (
+        <p role="alert" className="shrink-0 bg-background p-3 text-center text-sm text-red-600 dark:text-red-400">
+          {labels.downloadFailed}
+        </p>
+      )}
+    </>
   );
 
   if (isSidebar) {
@@ -132,7 +143,7 @@ export default function CodeEditorBinaryFile({
             </button>
           </div>
         </div>
-        {binaryContent}
+        {fileContent}
       </div>
     );
   }
@@ -143,7 +154,9 @@ export default function CodeEditorBinaryFile({
 
   const innerClassName = isFullscreen
     ? 'bg-background flex flex-col w-full h-full'
-    : 'bg-background shadow-2xl flex flex-col w-full h-full md:rounded-lg md:shadow-2xl md:w-full md:max-w-2xl md:h-auto md:max-h-[60vh]';
+    : `bg-background shadow-2xl flex flex-col w-full h-full md:rounded-lg md:shadow-2xl md:w-full ${preview
+      ? 'md:max-w-6xl md:h-[80vh] md:max-h-[80vh]'
+      : 'md:max-w-2xl md:h-auto md:max-h-[60vh]'}`;
 
   return (
     <div className={containerClassName}>
@@ -182,7 +195,7 @@ export default function CodeEditorBinaryFile({
             </button>
           </div>
         </div>
-        {binaryContent}
+        {fileContent}
       </div>
     </div>
   );

@@ -35,8 +35,8 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [isBinary, setIsBinary] = useState(false);
-  // Some binaries (images, PDFs, audio, video) can be rendered natively, so the
-  // editor shows an inline preview instead of the generic binary placeholder.
+  // Identifies media that must never enter the editable text buffer; images
+  // are previewed and other media retain the original-file download notice.
   const previewKind = getPreviewKind(file.name);
   // `fileProjectId` is the DB primary key passed down from the editor sidebar;
   // the fallback to `projectPath` preserves older callers that didn't yet
@@ -70,8 +70,7 @@ export const useCodeEditorDocument = ({ file, projectPath }: UseCodeEditorDocume
         setSaving(false);
         setSaveError(null);
 
-        // Previewable media (image/pdf/audio/video) and binaries get a
-        // download-only notice instead of an editor, so there is nothing to
+        // Media and binaries have no editable text, so there is nothing to
         // read as text here. Clear any buffer left over from a previously
         // opened text file so a stray save can't write stale content over the
         // binary file.

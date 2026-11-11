@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, test, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, test, vi } from 'vitest';
 
 import type { CodeEditorFile } from '@/shared/types';
 
@@ -11,8 +11,8 @@ import type { CodeEditorFile } from '@/shared/types';
  * (invalid bytes becoming U+FFFD) and the title-bar download wrote that lossy
  * string back out — a 1.44 MB APK arrived as ~2.5 MB.
  *
- * Non-text files now show only an explanation plus a download button, and every
- * title-bar download saves the file's original bytes from the content endpoint.
+ * Images preview their original bytes; other non-text files show a download
+ * notice. Every title-bar download saves the original content endpoint bytes.
  * Text files stay editable; unsaved edits remain in the editor until saved.
  */
 
@@ -20,6 +20,9 @@ const readFile = vi.fn(async () => ({ ok: true, json: async () => ({ content: ''
 const saveFile = vi.fn(async () => ({ ok: true, json: async () => ({ success: true }) }));
 const readFileBlob = vi.fn();
 const saveBlob = vi.fn(async (_blob: Blob, _fileName: string) => true);
+let nextImageUrl = 0;
+const createObjectURL = vi.fn((_blob: Blob | MediaSource) => `blob:image-preview/${nextImageUrl++}`);
+const revokeObjectURL = vi.fn((_url: string) => undefined);
 
 vi.mock('@/shared/api', () => ({
   api: { readFile, saveFile, readFileBlob },
@@ -88,7 +91,7 @@ const assertOriginalBytesDownloaded = async (file: CodeEditorFile, bytes: Uint8A
 
   // The text endpoint would decode the bytes; the download must never use it.
   assert.equal(readFile.mock.calls.length, 0);
-  assert.deepEqual(readFileBlob.mock.calls[0], [file.projectId, file.path]);
+  assert.deepEqual(readFileBlob.mock.calls.at(-1), [file.projectId, file.path]);
 
   const [savedBlob, savedName] = saveBlob.mock.calls[0] as [Blob, string];
   assert.equal(savedName, file.name);
@@ -101,6 +104,18 @@ beforeEach(() => {
   saveFile.mockClear();
   readFileBlob.mockReset();
   saveBlob.mockClear();
+  nextImageUrl = 0;
+  createObjectURL.mockClear();
+  revokeObjectURL.mockClear();
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = createObjectURL;
+    static revokeObjectURL = revokeObjectURL;
+  });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
 });
 
 test('an APK shows a notice instead of source and downloads its original bytes', async () => {
@@ -119,21 +134,64 @@ test('an APK shows a notice instead of source and downloads its original bytes',
   await waitFor(() => assert.equal(saveFile.mock.calls.length, 0));
 });
 
-test('an image shows a notice instead of inline media and still downloads its bytes', async () => {
+test('an image previews without a text buffer and still downloads its original bytes', async () => {
   const imageFile: CodeEditorFile = { name: 'screenshot.png', path: '/repo/assets/screenshot.png', projectId: 'p1' };
   const imageBytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0xff, 0xd8]);
   serveBytes(imageBytes, 'image/png');
 
-  const { container } = render(<CodeEditor file={imageFile} onClose={() => undefined} />);
+  const { unmount } = render(<CodeEditor file={imageFile} onClose={() => undefined} />);
 
-  await screen.findByText(/cannot be displayed/i);
-  // The source pane no longer embeds the image itself.
-  assert.equal(container.querySelector('img'), null);
+  const image = await screen.findByRole('img', { name: imageFile.name });
+  assert.equal(image.getAttribute('src'), 'blob:image-preview/0');
+  assert.equal(screen.queryByText(/cannot be displayed/i), null);
   assert.equal(screen.queryByTestId('editor'), null);
-  // Opening the file alone must not fetch bytes; only the download does.
-  assert.equal(readFileBlob.mock.calls.length, 0);
+  assert.equal(readFile.mock.calls.length, 0);
+  assert.equal(readFileBlob.mock.calls[0][0], imageFile.projectId);
+  assert.equal(readFileBlob.mock.calls[0][1], imageFile.path);
+  assert.ok(readFileBlob.mock.calls[0][2].signal instanceof AbortSignal);
 
   await assertOriginalBytesDownloaded(imageFile, imageBytes);
+  fireEvent.keyDown(document, { key: 's', ctrlKey: true });
+  assert.equal(saveFile.mock.calls.length, 0);
+  unmount();
+  assert.deepEqual(revokeObjectURL.mock.calls, [['blob:image-preview/0']]);
+});
+
+test('switching images releases the previous preview and applies the image MIME type', async () => {
+  serveBytes(new Uint8Array([0xff, 0xd8, 0xff]), 'application/octet-stream');
+  const firstFile: CodeEditorFile = { name: 'first.png', path: '/repo/first.png', projectId: 'p1' };
+  const secondFile: CodeEditorFile = { name: 'PHOTO.JPEG', path: '/repo/PHOTO.JPEG', projectId: 'p1' };
+  const { rerender } = render(<CodeEditor file={firstFile} onClose={() => undefined} />);
+  await screen.findByRole('img', { name: firstFile.name });
+
+  rerender(<CodeEditor file={secondFile} onClose={() => undefined} />);
+  const image = await screen.findByRole('img', { name: secondFile.name });
+  assert.equal(image.getAttribute('src'), 'blob:image-preview/1');
+  assert.deepEqual(revokeObjectURL.mock.calls, [['blob:image-preview/0']]);
+  assert.equal((createObjectURL.mock.calls.at(-1)![0] as Blob).type, 'image/jpeg');
+});
+
+test('a failed image preview keeps the original-file download available', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const imageFile: CodeEditorFile = { name: 'private.png', path: '/repo/private.png', projectId: 'p1' };
+  readFileBlob.mockResolvedValueOnce({ ok: false, status: 403 });
+  render(<CodeEditor file={imageFile} onClose={() => undefined} />);
+
+  assert.match((await screen.findByRole('alert')).textContent ?? '', /Unable to display/);
+  assert.equal(createObjectURL.mock.calls.length, 0);
+  serveBytes(new Uint8Array([0x89, 0x50, 0x4e, 0x47]), 'image/png');
+  await assertOriginalBytesDownloaded(imageFile, new Uint8Array([0x89, 0x50, 0x4e, 0x47]));
+});
+
+test('an image decode failure displays an error instead of a broken image', async () => {
+  const imageFile: CodeEditorFile = { name: 'broken.webp', path: '/repo/broken.webp', projectId: 'p1' };
+  serveBytes(new Uint8Array([0]), 'image/webp');
+  render(<CodeEditor file={imageFile} onClose={() => undefined} />);
+  fireEvent.error(await screen.findByRole('img', { name: imageFile.name }));
+
+  assert.match((await screen.findByRole('alert')).textContent ?? '', /Unable to display/);
+  assert.equal(screen.queryByRole('img'), null);
+  assert.ok(screen.getByTitle(/Download original file|binaryFile\.download/));
 });
 
 test('a ZIP archive shows a notice and downloads its original bytes', async () => {

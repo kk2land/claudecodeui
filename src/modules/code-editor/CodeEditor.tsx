@@ -18,6 +18,7 @@ import CodeEditorHeader from '@/modules/code-editor/CodeEditorHeader';
 import CodeEditorLoadingState from '@/modules/code-editor/CodeEditorLoadingState';
 import CodeEditorSurface from '@/modules/code-editor/CodeEditorSurface';
 import CodeEditorBinaryFile from '@/modules/code-editor/CodeEditorBinaryFile';
+import CodeEditorImagePreview from '@/modules/code-editor/CodeEditorImagePreview';
 
 type CodeEditorProps = {
   file: CodeEditorFile;
@@ -71,6 +72,7 @@ export default function CodeEditor({
     saveError,
     isBinary,
     previewKind,
+    fileProjectId,
     hasUnsavedChanges,
     handleSave,
     handleDownload,
@@ -256,9 +258,8 @@ export default function CodeEditor({
     );
   }
 
-  // Non-text files (binaries, images, PDF, audio, video) are never shown as
-  // source or inline media here: the pane explains why and offers the original
-  // file through the title-bar download.
+  // Images use a read-only preview; other non-text files keep their download
+  // notice. Neither path opens a text buffer that could corrupt the file.
   if (previewKind || isBinary) {
     return (
       <CodeEditorBinaryFile
@@ -271,6 +272,9 @@ export default function CodeEditor({
         // Both panes save the file's original disk bytes through saveBlob, so
         // an unsaved text buffer never becomes the downloaded file.
         onDownload={handleDownload}
+        preview={previewKind === 'image' ? (
+          <CodeEditorImagePreview projectId={fileProjectId} filePath={file.path} fileName={file.name} />
+        ) : undefined}
         title={t('binaryFile.title', 'Binary File')}
         message={t('binaryFile.message', 'The file "{{fileName}}" cannot be displayed in the text editor because it is a binary file.', { fileName: file.name })}
         labels={{
