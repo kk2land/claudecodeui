@@ -339,7 +339,12 @@ export type ResidentTerminal = {
 export type ResidentBindingView = {
   /** Plugin-generated task id; unique per binding and never reused after removal. */
   taskId: string;
-  /** Display name snapshotted from the original session title at adoption. */
+  /**
+   * The linked session's current title (its custom name, trimmed like every other session
+   * surface), so a sidebar rename is reflected on the next read. The title captured at adoption
+   * remains the fallback when the session has no usable title or no longer exists; it is never
+   * rewritten by this projection.
+   */
   name: string;
   sessionId: string;
   projectId: string;

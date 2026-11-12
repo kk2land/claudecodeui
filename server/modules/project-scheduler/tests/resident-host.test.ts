@@ -11,9 +11,11 @@ import {
   sessionRuntimeDb,
   sessionsDb,
 } from '@/modules/database/index.js';
+import { sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry, startResidentContinueTurn } from '@/modules/websocket/index.js';
 import type {
   ProviderRuntimeGateway,
+  ResidentBindingView,
   ResidentContinueAdmission,
   ResidentIpcEvent,
 } from '@/shared/index.js';
@@ -505,6 +507,55 @@ test('a provider without resident support is refused explicitly', async () => {
       harness.host.handleRequest('adopt', { taskId: 'task-claude', sessionId: 'claude-session' }),
       (error: unknown) => error instanceof AppError && error.code === 'unsupported_provider',
     );
+    await harness.host.shutdown();
+  });
+});
+
+test('the resident task name follows the linked session title without touching persisted state', async () => {
+  await withDatabase(async () => {
+    const harness = createHarness();
+    admitRun();
+    const adopted = await harness.host.handleRequest('adopt', {
+      taskId: 'task-title',
+      sessionId: SESSION,
+    }) as { binding: ResidentBindingView };
+    // Adoption snapshots the session title it was created with.
+    assert.equal(adopted.binding.name, 'Resident conversation');
+    const persisted = residentBindingsDb.getByTaskId('task-title')!;
+    const executionBefore = (await harness.host.handleRequest('status', {
+      taskId: 'task-title',
+    }) as { bindings: ResidentBindingView[] }).bindings[0].executionId;
+
+    // The real rename path the sidebar uses.
+    sessionsService.renameSessionById(SESSION, '侧栏重命名后的标题');
+
+    const all = await harness.host.handleRequest('status', {}) as {
+      bindings: ResidentBindingView[];
+    };
+    const one = await harness.host.handleRequest('status', {
+      taskId: 'task-title',
+    }) as { bindings: ResidentBindingView[] };
+    for (const binding of [all.bindings[0], one.bindings[0]]) {
+      assert.equal(binding.name, '侧栏重命名后的标题');
+      // Only the display title follows; identity, run state and fallback are unchanged.
+      assert.equal(binding.taskId, persisted.taskId);
+      assert.equal(binding.sessionId, persisted.sessionId);
+      assert.equal(binding.executionId, executionBefore);
+      assert.equal(binding.enabled, persisted.enabled);
+      assert.equal(binding.visible, persisted.visible);
+      assert.equal(binding.status, persisted.status);
+    }
+    // The persisted adoption snapshot is untouched, and no run control fired.
+    assert.equal(residentBindingsDb.getByTaskId('task-title')?.name, persisted.name);
+    assert.deepEqual(harness.continueCalls, []);
+    assert.deepEqual(harness.aborts, []);
+
+    // A blank current title keeps the persisted adoption snapshot as fallback.
+    sessionsService.renameSessionById(SESSION, '   ');
+    const fallback = await harness.host.handleRequest('status', {
+      taskId: 'task-title',
+    }) as { bindings: ResidentBindingView[] };
+    assert.equal(fallback.bindings[0].name, 'Resident conversation');
     await harness.host.shutdown();
   });
 });

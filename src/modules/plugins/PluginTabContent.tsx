@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { useNavigate } from 'react-router-dom';
 
+import { OPEN_CHAT_TAB_EVENT } from '@/shared/constants';
 import { useTheme } from '@/shared/context/ThemeContext';
 import { api } from '@/shared/api';
 import { usePlugins } from '@/modules/plugins/context/PluginsContext';
@@ -81,6 +82,9 @@ export default function PluginTabContent({
     const target = typeof sessionId === 'string' ? sessionId.trim() : '';
     if (!target) return;
     navigate(`/session/${encodeURIComponent(target)}`);
+    // The caller is a plugin panel, so the workspace is still showing that panel's tab. Ask it to
+    // reveal the conversation, which is what "opens the session" means to the user.
+    window.dispatchEvent(new CustomEvent(OPEN_CHAT_TAB_EVENT));
   }, [navigate]);
 
   const plugin = plugins.find(p => p.name === pluginName);

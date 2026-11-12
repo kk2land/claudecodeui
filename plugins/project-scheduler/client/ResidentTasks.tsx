@@ -1,19 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, CircleAlert, CircleCheck, Play, Square, Trash2 } from "lucide-react";
+import React, { useCallback, useEffect, useState } from "react";
+import { Play, Square, Trash2 } from "lucide-react";
 
 import type { schedulerApi, SchedulerHost } from "./api.js";
 import {
   residentCapacityNote,
-  residentOutputUnavailableReason,
   residentStatusLabel,
-  residentStopCauseLabel,
   residentTaskActions,
-  residentTerminalSummary,
 } from "./residentTaskView.js";
-import type {
-  ResidentTaskDetail,
-  ResidentTaskRow,
-} from "../shared/contracts.js";
+import type { ResidentTaskRow } from "../shared/contracts.js";
 
 type ResidentApi = ReturnType<typeof schedulerApi>;
 
@@ -31,11 +25,11 @@ type ResidentTasksProps = {
  */
 export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
   const [tasks, setTasks] = useState<ResidentTaskRow[]>([]);
-  // Which binding's detail is open; kept here so switching does not touch the cron view state.
-  const [selectedId, setSelectedId] = useState<string | null>(null);
   // Per-binding lock while an operation is in flight, so a double click cannot send it twice.
   const [pending, setPending] = useState<Set<string>>(new Set());
-  const outputUnavailable = residentOutputUnavailableReason(host);
+  // Opening the original conversation is an optional host capability; without it the name is a
+  // disabled label rather than a button that silently does nothing.
+  const canOpenSession = typeof host.openSession === "function";
 
   const load = useCallback(async () => {
     try {
@@ -72,23 +66,6 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
     }
   };
 
-  const selected = tasks.find((task) => task.taskId === selectedId) ?? null;
-
-  if (selected) {
-    return (
-      <ResidentTaskPanel
-        api={api}
-        host={host}
-        task={selected}
-        pending={pending.has(selected.taskId)}
-        outputUnavailable={outputUnavailable}
-        onBack={() => setSelectedId(null)}
-        onMessage={onMessage}
-        onOperate={operate}
-      />
-    );
-  }
-
   return (
     <section className="cron-resident" aria-label="常驻任务">
       <header className="cron-heading">
@@ -99,6 +76,11 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
         <span>{tasks.length} 项</span>
       </header>
       <p className="cron-resident-note">{residentCapacityNote()}</p>
+      {!canOpenSession && (
+        <p className="cron-resident-note" role="status">
+          当前宿主不提供打开会话能力：任务名不可点击，启用、可见、停止、继续与删除仍可用。
+        </p>
+      )}
       {tasks.length === 0 ? (
         <p className="cron-resident-note">
           还没有常驻任务。在侧边栏会话的三点菜单里对正在运行的会话选择“设为常驻”。
@@ -110,9 +92,13 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
             const busy = pending.has(task.taskId);
             return (
               <li key={task.taskId} className="cron-resident-row">
+                {/* The name opens the original conversation — the same session id, never the
+                    plugin task id — so the user lands in the writable chat with its history. */}
                 <button
                   className="cron-link cron-resident-open"
-                  onClick={() => setSelectedId(task.taskId)}
+                  disabled={!canOpenSession}
+                  title={canOpenSession ? "打开原会话聊天" : "当前宿主不提供打开会话能力"}
+                  onClick={() => host.openSession?.(task.sessionId)}
                 >
                   {task.name}
                 </button>
@@ -204,161 +190,6 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
             );
           })}
         </ul>
-      )}
-    </section>
-  );
-}
-
-type ResidentTaskPanelProps = {
-  api: ResidentApi;
-  host: SchedulerHost;
-  task: ResidentTaskRow;
-  pending: boolean;
-  outputUnavailable: string | null;
-  onBack: () => void;
-  onMessage: (message: string) => void;
-  onOperate: (task: ResidentTaskRow, operation: () => Promise<unknown>, success: string) => Promise<void>;
-};
-
-/** One binding's detail: host state, its terminal history, and the session's read-only output. */
-function ResidentTaskPanel({
-  api,
-  host,
-  task,
-  pending,
-  outputUnavailable,
-  onBack,
-  onMessage,
-  onOperate,
-}: ResidentTaskPanelProps) {
-  // The plugin's own recorded terminal rows, newest first.
-  const [detail, setDetail] = useState<ResidentTaskDetail | null>(null);
-  // Container the host renders the read-only transcript into; the plugin only mounts and disposes.
-  const outputRef = useRef<HTMLDivElement | null>(null);
-  const actions = residentTaskActions(task);
-
-  useEffect(() => {
-    let live = true;
-    void api
-      .residentTask(task.taskId)
-      .then((value) => {
-        if (live) setDetail(value);
-      })
-      .catch((error) => {
-        if (live) onMessage(String(error));
-      });
-    return () => {
-      live = false;
-    };
-  }, [api, onMessage, task.taskId, task.status, task.executionId]);
-
-  useEffect(() => {
-    const container = outputRef.current;
-    if (!container || !host.mountSessionOutput) return;
-    // The host owns the viewer's lifecycle; this effect only unmounts it when the detail closes or
-    // switches to another binding, so switching never leaks a socket listener.
-    const dispose = host.mountSessionOutput(container, { sessionId: task.sessionId });
-    return () => dispose();
-  }, [host, task.sessionId]);
-
-  const runs = useMemo(() => detail?.runs ?? [], [detail]);
-
-  return (
-    <section className="cron-resident-detail" aria-label={`常驻任务 ${task.name}`}>
-      <header className="cron-heading">
-        <div>
-          <button onClick={onBack}>
-            <ArrowLeft size={14} />
-            常驻任务
-          </button>
-          <h2>{task.name}</h2>
-          <p>
-            {task.projectId} · {task.runtime.provider} · {residentStatusLabel(task.status)}
-            {task.terminal ? ` · ${residentStopCauseLabel(task.terminal.cause)}` : ""}
-          </p>
-        </div>
-        <div className="cron-actions">
-          {host.openSession && (
-            <button onClick={() => host.openSession?.(task.sessionId)}>打开会话</button>
-          )}
-          {actions.canStop && (
-            <button disabled={pending} onClick={() => void onOperate(task, () => api.stopResident(task.taskId), "已停止常驻任务")}>
-              <Square size={13} />
-              停止
-            </button>
-          )}
-          {actions.canContinue && (
-            <button
-              disabled={pending}
-              onClick={() =>
-                void onOperate(
-                  task,
-                  async () => {
-                    const response = await api.continueResident(task.taskId);
-                    if (!response.result.accepted) {
-                      throw new Error(
-                        response.result.reason === "already_running"
-                          ? "任务已在运行，未重复发送继续"
-                          : "任务已禁用，未发送继续",
-                      );
-                    }
-                    return response;
-                  },
-                  "已在原会话中发送继续",
-                )
-              }
-            >
-              <Play size={13} />
-              继续
-            </button>
-          )}
-        </div>
-      </header>
-
-      <p className="cron-resident-note">
-        {residentTerminalSummary(task)}
-        {task.terminal?.reason ? ` · ${task.terminal.reason}` : ""}
-      </p>
-
-      <div className="cron-resident-output">
-        {outputUnavailable ? (
-          <p role="alert" className="cron-resident-note">
-            {outputUnavailable}
-          </p>
-        ) : (
-          <div ref={outputRef} className="cron-resident-output-host" />
-        )}
-      </div>
-
-      <h3>常驻结束记录</h3>
-      {runs.length === 0 ? (
-        <p className="cron-resident-note">还没有结束记录；运行结果只在结束时写入这里。</p>
-      ) : (
-        <table className="cron-table">
-          <thead>
-            <tr>
-              <th>结束时间</th>
-              <th>结果</th>
-              <th>原因</th>
-              <th>告警</th>
-            </tr>
-          </thead>
-          <tbody>
-            {runs.map((run) => (
-              <tr key={run.id}>
-                <td>{run.endedAt ? new Date(run.endedAt).toLocaleString("zh-CN", { hour12: false }) : "—"}</td>
-                <td>
-                  <span className={"cron-badge cron-" + run.status}>
-                    {run.status === "success" ? <CircleCheck size={12} /> : <CircleAlert size={12} />}
-                    {run.status}
-                  </span>
-                </td>
-                <td>{run.reason ?? "—"}</td>
-                <td>{run.alertStatus === "none" ? "未发送" : run.alertStatus}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
       )}
     </section>
   );

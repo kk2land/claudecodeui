@@ -3,11 +3,8 @@ import test from "node:test";
 
 import {
   residentCapacityNote,
-  residentOutputUnavailableReason,
   residentStatusLabel,
-  residentStopCauseLabel,
   residentTaskActions,
-  residentTerminalSummary,
 } from "../client/residentTaskView.js";
 import type { ResidentTaskRow } from "../shared/contracts.js";
 
@@ -32,14 +29,11 @@ function row(overrides: Partial<ResidentTaskRow> = {}): ResidentTaskRow {
   };
 }
 
-test("resident status and stop cause labels come from the host state, not guesses", () => {
+test("resident status labels come from the host state, not guesses", () => {
   assert.equal(residentStatusLabel("running"), "运行中");
   assert.equal(residentStatusLabel("stopping"), "正在停止");
   assert.equal(residentStatusLabel("stopped"), "已停止");
   assert.equal(residentStatusLabel("idle"), "未启动");
-  assert.equal(residentStopCauseLabel(null), "—");
-  assert.equal(residentStopCauseLabel("completed"), "正常结束");
-  assert.equal(residentStopCauseLabel("recovery_failed"), "恢复失败");
 });
 
 test("only a running binding offers stop and only a stopped, enabled one offers continue", () => {
@@ -70,48 +64,9 @@ test("a disabled binding explains that it keeps protection and will not recover"
   assert.equal(residentTaskActions(row({ status: "running" })).canRemove, true);
 });
 
-test("the terminal summary distinguishes an alerting end from a silent one", () => {
-  const terminal = {
-    id: "terminal-1",
-    taskId: "resident-1",
-    sessionId: "session-1",
-    executionId: "exec-1",
-    status: "failed" as const,
-    cause: "failed" as const,
-    alert: true,
-    endedAt: "2026-01-02T03:04:05.000Z",
-    reason: "provider exited",
-  };
-  const summary = residentTerminalSummary(row({ status: "stopped", terminal }));
-  assert.match(summary, /运行失败/);
-  assert.match(summary, /需告警/);
-  const silent = residentTerminalSummary(
-    row({ status: "stopped", terminal: { ...terminal, status: "stopped", cause: "user_stopped", alert: false } }),
-  );
-  assert.match(silent, /手动停止/);
-  assert.match(silent, /不告警/);
-  assert.equal(residentTerminalSummary(row()), "还没有结束记录");
-});
-
 test("resident tasks are documented as not consuming the cron concurrency limit", () => {
   assert.match(residentCapacityNote(), /不占用/);
   assert.match(residentCapacityNote(), /maxConcurrentRuns/);
-});
-
-test("a host without the session-output capability is reported instead of faked", () => {
-  assert.equal(
-    residentOutputUnavailableReason({
-      mountSessionOutput: () => () => undefined,
-      openSession: () => undefined,
-    }),
-    null,
-  );
-  assert.match(String(residentOutputUnavailableReason({})), /不提供会话输出能力/);
-  // Half a capability is not enough: the detail needs both mount and open.
-  assert.match(
-    String(residentOutputUnavailableReason({ mountSessionOutput: () => () => undefined })),
-    /不提供会话输出能力/,
-  );
 });
 
 // --------------------------- DOM interaction ---------------------------
@@ -132,9 +87,9 @@ const { JSDOM } = requireDom("jsdom") as {
  */
 async function mountResidentTasks(options: {
   tasks: ResidentTaskRow[];
-  detail?: { runs: unknown[] };
   rpc?: (method: string, path: string, body?: unknown) => Promise<unknown>;
-  withHostCapabilities?: boolean;
+  /** Which optional host capabilities the fixture exposes, to pin the documented degradation. */
+  hostCapabilities?: "both" | "open-only" | "none";
 }) {
   const dom = new JSDOM("<!doctype html><html><body><div id=\"root\"></div></body></html>");
   const { window } = dom;
@@ -158,26 +113,30 @@ async function mountResidentTasks(options: {
 
   const calls: Array<{ method: string; path: string; body?: unknown }> = [];
   const mounted: Array<{ sessionId: string; container: unknown }> = [];
-  const disposed: string[] = [];
+  const opened: string[] = [];
   const messages: string[] = [];
+  const capabilities = options.hostCapabilities ?? "both";
   const host: SchedulerHost = {
     context: { theme: "light", project: null },
     onContextChange: () => () => undefined,
     rpc: async (method, path, body) => {
       calls.push({ method, path, body });
       if (options.rpc) return options.rpc(method, path, body);
-      if (method === "GET" && path === "/resident-tasks") return { tasks: options.tasks };
-      if (method === "GET") return { ...options.tasks[0], runs: options.detail?.runs ?? [] };
+      if (method === "GET") return { tasks: options.tasks };
       return options.tasks[0];
     },
-    ...(options.withHostCapabilities === false
+    ...(capabilities === "none"
       ? {}
       : {
-        mountSessionOutput: (container: HTMLElement, { sessionId }: { sessionId: string }) => {
-          mounted.push({ sessionId, container });
-          return () => disposed.push(sessionId);
-        },
-        openSession: () => undefined,
+        ...(capabilities === "both"
+          ? {
+            mountSessionOutput: (container: HTMLElement, { sessionId }: { sessionId: string }) => {
+              mounted.push({ sessionId, container });
+              return () => undefined;
+            },
+          }
+          : {}),
+        openSession: (sessionId: string) => { opened.push(sessionId); },
       }),
   };
 
@@ -218,7 +177,7 @@ async function mountResidentTasks(options: {
     window.close();
   };
 
-  return { window, calls, mounted, disposed, messages, click, findButton, root, act, close };
+  return { window, calls, mounted, opened, messages, click, findButton, root, act, close };
 }
 
 const residentRow = (overrides: Partial<ResidentTaskRow> = {}): ResidentTaskRow => ({
@@ -239,18 +198,61 @@ const residentRow = (overrides: Partial<ResidentTaskRow> = {}): ResidentTaskRow 
   ...overrides,
 });
 
-test("opening a resident detail mounts the host output for its session and disposes it on close", async () => {
+test("clicking a task name opens the original session once and shows no read-only panel", async () => {
   const mountedHost = await mountResidentTasks({ tasks: [residentRow()] });
 
   await mountedHost.click("会话 A");
-  assert.equal(mountedHost.mounted.length, 1);
-  assert.equal(mountedHost.mounted[0]!.sessionId, "session-1");
-  assert.equal(mountedHost.calls[0]!.path, "/resident-tasks");
-  assert.ok(mountedHost.calls.some((call) => call.path === "/resident-tasks/resident-1"));
-  assert.equal(mountedHost.disposed.length, 0);
 
-  await mountedHost.click("常驻任务");
-  assert.deepEqual(mountedHost.disposed, ["session-1"]);
+  // The conversation is opened by its session id, never by the plugin's task id.
+  assert.deepEqual(mountedHost.opened, ["session-1"]);
+  // No detail is requested and no viewer is mounted: the click is a navigation, not a drill-in.
+  assert.equal(mountedHost.calls.some((call) => call.path === "/resident-tasks/resident-1"), false);
+  assert.equal(mountedHost.mounted.length, 0);
+  const text = mountedHost.window.document.body.textContent ?? "";
+  assert.doesNotMatch(text, /常驻结束记录|只读输出/);
+  assert.ok(mountedHost.findButton("会话 A"), "the list is still on screen after opening the session");
+  await mountedHost.close();
+});
+
+test("without openSession the name is disabled and says why, while controls stay usable", async () => {
+  const mountedHost = await mountResidentTasks({
+    tasks: [residentRow()],
+    hostCapabilities: "none",
+  });
+
+  const name = mountedHost.findButton("会话 A");
+  assert.ok(name);
+  assert.equal(name!.disabled, true);
+  assert.match(mountedHost.window.document.body.textContent ?? "", /不提供打开会话能力/);
+
+  await mountedHost.click("停止");
+  assert.ok(mountedHost.calls.some((call) => call.path === "/resident-tasks/resident-1/stop"));
+  await mountedHost.close();
+});
+
+test("an open-only host still navigates even though it cannot render a viewer", async () => {
+  const mountedHost = await mountResidentTasks({
+    tasks: [residentRow()],
+    hostCapabilities: "open-only",
+  });
+
+  await mountedHost.click("会话 A");
+  assert.deepEqual(mountedHost.opened, ["session-1"]);
+  assert.equal(mountedHost.mounted.length, 0);
+  await mountedHost.close();
+});
+
+test("row controls call their APIs and never navigate", async () => {
+  const stopped = residentRow({ status: "stopped" });
+  const mountedHost = await mountResidentTasks({ tasks: [stopped] });
+
+  await mountedHost.click("继续");
+  await mountedHost.click("删除");
+
+  const paths = mountedHost.calls.map((call) => call.path);
+  assert.ok(paths.includes("/resident-tasks/resident-1/continue"));
+  assert.ok(paths.includes("/resident-tasks/resident-1"));
+  assert.deepEqual(mountedHost.opened, []);
   await mountedHost.close();
 });
 
@@ -350,5 +352,7 @@ test("the enabled and visible checkboxes PATCH their own field and keep state on
   await mountedHost.act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
   const patches = mountedHost.calls.filter((call) => call.method === "PATCH");
   assert.deepEqual(patches[patches.length - 1]!.body, { visible: false });
+  // Toggling a control is not a navigation.
+  assert.deepEqual(mountedHost.opened, []);
   await mountedHost.close();
 });

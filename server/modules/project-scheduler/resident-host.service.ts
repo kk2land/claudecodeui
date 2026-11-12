@@ -97,9 +97,13 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
   let recovered = false;
 
   function toView(record: ResidentBindingRecord): ResidentBindingView {
+    // The linked session is the title's single source of truth: a sidebar rename
+    // must show here on the next projection read. The adoption snapshot stays as
+    // the fallback for a session with no usable (or missing) custom name.
+    const currentTitle = sessionsDb.getSessionById(record.sessionId)?.custom_name?.trim();
     return {
       taskId: record.taskId,
-      name: record.name,
+      name: currentTitle || record.name,
       sessionId: record.sessionId,
       projectId: record.projectId,
       enabled: record.enabled,

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
 import { api } from '@/shared/api';
-import { TASKMASTER_FEATURE_ENABLED } from '@/shared/constants';
+import { OPEN_CHAT_TAB_EVENT, TASKMASTER_FEATURE_ENABLED } from '@/shared/constants';
 import type { ServerEvent,
   AppTab,
   LLMProvider,
@@ -959,6 +959,14 @@ export function useProjectsState({
 
     return subscribe(handleEvent);
   }, [isSessionProcessing, markSessionAttention, navigate, refreshProjectsSilently, sessionId, subscribe]);
+
+  // A resident task's row opens its conversation from inside the plugin panel; the panel cannot
+  // reach the workspace tab state, so it dispatches this request and the workspace reveals chat.
+  useEffect(() => {
+    const handleOpenChatTab = () => setActiveTab('chat');
+    window.addEventListener(OPEN_CHAT_TAB_EVENT, handleOpenChatTab);
+    return () => window.removeEventListener(OPEN_CHAT_TAB_EVENT, handleOpenChatTab);
+  }, []);
 
   useEffect(() => {
     return () => {

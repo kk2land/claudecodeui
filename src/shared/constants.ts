@@ -275,3 +275,12 @@ export const CODEX_MODEL_PROVIDERS_CHANGED_EVENT = 'codex-model-providers-change
  * by the same name.
  */
 export const RESIDENT_TASKS_PLUGIN = 'project-scheduler';
+
+//----------------- WORKSPACE TAB REQUESTS ------------
+
+/**
+ * Window event dispatched when something outside the workspace asks for the chat tab — currently
+ * the plugin host's `openSession`, whose caller is inside a plugin panel. The workspace listens
+ * and switches tabs; nothing else is carried, so no cross-module state is introduced.
+ */
+export const OPEN_CHAT_TAB_EVENT = 'cloudcli-open-chat-tab';
