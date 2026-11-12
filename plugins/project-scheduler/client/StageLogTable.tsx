@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { X } from "lucide-react";
+import { RefreshCw, X } from "lucide-react";
 
 import type { schedulerApi } from "./api.js";
 import { STAGE_LOG_DEFAULT_LIMIT } from "../shared/contracts.js";
@@ -136,6 +136,9 @@ export function StageLogTable({ api, taskId, onClose }: StageLogTableProps) {
         </div>
         <div className="cron-stage-log-actions">
           {cursor !== null && <button type="button" onClick={returnToLatest}>回到最新</button>}
+          <button type="button" aria-label="刷新阶段日志" title="刷新阶段日志" onClick={returnToLatest}>
+            <RefreshCw size={14} />
+          </button>
           <button type="button" aria-label="关闭阶段日志" onClick={onClose}>
             <X size={14} />
           </button>
