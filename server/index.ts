@@ -19,6 +19,7 @@ import {
     sessionRetentionService,
     setCodexWorkerBridge,
     setDshWorkerBridge,
+    setStageLogBridge,
 } from '@/modules/providers/index.js';
 import { broadcastCodexRateLimits, broadcastToConnectedClients, chatRunRegistry, createWebSocketServer, onChatRunCompleted } from '@/modules/websocket/index.js';
 
@@ -109,6 +110,8 @@ const projectSchedulerModule = createProjectSchedulerModule({
     // Stable, independent of the Worker plugin: adapters inject this endpoint.
     mcpUrl: `http://127.0.0.1:${SERVER_PORT}/api/scheduler-mcp`,
 });
+// Providers receive the stage-log bridge through composition; every adapter keeps working without it.
+setStageLogBridge(projectSchedulerModule.logBridge);
 // Providers receive Worker lifecycle callbacks through composition only; they
 // never runtime-import the workers module.
 setCodexWorkerBridge(workerModule.host.bridge, workerModule.mcpUrl);

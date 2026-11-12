@@ -11,6 +11,8 @@
  * - codexRuntime.abort(sessionId) - Cancel an active session
  */
 
+import { randomUUID } from 'node:crypto';
+
 import { Codex } from '@openai/codex-sdk';
 import type { ModelReasoningEffort, Thread, ThreadOptions } from '@openai/codex-sdk';
 
@@ -24,10 +26,12 @@ import {
 } from '@/shared/index.js';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { sessionRuntimeDb } from '@/modules/database/index.js';
+import { stageLogSdkConfig } from '@/modules/providers/list/codex/codex-stage-log.js';
 import type {
   AnyRecord,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
+  StageLogBridge,
   SideQuestionOutcome,
   SideQuestionRequest,
   SideQuestionSink,
@@ -44,6 +48,10 @@ type ActiveCodexSession = {
 };
 
 const activeCodexSessions = new Map<string, ActiveCodexSession>();
+
+// Injected by the server composition root. Each `codex exec` run is its own CLI
+// process, so the host's temporary token is released when that run settles.
+let stageLogBridge: StageLogBridge | null = null;
 
 // Codex CLI requires non-whitespace stdin even when --image arguments are
 // present, so attachment-only turns need a small text instruction.
@@ -324,6 +332,9 @@ async function queryCodex(
 
   let codex: Codex;
   let thread: Thread;
+  // This run's own logical runtime instance: a fresh CLI process per run, so
+  // repeated prepares inside the run resolve the same host token.
+  const stageLogRuntimeInstanceId = `codex-exec:${randomUUID()}`;
   // Provider-native thread id (starts as the resume id, or is captured from
   // the stream for brand-new sessions).
   let capturedSessionId = providerSessionId;
@@ -352,7 +363,24 @@ async function queryCodex(
   const sessionKey = () => sessionId || capturedSessionId || null;
 
   try {
-    codex = new Codex({ config: { features: { goals: isCodexGoalEnabled() } } });
+    // Resident logging rides the SDK's existing constructor config seam (the
+    // only place that reaches the CLI as `--config`). The host decides
+    // eligibility; a null connection leaves goals config untouched.
+    let stageLogConfig: Record<string, unknown> | null = null;
+    if (stageLogBridge) {
+      try {
+        stageLogConfig = stageLogSdkConfig(await stageLogBridge.prepareSession({
+          sessionId,
+          projectPath: String(projectPath ?? workingDirectory),
+          provider: 'codex',
+          userId: ws.userId ?? null,
+          runtimeInstanceId: stageLogRuntimeInstanceId,
+        }));
+      } catch {
+        stageLogConfig = null;
+      }
+    }
+    codex = new Codex({ config: { features: { goals: isCodexGoalEnabled() }, ...(stageLogConfig ?? {}) } });
 
     const threadOptions: ThreadOptions = {
       workingDirectory,
@@ -547,6 +575,10 @@ async function queryCodex(
     }
 
   } finally {
+    // The run's CLI process is gone now, so its stage-log token must not
+    // outlive it. This never runs for a still-live loaded thread: exec does not
+    // own one.
+    try { await stageLogBridge?.closeRuntime?.(stageLogRuntimeInstanceId); } catch { /* host bookkeeping only */ }
     // Update session status
     if (sessionKey()) {
       const session = activeCodexSessions.get(sessionKey() || '');
@@ -625,6 +657,10 @@ export const codexRuntime = {
   run: queryCodex,
   abort: abortCodexSession,
   askSideQuestion: askCodexSideQuestion,
+  /** The composition root installs the stage-log bridge; providers never import the scheduler. */
+  setStageLogBridge(bridge: StageLogBridge | null) {
+    stageLogBridge = bridge;
+  },
 };
 
 /**

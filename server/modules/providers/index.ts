@@ -1,7 +1,8 @@
-import type { CodexWorkerBridge, DshWorkerBridge } from '@/shared/index.js';
+import type { CodexWorkerBridge, DshWorkerBridge, StageLogBridge } from '@/shared/index.js';
 
 import { codexAppServerRuntime } from './list/codex/codex-app-server.runtime.js';
 import { codexAppServerTransport } from './list/codex/codex-app-server.transport.js';
+import { codexRuntime } from './list/codex/codex-runtime.provider.js';
 import type { DshRuntimeProvider } from './list/dsh/dsh-runtime.provider.js';
 import { providerRegistry } from './provider.registry.js';
 
@@ -44,6 +45,18 @@ export function setCodexWorkerBridge(bridge: CodexWorkerBridge | null, mcpUrl?: 
 /** Server bootstrap injects DSH's Worker callbacks without a providers-to-workers runtime dependency. */
 export function setDshWorkerBridge(bridge: DshWorkerBridge | null): void {
   (providerRegistry.resolveProvider('dsh').runtime as DshRuntimeProvider).setWorkerBridge(bridge);
+}
+
+/**
+ * Server bootstrap injects the host's stage-log capability into every
+ * adapter that can carry a temporary MCP server: Codex app-server threads,
+ * Codex exec constructor config, and DSH's ACP/headless launch patch. It is
+ * independent of the Worker bridges, so logging works while Workers are off.
+ */
+export function setStageLogBridge(bridge: StageLogBridge | null): void {
+  codexAppServerRuntime.setStageLogBridge(bridge);
+  codexRuntime.setStageLogBridge(bridge);
+  (providerRegistry.resolveProvider('dsh').runtime as DshRuntimeProvider).setStageLogBridge(bridge);
 }
 
 // sideQuestionsService: used by the websocket module's `chat.side_question` handler and

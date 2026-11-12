@@ -13,7 +13,7 @@ import { rememberDshContextUsage } from '@/modules/providers/services/provider-t
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { sessionRuntimeDb } from '@/modules/database/index.js';
 import type { IProviderRuntime } from '@/shared/interfaces.js';
-import type { AnyRecord, DshConfiguration, DshWorkerBridge, ProviderPermissionDecision, ProviderRuntimeAction, ProviderRuntimeState, ProviderRuntimeContext, ProviderRuntimeWriter } from '@/shared/types.js';
+import type { AnyRecord, DshConfiguration, DshWorkerBridge, ProviderPermissionDecision, ProviderRuntimeAction, ProviderRuntimeState, ProviderRuntimeContext, ProviderRuntimeWriter, StageLogBridge, StageLogMcpConfig } from '@/shared/types.js';
 import { AppError, createCompleteMessage, createNormalizedMessage } from '@/shared/utils.js';
 import { appendFilesInputTag, appendImagesInputTag, isAllowedImageSourcePath, normalizeAttachmentDescriptors, resolveImageAbsolutePath } from '@/shared/image-attachments.js';
 
@@ -37,6 +37,8 @@ type DshOwner = {
   approvalBypass?: boolean;
   mcpSignature?: string;
   worker?: Awaited<ReturnType<DshWorkerBridge['prepareSession']>>;
+  /** Temporary stage-log MCP connection for this owner; patched in, never persisted. */
+  stageLog?: StageLogMcpConfig | null;
   cliVersion?: string;
   processStopped?: boolean;
   /**
@@ -58,6 +60,8 @@ export class DshRuntimeProvider implements IProviderRuntime {
   // idle recycling, so the same token can be reused when a wake-up resumes.
   private readonly runtimeInstanceId = `dsh:${randomUUID()}`;
   private workerBridge: DshWorkerBridge | null = null;
+  // A separate host capability with the same logical lifetime as this runtime.
+  private stageLogBridge: StageLogBridge | null = null;
 
   constructor(
     private readonly configuration: DshConfigurationProvider,
@@ -70,6 +74,11 @@ export class DshRuntimeProvider implements IProviderRuntime {
   /** The composition root installs the Worker bridge; providers never import workers. */
   setWorkerBridge(bridge: DshWorkerBridge | null): void {
     this.workerBridge = bridge;
+  }
+
+  /** The composition root installs stage logging independently of Worker enablement. */
+  setStageLogBridge(bridge: StageLogBridge | null): void {
+    this.stageLogBridge = bridge;
   }
 
   async run(command: string, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<void> {
@@ -117,6 +126,20 @@ export class DshRuntimeProvider implements IProviderRuntime {
       // model's image support and persists the image in native session history.
       const prompt = appendFilesInputTag(appendImagesInputTag(command, images), options.files);
       const model = await context.resolveResumeModel(owner.id, options.model);
+      // Resident logging is available on both transports and never depends on
+      // Worker enablement. The host gates it; null keeps the launch unchanged.
+      try {
+        owner.stageLog = await this.stageLogBridge?.prepareSession({
+          sessionId: owner.id,
+          projectPath: String(options.projectPath ?? options.cwd ?? owner.cwd),
+          provider: 'dsh',
+          userId: owner.writer.userId ?? null,
+          runtimeInstanceId: this.runtimeInstanceId,
+        }) ?? null;
+      } catch {
+        owner.stageLog = null;
+      }
+      if (owner.aborted) return;
       // Worker MCP is ACP-only. prepareSession is idempotent per application
       // session and runtime instance, and a null/failed result keeps plain chat
       // working without Worker tools. Headless never asks for or injects it.
@@ -140,7 +163,7 @@ export class DshRuntimeProvider implements IProviderRuntime {
       } else {
         owner.worker = null;
       }
-      const mcpSignature = JSON.stringify({ servers: await this.servers(owner), worker: owner.worker ?? null });
+      const mcpSignature = JSON.stringify({ servers: await this.servers(owner), worker: owner.worker ?? null, stageLog: owner.stageLog ?? null });
       if (owner.child && owner.mcpSignature !== mcpSignature) await this.closeChild(owner);
       owner.mcpSignature = mcpSignature;
       if (owner.aborted) return;
@@ -268,6 +291,19 @@ export class DshRuntimeProvider implements IProviderRuntime {
       : { name: server.name, type: 'http', url: server.url, headers: Object.entries(server.headers ?? {}).map(([name, value]) => ({ name, value })) }));
   }
 
+  /**
+   * Resident logging is patched in as a `dsh-mcp-client` server for both
+   * transports. The ACP request intentionally does not also pass it through
+   * `mcpServers`: one server must never be injected twice, and the HTTP field
+   * depends on a CLI version CloudCLI does not control.
+   */
+  private stageLogRow(connection: StageLogMcpConfig): AnyRecord {
+    return { insert: [{
+      id: 'cloudcli-stage-log-mcp', name: '@deepseek-ai/dsh-mcp-client',
+      config: { serverName: 'cloudcli_scheduler', transport: 'streamable-http', url: connection.url, headers: connection.headers },
+    }] };
+  }
+
   private async executable(command: string, owner: DshOwner): Promise<string> {
     const directories = path.isAbsolute(command) || command.includes('/') || command.includes('\\')
       ? [owner.cwd] : (owner.config.env.PATH || '').split(path.delimiter);
@@ -282,10 +318,12 @@ export class DshRuntimeProvider implements IProviderRuntime {
   private async acp(owner: DshOwner, prompt: string, model: string | undefined, options: AnyRecord): Promise<void> {
     const timeout = owner.config.timeoutMs;
     if (!owner.child) {
-      const child = await this.launch(owner, owner.worker ? [{ insert: [{
+      const extraRows: AnyRecord[] = owner.worker ? [{ insert: [{
         id: 'cloudcli-workers-mcp', name: '@deepseek-ai/dsh-mcp-client',
         config: { serverName: 'cloudcli_workers', transport: 'streamable-http', ...owner.worker },
-      }] }] : []);
+      }] }] : [];
+      if (owner.stageLog) extraRows.push(this.stageLogRow(owner.stageLog));
+      const child = await this.launch(owner, extraRows);
       child.onFrame = (frame) => {
         if (frame.method === 'session/update' && frame.params?.sessionId === owner.nativeId && owner.busy && !owner.aborted) {
           for (const message of this.events.normalize(frame.params, owner.id)) {
@@ -393,6 +431,9 @@ export class DshRuntimeProvider implements IProviderRuntime {
       ...(server.type === 'http' ? { url: server.url, headers: Object.fromEntries(server.headers.map((entry: AnyRecord) => [entry.name, entry.value])) }
         : { command: server.command, args: server.args, env: Object.fromEntries(server.env.map((entry: AnyRecord) => [entry.name, entry.value])) }),
     } })) });
+    // Patched like the ACP launch does; headless has no session/new, so its
+    // whole server table travels through this temporary patch.
+    if (owner.stageLog) rows.push(this.stageLogRow(owner.stageLog));
     const args = ['--json', ...(owner.nativeId ? ['--session-id', owner.nativeId] : []), '-'];
     const child = await this.launch(owner, rows, args);
     let final = false, step = 0, text = '';
@@ -584,5 +625,6 @@ export class DshRuntimeProvider implements IProviderRuntime {
     // Closing the runtime cancels every Worker owner scoped to this logical DSH
     // instance. A single ACP process exit is not a runtime lifetime boundary.
     await this.workerBridge?.closeRuntime(this.runtimeInstanceId, 'DSH runtime closed.').catch(() => {});
+    try { await this.stageLogBridge?.closeRuntime?.(this.runtimeInstanceId); } catch { /* host bookkeeping only */ }
   }
 }

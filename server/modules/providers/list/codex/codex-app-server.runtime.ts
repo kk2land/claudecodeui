@@ -8,6 +8,7 @@ import { CodexComposerPredictions } from '@/modules/providers/list/codex/codex-c
 import { CodexPredictionConfigProvider } from '@/modules/providers/list/codex/codex-prediction-config.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
 import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
+import { stageLogThreadConfig } from '@/modules/providers/list/codex/codex-stage-log.js';
 import { appendFilesInputTag, normalizeAttachmentDescriptors, isImageAttachmentDescriptor } from '@/shared/image-attachments.js';
 import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEnabled } from '@/shared/index.js';
 import type {
@@ -26,6 +27,7 @@ import type {
   ProviderPermissionDecision,
   ProviderRuntimeContext,
   ProviderRuntimeWriter,
+  StageLogBridge,
   SessionRuntimeSettings,
 } from '@/shared/index.js';
 
@@ -201,6 +203,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   // Worker ownership belongs to this runtime, not to a proxy process that can
   // exit after an idle timeout. A later native resume keeps the same owner.
   private readonly workerRuntimeInstanceId = `codex:${randomUUID()}`;
+  // Resident-log tokens are scoped to this logical runtime too. A proxy idle
+  // exit keeps them, so a resumed thread keeps the temp config the host issued.
+  private readonly stageLogRuntimeInstanceId = `codex-stage-log:${randomUUID()}`;
+  // Injected by the server composition root; stage logging stays host-owned.
+  private stageLogBridge: StageLogBridge | null = null;
   // The proxy owns its own native idle timer; a loaded-list RPC during an
   // active Worker run is the smallest protocol activity that refreshes it.
   private keepaliveTimer: ReturnType<typeof setInterval> | null = null;
@@ -290,6 +297,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.workerBridge = bridge;
   }
 
+  /** The composition root installs the stage-log bridge independently of the Worker bridge. */
+  setStageLogBridge(bridge: StageLogBridge | null): void {
+    this.stageLogBridge = bridge;
+  }
+
   /** The provider router and shutdown use this only for an explicit lifecycle stop. */
   async stopWorkers(reason = 'Codex app-server stopped.'): Promise<void> {
     this.stopKeepalive();
@@ -324,6 +336,35 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       });
     } catch {
       // Worker registration is optional; a bridge failure must not block Codex.
+      return null;
+    }
+  }
+
+  /**
+   * Registers the temporary stage-log MCP thread config.
+   *
+   * The host decides eligibility; null keeps Codex working without the tool and
+   * never touches the user's global config. The same runtime instance id is
+   * reused for every prepare so a token survives an idle proxy exit, and the
+   * host can release exactly this runtime's tokens on shutdown.
+   */
+  private async prepareStageLogConfig(
+    sessionId: string,
+    options: AnyRecord,
+    writer: ProviderRuntimeWriter,
+  ): Promise<Record<string, unknown> | null> {
+    if (!this.stageLogBridge) return null;
+    try {
+      const connection = await this.stageLogBridge.prepareSession({
+        sessionId,
+        projectPath: String(options.projectPath ?? options.cwd ?? ''),
+        provider: 'codex',
+        userId: writer.userId ?? null,
+        runtimeInstanceId: this.stageLogRuntimeInstanceId,
+      });
+      return stageLogThreadConfig(connection);
+    } catch {
+      // Logging is optional; a bridge failure must not block Codex.
       return null;
     }
   }
@@ -403,8 +444,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       // The Worker owner/token is registered once per loaded thread. The
       // returned map is a temporary thread config override, never config.toml.
       const workerConfig = await this.prepareWorkerConfig(sessionId, options, writer);
+      // Resident logging is independent of Worker enablement and merges into the
+      // same temporary thread config without replacing the user's own servers.
+      const stageLogConfig = await this.prepareStageLogConfig(sessionId, options, writer);
       this.assertLiveSession(target);
       if (target.stopRequested && !providerId) return;
+      const threadConfig = { ...(workerConfig ?? {}), ...(stageLogConfig ?? {}) };
       const result = await this.client.request(providerId ? 'thread/resume' : 'thread/start', {
         // Select readable history for new threads; this creation-only setting
         // cannot migrate existing threads. Resume reads their history separately.
@@ -412,7 +457,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         cwd: options.cwd ?? options.projectPath,
         ...(requestedModelProvider ? { modelProvider: requestedModelProvider } : {}),
         ...(target.model ? { model: target.model } : {}), ...permission,
-        ...(workerConfig ? { config: workerConfig } : {}),
+        ...(Object.keys(threadConfig).length ? { config: threadConfig } : {}),
       });
       this.assertLiveSession(target);
       if (!result.thread?.id) throw new Error('Codex did not return a thread id.');
@@ -1641,6 +1686,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     // The host logs unconfirmed Worker cleanup; shutdown must still close the
     // native transport, predictions and subscriptions.
     await this.stopWorkers('Codex runtime closed.').catch(() => {});
+    // An ordinary turn, Stop or thread unload is not a runtime teardown: only
+    // closing this runtime releases its stage-log tokens.
+    try { await this.stageLogBridge?.closeRuntime?.(this.stageLogRuntimeInstanceId); } catch { /* host bookkeeping only */ }
     if (this.client === codexAppServerTransport) {
       await Promise.all(this.listActiveSessions().map(({ sessionId }) => this.abort(sessionId)));
       await codexAppServerTransport.close();
