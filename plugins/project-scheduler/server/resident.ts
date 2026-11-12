@@ -3,6 +3,7 @@ import type {
   ResidentBindingView,
   ResidentContinueResponse,
   ResidentIpcEvent,
+  StageLogPage,
   ResidentRemoveResult,
   ResidentTaskDetail,
   ResidentTaskListResponse,
@@ -59,6 +60,21 @@ export class ResidentTasks {
   async detail(taskId: string): Promise<ResidentTaskDetail> {
     const binding = await this.binding(taskId);
     return { ...this.row(binding), runs: this.resident.runs(taskId) };
+  }
+  /**
+   * One newest-first page of the host's stage logs for this task. The plugin stores no log rows and
+   * derives nothing from them; the opaque cursor and the page bounds belong to the host, and stage
+   * logs stay separate from the terminal `runs` in the detail response.
+   */
+  async logs(
+    taskId: string,
+    query: { cursor?: string; limit?: number } = {},
+  ): Promise<StageLogPage> {
+    return this.host.request("logs", {
+      taskId,
+      ...(query.cursor ? { cursor: query.cursor } : {}),
+      ...(query.limit === undefined ? {} : { limit: query.limit }),
+    });
   }
   /**
    * Binds a running foreground session. The host validates runtime state, provider and duplicate

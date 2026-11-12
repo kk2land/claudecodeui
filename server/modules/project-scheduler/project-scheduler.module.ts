@@ -8,6 +8,9 @@ import {
   startResidentContinueTurn,
 } from '@/modules/websocket/index.js';
 
+import { createStageLogMcpService } from './stage-log-mcp.service.js';
+import { createStageLogMcpRouter } from './stage-log-mcp.routes.js';
+import { createStageLogService } from './stage-log.service.js';
 import { readResidentSessionInfo } from './resident-session-projection.js';
 import { createResidentHostService } from './resident-host.service.js';
 import { createResidentIpcService } from './resident-ipc.service.js';
@@ -22,7 +25,19 @@ import { createResidentIpcService } from './resident-ipc.service.js';
  */
 export function createProjectSchedulerModule(options: {
   runtime: ProviderRuntimeGateway;
+  /** Stable URL the adapters inject as their stage-log MCP endpoint (tests may omit it). */
+  mcpUrl?: string;
+  /** Plugin enable switch; the MCP gate must not depend on the plugin process/port. */
+  isPluginEnabled?: () => boolean;
 }) {
+  const pluginEnabled = options.isPluginEnabled ?? (() => isPluginEnabled('project-scheduler'));
+  const logs = createStageLogService();
+  const logMcp = createStageLogMcpService({
+    logs,
+    resolveMcpUrl: () => options.mcpUrl ?? '',
+    isEnabled: pluginEnabled,
+  });
+  let logReady = true;
   // Late bound so the host can emit through the IPC service created from it.
   let emitEvent: (event: ResidentIpcEvent) => void = () => undefined;
   const host = createResidentHostService({
@@ -39,15 +54,29 @@ export function createProjectSchedulerModule(options: {
       void broadcastSessionUpserted(sessionId).catch(() => undefined);
     },
     announceSessionRemoved: (sessionId, projectId) => broadcastSessionRemoved(sessionId, projectId),
+    logSystem: (input) => { logs.recordSystem(input); },
+    logs: (query) => logs.list(query),
   });
   const ipc = createResidentIpcService(host);
   emitEvent = (event) => ipc.emit(event);
 
   return {
     host,
+    /** Provider adapters inject this temporary MCP connection (W6 receives it via its setter). */
+    logBridge: {
+      prepareSession: (input: Parameters<typeof logMcp.prepareSession>[0]) => logMcp.prepareSession(input),
+      closeRuntime: (runtimeInstanceId: string) => logMcp.closeRuntime(runtimeInstanceId),
+    },
+    /** Mounted by the server root before general API auth. */
+    mcpRouter: createStageLogMcpRouter({
+      service: logMcp,
+      isEnabled: pluginEnabled,
+      isReady: () => logReady,
+    }),
     /** Watches run admissions and the plugin IPC channel; idempotent. */
     initialize(): void {
       host.initialize();
+      logs.start();
       ipc.start();
       // The session delta carries the live resident projection so an adopted or
       // removed task updates the sidebar without a manual refresh.
@@ -59,6 +88,8 @@ export function createProjectSchedulerModule(options: {
       await host.recoverAfterRestart();
     },
     async shutdown(): Promise<void> {
+      logReady = false;
+      logs.stop();
       ipc.stop();
       await host.shutdown();
     },

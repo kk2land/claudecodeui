@@ -16,6 +16,7 @@ import { defaultSettings } from "../server/configuration.js";
 import type {
   ResidentBindingView,
   ResidentIpcRequest,
+  StageLogEntry,
   ResidentTerminal,
   SchedulerRun,
   SchedulerSettings,
@@ -346,6 +347,41 @@ test("list, detail, switches, stop and continue use the host as the runtime auth
   const continued = await resumed;
   assert.equal(continued.result.accepted, true);
   assert.equal(continued.task.executionId, "exec-2");
+});
+
+test("stage logs forward the query to the host and never mix into terminal runs", async (t) => {
+  const { store, host, resident } = service(t);
+  const page = resident.logs("task-1", { cursor: "opaque-1", limit: 50 });
+  const request = host.sent.at(-1)!;
+  assert.equal(request.action, "logs");
+  assert.deepEqual(request.payload, { taskId: "task-1", cursor: "opaque-1", limit: 50 });
+  const entry: StageLogEntry = {
+    id: "log-1",
+    taskId: "task-1",
+    sessionId: "session-1",
+    executionId: "exec-1",
+    source: "agent",
+    occurredAt: "2026-01-01T00:30:00.000Z",
+    createdAt: "2026-01-01T00:30:01.000Z",
+    content: "部署完成",
+    status: "success",
+  };
+  host.respond(request, { logs: [entry], nextCursor: "opaque-0" });
+  const first = await page;
+  assert.equal(first.logs.length, 1);
+  assert.equal(first.logs[0].content, "部署完成");
+  assert.equal(first.nextCursor, "opaque-0");
+  // An omitted query sends only the task id, so the host applies its own default page size.
+  const defaults = resident.logs("task-1");
+  assert.deepEqual(host.sent.at(-1)!.payload, { taskId: "task-1" });
+  host.respond(host.sent.at(-1)!, { logs: [], nextCursor: null });
+  assert.deepEqual((await defaults).logs, []);
+  // Host refusals (unknown task, unavailable transport) surface unchanged.
+  const unknown = resident.logs("missing");
+  host.fail(host.sent.at(-1)!, "not_found", "宿主没有该常驻任务");
+  await assert.rejects(unknown, { code: "not_found" });
+  // Stage logs are not run rows: the resident detail history stays empty.
+  assert.deepEqual(store.resident.runs("task-1"), []);
 });
 
 test("removal stops an active run first, then unbinds, then drops metadata", async (t) => {

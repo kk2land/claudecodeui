@@ -313,6 +313,33 @@ CREATE INDEX IF NOT EXISTS idx_resident_bindings_status
 ON resident_bindings(status);
 `;
 
+
+/**
+ * Stage logs an agent reports for one resident task, kept for seven days by `created_at`.
+ *
+ * Independent of scheduler terminal runs and of the plugin's own tables: the host derives
+ * task/session/execution ids at write time, `created_at` is always server-issued, and
+ * `occurred_at` is what the agent reported. `data_json` is the reported JSON object verbatim.
+ */
+export const STAGE_LOGS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS stage_logs (
+    id TEXT PRIMARY KEY NOT NULL,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    execution_id TEXT,
+    source TEXT NOT NULL,
+    occurred_at TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    content TEXT NOT NULL,
+    status TEXT NOT NULL,
+    phase TEXT,
+    data_json TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_stage_logs_task_created
+ON stage_logs(task_id, created_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS idx_stage_logs_created ON stage_logs(created_at);
+`;
+
 /** Database initialization and migrations persist session runtimes and queue holds, plus Codex's native mode. */
 export const SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS session_runtime_settings (
@@ -423,4 +450,6 @@ ${QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL}
 ${SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL}
 
 ${RESIDENT_BINDINGS_TABLE_SCHEMA_SQL}
+
+${STAGE_LOGS_TABLE_SCHEMA_SQL}
 `;

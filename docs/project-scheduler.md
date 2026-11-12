@@ -191,8 +191,31 @@ provider 模式；已结束、报错、
 常驻执行不受定时任务并发上限约束：`maxConcurrentRuns` 及 worker 并发只约束脚本与提示词任务。
 每个常驻任务始终关联一个原会话，多个任务按各自会话运行；这里不额外承诺并发额度。
 
+### 阶段日志
+
+常驻会话的 Agent 可以通过 `stage_log` 工具记录简短的阶段（例如「部署到 staging 完成」
+「测试套件失败」）。注入前提是定时任务插件已启用且宿主日志记录器就绪，与同会话中 Worker 是否
+启用无关。Codex 在 app-server 线程实际创建（thread/start）或恢复（thread/resume）时注入；会话
+已经加载时，不保证下一轮就带上该工具。Codex exec 每次运行单独注入，DSH 在 ACP 与 headless 下
+通过临时 patch 注入，不修改用户配置。工具的 description 自带记录规则，用户提示词可按业务补充
+要记的阶段；遗漏记录不影响对话。
+
+每条阶段包含两个时间：事件发生时间（可自己提供，缺省取记录时刻，用于展示）和记录入库时间
+（由宿主发放，仅用于 7 天保留与翻页）；状态是自由文本，另含阶段名、来源（Agent 上报或宿主
+生命周期）和可选结构化数据。宿主生命周期条目只说明任务状态变化，不改变任务的运行结果，也不会
+为阶段自动发送告警。任务尚未成为常驻时，工具返回 `not_resident`：本条不重试，成为常驻后的后续
+阶段仍可正常记录。阶段日志不是终态运行记录，与运行历史分开保存与展示。
+
+常驻列表中的任务名仍直接进入原会话聊天；另有独立的「阶段日志」表格，按时间、阶段、状态、内容、
+来源、添加时间与详情各列展示，每条一行。表格默认看最近 50 条，每 5 秒刷新最新一页，查看更早的
+页为静态内容，可随时回到最新。服务端每页默认 50 条、最多 100 条，用不透明 cursor 翻页；阶段
+日志只有 7 天保留期，从记录入库时间起算。旧版节点日志记录继续保留并可在同一表格查看，无需手动
+迁移。
+
 HTTP 接口供插件界面使用：`GET/POST /resident-tasks`、`GET/PATCH/DELETE /resident-tasks/:id`、
-`POST /resident-tasks/:id/stop`、`POST /resident-tasks/:id/continue`。创建只接受 `sessionId`；
+`POST /resident-tasks/:id/stop`、`POST /resident-tasks/:id/continue`，以及
+`GET /resident-tasks/:id/logs?cursor&limit` 返回 `{logs, nextCursor}`（阶段日志，与任务详情的
+`runs` 相互独立）。创建只接受 `sessionId`；
 PATCH 只接受布尔 `enabled`/`visible`；创建返回 `{task}`，列表返回 `{tasks}`，`GET /resident-tasks/:id`
 （程序接口，供脚本或工具读取）返回任务字段加 `runs`，继续返回 `{task, result}`，其他控制返回同一
 任务行，删除返回 `{removed: true, sessionId}`。

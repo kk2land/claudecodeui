@@ -92,6 +92,7 @@ test(
     const bindings = new Map<string, ResidentBindingView>();
     const requests: ResidentIpcRequest[] = [];
     let failStop = false;
+    let logPages = 0;
     const port = await new Promise<number>((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error("plugin did not start")), 5000);
       let stderr = "";
@@ -214,6 +215,28 @@ test(
           });
           return;
         }
+        case "logs": {
+          logPages++;
+          reply({
+            logs: [
+              {
+                id: "log-1",
+                taskId,
+                sessionId: "session-1",
+                executionId: "exec-1",
+                source: "agent",
+                occurredAt: "2026-01-01T00:30:00.000Z",
+                createdAt: "2026-01-01T00:30:01.000Z",
+                content: "部署完成",
+                status: "success",
+                phase: "deploy",
+                data: { env: "staging" },
+              },
+            ],
+            nextCursor: "opaque-next",
+          });
+          return;
+        }
         case "remove": {
           const found = bindings.get(taskId);
           if (!found) {
@@ -328,6 +351,42 @@ test(
     // Resident terminal rows never leak into the scheduled task history.
     const ordinary = await request("/runs");
     assert.deepEqual(ordinary.data.runs, []);
+
+    // Stage logs are read page by page from the host; the plugin forwards the query untouched.
+    const logs = await request(
+      "/resident-tasks/" + created.taskId + "/logs?cursor=opaque-1&limit=10",
+    );
+    assert.equal(logs.status, 200, JSON.stringify(logs.data));
+    const logsBody = logs.data as unknown as {
+      logs: Array<{ id: string; content: string; source: string; phase?: string }>;
+      nextCursor: string | null;
+    };
+    assert.equal(logsBody.logs.length, 1);
+    assert.equal(logsBody.logs[0].id, "log-1");
+    assert.equal(logsBody.logs[0].source, "agent");
+    assert.equal(logsBody.logs[0].phase, "deploy");
+    assert.equal(logsBody.nextCursor, "opaque-next");
+    const logsRequest = requests.at(-1)!;
+    assert.equal(logsRequest.action, "logs");
+    assert.deepEqual(logsRequest.payload, {
+      taskId: created.taskId,
+      cursor: "opaque-1",
+      limit: 10,
+    });
+    const defaults = await request("/resident-tasks/" + created.taskId + "/logs");
+    assert.equal(defaults.status, 200);
+    assert.deepEqual(requests.at(-1)!.payload, { taskId: created.taskId });
+    // An invalid transport value never reaches the host.
+    const pagesBefore = logPages;
+    const badLimit = await request("/resident-tasks/" + created.taskId + "/logs?limit=0");
+    assert.equal(badLimit.status, 400);
+    assert.equal(logPages, pagesBefore);
+    // Stage logs never become terminal runs in the detail response.
+    const withLogs = await request("/resident-tasks/" + created.taskId);
+    assert.equal(
+      (withLogs.data as unknown as { runs: unknown[] }).runs.length,
+      1,
+    );
 
     // A failed stop keeps the task, its metadata and the binding.
     const running = bindings.get(created.taskId)!;

@@ -26,6 +26,7 @@ const ACTIONS = new Set([
   'stop',
   'continue',
   'remove',
+  'logs',
 ]);
 const ERROR_CODES = new Set<ResidentError['code']>([
   'invalid_request',

@@ -26,6 +26,8 @@ export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 // rows; the sessions repository reads the same table for deletion protection
 // and list visibility.
 export { residentBindingsDb } from '@/modules/database/repositories/resident-bindings.db.js';
+// stageLogsDb: used only by the project-scheduler host module's stage log service.
+export { stageLogsDb } from '@/modules/database/repositories/stage-logs.db.js';
 export type { ResidentBindingRecord } from '@/modules/database/repositories/resident-bindings.db.js';
 export { sessionRuntimeDb } from '@/modules/database/repositories/session-runtime.db.js';
 export { userDb } from '@/modules/database/repositories/users.js';

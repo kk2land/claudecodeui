@@ -2,6 +2,7 @@ import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
 
 import type {
+  ResidentProvider,
   ResidentSessionInfo,
   ResidentStopCause,
   ResidentTaskStatus,
@@ -2449,6 +2450,12 @@ export type ResidentBindingRecord = {
 export type {
   ResidentAdoptBlockedReason,
   ResidentBindingView,
+  StageLogEntry,
+  StageLogInput,
+  StageLogPage,
+  StageLogQuery,
+  StageLogRecorded,
+  StageLogSource,
   ResidentContinueBlockReason,
   ResidentContinueResult,
   ResidentError,
@@ -2469,6 +2476,45 @@ export type {
   ResidentTaskStatus,
   ResidentTerminal,
 } from '../../plugins/project-scheduler/shared/contracts.js';
+
+export {
+  STAGE_LOG_DEFAULT_LIMIT,
+  STAGE_LOG_MAX_LIMIT,
+} from '../../plugins/project-scheduler/shared/contracts.js';
+
+//----------------- STAGE LOG MCP BRIDGE ------------
+/**
+ * Temporary HTTP MCP connection the stage logger injects into a provider session. It carries
+ * only a URL and headers (the host issues the bearer token); business rules — which task, session
+ * or execution a report belongs to — stay on the server and are never decided by the adapter.
+ */
+export type StageLogMcpConfig = {
+  url: string;
+  headers: Record<string, string>;
+};
+
+/**
+ * Host-owned stage logging capability, consumed by the Codex app-server, Codex exec and DSH
+ * adapters. `prepareSession` is idempotent per runtime instance + application session and returns
+ * the temporary MCP connection the adapter must inject through its own existing seam (an
+ * app-server thread `config`, the exec client `config`, or the DSH mcp-client patch). It never
+ * edits a native profile and never decides logging eligibility; a null result simply means the
+ * adapter keeps working without the tool.
+ *
+ * The contract is deliberately minimal: no lease, cache, retry or per-model parameters. The
+ * optional `closeRuntime` releases the token/owner of one adapter runtime instance; adapters that
+ * already own process lifecycle may omit it.
+ */
+export type StageLogBridge = {
+  prepareSession(input: {
+    sessionId: string;
+    projectPath: string;
+    provider: ResidentProvider;
+    userId?: string | number | null;
+    runtimeInstanceId?: string;
+  }): Promise<StageLogMcpConfig | null>;
+  closeRuntime?(runtimeInstanceId: string): Promise<void> | void;
+};
 
 // ---------------------------
 

@@ -444,6 +444,85 @@ export type ResidentContinueResponse = {
   result: ResidentContinueResult;
 };
 
+//----------------- STAGE LOGS ------------
+
+/**
+ * Stage logs an agent reports for one resident task: short business checkpoints ("deployed staging",
+ * "test suite failed"), not terminal run rows. The host stores them for seven days and derives the
+ * task, session and execution ids on the server, so a tool caller only supplies content/status.
+ * `source` distinguishes agent reports from host lifecycle entries.
+ */
+export type StageLogSource = "agent" | "system";
+
+/**
+ * One stored stage log. `occurredAt` is what the agent reported (the host substitutes its own now
+ * when omitted) and `createdAt` is host-issued and is the only retention/pagination basis.
+ * `executionId` is the chat run the entry belongs to, or null for an entry recorded while the
+ * binding had no execution. `status` is free text chosen by the caller (success/failed/skipped/...).
+ */
+export type StageLogEntry = {
+  id: string;
+  taskId: string;
+  sessionId: string;
+  executionId: string | null;
+  source: StageLogSource;
+  occurredAt: string;
+  createdAt: string;
+  content: string;
+  status: string;
+  phase?: string;
+  data?: Record<string, unknown>;
+};
+
+/**
+ * MCP `stage_log` input. The server derives the owning task/session/execution from the MCP
+ * token; no id, source, timestamp or status vocabulary is trusted from the caller beyond these
+ * fields.
+ */
+export type StageLogInput = {
+  content: string;
+  status: string;
+  /**
+   * ISO-8601 timestamp of the event itself. Only an omitted value defaults to the host's now; an
+   * invalid value is rejected at the MCP boundary (callers cannot forge `createdAt`, which is
+   * always server-issued and is the sole retention/pagination basis).
+   */
+  occurredAt?: string;
+  phase?: string;
+  /** Small JSON object for structured detail; the host stores it as reported. */
+  data?: Record<string, unknown>;
+};
+
+/**
+ * `stage_log` result. `recorded: false` with `not_resident` means this session has no resident
+ * binding yet (for example a plain foreground chat that injected the tool), so the agent should
+ * not retry this entry but may keep calling the tool for later nodes once adopted. A disabled
+ * plugin is reported by the MCP route as unavailable instead of this value.
+ */
+export type StageLogRecorded =
+  | { recorded: true; log: StageLogEntry }
+  | { recorded: false; reason: "not_resident" };
+
+/** Newest-first page size for `logs`; the host applies these defaults and bounds. */
+export const STAGE_LOG_DEFAULT_LIMIT = 50;
+export const STAGE_LOG_MAX_LIMIT = 100;
+
+/**
+ * `logs` request payload. `cursor` is an opaque host-issued token (never parsed by the caller) and
+ * orders by `createdAt` then `id`.
+ */
+export type StageLogQuery = {
+  taskId: string;
+  cursor?: string;
+  limit?: number;
+};
+
+/** `logs` response value: one newest-first page plus the opaque cursor for the next older page. */
+export type StageLogPage = {
+  logs: StageLogEntry[];
+  nextCursor: string | null;
+};
+
 //----------------- RESIDENT HOST IPC PROTOCOL ------------
 
 /** Fixed IPC channel between the host resident module and the bundled scheduler plugin. */
@@ -465,6 +544,8 @@ export type ResidentIpcRequestPayloads = {
   continue: { taskId: string };
   /** Unbinds after a confirmed stop and keeps the session; the task metadata row is the plugin's. */
   remove: { taskId: string };
+  /** Newest-first page of the host's seven-day stage logs for one task. */
+  logs: StageLogQuery;
 };
 
 /** Fixed IPC action names. */
@@ -479,6 +560,7 @@ export type ResidentIpcResponseValues = {
   stop: { binding: ResidentBindingView };
   continue: { result: ResidentContinueResult; binding: ResidentBindingView };
   remove: ResidentRemoveResult;
+  logs: StageLogPage;
 };
 
 /**

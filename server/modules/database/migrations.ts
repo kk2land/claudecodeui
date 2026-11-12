@@ -13,6 +13,7 @@ import {
   SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL,
   SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL,
   RESIDENT_BINDINGS_TABLE_SCHEMA_SQL,
+  STAGE_LOGS_TABLE_SCHEMA_SQL,
   SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL,
   SESSIONS_TABLE_SCHEMA_SQL,
   USER_PREFERENCES_TABLE_SCHEMA_SQL,
@@ -584,6 +585,30 @@ const migrateGptwebProviderModels = (db: Database): void => {
   })();
 };
 
+/**
+ * Renames the pre-release `resident_logs` table to the stage-log feature name.
+ *
+ * The stage table already exists from its additive DDL, so this copies every legacy row verbatim
+ * (same id, task/session/execution, timestamps, content, status, phase and data) inside one
+ * transaction and only then drops the old table. A second run is a no-op because the old table is
+ * gone; a fresh database never enters this path.
+ */
+const migrateResidentLogsToStageLogs = (db: Database): void => {
+  if (!tableExists(db, 'resident_logs')) return;
+  db.transaction(() => {
+    db.exec(`
+      INSERT OR IGNORE INTO stage_logs (
+        id, task_id, session_id, execution_id, source, occurred_at, created_at,
+        content, status, phase, data_json
+      )
+      SELECT id, task_id, session_id, execution_id, source, occurred_at, created_at,
+        content, status, phase, data_json
+      FROM resident_logs
+    `);
+    db.exec('DROP TABLE resident_logs');
+  })();
+};
+
 /** Database initialization and integration tests upgrade existing installations in place. */
 export const runMigrations = (db: Database) => {
   try {
@@ -638,8 +663,10 @@ export const runMigrations = (db: Database) => {
     addSessionLastOpenedAtColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
-    // Additive: resident bindings never rewrite or drop existing data.
+    // Additive: resident bindings/logs never rewrite or drop existing data.
     db.exec(RESIDENT_BINDINGS_TABLE_SCHEMA_SQL);
+    db.exec(STAGE_LOGS_TABLE_SCHEMA_SQL);
+    migrateResidentLogsToStageLogs(db);
 
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_provider_session_id ON sessions(provider_session_id)');

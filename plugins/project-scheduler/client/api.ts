@@ -1,5 +1,6 @@
 import type {
   ResidentContinueResponse,
+  StageLogPage,
   ResidentRemoveResult,
   ResidentTaskDetail,
   ResidentTaskListResponse,
@@ -168,6 +169,22 @@ export function schedulerApi(host: SchedulerHost) {
         "/runs/" + encodeURIComponent(id),
       ),
     residentTasks: () => request<ResidentTaskListResponse>("GET", "/resident-tasks"),
+    /**
+     * One page of a resident task's stage log, newest first. `cursor` walks older pages; the host
+     * keeps only the last seven days, so an old cursor may legitimately return nothing.
+     */
+    stageLogs: (id: string, options: { cursor?: string | null; limit?: number } = {}) => {
+      // Both parameters are part of the request itself: `limit` is what makes the page size
+      // explicit instead of trusting the host default, and `cursor` walks older pages.
+      const query = new URLSearchParams();
+      if (options.cursor) query.set("cursor", options.cursor);
+      if (options.limit !== undefined) query.set("limit", String(options.limit));
+      const suffix = query.toString();
+      return request<StageLogPage>(
+        "GET",
+        "/resident-tasks/" + encodeURIComponent(id) + "/logs" + (suffix ? "?" + suffix : ""),
+      );
+    },
     residentTask: (id: string) =>
       request<ResidentTaskDetail>(
         "GET",

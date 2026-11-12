@@ -224,6 +224,25 @@ app.get(
   "/resident-tasks/:id",
   route((req) => resident.detail(String(req.params.id))),
 );
+app.get(
+  "/resident-tasks/:id/logs",
+  route((req) => {
+    // Transport parsing only; page size bounds and the opaque cursor semantics stay in the host.
+    const cursor = req.query.cursor;
+    if (cursor !== undefined && typeof cursor !== "string")
+      throw new Error("cursor 必须是字符串");
+    const rawLimit = req.query.limit;
+    let limit: number | undefined;
+    if (rawLimit !== undefined) {
+      if (typeof rawLimit !== "string" || !/^[0-9]+$/.test(rawLimit))
+        throw new Error("limit 必须是正整数");
+      limit = Number(rawLimit);
+      if (!Number.isSafeInteger(limit) || limit < 1)
+        throw new Error("limit 必须是正整数");
+    }
+    return resident.logs(String(req.params.id), { cursor, limit });
+  }),
+);
 app.patch(
   "/resident-tasks/:id",
   route((req) => {

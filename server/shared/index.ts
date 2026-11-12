@@ -89,6 +89,14 @@ export type {
   ResidentIpcResponse,
   ResidentIpcResponseValues,
   ResidentIpcSuccessResponse,
+  StageLogEntry,
+  StageLogInput,
+  StageLogPage,
+  StageLogQuery,
+  StageLogRecorded,
+  StageLogSource,
+  StageLogBridge,
+  StageLogMcpConfig,
   ResidentBindingRecord,
   ResidentProvider,
   ResidentRemoveResult,
@@ -99,6 +107,8 @@ export type {
   ResidentTerminal,
   CodexWorkerBridge,
   CodexWorkerPrepareSessionInput,
+  DshRuntimeMode,
+  DshRuntimeSettings,
   DshWorkerBridge,
   WorkerChangedEventValue,
   WorkerError,
@@ -120,6 +130,11 @@ export type {
   WorkerWakeResult,
   WorkerWakeSource,
   WorkerWakeTurnInput,
+} from './types.js';
+
+export {
+  STAGE_LOG_DEFAULT_LIMIT,
+  STAGE_LOG_MAX_LIMIT,
 } from './types.js';
 
 export type {

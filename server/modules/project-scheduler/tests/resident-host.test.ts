@@ -22,6 +22,7 @@ import type {
 import { AppError } from '@/shared/utils.js';
 
 import { createResidentHostService } from '../resident-host.service.js';
+import { createStageLogService } from '../stage-log.service.js';
 
 const SESSION = 'resident-session-1';
 
@@ -60,6 +61,7 @@ function createHarness(options: {
   const aborts: string[] = [];
   const states = new Map<string, { goal?: { status: string }; phase?: string; queueHeld?: boolean }>();
   const announcements: Array<{ kind: 'upsert' | 'removed'; sessionId: string }> = [];
+  const logs = createStageLogService();
   const runtime = {
     hasRuntime: () => true,
     abort: async (_provider: string, sessionId: string) => {
@@ -84,9 +86,11 @@ function createHarness(options: {
     requestQueueDispatch: () => undefined,
     announceSession: (sessionId) => announcements.push({ kind: 'upsert', sessionId }),
     announceSessionRemoved: (sessionId) => announcements.push({ kind: 'removed', sessionId }),
+    logSystem: (input) => { logs.recordSystem(input); },
+    logs: (query) => logs.list(query),
   });
   host.initialize();
-  return { host, events, continueCalls, aborts, states, announcements };
+  return { host, events, continueCalls, aborts, states, announcements, logs };
 }
 
 /** Admits a real registry run, the way dispatchRun does synchronously. */
@@ -557,5 +561,29 @@ test('the resident task name follows the linked session title without touching p
     }) as { bindings: ResidentBindingView[] };
     assert.equal(fallback.bindings[0].name, 'Resident conversation');
     await harness.host.shutdown();
+  });
+});
+
+test('the system run-start log belongs to the new execution, not the previous one', async () => {
+  await withDatabase(async () => {
+    const harness = createHarness();
+    const first = admitRun();
+    await harness.host.handleRequest('adopt', { taskId: 'task-exec-log', sessionId: SESSION });
+    // A real second admission replaces the binding's execution id.
+    const second = admitRun('resident');
+    assert.notEqual(second.executionId, first.executionId);
+    assert.equal(residentBindingsDb.getByTaskId('task-exec-log')?.executionId, second.executionId);
+
+    const runStarts = harness.logs.list({ taskId: 'task-exec-log' }).logs
+      .filter((entry) => entry.content === '运行开始');
+    assert.ok(runStarts.length > 0);
+    // The newest run-start entry carries the new execution, never the earlier one.
+    assert.equal(runStarts[0].executionId, second.executionId);
+    assert.equal(runStarts.some((entry) => entry.executionId === first.executionId), false);
+    // The adopt entry is a separate real transition.
+    assert.equal(
+      harness.logs.list({ taskId: 'task-exec-log' }).logs.some((entry) => entry.content === '已设为常驻任务'),
+      true,
+    );
   });
 });

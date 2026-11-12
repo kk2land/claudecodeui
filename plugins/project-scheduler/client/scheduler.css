@@ -1237,6 +1237,8 @@
 .cron-resident-row {
   display: grid;
   gap: 4px;
+  /* Lets the stage-log panel below scroll internally instead of widening the whole row. */
+  min-width: 0;
   padding: 8px 10px;
   border: 1px solid var(--cron-border, #d8dbe0);
   border-radius: 9px;
@@ -1260,4 +1262,94 @@
   display: inline-flex;
   gap: 4px;
   align-items: center;
+}
+
+.cron-stage-log {
+  margin-top: 8px;
+  padding: 10px 12px;
+  /* A grid item inside the resident row: without min-width it would inherit this table's
+     min-content width and push the whole page sideways on narrow screens. */
+  min-width: 0;
+  border: 1px solid var(--cron-border);
+  border-radius: 9px;
+  background: var(--cron-bg);
+  color: var(--cron-ink);
+}
+.cron-stage-log-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: flex-start;
+  margin-bottom: 8px;
+}
+.cron-stage-log-actions {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+/* Only this container scrolls — horizontally under ~720px, vertically past 340px — so the page
+   body itself never scrolls sideways and the last columns stay reachable. */
+.cron-stage-log-scroll {
+  max-width: 100%;
+  max-height: 340px;
+  overflow: auto;
+  border: 1px solid var(--cron-border);
+  border-radius: 7px;
+}
+/* Deliberately not the shared `.cron-table` base: that one is a fixed-layout three-column layout
+   with 24/29/25% headers, which squeezed these seven columns into the remainder. */
+.cron-stage-log-table {
+  width: 100%;
+  min-width: 720px;
+  margin: 0;
+  table-layout: auto;
+  border-collapse: collapse;
+  font-size: 12px;
+}
+.cron-stage-log-table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px;
+  text-align: left;
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--cron-muted);
+  white-space: nowrap;
+  border-bottom: 1px solid var(--cron-border);
+  background: var(--cron-soft);
+}
+.cron-stage-log-table td {
+  padding: 6px 8px;
+  vertical-align: top;
+  border-bottom: 1px solid var(--cron-border);
+  overflow-wrap: anywhere;
+}
+.cron-stage-log-table tbody tr:hover > td {
+  background: var(--cron-soft);
+}
+/* The message column takes the remaining width and wraps instead of becoming a one-word tower. */
+.cron-stage-log-table .cron-stage-log-content {
+  min-width: 220px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cron-stage-log-time {
+  white-space: nowrap;
+}
+.cron-stage-log-phase,
+.cron-stage-log-status,
+.cron-stage-log-source {
+  white-space: nowrap;
+}
+.cron-stage-log-detail summary {
+  cursor: pointer;
+  white-space: nowrap;
+}
+.cron-stage-log-data {
+  margin: 4px 0 0;
+  max-width: 320px;
+  max-height: 180px;
+  overflow: auto;
+  font-size: 11px;
 }

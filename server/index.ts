@@ -104,7 +104,11 @@ const workerModule = createWorkerModule({ serverPort: SERVER_PORT });
 // Resident ("常驻") tasks: host-owned binding lifecycle and the scheduler
 // plugin's IPC channel. Created here so bootstrap can identify leftover running
 // bindings before any queue is released.
-const projectSchedulerModule = createProjectSchedulerModule({ runtime: providerRuntimeService });
+const projectSchedulerModule = createProjectSchedulerModule({
+    runtime: providerRuntimeService,
+    // Stable, independent of the Worker plugin: adapters inject this endpoint.
+    mcpUrl: `http://127.0.0.1:${SERVER_PORT}/api/scheduler-mcp`,
+});
 // Providers receive Worker lifecycle callbacks through composition only; they
 // never runtime-import the workers module.
 setCodexWorkerBridge(workerModule.host.bridge, workerModule.mcpUrl);
@@ -192,6 +196,8 @@ app.get('/health', (req, res) => {
 // Worker MCP bridge: mounted before JWT/API-key auth because the plugin verifies
 // the owner bearer token itself. Never starts the plugin for an anonymous call.
 app.use('/api/worker-mcp', workerModule.mcpRouter);
+// Stage logs: independent bearer token, mounted before general API auth.
+app.use('/api/scheduler-mcp', projectSchedulerModule.mcpRouter);
 
 // Optional API key validation (if configured)
 app.use('/api', validateApiKey);

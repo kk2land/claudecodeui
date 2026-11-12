@@ -13,6 +13,8 @@ import { AppError } from '@/shared/utils.js';
 import type {
   LLMProvider,
   ProviderRuntimeGateway,
+  StageLogPage,
+  StageLogQuery,
   ResidentBindingView,
   ResidentContinueResult,
   ResidentIpcEvent,
@@ -46,6 +48,10 @@ export type ResidentHostDependencies = {
   announceSession(sessionId: string): void;
   /** Removes a hidden session from foreground lists without archiving it. */
   announceSessionRemoved(sessionId: string, projectId: string | null): void;
+  /** Writes one host lifecycle stage log for a bound session; absent bindings are ignored. */
+  logSystem?(input: { sessionId: string; content: string; status: string; phase?: string }): void;
+  /** Reads one newest-first log page for a task (7-day window, opaque cursor). */
+  logs?(query: StageLogQuery): StageLogPage;
 };
 
 /** The single host-side authority for resident bindings; consumed by the IPC service and bootstrap. */
@@ -89,6 +95,15 @@ function readBoolean(payload: Record<string, unknown>, key: string): boolean {
  */
 export function createResidentHostService(dependencies: ResidentHostDependencies) {
   const { runtime } = dependencies;
+
+  /** Lifecycle logging is best-effort and must never change a state transition. */
+  function logSystem(sessionId: string, content: string, status: string, phase?: string): void {
+    try {
+      dependencies.logSystem?.({ sessionId, content, status, phase });
+    } catch (error) {
+      console.error('[ProjectScheduler] Resident log write failed', { sessionId, error: String(error) });
+    }
+  }
   let unsubscribeRunStarted: (() => void) | null = null;
   let unsubscribeRunCompleted: (() => void) | null = null;
   /** Set at shutdown: no terminal may be committed while providers are closing. */
@@ -179,6 +194,14 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       terminal,
       executionId,
     })!;
+    logSystem(
+      record.sessionId,
+      terminal.reason
+        ? `运行结束：${effectiveCause}（${terminal.status}）：${terminal.reason}`
+        : `运行结束：${effectiveCause}（${terminal.status}）`,
+      effectiveCause,
+      terminal.status,
+    );
     dependencies.emitEvent({
       channel: 'cloudcli-scheduler-resident',
       kind: 'event',
@@ -222,6 +245,8 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       effort: run.dispatch.effort,
       runtime: run.dispatch.runtimeMode,
     });
+    // After the binding update: the entry belongs to THIS execution, never the previous one.
+    logSystem(run.sessionId, '运行开始', 'running', 'run');
     emitChanged([record.taskId]);
   }
 
@@ -342,6 +367,7 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       effort: run?.dispatch.effort ?? session.effort,
       runtime: run?.dispatch.runtimeMode ?? settings?.runtime ?? null,
     });
+    logSystem(sessionId, '已设为常驻任务', 'adopted', 'adopt');
     emitChanged([taskId]);
     // Publish the new projection so every sidebar stops offering adoption now.
     dependencies.announceSession(sessionId);
@@ -463,6 +489,7 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       executionId: admission.executionId,
       stopCause: null,
     });
+    logSystem(record.sessionId, '继续运行已接纳', 'running', 'continue');
     // Admitted first, so a queued turn can never overtake the continue input;
     // the queue keeps its own order behind this run.
     releaseCodexQueueHold(record.sessionId);
@@ -554,18 +581,24 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
         continue;
       }
       if (!pluginEnabled) continue;
+      logSystem(record.sessionId, '重启恢复：尝试继续', 'recovering', 'recovery');
       try {
         const result = await resume(record);
-        if (result.accepted) continue;
+        if (result.accepted) {
+          logSystem(record.sessionId, '重启恢复：已继续运行', 'recovered', 'recovery');
+          continue;
+        }
         if (result.reason === 'already_running') {
           // A live run already exists for this session; keep tracking it and do
           // not send a second continue.
           residentBindingsDb.update(record.taskId, { status: 'running' });
           continue;
         }
+        logSystem(record.sessionId, '重启恢复失败：恢复被拒绝', 'recovery_failed', 'recovery');
         commitTerminal(record, 'recovery_failed', { reason: 'Recovery was refused.' });
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
+        logSystem(record.sessionId, `重启恢复失败：${message}`, 'recovery_failed', 'recovery');
         commitTerminal(record, 'recovery_failed', { reason: message });
       }
     }
@@ -644,6 +677,12 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
         case 'stop': return stop(payload);
         case 'continue': return continueTask(payload);
         case 'remove': return remove(payload);
+        case 'logs': {
+          if (!dependencies.logs) {
+            throw new AppError('Resident logs are unavailable.', { code: 'not_found', statusCode: 404 });
+          }
+          return dependencies.logs(payload as StageLogQuery);
+        }
         default:
           throw new AppError('Unknown resident action.', { code: 'invalid_request', statusCode: 400 });
       }

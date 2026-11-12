@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { Play, Square, Trash2 } from "lucide-react";
+import { Play, ScrollText, Square, Trash2 } from "lucide-react";
 
 import type { schedulerApi, SchedulerHost } from "./api.js";
 import {
@@ -7,6 +7,7 @@ import {
   residentStatusLabel,
   residentTaskActions,
 } from "./residentTaskView.js";
+import { StageLogTable } from "./StageLogTable.js";
 import type { ResidentTaskRow } from "../shared/contracts.js";
 
 type ResidentApi = ReturnType<typeof schedulerApi>;
@@ -27,6 +28,9 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
   const [tasks, setTasks] = useState<ResidentTaskRow[]>([]);
   // Per-binding lock while an operation is in flight, so a double click cannot send it twice.
   const [pending, setPending] = useState<Set<string>>(new Set());
+  // The one task whose stage log is expanded; opening another replaces it, so at most one log
+  // panel exists and its request/timer are cleaned up when it closes or switches.
+  const [logTaskId, setLogTaskId] = useState<string | null>(null);
   // Opening the original conversation is an optional host capability; without it the name is a
   // disabled label rather than a button that silently does nothing.
   const canOpenSession = typeof host.openSession === "function";
@@ -184,8 +188,24 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
                       删除
                     </button>
                   )}
+                  <button
+                    type="button"
+                    aria-expanded={logTaskId === task.taskId}
+                    onClick={() => setLogTaskId((current) => (current === task.taskId ? null : task.taskId))}
+                  >
+                    <ScrollText size={13} />
+                    阶段日志
+                  </button>
                 </div>
                 {actions.note && <small className="cron-resident-note">{actions.note}</small>}
+                {logTaskId === task.taskId && (
+                  <StageLogTable
+                    key={task.taskId}
+                    api={api}
+                    taskId={task.taskId}
+                    onClose={() => setLogTaskId(null)}
+                  />
+                )}
               </li>
             );
           })}
