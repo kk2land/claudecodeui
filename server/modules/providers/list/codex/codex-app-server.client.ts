@@ -2,16 +2,13 @@ import { stat } from 'node:fs/promises';
 
 import { z } from 'zod';
 
-import {
-  codexAppServerTransport,
-  type CodexAppServerTransport,
-} from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import {
   AppError,
   SIDE_CONVERSATION_BOUNDARY_PROMPT,
   SIDE_CONVERSATION_DEVELOPER_INSTRUCTIONS,
 } from '@/shared/index.js';
-import type { CodexModelSelection, CodexRpcFrame } from '@/shared/index.js';
+import type { CodexModelSelection, CodexRpcClient, CodexRpcFrame } from '@/shared/index.js';
 
 /**
  * How long a side-question turn may run before it is given up on. A side
@@ -152,7 +149,7 @@ export const codexAppServer = {
    * constant so the providers tests can point it at a transport built with a
    * fake `spawn`; production always uses the runtime-owned shared connection.
    */
-  transport(): CodexAppServerTransport {
+  transport(): CodexRpcClient {
     return codexAppServerTransport;
   },
 };
@@ -174,7 +171,7 @@ export const codexAppServer = {
  * process — unlike a transient client, whose child died with the request.
  */
 async function askSideQuestionOn(
-  transport: CodexAppServerTransport,
+  transport: CodexRpcClient,
   input: CodexSideQuestionInput,
   onDelta: (text: string) => void,
 ): Promise<string> {
@@ -335,7 +332,8 @@ async function askSideQuestionOn(
 
         // From here on the turn waiter sits on a notification, so a shared child
         // that exits mid-turn is noticed now instead of at the timeout.
-        removeExitListener = transport.onExit((error) => {
+        removeExitListener = transport.onExit((error, _instanceId, threadIds) => {
+          if (threadIds && !threadIds.has(forkId)) return;
           settle(() => reject(new AppError(
             `Codex exited before the side-question turn finished (${error.message}).`,
             { code: 'CODEX_SIDE_QUESTION_FAILED', statusCode: 502 },

@@ -5,7 +5,7 @@ import { createRequire } from 'node:module';
 import path from 'node:path';
 import { createInterface } from 'node:readline';
 
-import type { CodexRpcClient, CodexRpcFrame } from '@/shared/index.js';
+import type { AnyRecord, CodexRpcClient, CodexRpcFrame } from '@/shared/index.js';
 import { AppError, findApplicationRoot, getModuleDirectory, isCodexGoalEnabled } from '@/shared/index.js';
 
 type PendingRequest = {
@@ -64,6 +64,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
     spawn?: () => ChildProcessWithoutNullStreams;
     timeoutMs?: number;
     stopTimeoutMs?: number;
+    modelProvider?: string;
   } = {}) {}
 
   /** Providers' composition boundary supplies the disabled Worker declaration before lazy startup. */
@@ -81,7 +82,7 @@ export class CodexAppServerTransport implements CodexRpcClient {
     return () => { this.requests.delete(listener); };
   }
 
-  onExit(listener: (error: Error) => void) {
+  onExit(listener: (error: Error, appServerInstanceId?: string) => void) {
     this.exits.add(listener);
     return () => { this.exits.delete(listener); };
   }
@@ -210,6 +211,9 @@ export class CodexAppServerTransport implements CodexRpcClient {
       // threads promptly so SDK compatibility can resume their latest rollout.
       child = spawn(process.execPath, [launcher, 'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0',
         '-c', `features.goals=${isCodexGoalEnabled()}`,
+        // Recent CLIs validate inputs against the process's configured provider,
+        // not just the modelProvider override on thread/start or thread/resume.
+        ...(this.options.modelProvider ? ['-c', `model_provider=${JSON.stringify(this.options.modelProvider)}`] : []),
         // A complete, disabled transport also makes prediction-only overrides
         // valid when config.toml has no Worker entry. Owner tokens stay per thread.
         ...(this.workerMcpUrl ? ['-c', `mcp_servers.cloudcli_workers.url=${JSON.stringify(this.workerMcpUrl)}`,
@@ -390,5 +394,130 @@ export class CodexAppServerTransport implements CodexRpcClient {
   }
 }
 
-/** Shared by the Codex runtime and fork adapter; construction never starts a child. */
-export const codexAppServerTransport = new CodexAppServerTransport();
+/**
+ * Runtime, forks and side questions share one lazy connection per model service.
+ * Launch overrides keep each CLI's provider checks consistent without changing
+ * config.toml or stopping conversations that use another service.
+ */
+export class CodexAppServerConnections implements CodexRpcClient {
+  private readonly connections = new Map<string | null, CodexAppServerTransport>();
+  private readonly threads = new Map<string, CodexAppServerTransport>();
+  private readonly notifications = new Set<(frame: CodexRpcFrame) => void>();
+  private readonly requests = new Set<(frame: CodexRpcFrame) => Promise<unknown>>();
+  private readonly exits = new Set<Parameters<CodexRpcClient['onExit']>[0]>();
+  private workerMcpUrl: string | null = null;
+  // Stop invalidates metadata reads that have not yet selected a connection.
+  private stopVersion = 0;
+  private stopping: Promise<void> | null = null;
+  private closed = false;
+
+  constructor(private readonly createConnection = (modelProvider: string | null) =>
+    new CodexAppServerTransport({ ...(modelProvider ? { modelProvider } : {}) })) {}
+
+  private connection(modelProvider: string | null): CodexAppServerTransport {
+    const existing = this.connections.get(modelProvider);
+    if (existing) return existing;
+    const connection = this.createConnection(modelProvider);
+    connection.setWorkerMcpUrl(this.workerMcpUrl);
+    connection.onNotification((frame) => {
+      if (frame.method === 'thread/started' && frame.params?.thread?.id) {
+        this.threads.set(frame.params.thread.id, connection);
+      }
+      for (const listener of this.notifications) listener(frame);
+    });
+    connection.onRequest((frame) => {
+      const handler = this.requests.values().next().value;
+      return handler ? handler(frame) : Promise.reject(new Error(`Unsupported request: ${frame.method}`));
+    });
+    connection.onExit((error, instanceId) => {
+      const threadIds = new Set([...this.threads].filter(([, owner]) => owner === connection).map(([id]) => id));
+      for (const listener of this.exits) listener(error, instanceId, threadIds);
+    });
+    this.connections.set(modelProvider, connection);
+    return connection;
+  }
+
+  get status() {
+    return ([...this.connections.values()].find((connection) => connection.status.running) ?? this.connection(null)).status;
+  }
+
+  statusForThread(threadId: string | null) {
+    return (threadId ? this.threads.get(threadId)?.status : undefined) ?? this.status;
+  }
+
+  instanceIdForThread(threadId: string): string | null {
+    return this.threads.get(threadId)?.instanceId ?? null;
+  }
+
+  get isStopping(): boolean {
+    return Boolean(this.stopping) || [...this.connections.values()].some((connection) => connection.isStopping);
+  }
+
+  setWorkerMcpUrl(url: string | null): void {
+    this.workerMcpUrl = url;
+    for (const connection of this.connections.values()) connection.setWorkerMcpUrl(url);
+  }
+
+  onNotification(listener: (frame: CodexRpcFrame) => void) {
+    this.notifications.add(listener);
+    return () => { this.notifications.delete(listener); };
+  }
+
+  onRequest(listener: (frame: CodexRpcFrame) => Promise<unknown>) {
+    this.requests.add(listener);
+    return () => { this.requests.delete(listener); };
+  }
+
+  onExit(listener: Parameters<CodexRpcClient['onExit']>[0]) {
+    this.exits.add(listener);
+    return () => { this.exits.delete(listener); };
+  }
+
+  async request<T = AnyRecord>(method: string, params?: unknown): Promise<T> {
+    if (this.closed) throw new Error('Codex app-server is shutting down.');
+    if (this.isStopping) throw new AppError('Codex app-server is stopping.', { code: 'CODEX_APP_SERVER_STOPPING', statusCode: 409 });
+    const stopVersion = this.stopVersion;
+    // Worker keepalive must refresh every live service without starting an idle one.
+    if (method === 'thread/loaded/list') {
+      const live = [...this.connections.values()].filter((connection) => connection.status.running);
+      const results = await Promise.all(live.map((connection) => connection.request<{ data: string[] }>(method, params)));
+      return { data: results.flatMap((result) => result.data) } as T;
+    }
+    const input = (params ?? {}) as { threadId?: string; modelProvider?: string };
+    let connection = input.threadId ? this.threads.get(input.threadId) : undefined;
+    const opensThread = ['thread/start', 'thread/resume', 'thread/fork'].includes(method);
+    if (opensThread) {
+      if (input.modelProvider) connection = this.connection(input.modelProvider);
+      else if (!connection && input.threadId) {
+        // Cold resumes and SDK forks have no in-memory routing entry. History
+        // remains readable through the default connection on the affected CLIs.
+        const saved = await this.connection(null).request<{ thread: { modelProvider: string | null } }>('thread/read', {
+          threadId: input.threadId,
+        });
+        if (stopVersion !== this.stopVersion) throw new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED', statusCode: 409 });
+        connection = this.connection(saved.thread.modelProvider);
+      }
+    }
+    const owner = connection ?? this.connection(null);
+    const result = await owner.request<AnyRecord>(method, params);
+    if (opensThread && result.thread?.id) this.threads.set(result.thread.id, owner);
+    return result as T;
+  }
+
+  async stop(): Promise<void> {
+    if (this.stopping) return this.stopping;
+    this.stopVersion += 1;
+    this.stopping = Promise.all([...this.connections.values()].map((connection) => connection.stop())).then(() => {});
+    try { await this.stopping; }
+    finally { this.stopping = null; }
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.stopVersion += 1;
+    await Promise.all([...this.connections.values()].map((connection) => connection.close()));
+  }
+}
+
+/** Shared by Codex runtime and fork clients; construction never starts a child. */
+export const codexAppServerTransport = new CodexAppServerConnections();

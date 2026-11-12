@@ -59,7 +59,7 @@ test('production spawn preserves Goals flags and supplies a disabled Worker tran
       const h = fakeProcess();
       const spawn = t.mock.method(childProcess, 'spawn', () => h.child);
       syncBuiltinESMExports();
-      const transport = new CodexAppServerTransport({ timeoutMs: 100 });
+      const transport = new CodexAppServerTransport({ timeoutMs: 100, modelProvider: 'magpie' });
       transport.setWorkerMcpUrl('http://127.0.0.1:3001/api/worker-mcp');
       h.onFrame((frame) => { if (frame.id !== undefined) h.reply({ id: frame.id, result: {} }); });
       try {
@@ -68,6 +68,8 @@ test('production spawn preserves Goals flags and supplies a disabled Worker tran
         assert.ok(args.includes(`features.goals=${enabled}`));
         assert.equal(args[args.indexOf(`features.goals=${enabled}`) - 1], '-c');
         assert.ok(args.includes('thread_unload_delay_secs=0'));
+        assert.ok(args.includes('model_provider="magpie"'));
+        assert.equal(args[args.indexOf('model_provider="magpie"') - 1], '-c');
         assert.ok(args.includes('mcp_servers.cloudcli_workers.url="http://127.0.0.1:3001/api/worker-mcp"'));
         assert.ok(args.includes('mcp_servers.cloudcli_workers.enabled=false'));
       } finally {

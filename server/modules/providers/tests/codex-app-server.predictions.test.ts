@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test, { afterEach, beforeEach } from 'node:test';
 
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
-import { CodexComposerPredictions } from '@/modules/providers/list/codex/codex-composer-predictions.provider.js';
 import { AppError } from '@/shared/index.js';
 import type {
   AnyRecord,
@@ -55,6 +54,7 @@ function harness(opts: {
   goal?: () => AnyRecord | null;
   goalSet?: Promise<AnyRecord>;
   bridge?: CodexWorkerBridge;
+  instanceIdForThread?: CodexRpcClient['instanceIdForThread'];
 } = {}) {
   let goalState: AnyRecord | null = null;
   const calls: Array<{ method: string; params: AnyRecord }> = [];
@@ -62,11 +62,12 @@ function harness(opts: {
   const listeners = new Set<(frame: CodexRpcFrame) => void>();
   const notify = (frame: CodexRpcFrame) => { for (const listener of listeners) listener(frame); };
   let requestHandler: (frame: CodexRpcFrame) => Promise<unknown> = async () => ({});
-  let exit: (error: Error) => void = () => {};
+  let exit: Parameters<CodexRpcClient['onExit']>[0] = () => {};
   let nativeId: string | null = null;
   let nextTurnId = 1;
 
   const rpc: CodexRpcClient = {
+    ...(opts.instanceIdForThread ? { instanceIdForThread: opts.instanceIdForThread } : {}),
     request<T>(method: string, params: AnyRecord = {}) {
       calls.push({ method, params });
       const known = new Set(['thread/start', 'thread/resume', 'turn/start', 'thread/fork', 'turn/interrupt', 'account/read']);
@@ -92,7 +93,6 @@ function harness(opts: {
   const configProvider = {
     load: (input: { signal: AbortSignal; refreshCredentials: () => Promise<void> }) => Promise.resolve((opts.config ?? (async () => READY_CONFIG))()),
   };
-  const predictions = new CodexComposerPredictions(rpc, () => true, 30_000, () => 0);
 
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
   const settingsDb = {
@@ -106,7 +106,6 @@ function harness(opts: {
     opts.predictionTimeoutMs ?? 5_000,
     {
       configProvider,
-      predictions,
       providerEligible: opts.providerEligible ?? (() => true),
       random: opts.random ?? Math.random,
       cliVersion: () => ('cliVersion' in opts ? opts.cliVersion! : '0.163.0'),
@@ -159,7 +158,7 @@ function harness(opts: {
     runtime, calls, inflight, events, resolve, event, rawEvent, requestHandler: () => requestHandler,
     options, writer, context, setup,
     state: () => runtime.getState('app-session'),
-    exit: (error: Error) => exit(error),
+    exit: (...args: Parameters<typeof exit>) => exit(...args),
     predictions: (method: string) => calls.filter((c) => c.method === method),
     setGoal: (goal: AnyRecord | null) => { goalState = goal; },
   };
@@ -172,6 +171,48 @@ async function eventually(predicate: () => boolean, description = 'expected stat
   }
   assert.ok(predicate(), `expected ${description}`);
 }
+
+for (const finish of ['complete', 'cancel'] as const) {
+  test(`another service exit preserves prediction ${finish} cleanup on the live connection`, async (t) => {
+    const instances = new Map<string, string | null>([
+      ['native-thread', 'openai-1'], ['prediction-fork', 'openai-1'], ['magpie-thread', 'magpie-1'],
+    ]);
+    const h = harness({ instanceIdForThread: (id) => instances.get(id) ?? null });
+    t.after(() => h.runtime.close());
+    await h.setup();
+    await eventually(() => h.predictions('thread/fork').length === 1);
+    h.resolve('thread/fork', 1, { thread: { id: 'prediction-fork' } });
+    await eventually(() => h.predictions('turn/start').length === 2);
+    h.resolve('turn/start', 2, { turn: { id: 'prediction-turn' } });
+    instances.set('magpie-thread', null);
+    h.exit(new Error('Magpie idle exit'), undefined, new Set(['magpie-thread']));
+    if (finish === 'complete') {
+      h.rawEvent('item/agentMessage/delta', 'prediction-fork', { turnId: 'prediction-turn', delta: '{"suggestion":"Next."}' });
+      h.rawEvent('turn/completed', 'prediction-fork', { turn: { id: 'prediction-turn', status: 'completed' } });
+      await eventually(() => h.state().prediction?.status === 'ready');
+    } else {
+      await h.runtime.abort('app-session');
+      await eventually(() => h.predictions('turn/interrupt').some((call) => call.params.threadId === 'prediction-fork'));
+    }
+    await eventually(() => h.predictions('thread/unsubscribe').some((call) => call.params.threadId === 'prediction-fork'));
+  });
+}
+
+test('a late prediction acknowledgement never addresses a replacement provider connection', async (t) => {
+  let instance = 'openai-1';
+  const h = harness({ instanceIdForThread: () => instance });
+  t.after(() => h.runtime.close());
+  await h.setup();
+  await eventually(() => h.predictions('thread/fork').length === 1);
+  instance = 'openai-2';
+  h.exit(new Error('OpenAI exited'), undefined, new Set(['native-thread']));
+  h.resolve('thread/fork', 1, { thread: { id: 'stale-prediction-fork' } });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.predictions('turn/start').length, 1);
+  assert.equal(h.predictions('turn/interrupt').length, 0);
+  assert.equal(h.predictions('thread/unsubscribe').length, 0);
+  assert.equal(h.state().prediction, undefined);
+});
 
 test('a completed opted-in turn forks and runs a prediction turn, publishing the parsed suggestion', async () => {
   const h = harness();

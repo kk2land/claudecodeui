@@ -184,7 +184,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private controls = new Map<string, Promise<CodexSessionState>>();
   private stopVersions = new Map<string, number>();
   private threadClosures = new Map<string, () => void>();
-  private stopExitWaiters = new Set<() => void>();
+  private stopExitWaiters = new Map<() => void, NativeSession>();
   private unsubscribe: Array<() => void>;
   private readonly configProvider: Pick<CodexPredictionConfigProvider, 'load'>;
   private readonly predictions: CodexComposerPredictions;
@@ -246,7 +246,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     this.unsubscribe = [
       client.onNotification((frame) => this.onNotification(frame)),
       client.onRequest((frame) => this.onRequest(frame)),
-      client.onExit((error) => {
+      client.onExit((error, _instanceId, threadIds) => {
         // A new process may serve a later request; anything already in flight
         // belongs to the dead generation and must never be replayed against it.
         this.connectionEpoch += 1;
@@ -254,10 +254,15 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         const cleanExit = error instanceof AppError && error.code === 'CODEX_APP_SERVER_CLEAN_EXIT';
         // Transport loss never owns Worker cleanup. Explicit Stop and runtime
         // shutdown call stopWorkers; an idle proxy can disappear independently.
-        for (const exited of this.stopExitWaiters) exited();
-        for (const closed of this.threadClosures.values()) closed();
-        this.stopKeepalive();
+        for (const [exited, session] of this.stopExitWaiters) {
+          if (!threadIds || session.threadId && threadIds.has(session.threadId)) exited();
+        }
+        for (const [threadId, closed] of this.threadClosures) {
+          if (!threadIds || threadIds.has(threadId)) closed();
+        }
+        if (!client.status?.running) this.stopKeepalive();
         for (const session of this.sessions.values()) {
+          if (threadIds && (!session.threadId || !threadIds.has(session.threadId))) continue;
           const idleExit = cleanExit && session.state.phase === 'idle' && session.state.goal?.status !== 'active';
           if (stopped || session.state.phase !== 'idle' || session.state.goal?.status === 'active') this.settings.update(session.id, { queueHeld: true });
           // Cancel work already awaiting setup/model resolution before process exit.
@@ -274,8 +279,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
           this.publish(session);
           if (stopped) this.failures.delete(session.id);
           else this.failures.set(session.id, { state: this.getState(session.id), writer: session.writer });
+          this.sessions.delete(session.id);
         }
-        this.sessions.clear();
       }),
     ];
   }
@@ -327,11 +332,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     const session = this.sessions.get(sessionId);
     const predictionSupported = this.predictionSupported();
     const settings = this.settings.get(sessionId);
-    if (session) return { ...session.state, ...settings, diagnostics: this.client.status, predictionSupported,
+    if (session) return { ...session.state, ...settings, diagnostics: this.client.statusForThread?.(session.threadId) ?? this.client.status, predictionSupported,
       ...(session.modelProvider && session.model ? { activeModelSelection: { modelProvider: session.modelProvider, model: session.model } } : {}),
       goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions], ...(session.state.prediction ? { prediction: { ...session.state.prediction } } : {}) };
     const failure = this.failures.get(sessionId);
-    if (failure) return { ...failure.state, ...settings, predictionSupported, diagnostics: this.client.status };
+    // The failure snapshot names the exited process; pool status may belong to another service.
+    if (failure) return { ...failure.state, ...settings, predictionSupported };
     return { ...settings, diagnostics: this.client.status, predictionSupported, phase: 'idle', turnId: null, goal: null, questions: [] };
   }
 
@@ -1181,7 +1187,7 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       const exited = new Promise<void>((resolve) => {
         onExit = () => { processExited = true; resolve(); };
       });
-      this.stopExitWaiters.add(onExit);
+      this.stopExitWaiters.set(onExit, session);
       const exitError = new AppError('Codex app-server session was closed.', { code: 'CODEX_APP_SERVER_SESSION_CLOSED', statusCode: 409 });
       const bounded = async <T>(promise: Promise<T>): Promise<T> => {
         let timer: ReturnType<typeof setTimeout> | undefined;

@@ -22,6 +22,9 @@ type PredictionOutcome =
 /** Cancellation source; `reverse`/`close` are rejections, `deadline` a timeout. */
 type CancelReason = 'reverse' | 'deadline' | 'close';
 
+/** A physical connection identity, or the legacy client's numeric connection counter. */
+type ConnectionEpoch = string | number;
+
 /**
  * One prediction run's mutable lifecycle state.
  *
@@ -43,7 +46,7 @@ class Run {
   forkThreadId: string | null = null;
   turnId: string | null = null;
 
-  constructor(readonly epoch: number, caller: AbortSignal, deadlineMs: number) {
+  constructor(readonly epoch: ConnectionEpoch, caller: AbortSignal, deadlineMs: number) {
     this.caller = caller;
     this.onCallerAbort = () => this.controller.abort();
     caller.addEventListener('abort', this.onCallerAbort, { once: true });
@@ -101,7 +104,7 @@ class Run {
 export class CodexComposerPredictions {
   /** Temporary thread id → its creating epoch; a thread remains owned until its
    *  unsubscribe settles, so late temporary events stay isolated. */
-  private readonly temporaryThreads = new Map<string, number>();
+  private readonly temporaryThreads = new Map<string, ConnectionEpoch>();
   /** Live runs, so reverse requests and close can cancel them. */
   private readonly runs = new Set<Run>();
   /** In-flight interrupts for a given connection/thread/turn, to avoid duplicates. */
@@ -146,7 +149,9 @@ export class CodexComposerPredictions {
     if (this.disposed) return { status: 'unavailable', reason: 'rejected' };
     input.signal.throwIfAborted();
 
-    const run = new Run(this.generation(), input.signal, this.deadlineMs);
+    const epoch = this.client.instanceIdForThread ? this.client.instanceIdForThread(input.parentThreadId) : this.generation();
+    if (epoch === null) return { status: 'unavailable', reason: 'rejected' };
+    const run = new Run(epoch, input.signal, this.deadlineMs);
     this.runs.add(run);
 
     let events: { result: Promise<PredictionOutcome>; stop(): void } | null = null;
@@ -184,7 +189,7 @@ export class CodexComposerPredictions {
       if (!forkThreadId) return { status: 'unavailable', reason: 'failed' };
       run.forkThreadId = forkThreadId;
       this.temporaryThreads.set(forkThreadId, run.epoch);
-      if (!this.connectionUsable(run.epoch)) return { status: 'unavailable', reason: 'rejected' };
+      if (!this.connectionUsable(forkThreadId, run.epoch)) return { status: 'unavailable', reason: 'rejected' };
 
       // Installed before turn/start so a notification that beats the RPC
       // acknowledgement is still observed for this exact thread.
@@ -271,8 +276,9 @@ export class CodexComposerPredictions {
   }
 
   /** True while this run's exact connection generation is still the live one. */
-  private connectionUsable(epoch: number): boolean {
-    return this.generation() === epoch && this.isLive();
+  private connectionUsable(threadId: string, epoch: ConnectionEpoch): boolean {
+    const current = this.client.instanceIdForThread ? this.client.instanceIdForThread(threadId) : this.generation();
+    return current === epoch && this.isLive();
   }
 
   private watch(
@@ -341,8 +347,8 @@ export class CodexComposerPredictions {
   }
 
   /** Interrupts a prediction turn that may still be running after a cancellation. */
-  private async interrupt(threadId: string, turnId: string | null, epoch: number): Promise<void> {
-    if (!turnId || !this.connectionUsable(epoch)) return;
+  private async interrupt(threadId: string, turnId: string | null, epoch: ConnectionEpoch): Promise<void> {
+    if (!turnId || !this.connectionUsable(threadId, epoch)) return;
     const key = `${epoch}:${threadId}:${turnId}`;
     if (this.interrupted.has(key)) return;
     this.interrupted.add(key);
@@ -355,8 +361,8 @@ export class CodexComposerPredictions {
     }
   }
 
-  private async unsubscribe(threadId: string, epoch: number): Promise<void> {
-    if (!this.connectionUsable(epoch)) {
+  private async unsubscribe(threadId: string, epoch: ConnectionEpoch): Promise<void> {
+    if (!this.connectionUsable(threadId, epoch)) {
       this.temporaryThreads.delete(threadId);
       return;
     }

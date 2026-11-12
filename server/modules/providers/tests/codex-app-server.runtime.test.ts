@@ -21,7 +21,7 @@ function harness(
   const directoryReads = overrides.directoryReads ?? [];
   let notify: (frame: CodexRpcFrame) => void = () => {};
   let request: (frame: CodexRpcFrame) => Promise<unknown> = async () => ({});
-  let exit: (error: Error) => void = () => {};
+  let exit: Parameters<CodexRpcClient['onExit']>[0] = () => {};
   let nativeId: string | null = null;
   let goal: AnyRecord | null = null;
   let nextTurnId = 1;
@@ -81,7 +81,7 @@ function harness(
   const options = { sessionId: 'app-session', cwd: '/tmp', model: 'test-model', effort: 'high' };
   const event = (method: string, params: AnyRecord = {}) => notify({ method, params: { threadId: 'native-thread', ...params } });
   const finish = (id = 'turn-1', status = 'completed') => event('turn/completed', { turn: { id, status } });
-  return { runtime, calls, handlers, events, event, finish, request: (frame: CodexRpcFrame) => request(frame), exit: (error: Error) => exit(error), accepted,
+  return { runtime, rpc, calls, handlers, events, event, finish, request: (frame: CodexRpcFrame) => request(frame), exit: (...args: Parameters<typeof exit>) => exit(...args), accepted,
     options, writer, context, settingsDb, storedMessages, historyReads, directoryReads, settings: () => settingsDb.get('app-session'),
     control: (action: Parameters<CodexAppServerRuntime['control']>[1]) => runtime.control('app-session', action, options, writer, context),
     run: (text = 'hello', extra: AnyRecord = {}) => runtime.run(text, { ...options, ...extra }, writer, context) };
@@ -97,6 +97,55 @@ function startTimeoutError() {
     code: 'CODEX_APP_SERVER_TIMEOUT', statusCode: 504, details: { method: 'turn/start', resultUnknown: true },
   });
 }
+
+test('a model service process exit leaves another service turn running', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  h.context.resolveProviderSessionId = () => null;
+  h.handlers.set('thread/start', async (params) => ({ thread: { id: `${params.modelProvider}-thread` }, model: params.model, modelProvider: params.modelProvider }));
+  h.settingsDb.update('magpie-session', { modelSelection: { modelProvider: 'magpie', model: 'test-model' } });
+  const magpie = h.run('magpie', { sessionId: 'magpie-session' });
+  await eventually(() => h.runtime.getState('magpie-session').turnId === 'turn-1');
+  const openai = h.run('openai', { sessionId: 'openai-session' });
+  await eventually(() => h.runtime.getState('openai-session').turnId === 'turn-2');
+
+  h.exit(new Error('Magpie process exited'), undefined, new Set(['magpie-thread']));
+  await magpie;
+  assert.equal(h.runtime.getState('magpie-session').phase, 'failed');
+  assert.equal(h.runtime.getState('openai-session').phase, 'running');
+  assert.equal(h.runtime.getState('openai-session').turnId, 'turn-2');
+  assert.equal(h.settingsDb.get('openai-session').queueHeld, false);
+  h.event('turn/completed', { threadId: 'openai-thread', turn: { id: 'turn-2', status: 'completed' } });
+  await openai;
+  assert.equal(h.runtime.getState('openai-session').phase, 'idle');
+});
+
+test('failed sessions retain their own process diagnostics while another service stays running', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  const openai: NonNullable<CodexRpcClient['status']> = {
+    running: true, pid: 6002, startedAt: 1, pendingRequests: 0, launcherPath: '/fake/codex', cliVersion: '0.165.0',
+  };
+  const magpie: NonNullable<CodexRpcClient['status']> = { ...openai, pid: 6001 };
+  Object.defineProperty(h.rpc, 'status', { value: openai });
+  h.rpc.statusForThread = (id) => id === 'magpie-thread' ? { ...magpie } : openai;
+  h.context.resolveProviderSessionId = () => null;
+  h.handlers.set('thread/start', async (params) => ({ thread: { id: 'magpie-thread' }, model: params.model, modelProvider: 'magpie' }));
+  h.settingsDb.update('magpie-session', { modelSelection: { modelProvider: 'magpie', model: 'test-model' } });
+  const run = h.run('magpie', { sessionId: 'magpie-session' });
+  await eventually(() => h.runtime.getState('magpie-session').turnId === 'turn-1');
+  assert.equal(h.runtime.getState('magpie-session').diagnostics?.pid, 6001);
+  Object.assign(magpie, { running: false, pid: null });
+  h.exit(new Error('Magpie exited'), undefined, new Set(['magpie-thread']));
+  await run;
+  const failed = h.runtime.getState('magpie-session');
+  assert.equal(failed.phase, 'failed');
+  assert.equal(failed.diagnostics?.running, false);
+  assert.equal(failed.diagnostics?.pid, null);
+  assert.equal(failed.diagnostics?.cliVersion, '0.165.0');
+  assert.equal(h.rpc.status?.running, true);
+  assert.equal(h.rpc.status?.pid, 6002);
+});
 
 test('model providers switch only after the current task ends and resume the same native thread', async () => {
   const h = harness();

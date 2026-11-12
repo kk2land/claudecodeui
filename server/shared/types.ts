@@ -1011,18 +1011,23 @@ export type CodexRpcFrame = {
 /** Injectable transport contract used by the native runtime and scripted protocol tests. */
 export type CodexRpcClient = {
   readonly status?: NonNullable<CodexSessionState['diagnostics']>;
+  /** Provider-scoped transports report the process that owns this native thread. */
+  statusForThread?(threadId: string | null): NonNullable<CodexSessionState['diagnostics']>;
   /**
    * Identity of the current physical app-server connection generation. Exit
    * listeners can identify that process; Worker ownership uses a separate
    * runtime identity and survives idle proxy exits.
    */
   readonly instanceId?: string | null;
+  /** Physical connection owning a native thread; null means it has exited or is unknown. */
+  instanceIdForThread?(threadId: string): string | null;
   /** Reserves or returns the instance id before the lazy child is spawned. */
   ensureInstanceId?(): string;
   request<T = AnyRecord>(method: string, params?: unknown): Promise<T>;
   onNotification(listener: (frame: CodexRpcFrame) => void): () => void;
   onRequest(listener: (frame: CodexRpcFrame) => Promise<unknown>): () => void;
-  onExit(listener: (error: Error, appServerInstanceId?: string) => void): () => void;
+  /** A scoped exit affects only the supplied native threads; omission means the whole client exited. */
+  onExit(listener: (error: Error, appServerInstanceId?: string, threadIds?: ReadonlySet<string>) => void): () => void;
 };
 // ---------------------------
 
