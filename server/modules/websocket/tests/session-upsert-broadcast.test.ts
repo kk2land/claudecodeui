@@ -6,8 +6,10 @@ import test from 'node:test';
 
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import {
+  broadcastSessionRemoved,
   broadcastSessionUpserted,
   broadcastSessionUpsertedBatch,
+  setResidentProjectionReader,
 } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
 
@@ -205,4 +207,51 @@ test('explicit SDK runtime broadcasts exec sessions again', async () => {
     if (previousRuntime === undefined) delete process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
     else process.env.CLOUDCLI_CODEX_RUNTIME_MODE = previousRuntime;
   }
+});
+
+test('the registered resident reader feeds the upsert and is cleared afterwards', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('app-resident', 'codex', '/workspace/demo');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    setResidentProjectionReader(({ sessionId }) => ({
+      taskId: sessionId === 'app-resident' ? 'task-1' : null,
+      status: 'stopped',
+      enabled: true,
+      visible: true,
+      adoptable: false,
+      blockedReason: sessionId === 'app-resident' ? 'already_resident' : 'not_running',
+    }));
+    try {
+      await broadcastSessionUpserted('app-resident');
+      const session = connection.frames[0]?.session as Record<string, unknown>;
+      assert.equal((session.resident as { taskId?: string }).taskId, 'task-1');
+    } finally {
+      // Leftover registrations must never leak into another test's payload.
+      setResidentProjectionReader(null);
+    }
+
+    connection.frames.length = 0;
+    await broadcastSessionUpserted('app-resident');
+    assert.equal(
+      Object.hasOwn(connection.frames[0]?.session as object, 'resident'),
+      false,
+    );
+  });
+});
+
+test('a hidden session removal carries the owning project id', async () => {
+  await withIsolatedDatabase(async () => {
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    broadcastSessionRemoved('app-resident', 'project-1');
+    assert.deepEqual(
+      { kind: connection.frames[0].kind, sessionId: connection.frames[0].sessionId, projectId: connection.frames[0].projectId },
+      { kind: 'session_removed', sessionId: 'app-resident', projectId: 'project-1' },
+    );
+    broadcastSessionRemoved('app-resident');
+    assert.equal(Object.hasOwn(connection.frames[1], 'projectId'), false);
+  });
 });

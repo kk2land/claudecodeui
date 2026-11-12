@@ -73,6 +73,13 @@ type ProviderCapabilities = {
    * Requires a runtime that keeps its CLI's input open during a turn.
    */
   supportsSteering: boolean;
+  /**
+   * Whether a running foreground session of this provider can be converted into
+   * a resident task. Codex qualifies in both of its existing runtimes (its
+   * app-server and its exec/SDK adapter), and the session keeps whichever
+   * runtime it is configured with.
+   */
+  supportsResidentTasks: boolean;
 };
 
 /**
@@ -102,6 +109,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // Streaming input stays open for the whole run, and a user message written
     // to it with priority `next` joins the running turn.
     supportsSteering: true,
+    // Resident tasks reuse a native app-server/DSH session; the Claude SDK has
+    // no equivalent session the host could keep owning.
+    supportsResidentTasks: false,
   },
   cursor: {
     provider: 'cursor',
@@ -118,6 +128,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsSessionForking: false,
     supportsSideQuestions: false,
     supportsSteering: false,
+    supportsResidentTasks: false,
   },
   codex: {
     provider: 'codex',
@@ -139,6 +150,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsSessionForking: true,
     supportsSideQuestions: true,
     supportsSteering: false,
+    // Both existing runtimes (app-server and the exec/SDK adapter) resume a
+    // persistent native thread, so either can stay resident.
+    supportsResidentTasks: true,
   },
   dsh: {
     provider: 'dsh',
@@ -162,6 +176,8 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // whole new turn.
     supportsSideQuestions: false,
     supportsSteering: false,
+    // ACP and headless both expose a durable native session the host can resume.
+    supportsResidentTasks: true,
   },
   opencode: {
     provider: 'opencode',
@@ -185,6 +201,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsSessionForking: false,
     supportsSideQuestions: true,
     supportsSteering: false,
+    supportsResidentTasks: false,
   },
 };
 

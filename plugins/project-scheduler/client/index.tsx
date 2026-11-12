@@ -14,6 +14,7 @@ import {
 } from "lucide-react";
 import { schedulerApi, type SchedulerHost } from "./api.js";
 import { ConfigurationEditor } from "./ConfigurationEditor.js";
+import { ResidentTasks } from "./ResidentTasks.js";
 import { COMMON_TIMEZONES } from "./configurationDraft.js";
 import {
   environmentRowsToMap,
@@ -438,6 +439,9 @@ function Scheduler({ host }: { host: SchedulerHost }) {
               项运行中
             </span>
           </div>
+          {/* Resident bindings run in their own sessions, so they sit beside the cron tasks
+              rather than inside the scheduled-task table. */}
+          <ResidentTasks api={api} host={host} onMessage={setMessage} />
           <ProjectAlertWarning tasks={visible} onEdit={editProjectAlerts} />
           <table className="cron-table">
             <thead>

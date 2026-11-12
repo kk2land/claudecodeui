@@ -100,6 +100,12 @@ export type SchedulerTokenUsage = {
   cacheReadTokens: number | null;
   cacheWriteTokens: number | null;
 };
+/**
+ * Provenance of a run row. Scheduled-task rows (cron and manual) omit it so every run recorded
+ * before resident tasks existed keeps its meaning; only resident terminal rows set `"resident"`.
+ * Ordinary run lists therefore exclude a resident row with `run.source !== "resident"`.
+ */
+export type SchedulerRunSource = "resident";
 /** A persisted execution or skipped occurrence. */
 export type SchedulerRun = {
   id: string;
@@ -116,7 +122,12 @@ export type SchedulerRun = {
     | "interrupted"
     | "skipped_overlap"
     | "skipped_capacity";
-  trigger: "cron" | "manual";
+  /**
+   * What asked for this run. `cron`/`manual` are scheduled tasks; `resident` marks a turn the
+   * host issued for a resident binding (continue, enable, or restart resume) and is written only
+   * on the binding's terminal row together with `source: "resident"`.
+   */
+  trigger: "cron" | "manual" | "resident";
   scheduledAt: string;
   startedAt: string;
   endedAt: string | null;
@@ -130,6 +141,19 @@ export type SchedulerRun = {
   alertStatus: "none" | "pending" | "sent" | "failed";
   alertError: string | null;
   alertAttempts: number;
+  /** Present only on resident terminal rows; omitted by every scheduled-task run. */
+  source?: SchedulerRunSource;
+  /** Resident binding task id; see `ResidentBindingView.taskId`. */
+  residentTaskId?: string;
+  /** App session the resident turn ran in; the provider-native id lives in the host binding. */
+  sessionId?: string;
+  /**
+   * The chat run's own `executionId` — the identifier the websocket gateway assigned to that
+   * turn. It changes per admitted run and is never fabricated across a host restart; the stable
+   * replay identity is `ResidentTerminal.id`, which is also the run row's `id`, so re-delivering
+   * the same terminal keeps the existing row and its alert counters.
+   */
+  executionId?: string;
 };
 /** Browser inventory; definitions and last-result summaries survive log retention. */
 export type SchedulerTaskRow = {
@@ -231,3 +255,303 @@ export type SchedulerLog = {
   expired: boolean;
   truncated: boolean;
 };
+
+//----------------- RESIDENT BINDINGS ------------
+
+/**
+ * Resident ("常驻") tasks reuse an already-running foreground Codex session (whichever
+ * runtime that session already uses — app-server or the exec/SDK adapter) or a DSH session
+ * instead of launching a scheduler process. The host owns every piece of run state in its single
+ * `resident` binding table; the plugin only owns task metadata, alert preferences and the
+ * terminal cursor. This section is the only shared definition of that protocol: the host module,
+ * the plugin server/client, and the browser view all import it, so nothing here may be duplicated
+ * downstream.
+ *
+ * Not here on purpose: provider options, credentials, prompts, model/effort/runtime selection
+ * (those follow the existing session), and the plugin's own `resident_tasks` columns.
+ */
+
+/** Providers whose foreground sessions can become resident; matches `SchedulerAgent["provider"]`. */
+export type ResidentProvider = "codex" | "dsh";
+
+/**
+ * Lifecycle of one binding as the host reports it. `idle` never started, `running` has an active
+ * provider run, `stopping` is waiting for that run to exit, and `stopped` holds a terminal
+ * episode; a stopped binding resumes only on an explicit continue or enable.
+ */
+export type ResidentTaskStatus = "idle" | "running" | "stopping" | "stopped";
+
+/**
+ * Why the last execution ended. `completed` is a natural finish and `failed` a provider error;
+ * `recovery_failed` means the host could not resume a binding that was running across a restart.
+ * Those three alert. `user_stopped` (foreground or plugin stop), `disabled`, and `deleted` are
+ * deliberate user actions and stay silent, but they still record a terminal episode.
+ */
+export type ResidentStopCause =
+  | "completed"
+  | "failed"
+  | "recovery_failed"
+  | "user_stopped"
+  | "disabled"
+  | "deleted";
+
+/**
+ * Read-only permission context captured at adoption so a restart can resume the same native
+ * session. `permissionMode` is the provider's approval/permission setting and `sandboxMode` the
+ * Codex sandbox (null for providers without a separate axis). Never carries credentials or a
+ * full provider-options blob.
+ */
+export type ResidentRuntimeSnapshot = {
+  provider: ResidentProvider;
+  permissionMode: string | null;
+  sandboxMode: string | null;
+};
+
+/**
+ * One finished resident episode, delivered to the plugin by the `terminal` event and kept as the
+ * binding's `terminal`. `id` is stable for that episode and becomes the plugin's `SchedulerRun.id`
+ * (`source: "resident"`), so a re-delivered snapshot cannot create a second run or reset
+ * `alertAttempts`; `executionId` is the actual chat run id and is only informational there. `alert` is host-computed: only unexpected ends alert, and the plugin still
+ * reuses its existing Telegram pending/retry delivery for those.
+ */
+export type ResidentTerminal = {
+  id: string;
+  taskId: string;
+  sessionId: string;
+  executionId: string;
+  /** Outcome recorded on the plugin run row; independent of `cause` for alert policy. */
+  status: "success" | "failed" | "stopped" | "interrupted";
+  cause: ResidentStopCause;
+  alert: boolean;
+  /** ISO-8601 UTC timestamp of the terminal boundary. */
+  endedAt: string;
+  /** User-facing failure detail; null for a normal end. Never contains credentials. */
+  reason: string | null;
+  /** Token totals for this execution when the provider reported them; null when unknown. */
+  usage?: SchedulerTokenUsage | null;
+};
+
+/**
+ * Host-authoritative view of one binding. Returned by every IPC action, and extended by the
+ * plugin with its own metadata to form `ResidentTaskRow`. Fields are deliberately read-only for
+ * the plugin: writing them back would create a second state authority.
+ */
+export type ResidentBindingView = {
+  /** Plugin-generated task id; unique per binding and never reused after removal. */
+  taskId: string;
+  /** Display name snapshotted from the original session title at adoption. */
+  name: string;
+  sessionId: string;
+  projectId: string;
+  enabled: boolean;
+  /** Foreground visibility of the session; true at adoption unless the user hides it later. */
+  visible: boolean;
+  /** Protection is implied by the binding's existence, not by `enabled` or `visible`. */
+  status: ResidentTaskStatus;
+  /** Current chat run's execution id while `running`/`stopping`; the last one after a terminal. */
+  executionId: string | null;
+  stopCause: ResidentStopCause | null;
+  runtime: ResidentRuntimeSnapshot;
+  /**
+   * Latest terminal episode; null before the first end. Retained independently of later runs: a
+   * new admission clears `stopCause` only, so an episode the plugin has not processed yet can
+   * still be delivered.
+   */
+  terminal: ResidentTerminal | null;
+  /** ISO-8601 UTC timestamps issued by the host. */
+  createdAt: string;
+  updatedAt: string;
+};
+
+/** Why a session cannot become resident right now; the UI uses it to explain a greyed menu item. */
+export type ResidentAdoptBlockedReason =
+  | "already_resident"
+  | "not_running"
+  | "unsupported_provider"
+  | "plugin_unavailable";
+
+/**
+ * Resident metadata the server attaches as `resident` to its existing session projections (list,
+ * detail, and the REST lookup-by-id used to open a hidden resident session). `taskId` is null
+ * when the session is not bound, and a non-null value is the session's protection marker: it
+ * survives disabled/hidden bindings and a stopped or disabled plugin. `adoptable` is only true
+ * for a running foreground turn of a supported provider with the plugin available and no
+ * existing binding, so the three-dot menu never needs to re-derive those rules.
+ */
+export type ResidentSessionInfo = {
+  taskId: string | null;
+  status: ResidentTaskStatus | null;
+  enabled: boolean;
+  visible: boolean;
+  adoptable: boolean;
+  blockedReason: ResidentAdoptBlockedReason | null;
+};
+
+/** Why an explicit continue was not accepted. An active binding is reported, not interrupted. */
+export type ResidentContinueBlockReason = "already_running" | "disabled";
+
+/**
+ * Result of an explicit continue (plugin button or re-enable). `accepted` means the host admitted
+ * one provider turn in the binding's original native session; `executionId` identifies it and is
+ * awaited by the host, never by the caller. A non-accepted continue is a normal answer, not an
+ * error.
+ */
+export type ResidentContinueResult = {
+  accepted: boolean;
+  executionId: string | null;
+  reason: ResidentContinueBlockReason | null;
+};
+
+/** Result of removing a task after its stop succeeded; the session itself is always kept. */
+export type ResidentRemoveResult = {
+  removed: true;
+  sessionId: string;
+};
+
+//----------------- RESIDENT HTTP DTOs ------------
+
+/**
+ * One row of `GET /resident-tasks`: the host binding plus `notify`, the plugin-owned alert
+ * preference. `terminal` is the host's latest episode; the plugin's run history is separate.
+ */
+export type ResidentTaskRow = ResidentBindingView & {
+  /** Master alert switch for this task, set at creation and stored only in the plugin database. */
+  notify: boolean;
+};
+
+/** `GET /resident-tasks` body. */
+export type ResidentTaskListResponse = {
+  tasks: ResidentTaskRow[];
+};
+
+/**
+ * `GET /resident-tasks/:id` body. History and live output are read from the original session
+ * (host session APIs plus `SessionOutput`), not embedded here; `runs` only lists the plugin's
+ * recorded terminal rows, newest first.
+ */
+export type ResidentTaskDetail = ResidentTaskRow & {
+  runs: SchedulerRun[];
+};
+
+/** `POST /resident-tasks/:id/continue`: `task` is the binding's current state after the attempt. */
+export type ResidentContinueResponse = {
+  task: ResidentTaskRow;
+  result: ResidentContinueResult;
+};
+
+//----------------- RESIDENT HOST IPC PROTOCOL ------------
+
+/** Fixed IPC channel between the host resident module and the bundled scheduler plugin. */
+export type ResidentIpcChannel = "cloudcli-scheduler-resident";
+
+/**
+ * Payload of each plugin-to-host request. Only ids and booleans cross the wire: the host resolves
+ * the session, approval context, provider and owner itself, and the plugin never sends provider
+ * options, prompts, or credentials.
+ */
+export type ResidentIpcRequestPayloads = {
+  /** Binds an already-running foreground session. The plugin generates `taskId`; the host rejects a duplicate session binding. */
+  adopt: { taskId: string; sessionId: string };
+  /** One binding, or every binding when `taskId` is omitted. Also used for plugin-ready reconciliation. */
+  status: { taskId?: string };
+  setEnabled: { taskId: string; enabled: boolean };
+  setVisible: { taskId: string; visible: boolean };
+  stop: { taskId: string };
+  continue: { taskId: string };
+  /** Unbinds after a confirmed stop and keeps the session; the task metadata row is the plugin's. */
+  remove: { taskId: string };
+};
+
+/** Fixed IPC action names. */
+export type ResidentIpcAction = keyof ResidentIpcRequestPayloads;
+
+/** Value of a successful response, keyed by action. */
+export type ResidentIpcResponseValues = {
+  adopt: { binding: ResidentBindingView };
+  status: { bindings: ResidentBindingView[] };
+  setEnabled: { binding: ResidentBindingView };
+  setVisible: { binding: ResidentBindingView };
+  stop: { binding: ResidentBindingView };
+  continue: { result: ResidentContinueResult; binding: ResidentBindingView };
+  remove: ResidentRemoveResult;
+};
+
+/**
+ * Machine-readable IPC failure. Unlike the plugin's HTTP error envelope this is typed so the
+ * plugin can distinguish "retry later" (`stop_failed`, `continue_failed`) from a permanent state
+ * answer. `message` is safe to display and never contains credentials.
+ */
+export type ResidentError = {
+  code:
+    | "invalid_request"
+    | "not_found"
+    | "already_resident"
+    | "unsupported_provider"
+    | "not_running"
+    | "session_unavailable"
+    | "active_execution"
+    | "stop_failed"
+    | "continue_failed";
+  message: string;
+};
+
+/**
+ * Response direction differs from the Worker channel: the plugin initiates every request (its
+ * HTTP handlers) and the host answers, while lifecycle events flow host-to-plugin.
+ */
+export type ResidentIpcRequest = {
+  [Action in ResidentIpcAction]: {
+    channel: ResidentIpcChannel;
+    id: string;
+    kind: "request";
+    action: Action;
+    payload: ResidentIpcRequestPayloads[Action];
+  };
+}[ResidentIpcAction];
+
+/** Successful response; `value` depends on the request action. */
+export type ResidentIpcSuccessResponse = {
+  channel: ResidentIpcChannel;
+  id: string;
+  kind: "response";
+  ok: true;
+  value: ResidentIpcResponseValues[ResidentIpcAction];
+};
+
+/** Failed response; the request id is echoed so concurrent requests can be matched. */
+export type ResidentIpcErrorResponse = {
+  channel: ResidentIpcChannel;
+  id: string;
+  kind: "response";
+  ok: false;
+  error: ResidentError;
+};
+
+/** Complete IPC response union. */
+export type ResidentIpcResponse = ResidentIpcSuccessResponse | ResidentIpcErrorResponse;
+
+/**
+ * Events pushed by the host. `sync` follows every plugin (re)start with the complete binding
+ * snapshot so the plugin reconciles its stored tasks without prompting a continue; the plugin
+ * ignores terminals it already processed via its stored cursor. `terminal` announces one new
+ * episode, and `changed` is the cheap invalidation for enabled/visible/adopt/remove.
+ */
+export type ResidentIpcEvent =
+  | {
+      channel: ResidentIpcChannel;
+      kind: "event";
+      event: "sync";
+      value: { bindings: ResidentBindingView[] };
+    }
+  | {
+      channel: ResidentIpcChannel;
+      kind: "event";
+      event: "terminal";
+      value: ResidentTerminal;
+    }
+  | {
+      channel: ResidentIpcChannel;
+      kind: "event";
+      event: "changed";
+      value: { taskIds: string[] };
+    };

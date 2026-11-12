@@ -6,6 +6,7 @@ import { createPendingCloneRequests } from '@/modules/projects/services/project-
 import { startCloneProject } from '@/modules/projects/services/project-clone.service.js';
 import { AppError, asyncHandler, createApiSuccessResponse } from '@/shared/utils.js';
 import { getArchivedProjectsWithSessions, getProjectSessionsPage, getProjectsWithSessions } from '@/modules/projects/services/projects-with-sessions-fetch.service.js';
+import { readResidentSessionInfo } from '@/modules/project-scheduler/index.js';
 import { deleteOrArchiveProject, restoreArchivedProject } from '@/modules/projects/services/project-delete.service.js';
 import { applyLegacyStarredProjectIds, toggleProjectStar } from '@/modules/projects/services/project-star.service.js';
 
@@ -57,6 +58,22 @@ function parseNonNegativeIntQuery(value: unknown, name: string, fallback: number
   return parsedValue;
 }
 
+/**
+ * Adds the resident binding state to one session summary. A bound session is
+ * protected and cannot be adopted again; an unbound one is not adoptable from
+ * a list (adoption requires a running turn), so the menu stays greyed with the
+ * reason it reports.
+ */
+function withResidentSession<T extends { id: string; provider: string }>(session: T) {
+  const resident = readResidentSessionInfo({ sessionId: session.id, provider: session.provider });
+  // Only Codex/DSH rows gain the field; other providers keep their old shape.
+  return resident ? { ...session, resident } : session;
+}
+
+function withResidentSessions<T extends { sessions: Array<{ id: string; provider: string }> }>(project: T) {
+  return { ...project, sessions: project.sessions.map(withResidentSession) };
+}
+
 router.get(
   '/',
   asyncHandler(async (req, res) => {
@@ -70,7 +87,7 @@ router.get(
       sessionsLimit,
       sessionsOffset,
     });
-    res.json(projects);
+    res.json(projects.map(withResidentSessions));
   }),
 );
 
@@ -78,7 +95,7 @@ router.get(
   '/archived',
   asyncHandler(async (_req, res) => {
     const projects = await getArchivedProjectsWithSessions();
-    res.json(createApiSuccessResponse({ projects }));
+    res.json(createApiSuccessResponse({ projects: projects.map(withResidentSessions) }));
   }),
 );
 
@@ -89,7 +106,7 @@ router.get(
     const limit = parseNonNegativeIntQuery(req.query.limit, 'limit', 20);
     const offset = parseNonNegativeIntQuery(req.query.offset, 'offset', 0);
     const sessionsPage = await getProjectSessionsPage(projectId, { limit, offset });
-    res.json(sessionsPage);
+    res.json({ ...sessionsPage, sessions: sessionsPage.sessions.map(withResidentSession) });
   }),
 );
 

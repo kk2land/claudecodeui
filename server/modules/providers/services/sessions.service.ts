@@ -738,6 +738,16 @@ export const sessionsService = {
       };
     }
 
+    // Force delete is a physical delete. A resident binding protects the
+    // session and its transcripts until the task itself is removed; archiving
+    // (force false) keeps its existing meaning and stays allowed.
+    if (sessionsDb.isSessionResidentProtected(sessionId)) {
+      throw new AppError('This session belongs to a resident task. Remove the task first.', {
+        code: 'RESIDENT_PROTECTED',
+        statusCode: 409,
+      });
+    }
+
     let removedFromDisk = false;
     if (options.deletedFromDisk) {
       if (session.provider === 'dsh') {

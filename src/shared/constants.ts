@@ -266,3 +266,12 @@ export const PROVIDER_PERMISSION_PREFERENCE_KEYS: Record<LLMProvider, UserPrefer
  * pick up the confirmed default without a reload.
  */
 export const CODEX_MODEL_PROVIDERS_CHANGED_EVENT = 'codex-model-providers-changed';
+
+//----------------- RESIDENT TASKS ------------
+
+/**
+ * Folder name of the bundled plugin that owns resident ("常驻") task storage and RPC. The chat
+ * session menu adopts a running session through this plugin's route, and plugin UIs are addressed
+ * by the same name.
+ */
+export const RESIDENT_TASKS_PLUGIN = 'project-scheduler';

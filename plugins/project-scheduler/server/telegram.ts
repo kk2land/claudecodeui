@@ -1,6 +1,6 @@
 import https from "node:https";
 import { HttpsProxyAgent } from "https-proxy-agent";
-import type { SchedulerSettings } from "../shared/contracts.js";
+import type { SchedulerRun, SchedulerSettings } from "../shared/contracts.js";
 import type { SchedulerStore } from "./store.js";
 
 /** Fixed-destination Telegram transport; requests and errors never expose the bot URL/token. */
@@ -91,18 +91,7 @@ export class TelegramNotifier {
           run.alertAttempts++;
           this.store.saveRun(run);
           try {
-            await this.send(
-              settings,
-              [
-                "定时任务执行失败",
-                "项目：" + run.projectName,
-                "任务：" + run.taskName,
-                "时间：" + run.startedAt,
-                "状态：" + run.status,
-                "退出码：" + String(run.exitCode),
-                "原因：" + (run.reason ?? "命令非零退出"),
-              ].join("\n"),
-            );
+            await this.send(settings, this.message(run));
             run.alertStatus = "sent";
             run.alertError = null;
             break;
@@ -127,5 +116,31 @@ export class TelegramNotifier {
   }
   stop(): void {
     this.stopped = true;
+  }
+  /**
+   * Scheduled alerts keep their existing failure wording. A resident episode alerts on both a
+   * natural finish and a failure, so it names the original session instead of an exit code.
+   */
+  private message(run: SchedulerRun): string {
+    if (run.source !== "resident")
+      return [
+        "定时任务执行失败",
+        "项目：" + run.projectName,
+        "任务：" + run.taskName,
+        "时间：" + run.startedAt,
+        "状态：" + run.status,
+        "退出码：" + String(run.exitCode),
+        "原因：" + (run.reason ?? "命令非零退出"),
+      ].join("\n");
+    return [
+      run.status === "success" ? "常驻任务已结束" : "常驻任务异常停止",
+      ...(run.projectName ? ["项目：" + run.projectName] : []),
+      "任务：" + run.taskName,
+      "时间：" + run.endedAt,
+      "状态：" + run.status,
+      "原因：" +
+        (run.reason ??
+          (run.status === "success" ? "本轮已正常结束" : "会话意外结束")),
+    ].join("\n");
   }
 }

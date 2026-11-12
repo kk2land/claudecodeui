@@ -1,6 +1,12 @@
 import type { IncomingMessage } from 'node:http';
 import type { Readable } from 'node:stream';
 
+import type {
+  ResidentSessionInfo,
+  ResidentStopCause,
+  ResidentTaskStatus,
+  ResidentTerminal,
+} from '../../plugins/project-scheduler/shared/contracts.js';
 import type { CodexWorkerBridge, WorkerIpcRequest } from '../../plugins/worker/shared/contracts.js';
 
 import type { ChatAttachmentDescriptor } from './image-attachments.js';
@@ -484,8 +490,25 @@ export type SessionUpsertedEvent = {
     summary: string;
     messageCount: number;
     lastActivity: string;
+    /** Present only when the resident projection reader is registered. */
+    resident?: ResidentSessionInfo | null;
   };
   project: SessionUpsertedProject | null;
+  timestamp: string;
+};
+
+/**
+ * Removal delta for a session that must leave every foreground list without
+ * being archived: a resident task hidden by its own `visible` switch. Carried on
+ * the existing authenticated chat sockets next to `session_upserted`, so the
+ * sidebar and its counts drop the row immediately. The session stays reachable
+ * by id and stays protected.
+ */
+export type SessionRemovedEvent = {
+  kind: 'session_removed';
+  sessionId: string;
+  /** Owning project id when known, so the loaded page drops its counts without a full refresh. */
+  projectId?: string;
   timestamp: string;
 };
 
@@ -2176,6 +2199,66 @@ export type ProviderRuntimeGateway = SideQuestionRuntime & {
 
 // ---------------------------
 
+//----------------- CHAT RUN DISPATCH SNAPSHOT ------------
+/**
+ * Snapshot of the dispatch boundary for one chat run: what the turn actually
+ * ran with and who asked for it. Used by the websocket registry (producer) and
+ * the resident host (consumer) so a binding records real permissions/model/
+ * runtime and can distinguish a resident-admitted turn from a foreground one.
+ */
+export type ChatRunDispatch = {
+  origin: 'foreground' | 'resident' | 'detached';
+  permissionMode: string | null;
+  sandboxMode: string | null;
+  model: string | null;
+  effort: string | null;
+  runtimeMode: string | null;
+};
+
+/**
+ * Read-only view of one chat run, including its provider terminal outcome.
+ * `success`/`exitCode` are null until the terminal `complete` arrives; `aborted`
+ * marks a user stop and `errorText` keeps the provider's failure detail.
+ */
+export type ChatRunSnapshot = {
+  executionId: string;
+  appSessionId: string;
+  provider: LLMProvider;
+  providerSessionId: string | null;
+  status: 'running' | 'completed';
+  hadError: boolean;
+  aborted: boolean;
+  success: boolean | null;
+  exitCode: number | null;
+  errorText: string | null;
+  /**
+   * Terminal-boundary flags the provider reported on `complete`: a native Codex
+   * goal was still active, or a Stop was still in progress. They describe the
+   * run at the instant it ended, so a resident monitor can avoid calling a
+   * goal-owned continuation a finished episode.
+   */
+  goalActive: boolean;
+  stopping: boolean;
+  startedAt: number;
+  completedAt: number | null;
+  dispatch: ChatRunDispatch;
+};
+
+/**
+ * Admission of one trusted resident continue turn. `accepted` reports that the
+ * host admitted a turn in the binding's original native session; `settled` is
+ * the still-running dispatch promise the caller keeps (never awaited to answer).
+ */
+export type ResidentContinueAdmission =
+  | {
+      accepted: true;
+      executionId: string;
+      settled: Promise<{ started: boolean; error: string | null }>;
+    }
+  | { accepted: false; reason: 'already_running' | 'unavailable'; error: string };
+
+// ---------------------------
+
 //----------------- PROJECT TODO ------------
 /**
  * Lifecycle state of a per-user, per-project todo item.
@@ -2325,6 +2408,67 @@ export type {
   WorkerNotificationDelivery,
   WorkerOwner,
 } from '../../plugins/worker/shared/contracts.js';
+
+// ---------------------------
+
+//----------------- PROJECT SCHEDULER RESIDENT CONTRACTS ------------
+/**
+ * Stored resident binding, exactly as `resident_bindings` holds it. The
+ * repository maps rows to this shape and the host module maps it to
+ * `ResidentBindingView`; no other module reads the columns.
+ */
+export type ResidentBindingRecord = {
+  taskId: string;
+  sessionId: string;
+  projectId: string;
+  name: string;
+  provider: string;
+  providerSessionId: string;
+  enabled: boolean;
+  visible: boolean;
+  status: ResidentTaskStatus;
+  executionId: string | null;
+  stopCause: ResidentStopCause | null;
+  terminal: ResidentTerminal | null;
+  permissionMode: string | null;
+  sandboxMode: string | null;
+  model: string | null;
+  effort: string | null;
+  runtime: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
+/**
+ * Host-facing subset of the bundled project-scheduler plugin's resident protocol: the single
+ * typed IPC channel, the binding/terminal views the host module owns, and the session projection
+ * metadata it attaches. The source of truth remains
+ * `plugins/project-scheduler/shared/contracts.ts`; importing it here only re-exports types, so no
+ * plugin runtime code enters the server graph. Plugin-only HTTP DTOs stay out of this subset.
+ */
+export type {
+  ResidentAdoptBlockedReason,
+  ResidentBindingView,
+  ResidentContinueBlockReason,
+  ResidentContinueResult,
+  ResidentError,
+  ResidentIpcAction,
+  ResidentIpcChannel,
+  ResidentIpcErrorResponse,
+  ResidentIpcEvent,
+  ResidentIpcRequest,
+  ResidentIpcRequestPayloads,
+  ResidentIpcResponse,
+  ResidentIpcResponseValues,
+  ResidentIpcSuccessResponse,
+  ResidentProvider,
+  ResidentRemoveResult,
+  ResidentRuntimeSnapshot,
+  ResidentSessionInfo,
+  ResidentStopCause,
+  ResidentTaskStatus,
+  ResidentTerminal,
+} from '../../plugins/project-scheduler/shared/contracts.js';
 
 // ---------------------------
 

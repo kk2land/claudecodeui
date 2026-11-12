@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { Archive, Check, Edit2, GitBranch, MoreHorizontal, Trash2, X } from 'lucide-react';
+import { Archive, Check, Edit2, GitBranch, MoreHorizontal, Pin, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { ActionMenu } from '@/shared/ui';
@@ -7,6 +7,7 @@ import { cn } from '@/shared/utils';
 import type { LLMProvider } from '@/shared/types';
 import { useSessionForkingProviders } from '@/shared/hooks/useProviderCapabilities';
 import { useProviderSessionIdCopy } from '@/modules/sidebar/hooks/useProviderSessionIdCopy';
+import type { ResidentTaskAction } from '@/modules/sidebar/hooks/useResidentTaskAction';
 import { PROVIDER_LABELS } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 
 type SessionOptionsProps = {
@@ -32,6 +33,11 @@ type SessionOptionsProps = {
   onFork?: () => void;
   /** Withheld where the row has nowhere to send an archive or delete. */
   canDelete?: boolean;
+  /**
+   * Resident-task entry state, resolved by the row from the session projection. Omitted where the
+   * row is not a real session (e.g. a placeholder), which keeps the entry out of the menu.
+   */
+  residentAction?: ResidentTaskAction;
   className?: string;
   t: TFunction;
 };
@@ -62,6 +68,7 @@ export default function SessionOptions({
   onDeleteSession,
   onFork,
   canDelete = true,
+  residentAction,
   className,
   t,
 }: SessionOptionsProps) {
@@ -184,6 +191,19 @@ export default function SessionOptions({
               description: 'Continue from a copy, leaving this one untouched.',
               icon: GitBranch,
               onSelect: onFork,
+            }] : []),
+            // Conversion keeps the same app/native session and never interrupts the run, so this
+            // entry only appears for providers the capability matrix admits; a bound session
+            // reports that instead of offering a second, duplicate binding.
+            ...(residentAction && residentAction.available ? [{
+              key: 'resident',
+              label: residentAction.label,
+              description: residentAction.description ?? undefined,
+              icon: Pin,
+              disabled: residentAction.disabled,
+              loading: residentAction.pending,
+              closeOnSelect: false,
+              onSelect: () => { void residentAction.adopt(); },
             }] : []),
             ...(canDelete && !isProcessing ? [{
               key: 'archive',

@@ -428,6 +428,8 @@ type RpcMode = {
   withoutModels?: boolean;
   /** Per-run records returned by GET /runs; omitted means no run history. */
   runs?: Array<Record<string, unknown>>;
+  /** Resident bindings returned by GET /resident-tasks; omitted means none. */
+  residentTasks?: Array<Record<string, unknown>>;
 };
 
 async function mountPlugin(mode: RpcMode = {}) {
@@ -474,6 +476,8 @@ async function mountPlugin(mode: RpcMode = {}) {
           telegram: { enabled: mode.telegramEnabled ?? false, chatId: "", proxy: "", botTokenConfigured: false },
         };
       if (path === "/tasks") return { tasks: mode.tasks ?? [] };
+      // The resident area always lists first; an empty list keeps it in its real shape.
+      if (path === "/resident-tasks") return { tasks: mode.residentTasks ?? [] };
       if (path.startsWith("/runs?"))
         return { runs: mode.runs ?? [] };
       if (path === "/projects")

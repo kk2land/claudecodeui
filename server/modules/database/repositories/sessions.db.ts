@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 
 import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
+import { residentBindingsDb } from '@/modules/database/repositories/resident-bindings.db.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
 
 type SessionRow = {
@@ -58,7 +59,16 @@ function visibleSessionsSql(): string {
     : ` AND NOT (sessions.provider = 'codex'
         AND COALESCE(sessions.session_source, '') = '${CODEX_EXEC_SESSION_SOURCE}')`;
 
-  return `sessions.provider <> 'gptweb'${execVisibility}`;
+  // A resident task may be hidden from the foreground lists without being
+  // archived: the binding's own `visible` flag is the only source of that
+  // state, and it applies to every list, count and search candidate. Looking a
+  // hidden session up by id still works, because that path never filters.
+  const residentVisibility = ` AND NOT EXISTS (
+      SELECT 1 FROM resident_bindings resident
+      WHERE resident.session_id = sessions.session_id AND resident.visible = 0
+    )`;
+
+  return `sessions.provider <> 'gptweb'${execVisibility}${residentVisibility}`;
 }
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -266,7 +276,8 @@ export const sessionsDb = {
     // id is the provider-native one, which is what this row claims, so replace
     // it rather than leaving two sidebar entries for one conversation.
     db.transaction(() => {
-      db.prepare('DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ? AND provider = ?')
+      db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ? AND provider = ?
+        AND session_id NOT IN (SELECT session_id FROM resident_bindings)`)
         .run(input.providerSessionId, input.providerSessionId, input.sessionId, input.provider);
       db.prepare(
         `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
@@ -311,7 +322,9 @@ export const sessionsDb = {
         .get(providerSessionId, providerSessionId, sessionId, sessionId) as SessionRow | undefined;
 
       if (duplicate) {
-        db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
+        if (!residentBindingsDb.isSessionProtected(duplicate.session_id)) {
+          db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
+        }
         db.prepare(
           `UPDATE sessions SET
              provider_session_id = ?,
@@ -356,7 +369,8 @@ export const sessionsDb = {
 
     db.transaction(() => {
       db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ?
-        AND provider = (SELECT provider FROM sessions WHERE session_id = ?)`)
+        AND provider = (SELECT provider FROM sessions WHERE session_id = ?)
+        AND session_id NOT IN (SELECT session_id FROM resident_bindings)`)
         .run(input.providerSessionId, input.providerSessionId, sessionId, sessionId);
       db.prepare(
         `UPDATE sessions SET
@@ -547,9 +561,12 @@ export const sessionsDb = {
    * Archived state and retaining access by id are separate concerns.
    */
   isSessionVisibleToUser(
-    row: Pick<SessionRow, 'provider' | 'session_source'>
+    row: Pick<SessionRow, 'session_id' | 'provider' | 'session_source'>
   ): boolean {
     if (row.provider === 'gptweb') {
+      return false;
+    }
+    if (residentBindingsDb.isSessionHidden(row.session_id)) {
       return false;
     }
     return !(
@@ -557,6 +574,22 @@ export const sessionsDb = {
       && row.session_source === CODEX_EXEC_SESSION_SOURCE
       && process.env.CLOUDCLI_CODEX_RUNTIME_MODE !== 'sdk'
     );
+  },
+
+  /**
+   * True while a resident binding owns this app session. Every physical
+   * deletion path — user force delete, project delete, provider retention,
+   * orphan pruning and native transcript removal — consults this before
+   * touching rows or files. Disabled, hidden and plugin-off bindings stay
+   * protected; only removing the task unbinds.
+   */
+  isSessionResidentProtected(sessionId: string): boolean {
+    return residentBindingsDb.isSessionProtected(sessionId);
+  },
+
+  /** Native-id form of the resident guard, for transcript retention walking provider ids. */
+  isProviderSessionResidentProtected(provider: string, providerSessionId: string): boolean {
+    return residentBindingsDb.isProviderSessionProtected(provider, providerSessionId);
   },
 
   getSessionById(sessionId: string): SessionRow | null {
@@ -781,7 +814,12 @@ export const sessionsDb = {
   deleteSessionsByProjectPath(projectPath: string): void {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
-    db.prepare(`DELETE FROM sessions WHERE project_path = ?`).run(normalizedProjectPath);
+    // Resident bindings survive a project purge: their sessions are unbound
+    // only through the resident task, never as a side effect of a path delete.
+    db.prepare(
+      `DELETE FROM sessions WHERE project_path = ?
+         AND session_id NOT IN (SELECT session_id FROM resident_bindings)`
+    ).run(normalizedProjectPath);
   },
 
   getSessionName(sessionId: string, provider: string): string | null {
@@ -811,12 +849,18 @@ export const sessionsDb = {
   },
 
   deleteSessionById(sessionId: string): boolean {
+    if (residentBindingsDb.isSessionProtected(sessionId)) {
+      return false;
+    }
     const db = getConnection();
     return db.prepare('DELETE FROM sessions WHERE session_id = ?').run(sessionId).changes > 0;
   },
 
   /** Used by the OpenCode synchronizer to remove indexed child sessions by their native id. */
   deleteSessionByProviderSessionId(providerSessionId: string, provider: string): boolean {
+    if (residentBindingsDb.isProviderSessionProtected(provider, providerSessionId)) {
+      return false;
+    }
     const db = getConnection();
     return db
       .prepare('DELETE FROM sessions WHERE provider_session_id = ? AND provider = ?')

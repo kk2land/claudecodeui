@@ -22,6 +22,11 @@ export type {
   SessionDraftRecord,
 } from '@/shared/types.js';
 export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
+// residentBindingsDb: the project-scheduler host module owns resident binding
+// rows; the sessions repository reads the same table for deletion protection
+// and list visibility.
+export { residentBindingsDb } from '@/modules/database/repositories/resident-bindings.db.js';
+export type { ResidentBindingRecord } from '@/modules/database/repositories/resident-bindings.db.js';
 export { sessionRuntimeDb } from '@/modules/database/repositories/session-runtime.db.js';
 export { userDb } from '@/modules/database/repositories/users.js';
 // userPreferencesDb: used by the User module to persist the settings that used to live in browser localStorage.

@@ -5,7 +5,12 @@ import os from 'node:os';
 import path from 'node:path';
 import test, { afterEach, beforeEach } from 'node:test';
 
-import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
+import {
+  closeConnection,
+  initializeDatabase,
+  residentBindingsDb,
+  sessionsDb,
+} from '@/modules/database/index.js';
 import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-configuration.provider.js';
 import { cleanupExpiredDshSessions } from '@/modules/providers/list/dsh/dsh-session-retention.provider.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
@@ -129,4 +134,53 @@ test('a linked DSH home deletes canonical index entries while retaining active s
   assert.deepEqual(invalidate.mock.calls.map((call) => call.arguments[0]), ['expired']);
   await stat(active);
   assert.ok(sessionsDb.getSessionById('active'));
+});
+
+test('a resident native id protects every generation of its transcript and its app row', async () => {
+  // One DSH native conversation, three real candidate generations, all expired.
+  const generationFiles = await Promise.all([
+    log('sessions/project/protected-native/session.jsonl', 41),
+    log('sessions/project/protected-native/session.v2.jsonl', 40),
+    log('sessions/project/protected-native/session.v3.jsonl.zstd', 39),
+  ]);
+  // The app id differs from the native id: protection must reach every
+  // generation through the binding's native id, not only the indexed row id.
+  sessionsDb.createSession('app-resident', 'dsh', root, 'Resident', undefined, undefined, generationFiles[2]);
+  sessionsDb.assignProviderSessionId('app-resident', 'protected-native');
+  residentBindingsDb.insert({
+    taskId: 'task-protected',
+    sessionId: 'app-resident',
+    projectId: '',
+    name: 'Resident',
+    provider: 'dsh',
+    providerSessionId: 'protected-native',
+    // Protection is the binding's existence: disabled and hidden change nothing.
+    enabled: false,
+    visible: false,
+    status: 'stopped',
+    executionId: null,
+    stopCause: null,
+    terminal: null,
+    permissionMode: null,
+    sandboxMode: null,
+    model: null,
+    effort: null,
+    runtime: 'acp',
+  });
+
+  const result = await cleanupExpiredDshSessions(NOW, new Set(),
+    new DshConfigurationProvider({ DSH_HOME: root }));
+
+  assert.deepEqual(result, { deleted: 0, skipped: generationFiles.length, failed: 0 });
+  for (const file of generationFiles) assert.equal(await readFile(file, 'utf8'), 'fixture');
+  assert.ok(sessionsDb.getSessionById('app-resident'));
+
+  // Removing the task is the only thing that lifts the protection.
+  residentBindingsDb.remove('task-protected');
+  const afterUnbind = await cleanupExpiredDshSessions(NOW, new Set(),
+    new DshConfigurationProvider({ DSH_HOME: root }));
+
+  assert.deepEqual(afterUnbind, { deleted: generationFiles.length, skipped: 0, failed: 0 });
+  for (const file of generationFiles) await assert.rejects(stat(file), { code: 'ENOENT' });
+  assert.equal(sessionsDb.getSessionById('app-resident'), null);
 });

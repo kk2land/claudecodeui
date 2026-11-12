@@ -2,6 +2,20 @@ import type { TFunction } from 'i18next';
 import type { CSSProperties } from 'react';
 import type { NavigateFunction } from 'react-router-dom';
 
+// Type-only re-export of the resident ("常驻") session projection defined by the bundled
+// project-scheduler plugin, which is the single source of truth for that protocol. Importing a
+// type erases at build time, so no plugin runtime code enters the frontend graph.
+// The specifier is project-root relative (see `baseUrl` in tsconfig.json) rather than a `@/`
+// path: the plugin folder sits outside `src`, so the source-root alias cannot reach it, and
+// duplicating these shapes here is exactly what the protocol forbids.
+import type {
+  ResidentSessionInfo,
+  ResidentStopCause,
+  ResidentTaskStatus,
+} from 'plugins/project-scheduler/shared/contracts';
+
+export type { ResidentSessionInfo, ResidentStopCause, ResidentTaskStatus };
+
 //----------------- LLM PROVIDER MODEL CATALOG ------------
 
 /** Identifies which coding-agent CLI backs a session, project selection or model list. */
@@ -16,6 +30,11 @@ export type ProviderCapabilityRow = {
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /** Whether the server offers this provider's account quota card; absent or false hides it and skips its cache request. */
   accountRateLimits?: boolean;
+  /**
+   * Whether a foreground run of this provider can be converted into a resident task. Gates the
+   * session menu's adoption entry; absent or false means the provider is never offered.
+   */
+  supportsResidentTasks?: boolean;
 };
 
 /** One selectable model in a provider's model menu, including its optional reasoning-effort choices. */
@@ -112,6 +131,12 @@ export type ProjectSession = {
   // Tags the session with the owning project's DB `projectId` so UI handlers
   // (session switching, sidebar focus, etc.) can match against selectedProject.
   __projectId?: string;
+  /**
+   * Resident-task metadata the server attaches to its session projections: null or absent when the
+   * session is not bound. A non-null `taskId` inside it is the session's protection marker and the
+   * authority for whether the session menu may offer adoption, so the UI never re-derives it.
+   */
+  resident?: ResidentSessionInfo | null;
   [key: string]: unknown;
 };
 
@@ -146,6 +171,25 @@ export type Project = {
   taskmaster?: ProjectTaskmasterInfo;
   [key: string]: unknown;
 };
+
+//----------------- SESSION REMOVAL REALTIME EVENT ------------
+
+/**
+ * A session left the visible session list (hiding it with `visible=false`) without being deleted.
+ * Broadcast on the existing chat socket so every open client drops the row at once; the session
+ * itself, its transcript and any open chat view stay alive and remain reachable by session id.
+ *
+ * `projectId` is optional because the broadcaster does not always know the owner. Without it a
+ * consumer must not guess: it refreshes the authoritative list instead.
+ */
+export type SessionRemovedEvent = {
+  kind: 'session_removed';
+  sessionId: string;
+  projectId?: string;
+  timestamp?: string;
+};
+
+// ---------------------------
 
 /** Progress payload streamed while the backend enumerates projects, used to drive the sidebar loading bar. */
 export type LoadingProgress = {

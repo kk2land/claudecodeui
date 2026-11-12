@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { render, waitFor } from '@testing-library/react';
+import { MemoryRouter } from 'react-router-dom';
 
 import '@/modules/i18n';
 import PluginTabContent from '@/modules/plugins/PluginTabContent';
@@ -258,17 +259,23 @@ describe('PluginTabContent Codex provider directory capabilities', () => {
   });
 });
 
-/** Mounts the host inside the providers PluginTabContent depends on. */
+/**
+ * Mounts the host inside the providers PluginTabContent depends on. `MemoryRouter` is one of
+ * them: the component now opens sessions through the app router (`openSession`), and the real
+ * app always renders it inside a route, so the fixture must too.
+ */
 function renderHost() {
   return render(
-    <ThemeProvider>
-      <PluginsProvider>
-        <PluginTabContent
-          pluginName="project-scheduler"
-          selectedProject={project}
-          selectedSession={null}
-        />
-      </PluginsProvider>
-    </ThemeProvider>,
+    <MemoryRouter>
+      <ThemeProvider>
+        <PluginsProvider>
+          <PluginTabContent
+            pluginName="project-scheduler"
+            selectedProject={project}
+            selectedSession={null}
+          />
+        </PluginsProvider>
+      </ThemeProvider>
+    </MemoryRouter>,
   );
 }

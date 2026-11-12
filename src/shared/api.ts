@@ -4,6 +4,7 @@ import {
   storeAuthToken,
 } from '@/shared/authToken';
 import { IS_PLATFORM } from '@/shared/utils';
+import { RESIDENT_TASKS_PLUGIN } from '@/shared/constants';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
 import type { ProviderRuntimeAction, TodoDraftMeta } from '@/shared/types';
 
@@ -696,6 +697,17 @@ export const api = {
     // Unscoped snapshot used by the session list to aggregate every parent
     // session whose Worker is still active, across projects.
     workerStateAll: (options: ApiRequestOptions = {}) => get('/api/plugins/worker/rpc/state', options),
+    /**
+     * Converts an already-running foreground session into a resident task. The bundled
+     * project-scheduler plugin owns resident storage and forwards only the session id to the host,
+     * which validates that the run is genuinely active, adoptable and unbound. Callers must read
+     * the response: a refusal is a normal state answer, never an optimistic success.
+     */
+    adoptResidentSession: (sessionId: string) =>
+      authenticatedFetch(
+        `/api/plugins/${encodeURIComponent(RESIDENT_TASKS_PLUGIN)}/rpc/resident-tasks`,
+        { method: 'POST', body: JSON.stringify({ sessionId }) },
+      ),
   },
 
   browserUse: {

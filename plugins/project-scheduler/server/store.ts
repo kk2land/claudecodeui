@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
 import { defaultSettings } from "./configuration.js";
+import { ResidentStore } from "./resident-store.js";
 import type {
   SchedulerRun,
   SchedulerSettings,
@@ -14,6 +15,8 @@ import type {
 export class SchedulerStore {
   private readonly db: Database.Database;
   private readonly leader: Database.Database;
+  /** Resident metadata and resident terminal rows; used by `ResidentTasks` only. */
+  readonly resident: ResidentStore;
   constructor(readonly directory: string) {
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.leader = new Database(path.join(directory, "leader.db"), {
@@ -34,6 +37,7 @@ export class SchedulerStore {
     this.db.exec(
       "CREATE TABLE IF NOT EXISTS tasks (project_id TEXT NOT NULL, task_id TEXT NOT NULL, definition TEXT NOT NULL, updated_at TEXT NOT NULL, last_run TEXT, PRIMARY KEY(project_id,task_id)); CREATE TABLE IF NOT EXISTS runs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, task_id TEXT NOT NULL, status TEXT NOT NULL, ended_at TEXT, body TEXT NOT NULL); CREATE INDEX IF NOT EXISTS runs_task ON runs(project_id,task_id); CREATE INDEX IF NOT EXISTS runs_expiry ON runs(ended_at); CREATE TABLE IF NOT EXISTS settings (id INTEGER PRIMARY KEY CHECK(id=1), body TEXT NOT NULL)",
     );
+    this.resident = new ResidentStore(this.db);
   }
   settings(): SchedulerSettings {
     const row = this.db
@@ -134,7 +138,12 @@ export class SchedulerStore {
           run.endedAt,
           JSON.stringify(run),
         );
-      if (run.endedAt && !run.status.startsWith("skipped_")) {
+      if (
+        run.endedAt &&
+        !run.status.startsWith("skipped_") &&
+        // Resident rows only mirror a host episode; they never become a scheduled task result.
+        run.source !== "resident"
+      ) {
         // Completion order defines the latest result when a task permits concurrent executions.
         this.db
           .prepare(
@@ -162,15 +171,19 @@ export class SchedulerStore {
     );
   }
   runs(projectId?: string, taskId?: string, limit = 100): SchedulerRun[] {
+    // Resident terminal rows are read through `resident.runs`; ordinary history stays unchanged.
+    const base =
+      "SELECT body FROM runs WHERE COALESCE(json_extract(body,'$.source'),'')<>'resident'";
     const rows =
       projectId && taskId
         ? this.db
             .prepare(
-              "SELECT body FROM runs WHERE project_id=? AND task_id=? ORDER BY rowid DESC LIMIT ?",
+              base +
+                " AND project_id=? AND task_id=? ORDER BY rowid DESC LIMIT ?",
             )
             .all(projectId, taskId, limit)
         : this.db
-            .prepare("SELECT body FROM runs ORDER BY rowid DESC LIMIT ?")
+            .prepare(base + " ORDER BY rowid DESC LIMIT ?")
             .all(limit);
     return (rows as { body: string }[]).map(
       (row) => JSON.parse(row.body) as SchedulerRun,
@@ -187,7 +200,11 @@ export class SchedulerStore {
   }
   unfinished(): SchedulerRun[] {
     return (
-      this.db.prepare("SELECT body FROM runs WHERE status='running'").all() as {
+      this.db
+        .prepare(
+          "SELECT body FROM runs WHERE status='running' AND COALESCE(json_extract(body,'$.source'),'')<>'resident'",
+        )
+        .all() as {
         body: string;
       }[]
     ).map((row) => JSON.parse(row.body) as SchedulerRun);

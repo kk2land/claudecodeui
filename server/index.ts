@@ -47,6 +47,7 @@ import {
     stopAllPlugins,
 } from './modules/plugins/index.js';
 import { createWorkerModule } from './modules/workers/index.js';
+import { createProjectSchedulerModule } from './modules/project-scheduler/index.js';
 import { applyStaticAssetCacheHeaders, createStaticAssetsMiddleware } from './modules/static-assets/index.js';
 import providerRoutes from './modules/providers/provider.routes.js';
 import { voiceRoutes } from './modules/voice/index.js';
@@ -100,6 +101,10 @@ const DISPLAY_HOST = getConnectableHost(HOST);
 const VITE_PORT = process.env.VITE_PORT || 5173;
 const LOCAL_SERVER_MARKER_PATH = path.join(os.homedir(), '.cloudcli', 'local-server.json');
 const workerModule = createWorkerModule({ serverPort: SERVER_PORT });
+// Resident ("常驻") tasks: host-owned binding lifecycle and the scheduler
+// plugin's IPC channel. Created here so bootstrap can identify leftover running
+// bindings before any queue is released.
+const projectSchedulerModule = createProjectSchedulerModule({ runtime: providerRuntimeService });
 // Providers receive Worker lifecycle callbacks through composition only; they
 // never runtime-import the workers module.
 setCodexWorkerBridge(workerModule.host.bridge, workerModule.mcpUrl);
@@ -419,6 +424,14 @@ async function startServer() {
             await initializeSessionsWatcher();
             sessionRetentionService.start();
             todoRetentionService.start();
+            // Resident recovery runs before the queue dispatcher releases any
+            // held turn: only bindings that were running and enabled when the
+            // host stopped are resumed, in their original native session.
+            projectSchedulerModule.initialize();
+            await projectSchedulerModule.recover().catch((error) => {
+                console.error('[ProjectScheduler] Recovery failed', getErrorMessage(error));
+            });
+
             // Sends anything that came due while the server was not running,
             // then keeps polling.
             initializeScheduledMessageDispatcher(providerRuntimeService, {
@@ -426,6 +439,9 @@ async function startServer() {
                 // barrel so a finished run starts the next queued prompt at
                 // once instead of waiting for the 15s supplemental check.
                 subscribeTurnCompleted: onChatRunCompleted,
+                // A resident episode stops only once the dispatcher proves the
+                // session settled: no run, no owed queue, no goal/stop transition.
+                onSessionSettled: (sessionId) => projectSchedulerModule.host.onSessionSettled(sessionId),
             });
 
             // Start server-side plugin processes for enabled plugins
@@ -436,9 +452,14 @@ async function startServer() {
         });
 
         await closeSessionsWatcher();
-        closeScheduledMessageDispatcher();
         // Clean up plugin processes on shutdown
         const shutdownRuntimeServices = async () => {
+            // Order matters: stop the dispatcher (and its settled chain) first,
+            // then suspend resident tracking before providers close. A shutdown
+            // is not a terminal episode: bindings that were running stay
+            // `running` in the database so the next start resumes them.
+            closeScheduledMessageDispatcher();
+            await projectSchedulerModule.shutdown().catch((error) => console.error('[ProjectScheduler] Shutdown failed', error));
             await sessionRetentionService.close().catch((error) => console.error('[SessionRetention] Shutdown failed', error));
             todoRetentionService.close();
             // Seal Worker delivery and let the plugin confirm child cleanup before

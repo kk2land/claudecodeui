@@ -1213,3 +1213,66 @@
     padding-right: 14px;
   }
 }
+
+/* ---------------------- resident ("常驻") tasks ---------------------- */
+.cron-resident,
+.cron-resident-detail {
+  margin: 16px 0;
+  padding: 12px 14px;
+  border: 1px solid var(--cron-border, #d8dbe0);
+  border-radius: 11px;
+  background: var(--cron-surface, #fff);
+}
+.cron-resident-note {
+  margin: 4px 0;
+  font-size: 12px;
+  opacity: 0.75;
+}
+.cron-resident-list {
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+.cron-resident-row {
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--cron-border, #d8dbe0);
+  border-radius: 9px;
+}
+.cron-resident-open {
+  justify-self: start;
+}
+.cron-resident-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  font-size: 12px;
+}
+.cron-resident-actions label {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.cron-resident-actions button {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+.cron-resident-output {
+  margin: 8px 0;
+  min-height: 220px;
+  max-height: 460px;
+  overflow: hidden;
+  border: 1px solid var(--cron-border, #d8dbe0);
+  border-radius: 9px;
+}
+.cron-resident-output-host {
+  height: 100%;
+  min-height: 220px;
+  max-height: 460px;
+  overflow: hidden;
+}

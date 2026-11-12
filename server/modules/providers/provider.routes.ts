@@ -13,6 +13,7 @@ import { sideQuestionsService } from '@/modules/providers/services/side-question
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import { providerRuntimeManagementService } from '@/modules/providers/services/provider-runtime-management.service.js';
 import { codexRateLimitsService } from '@/modules/providers/list/codex/codex-rate-limits.service.js';
+import { readResidentSessionInfo } from '@/modules/project-scheduler/index.js';
 import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type {
   CustomProviderModelEffort,
@@ -1017,7 +1018,20 @@ router.get(
   '/sessions/running',
   asyncHandler(async (_req: Request, res: Response) => {
     const sessions = await sessionsService.listRunningSessions();
-    res.json(createApiSuccessResponse({ sessions }));
+    // The three-dot menu reads this projection: `adoptable` is true only for a
+    // running Codex (either configured runtime) or DSH session with the plugin
+    // available, so the sidebar enables "make resident" as soon as it runs.
+    res.json(createApiSuccessResponse({
+      sessions: sessions.map((entry) => {
+        const resident = readResidentSessionInfo({
+          sessionId: entry.sessionId,
+          provider: entry.provider,
+        });
+        // Only Codex/DSH carry the field; every other provider keeps its exact
+        // pre-resident payload shape.
+        return resident ? { ...entry, resident } : entry;
+      }),
+    }));
   }),
 );
 
@@ -1084,7 +1098,12 @@ router.get(
   asyncHandler(async (req: Request, res: Response) => {
     const sessionId = parseSessionId(req.params.sessionId);
     const result = sessionsService.getSessionDetailsById(sessionId);
-    res.json(createApiSuccessResponse(result));
+    // Opening a hidden resident session by id still works: this projection is
+    // the only resident state a lookup returns.
+    res.json(createApiSuccessResponse({
+      ...result,
+      resident: readResidentSessionInfo({ sessionId: result.sessionId, provider: result.provider }),
+    }));
   }),
 );
 

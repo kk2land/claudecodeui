@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import test from 'node:test';
 
+import {
+  closeConnection,
+  initializeDatabase,
+  residentBindingsDb,
+  sessionsDb,
+} from '@/modules/database/index.js';
 import { removeWorktree } from '@/modules/worktrees/services/worktree-remove.service.js';
 import type { GitCommandResult, ProjectRepositoryRow } from '@/shared/types.js';
 import { AppError } from '@/shared/utils.js';
@@ -224,4 +233,64 @@ test('removeWorktree never removes the main worktree', async () => {
       && error.code === 'WORKTREE_MAIN_NOT_REMOVABLE'
       && error.statusCode === 400,
   );
+});
+
+test('a protected resident session in the worktree blocks removal before any mutating git call', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'worktree-resident-guard-'));
+  const previousDatabasePath = process.env.DATABASE_PATH;
+  closeConnection();
+  process.env.DATABASE_PATH = path.join(root, 'auth.db');
+  try {
+    await initializeDatabase();
+    const worktreePath = '/home/user/repo-worktrees/feature-login';
+    sessionsDb.createAppSession('resident-in-worktree', 'codex', worktreePath, 'Resident');
+    residentBindingsDb.insert({
+      taskId: 'task-protected',
+      sessionId: 'resident-in-worktree',
+      projectId: '',
+      name: 'Resident',
+      provider: 'codex',
+      providerSessionId: 'native-resident',
+      // Disabled and hidden: protection comes from the binding alone.
+      enabled: false,
+      visible: false,
+      status: 'stopped',
+      executionId: null,
+      stopCause: null,
+      terminal: null,
+      permissionMode: null,
+      sandboxMode: null,
+      model: null,
+      effort: null,
+      runtime: 'app-server',
+    });
+
+    const { calls, runner } = createFakeRunner();
+    const { dependencies, archivedProjectIds } = createDependencies(runner);
+
+    await assert.rejects(
+      removeWorktree(
+        {
+          projectPath: '/home/user/repo',
+          worktreePath,
+          force: true,
+          deleteBranch: true,
+        },
+        dependencies,
+      ),
+      (error: unknown) =>
+        error instanceof AppError
+        && error.code === 'RESIDENT_PROTECTED'
+        && error.statusCode === 409,
+    );
+
+    // Only the read-only porcelain listing ran: no `worktree remove`, no `branch -D`.
+    assert.deepEqual(calls.map((call) => call.args), [['worktree', 'list', '--porcelain']]);
+    assert.deepEqual(archivedProjectIds, []);
+  } finally {
+    closeConnection();
+    if (previousDatabasePath === undefined) delete process.env.DATABASE_PATH;
+    else process.env.DATABASE_PATH = previousDatabasePath;
+    await rm(root, { recursive: true, force: true });
+  }
 });

@@ -1,6 +1,6 @@
 import { memo, useState } from 'react';
 import type { KeyboardEvent } from 'react';
-import { Archive, Check, CheckSquare, Edit2, GitBranch, Loader2, MoreHorizontal, Square, Trash2, X } from 'lucide-react';
+import { Archive, Check, CheckSquare, Edit2, GitBranch, Loader2, MoreHorizontal, Pin, Square, Trash2, X } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Badge, Dialog, DialogContent, DialogTitle, LLMProviderLogo, Tooltip, buttonVariants } from '@/shared/ui';
@@ -10,6 +10,7 @@ import { useSessionForkingProviders } from '@/shared/hooks/useProviderCapabiliti
 import { PROVIDER_LABELS, createSessionViewModel, formatCompactAge } from '@/modules/sidebar/utils/sidebarProjectFormatting';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
 import { useProviderSessionIdCopy } from '@/modules/sidebar/hooks/useProviderSessionIdCopy';
+import { useResidentTaskAction } from '@/modules/sidebar/hooks/useResidentTaskAction';
 import SessionOptions from '@/modules/sidebar/SessionOptions';
 
 type SidebarSessionItemProps = {
@@ -95,6 +96,13 @@ function SidebarSessionItem({
   // the desktop SessionOptions menu. The capability request is shared by rows.
   const forkableProviders = useSessionForkingProviders();
   const canFork = Boolean(onForkSession) && forkableProviders.has(session.__provider) && !isProcessing;
+  // Resident adoption is offered from both the desktop three-dot menu and the mobile sheet, so
+  // the rule and the request live in one hook rather than being repeated per surface.
+  const residentAction = useResidentTaskAction({
+    session,
+    provider: session.__provider,
+    isProcessing,
+  });
 
   // Sessions are owned by a project identified by `projectId` (DB primary key)
   // after the projectName → projectId migration.
@@ -374,6 +382,30 @@ function SidebarSessionItem({
                   </button>
                 )}
 
+                {residentAction.available && (
+                  <button
+                    type="button"
+                    disabled={residentAction.disabled}
+                    onClick={() => { void residentAction.adopt(); }}
+                    className={cn(
+                      'flex min-h-12 w-full items-center gap-3 rounded-xl border px-4 py-3 text-left transition-colors',
+                      residentAction.disabled
+                        ? 'border-border bg-muted/20 text-muted-foreground'
+                        : 'border-border bg-muted/35 text-foreground active:bg-muted',
+                    )}
+                  >
+                    {residentAction.pending
+                      ? <Loader2 className="h-5 w-5 flex-shrink-0 animate-spin" />
+                      : <Pin className="h-5 w-5 flex-shrink-0" />}
+                    <span className="min-w-0 flex-1">
+                      <span className="block text-sm font-medium">{residentAction.label}</span>
+                      {residentAction.description && (
+                        <span className="mt-0.5 block text-xs">{residentAction.description}</span>
+                      )}
+                    </span>
+                  </button>
+                )}
+
                 {!isProcessing && (
                   <>
                     <button
@@ -527,6 +559,7 @@ function SidebarSessionItem({
             onArchiveSession={onArchiveSession}
             onDeleteSession={onDeleteSession}
             onFork={onForkSession ? () => onForkSession(session) : undefined}
+            residentAction={residentAction}
             t={t}
           />
         )}

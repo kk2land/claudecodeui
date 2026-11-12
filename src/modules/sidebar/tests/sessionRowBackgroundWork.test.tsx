@@ -19,6 +19,9 @@ const recordedOptionsProps: Record<string, unknown>[] = [];
 
 vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
   useSessionForkingProviders: () => new Set(),
+  // The rows also read the resident-task capability; an empty matrix keeps every provider
+  // unadoptable, which is what these row-behaviour tests expect.
+  useProviderCapabilities: () => ({}),
 }));
 
 vi.mock('@/modules/sidebar/SessionOptions', () => ({

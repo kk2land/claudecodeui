@@ -4,6 +4,8 @@ import { sessionsDb } from '@/modules/database/index.js';
 import { ChatSessionWriter } from '@/modules/websocket/services/chat-session-writer.service.js';
 import { broadcastSessionUpserted } from '@/modules/websocket/services/session-upsert-broadcast.service.js';
 import type {
+  ChatRunDispatch,
+  ChatRunSnapshot,
   LLMProvider,
   NormalizedMessage,
   RealtimeClientConnection,
@@ -36,6 +38,19 @@ type ChatRun = {
   writer: ChatSessionWriter;
   startedAt: number;
   completedAt: number | null;
+  /** Set by any `kind: "error"` event, so a settled turn reports a failure rather than success. */
+  hadError: boolean;
+  /** True when the terminal `complete` was emitted for an aborted run. */
+  aborted: boolean;
+  /** Terminal outcome reported by the provider's `complete`; null while the run is open. */
+  success: boolean | null;
+  exitCode: number | null;
+  /** Last provider error text seen for this run, used as the resident terminal reason. */
+  errorText: string | null;
+  /** Terminal-boundary provider flags (Codex: goal-owned continuation / Stop in progress). */
+  goalActive: boolean;
+  stopping: boolean;
+  dispatch: ChatRunDispatch;
 };
 
 /**
@@ -69,7 +84,26 @@ const runs = new Map<string, ChatRun>();
  * which handles its own asynchronous failures. Notification runs after the run
  * is marked completed so the next queued turn starts from a fresh run entry.
  */
-const turnCompletedListeners = new Set<(appSessionId: string) => void>();
+const turnCompletedListeners = new Set<
+  (appSessionId: string, snapshot: ChatRunSnapshot) => void
+>();
+
+/** Listeners notified once when a run is reserved, before the provider call starts. */
+const runStartedListeners = new Set<
+  (run: ChatRunSnapshot & { sessionId: string }) => void
+>();
+
+/**
+ * Subscribes to run admissions; used by the composition root to keep resident
+ * bindings' execution id and dispatch snapshot aligned with real turns.
+ * Returns an unsubscribe function.
+ */
+export function onChatRunStarted(
+  listener: (run: ChatRunSnapshot & { sessionId: string }) => void,
+): () => void {
+  runStartedListeners.add(listener);
+  return () => { runStartedListeners.delete(listener); };
+}
 
 /**
  * Subscribes to terminal run completions; used by the composition root to hand
@@ -77,13 +111,18 @@ const turnCompletedListeners = new Set<(appSessionId: string) => void>();
  *
  * Returns an unsubscribe function so tests and server shutdown can remove it.
  */
-export function onChatRunCompleted(listener: (appSessionId: string) => void): () => void {
+export function onChatRunCompleted(
+  listener: (appSessionId: string, snapshot: ChatRunSnapshot) => void,
+): () => void {
   turnCompletedListeners.add(listener);
   return () => { turnCompletedListeners.delete(listener); };
 }
 
 function announceRunCompleted(appSessionId: string): void {
-  for (const listener of turnCompletedListeners) listener(appSessionId);
+  const run = runs.get(appSessionId);
+  const snapshot = run ? snapshotRun(run) : null;
+  if (!snapshot) return;
+  for (const listener of turnCompletedListeners) listener(appSessionId, snapshot);
 }
 
 /**
@@ -145,12 +184,25 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     executionId: run.executionId,
   };
 
+  if (message.kind === 'error') {
+    run.hadError = true;
+    const text = typeof message.content === 'string'
+      ? message.content
+      : typeof message.text === 'string' ? message.text : null;
+    if (text) run.errorText = text;
+  }
+
   if (message.kind === 'complete') {
     // The provider may report its own id here; the frontend only ever knows
     // the app id, so the "actual" id is by definition the app id as well.
     outbound.actualSessionId = run.appSessionId;
     run.status = 'completed';
     run.completedAt = Date.now();
+    run.aborted = message.aborted === true;
+    run.success = message.success === true && !run.aborted;
+    run.exitCode = typeof message.exitCode === 'number' ? message.exitCode : null;
+    run.goalActive = message.goalActive === true;
+    run.stopping = message.stopping === true;
     evictRunLater(run);
   }
 
@@ -166,6 +218,26 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
   }
 
   return outbound;
+}
+
+function snapshotRun(run: ChatRun): ChatRunSnapshot {
+  return {
+    executionId: run.executionId,
+    appSessionId: run.appSessionId,
+    provider: run.provider,
+    providerSessionId: run.providerSessionId,
+    status: run.status,
+    hadError: run.hadError,
+    aborted: run.aborted,
+    success: run.success,
+    exitCode: run.exitCode,
+    errorText: run.errorText,
+    goalActive: run.goalActive,
+    stopping: run.stopping,
+    startedAt: run.startedAt,
+    completedAt: run.completedAt,
+    dispatch: run.dispatch,
+  };
 }
 
 /**
@@ -235,6 +307,8 @@ export const chatRunRegistry = {
     passive?: boolean;
     connection: RealtimeClientConnection | null;
     userId: string | number | null;
+    /** Dispatch-boundary snapshot; omitted by control/passive runs that never start a turn. */
+    dispatch?: ChatRunDispatch;
   }): ChatRun | null {
     const existing = runs.get(input.appSessionId);
     if (existing && existing.status === 'running') {
@@ -252,6 +326,21 @@ export const chatRunRegistry = {
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
       completedAt: null,
+      hadError: false,
+      aborted: false,
+      success: null,
+      exitCode: null,
+      errorText: null,
+      goalActive: false,
+      stopping: false,
+      dispatch: input.dispatch ?? {
+        origin: 'foreground',
+        permissionMode: null,
+        sandboxMode: null,
+        model: null,
+        effort: null,
+        runtimeMode: null,
+      },
     };
 
     run.writer = new ChatSessionWriter({
@@ -272,11 +361,21 @@ export const chatRunRegistry = {
       return this.startRun({ ...input, passive: false, providerSessionId: run.providerSessionId })!.writer;
     };
     runs.set(input.appSessionId, run);
+    if (run.status === 'running') {
+      const snapshot = snapshotRun(run);
+      for (const listener of runStartedListeners) listener({ ...snapshot, sessionId: run.appSessionId });
+    }
     return run;
   },
 
   getRun(appSessionId: string): ChatRun | undefined {
     return runs.get(appSessionId);
+  },
+
+  /** Stable read-only summary of a session's current (or retained) run. */
+  getSnapshot(appSessionId: string): ChatRunSnapshot | null {
+    const run = runs.get(appSessionId);
+    return run ? snapshotRun(run) : null;
   },
 
   isProcessing(appSessionId: string): boolean {

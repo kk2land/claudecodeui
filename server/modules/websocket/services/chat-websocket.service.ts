@@ -27,6 +27,7 @@ import type {
   LLMProvider,
   ProviderRuntimeGateway,
   ProviderRuntimeState,
+  ResidentContinueAdmission,
   ProviderRuntimeWriter,
   QueuedChatMessage,
   SideQuestion,
@@ -479,12 +480,31 @@ async function dispatchRun(
   delete clientOptions.todoIds;
   delete clientOptions.onInputAccepted;
 
+  // Snapshot what this turn really dispatches with. The resident binding copies
+  // it, so a restart resumes the same native session, model and permission
+  // instead of re-deriving a possibly different choice.
+  const permissionMode = typeof clientOptions.permissionMode === 'string'
+    ? clientOptions.permissionMode
+    : null;
   const run = chatRunRegistry.startRun({
     appSessionId: sessionId,
     provider,
     providerSessionId: session.provider_session_id,
     connection: ws,
     userId,
+    dispatch: {
+      origin: extraRuntimeOptions.residentContinue === true
+        ? 'resident'
+        : ws ? 'foreground' : 'detached',
+      permissionMode,
+      // No adapter exposes its resolved sandbox here; the saved permission mode is
+      // what the provider adapter maps for real. Never guess this value.
+      sandboxMode: null,
+      model: codexSettings?.modelSelection?.model
+        ?? (typeof clientOptions.model === 'string' ? clientOptions.model : session.model),
+      effort: typeof clientOptions.effort === 'string' ? clientOptions.effort : session.effort,
+      runtimeMode: codexSettings?.runtime ?? null,
+    },
   });
 
   if (!run) {
@@ -501,8 +521,14 @@ async function dispatchRun(
 
   // An admitted user prompt resumes an empty queue after Stop. Saved messages
   // still require explicit queue resume; automatic turns never clear the hold.
-  if (ws && codexSettings?.runtime === 'app-server' && codexSettings.queueHeld
-    && !sessionDraftsDb.hasQueuedMessages(sessionId)) {
+  // A resident task may be configured with the exec runtime; its queue hold is
+  // the same persisted flag, so an explicit foreground turn releases it too.
+  const residentExecHold = provider === 'codex'
+    && codexSettings?.runtime === 'sdk'
+    && sessionsDb.isSessionResidentProtected(sessionId);
+  if (ws && codexSettings?.queueHeld
+    && !sessionDraftsDb.hasQueuedMessages(sessionId)
+    && (codexSettings.runtime === 'app-server' || residentExecHold)) {
     sessionRuntimeDb.update(sessionId, { queueHeld: false });
   }
 
@@ -546,10 +572,13 @@ async function dispatchRun(
     cwd: clientOptions.cwd ?? session.project_path ?? undefined,
     projectPath: session.project_path ?? clientOptions.projectPath,
   };
-  // Only an interactive socket turn may activate a paused Worker owner. A
-  // detached/automatic wake-up never counts as an explicit user turn.
-  runtimeOptions.userTurn = Boolean(ws);
+  // Only an interactive socket turn (or the host's trusted resident continue) may
+  // activate a paused Worker owner. A detached/automatic wake-up never counts as
+  // an explicit user turn.
+  runtimeOptions.userTurn = Boolean(ws) || extraRuntimeOptions.residentContinue === true;
   delete runtimeOptions.workerFinalGuard;
+  // Internal marker only: no provider runtime may see it.
+  delete runtimeOptions.residentContinue;
   // Todo sources become submitted only when the provider's own raw events prove
   // it took this turn's input. The callback is server-owned, fires at most once
   // per run, and is dropped in `finally` so a later automatic turn (nextTurn)
@@ -1025,7 +1054,15 @@ async function handleChatAbort(
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
     return;
   }
-  if (state?.runtime === 'app-server') sessionRuntimeDb.update(sessionId, { queueHeld: true });
+  // A resident task must stay stopped whichever configured Codex runtime it
+  // uses: the persisted queue hold is the same flag the dispatcher honours, so
+  // a foreground Stop on an exec session holds it exactly like app-server.
+  if (
+    state?.runtime === 'app-server'
+    || (provider === 'codex' && sessionsDb.isSessionResidentProtected(sessionId))
+  ) {
+    sessionRuntimeDb.update(sessionId, { queueHeld: true });
+  }
   const success = await dependencies.runtime.abort(provider, sessionId);
   // Scoped to the run that was stopped: a stop can take a round trip, and a
   // new run of the session may have started by the time it returns.
@@ -1297,6 +1334,89 @@ export async function runDetachedChatTurn(
     undefined,
     input.onTurnStarting,
   );
+}
+
+/**
+ * Starts exactly one continue turn for a stopped resident binding.
+ *
+ * Trusted entry: content (`continue`), `userTurn` and queue-resume semantics
+ * are server-owned, and the provider-native id comes from the session row, so
+ * the same native conversation resumes. It never interrupts and never sends
+ * input while a run is active — an active session is reported back instead.
+ * The caller releases the held queue only after this admission, preserving
+ * queue order behind the continue turn.
+ */
+export function startResidentContinueTurn(
+  input: {
+    sessionId: string;
+    userId: string | number | null;
+    /**
+     * Permission/model/effort captured at the binding's real dispatch boundary.
+     * The prompt, `userTurn` and queue semantics stay server-owned; these only
+     * keep the resumed turn running with the same provider settings.
+     */
+    permissionMode?: string | null;
+    model?: string | null;
+    effort?: string | null;
+  },
+  dependencies: ChatWebSocketDependencies,
+): ResidentContinueAdmission {
+  const session = sessionsDb.getSessionById(input.sessionId);
+  if (!session) {
+    return { accepted: false, reason: 'unavailable', error: 'The session no longer exists.' };
+  }
+  const provider = session.provider as LLMProvider;
+  if (!dependencies.runtime.hasRuntime(provider)) {
+    return { accepted: false, reason: 'unavailable', error: `Provider "${provider}" is not available.` };
+  }
+  // A resident binding must resume the same native conversation; starting a new
+  // one would silently lose the context the user adopted.
+  if (!session.provider_session_id) {
+    return {
+      accepted: false,
+      reason: 'unavailable',
+      error: 'The original native session id is missing; this task cannot be continued.',
+    };
+  }
+  const codexSettings = provider === 'codex' ? sessionRuntimeDb.get(input.sessionId) : null;
+  if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection?.model === null) {
+    return {
+      accepted: false,
+      reason: 'unavailable',
+      error: 'Choose a model before sending a prompt.',
+    };
+  }
+  const previousRun = chatRunRegistry.getRun(input.sessionId);
+  const nativeState = dependencies.runtime.getState?.(provider, input.sessionId);
+  if (
+    previousRun?.status === 'running'
+    || nativeState?.goal?.status === 'active'
+    || ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '')
+  ) {
+    return { accepted: false, reason: 'already_running', error: 'The resident task is already running.' };
+  }
+
+  // dispatchRun reserves the run synchronously, before its first await, so the
+  // registry comparison below is the admission result, not the whole turn.
+  const options: AnyRecord = {};
+  if (input.permissionMode) options.permissionMode = input.permissionMode;
+  if (input.model) options.model = input.model;
+  if (input.effort) options.effort = input.effort;
+  const settled = dispatchRun(
+    null,
+    input.userId,
+    input.sessionId,
+    session,
+    { sessionId: input.sessionId, content: 'continue', options },
+    dependencies,
+    { residentContinue: true },
+  );
+  const admittedRun = chatRunRegistry.getRun(input.sessionId);
+  if (!admittedRun || admittedRun === previousRun || admittedRun.status !== 'running') {
+    void settled.catch(() => undefined);
+    return { accepted: false, reason: 'already_running', error: 'The resident task is already running.' };
+  }
+  return { accepted: true, executionId: admittedRun.executionId, settled };
 }
 
 export function handleChatConnection(

@@ -8,7 +8,10 @@ import type { ServerEvent,
   LLMProvider,
   LoadingProgress,
   Project,
-  ProjectSession,IsSessionProcessing } from '@/shared/types';
+  ProjectSession,
+  ResidentSessionInfo,
+  SessionRemovedEvent,
+  IsSessionProcessing } from '@/shared/types';
 import { mergeProjectSelectionMetadata } from '@/modules/project-workspace/utils/projectSelectionMetadata';
 import { readSelectedProvider } from '@/shared/selectedProvider';
 
@@ -74,6 +77,11 @@ type SessionDetailsApiPayload = {
       displayName?: string;
       isStarred?: boolean;
     } | null;
+    /**
+     * Resident-task metadata for the session. Present when the server resolved it; absent on a
+     * server that does not report it, which must not be turned into an explicit "unbound" value.
+     */
+    resident?: ResidentSessionInfo | null;
   };
 };
 
@@ -345,6 +353,27 @@ const removeSessionFromProject = (project: Project, sessionIdToDelete: string): 
   };
 
   return updatedProject;
+};
+
+/**
+ * Applies a realtime `session_removed` to one project: the row goes away and the project's total
+ * shrinks, whether or not that row happened to be on a page this client loaded. The count is
+ * decremented from the server-reported total rather than recomputed from loaded rows, so a user
+ * who paged deep into the list keeps every other page and the remaining count is still right.
+ */
+const dropRemovedSessionFromProject = (project: Project, sessionIdToRemove: string): Project => {
+  const sessions = project.sessions ?? [];
+  const nextSessions = sessions.filter((session) => String(session.id) !== sessionIdToRemove);
+  const total = Math.max(0, Number(project.sessionMeta?.total ?? sessions.length) - 1);
+  return {
+    ...project,
+    sessions: nextSessions,
+    sessionMeta: {
+      ...project.sessionMeta,
+      total,
+      hasMore: nextSessions.length < total,
+    },
+  };
 };
 
 // Writes a confirmed rename onto the matching sidebar row. Returns the same
@@ -770,9 +799,43 @@ export function useProjectsState({
         && event.kind !== 'stream_end'
         && event.kind !== 'permission_resolved'
         && event.kind !== 'permission_cancelled'
+        && event.kind !== 'session_removed'
         && event.kind !== 'websocket_reconnected'
       ) {
         markSessionAttention(eventSessionId);
+      }
+
+      if (event.kind === 'session_removed') {
+        // Hiding a session in the foreground removes it from the visible list; it is not a delete,
+        // so the open chat, its context and any deep link stay untouched.
+        const removed = event as unknown as SessionRemovedEvent;
+        const removedSessionId = typeof removed.sessionId === 'string' ? removed.sessionId.trim() : '';
+        if (!removedSessionId) return;
+        const removedProjectId = typeof removed.projectId === 'string' && removed.projectId
+          ? removed.projectId
+          : null;
+        const snapshot = projectsRef.current;
+        const owningProject = removedProjectId
+          ? snapshot.find((project) => project.projectId === removedProjectId) ?? null
+          : snapshot.find((project) => getProjectSessions(project)
+            .some((session) => String(session.id) === removedSessionId)) ?? null;
+
+        if (!owningProject) {
+          // The owner is unknown (no projectId on the event and the row was not on a loaded page),
+          // or the project itself is not loaded. Only the server knows the new totals, so refresh
+          // instead of decrementing a count we would have to guess the owner of.
+          void refreshProjectsSilently();
+          return;
+        }
+
+        setProjects((previousProjects) => previousProjects.map((project) => (
+          project.projectId === owningProject.projectId
+            ? dropRemovedSessionFromProject(project, removedSessionId)
+            : project
+        )));
+        // The currently open session keeps its selection and transcript; only the sidebar row is
+        // gone. Nothing here clears chat state.
+        return;
       }
 
       if (event.kind !== 'session_upserted') {
@@ -862,13 +925,22 @@ export function useProjectsState({
       setSelectedSession((previousSession) => {
         if (previousSession?.id === upsert.sessionId) {
           // Deferred naming must update the header as well as the sidebar.
-          // Keep the selection stable for transcript ticks with the same title.
-          if (typeof upsert.session.summary !== 'string' || previousSession.summary === upsert.session.summary) {
+          // Keep the selection stable for transcript ticks with the same title…
+          const sameSummary = typeof upsert.session.summary !== 'string'
+            || previousSession.summary === upsert.session.summary;
+          // …but a resident binding/unbinding arrives with an otherwise identical session, so
+          // resident metadata alone must still reach the selection (the session menu reads it).
+          const sameResident = serialize(previousSession.resident ?? null)
+            === serialize(upsert.session.resident ?? null);
+          if (sameSummary && sameResident) {
             return previousSession;
           }
-          // A title change must not replay a one-shot conversation search jump.
-          const { __searchTargetSnippet: _snippet, __searchTargetTimestamp: _timestamp, ...session } = previousSession;
-          return { ...session, summary: upsert.session.summary };
+          if (!sameSummary) {
+            // A title change must not replay a one-shot conversation search jump.
+            const { __searchTargetSnippet: _snippet, __searchTargetTimestamp: _timestamp, ...session } = previousSession;
+            return { ...session, summary: upsert.session.summary, resident: upsert.session.resident ?? session.resident ?? null };
+          }
+          return { ...previousSession, resident: upsert.session.resident ?? null };
         }
         if (previousSession?.id !== aliasedSelectedSessionId) {
           return previousSession;
@@ -1021,6 +1093,9 @@ export function useProjectsState({
             ? (details.provider as LLMProvider)
             : readSelectedProvider(),
         __projectId: resolvedProjectId,
+        // Only a field the server actually sent is applied. An absent projection stays absent, so
+        // the session menu reports "not known yet" instead of permanently "unbound".
+        ...(details.resident !== undefined ? { resident: details.resident } : {}),
       };
 
       setSelectedSession((previousSession) =>

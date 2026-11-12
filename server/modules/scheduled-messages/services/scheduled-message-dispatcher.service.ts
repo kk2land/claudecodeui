@@ -1,10 +1,10 @@
-import { scheduledMessagesDb, sessionDraftsDb } from '@/modules/database/index.js';
+import { scheduledMessagesDb, sessionDraftsDb, sessionsDb } from '@/modules/database/index.js';
 import type { QueuedSessionMessageRecord, ScheduledMessageRow } from '@/modules/database/index.js';
 import { announceScheduledMessagesChanged } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
 import type { ProviderRuntimeGateway } from '@/modules/websocket/index.js';
 import { readQueuedChatMessage } from '@/shared/utils.js';
-import type { QueuedChatMessage } from '@/shared/index.js';
+import type { LLMProvider, QueuedChatMessage } from '@/shared/index.js';
 
 /**
  * How often due scheduled messages are looked for.
@@ -32,6 +32,13 @@ let scheduledDispatchInFlight = false;
 let activeRuntime: ProviderRuntimeGateway | null = null;
 let unsubscribeTurnCompleted: (() => void) | null = null;
 /**
+ * Composition-root listener told when a session has genuinely nothing left to
+ * do. Used by the resident host to commit a stopped episode only after the
+ * queue/dispatch chain drained, so an ordinary turn end never reports a stop
+ * while a queued turn, a goal or a scheduled turn is still owed.
+ */
+let sessionSettledListener: ((sessionId: string) => void) | null = null;
+/**
  * Sessions with a queued dispatch in flight.
  *
  * A provider run can last for minutes. Tracking this per session means one
@@ -51,6 +58,55 @@ const deferredSessionDispatches = new Set<string>();
  * released when that scheduled turn settles, then the queue is tried at once.
  */
 const scheduledPrioritySessions = new Set<string>();
+
+/**
+ * Whether one session truly has nothing left: no dispatch in flight, no
+ * deferred/scheduled priority, no active run or background work, no queued
+ * turn, and no native goal or stop transition still owed.
+ */
+function isSessionSettled(sessionId: string, runtime: ProviderRuntimeGateway): boolean {
+  if (
+    dispatchingSessions.has(sessionId)
+    || scheduledPrioritySessions.has(sessionId)
+    || deferredSessionDispatches.has(sessionId)
+  ) {
+    return false;
+  }
+  if (
+    chatRunRegistry.isProcessing(sessionId)
+    || runtime.hasBackgroundWork(sessionId)
+    || Boolean(runtime.isQueueBlocked?.(sessionId))
+    || sessionDraftsDb.hasQueuedMessages(sessionId)
+  ) {
+    return false;
+  }
+  const session = sessionsDb.getSessionById(sessionId);
+  if (!session) {
+    return true;
+  }
+  const provider = session.provider as LLMProvider;
+  // Codex reports the app-server goal; DSH exposes its lifecycle as managed
+  // state. A goal or stop transition means the session is still working.
+  const state = provider === 'codex'
+    ? runtime.getState?.('codex', sessionId)
+    : runtime.getManagedState?.(provider, sessionId);
+  // Codex state carries the app-server goal; DSH managed state does not.
+  const goalActive = (state as { goal?: { status?: string } } | undefined)?.goal?.status === 'active';
+  return !(goalActive || ['starting', 'stopping', 'stopFailed'].includes(state?.phase ?? ''));
+}
+
+/** Reports a settled session to the composition root; never throws into a dispatch pass. */
+function announceSettledIfIdle(sessionId: string, runtime: ProviderRuntimeGateway): void {
+  if (!sessionSettledListener || !isSessionSettled(sessionId, runtime)) {
+    return;
+  }
+  try {
+    sessionSettledListener(sessionId);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.error('[ScheduledMessages] Session-settled listener failed', { sessionId, error: message });
+  }
+}
 
 function readOptions(raw: string): Record<string, unknown> {
   try {
@@ -203,9 +259,19 @@ export async function dispatchQueuedMessages(
       // itself in a tight loop; the supplemental poll owns that retry.
       if (deferredSessionDispatches.delete(candidate.sessionId) && admitted) {
         scheduleSessionDispatch(candidate.sessionId);
+      } else {
+        // The chain for this session ended here: either no follow-up was owed
+        // or the retry above will report its own settlement later.
+        announceSettledIfIdle(candidate.sessionId, runtime);
       }
     }
   }));
+
+  // A completion notification for a session with no queued turn claims nothing
+  // above, so its settled state is reported here.
+  if (options.sessionId) {
+    announceSettledIfIdle(options.sessionId, runtime);
+  }
 
   return claimed;
 }
@@ -337,12 +403,20 @@ export function initializeScheduledMessageDispatcher(
      * scheduled-messages module's dependencies explicit and acyclic.
      */
     subscribeTurnCompleted?: (listener: (sessionId: string) => void) => () => void;
+    /**
+     * Composition-root notification that a session has genuinely settled: no
+     * run, no queue, no scheduled priority, no goal or stop transition. The
+     * resident host commits a stopped episode only on this signal, so a plain
+     * turn completion is never mistaken for "the resident task stopped".
+     */
+    onSessionSettled?: (sessionId: string) => void;
   } = {},
 ): void {
   if (pollTimer) {
     return;
   }
   activeRuntime = runtime;
+  sessionSettledListener = options.onSessionSettled ?? null;
 
   const pollScheduled = () => {
     // A due-message pass that overruns the interval must not be started again
@@ -396,6 +470,7 @@ export function closeScheduledMessageDispatcher(): void {
   }
   unsubscribeTurnCompleted?.();
   unsubscribeTurnCompleted = null;
+  sessionSettledListener = null;
   activeRuntime = null;
   deferredSessionDispatches.clear();
 }

@@ -32,7 +32,12 @@ export async function cleanupExpiredDshSessions(
       if (entry.isDirectory()) {
         await walk(filePath);
       } else if (entry.isFile() && /^session(?:\.v[1-9]\d*)?\.jsonl(?:\.zstd)?$/.test(entry.name)) {
-        if (activeSessionIds.has(path.basename(directory))) {
+        // Every generation of a resident conversation is protected by its
+        // native id, so an older file must never be unlinked around it.
+        if (
+          activeSessionIds.has(path.basename(directory))
+          || sessionsDb.isProviderSessionResidentProtected('dsh', path.basename(directory))
+        ) {
           summary.skipped++;
           continue;
         }

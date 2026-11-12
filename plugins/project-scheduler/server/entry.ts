@@ -2,6 +2,8 @@ import fs from "node:fs";
 import express from "express";
 import { SchedulerStore } from "./store.js";
 import { ProjectScheduler } from "./scheduler.js";
+import { ResidentTasks } from "./resident.js";
+import { ResidentHost, ResidentHostError, processResidentTransport } from "./resident-ipc.js";
 import { updateSettings } from "./configuration.js";
 import { TelegramNotifier, sendTelegram } from "./telegram.js";
 import type { PublicSchedulerSettings } from "../shared/contracts.js";
@@ -16,6 +18,22 @@ const notifier = new TelegramNotifier(store);
 const scheduler = new ProjectScheduler(store, catalog, () => {
   void notifier.flush().catch((error) => console.error(String(error)));
 });
+const residentHost = new ResidentHost(processResidentTransport());
+// Resident runtime state always comes from the host; the plugin only stores task metadata.
+const resident = new ResidentTasks(
+  store,
+  residentHost,
+  () => {
+    void notifier.flush().catch((error) => console.error(String(error)));
+  },
+  (projectId) => {
+    try {
+      return scheduler.projects().find((project) => project.id === projectId)?.name ?? null;
+    } catch {
+      return null;
+    }
+  },
+);
 scheduler.recover();
 const app = express();
 app.use((req, res, next) => {
@@ -188,6 +206,49 @@ app.post(
     return { success: true };
   }),
 );
+app.get(
+  "/resident-tasks",
+  route(() => resident.list()),
+);
+app.post(
+  "/resident-tasks",
+  route((req) => {
+    const { sessionId } = req.body ?? {};
+    if (typeof sessionId !== "string" || !sessionId.trim())
+      throw new Error("需要会话 ID");
+    // Wrapped so the session menu can confirm the generated task id; controls return the row.
+    return resident.create(sessionId).then((task) => ({ task }));
+  }),
+);
+app.get(
+  "/resident-tasks/:id",
+  route((req) => resident.detail(String(req.params.id))),
+);
+app.patch(
+  "/resident-tasks/:id",
+  route((req) => {
+    const { enabled, visible } = req.body ?? {};
+    if (enabled === undefined && visible === undefined)
+      throw new Error("需要布尔类型的 enabled 或 visible");
+    if (enabled !== undefined && typeof enabled !== "boolean")
+      throw new Error("enabled 必须是布尔值");
+    if (visible !== undefined && typeof visible !== "boolean")
+      throw new Error("visible 必须是布尔值");
+    return resident.update(String(req.params.id), { enabled, visible });
+  }),
+);
+app.delete(
+  "/resident-tasks/:id",
+  route((req) => resident.remove(String(req.params.id))),
+);
+app.post(
+  "/resident-tasks/:id/stop",
+  route((req) => resident.stop(String(req.params.id))),
+);
+app.post(
+  "/resident-tasks/:id/continue",
+  route((req) => resident.resume(String(req.params.id))),
+);
 app.use(
   (
     error: Error,
@@ -196,13 +257,23 @@ app.use(
     _next: express.NextFunction,
   ) => {
     const secret = store.settings().telegram.botToken;
-    res
-      .status(400)
-      .json({
-        error: secret
-          ? error.message.replaceAll(secret, "[redacted]")
-          : error.message,
-      });
+    const message = secret
+      ? error.message.replaceAll(secret, "[redacted]")
+      : error.message;
+    if (!(error instanceof ResidentHostError)) {
+      res.status(400).json({ error: message });
+      return;
+    }
+    // A host answer must stay distinguishable from a transport failure.
+    const status =
+      error.code === "not_found"
+        ? 404
+        : error.code === "invalid_request"
+          ? 400
+          : error.code === "host_unavailable" || error.code === "timeout"
+            ? 503
+            : 409;
+    res.status(status).json({ error: message, code: error.code });
   },
 );
 const server = app.listen(0, "127.0.0.1", () => {
@@ -211,6 +282,10 @@ const server = app.listen(0, "127.0.0.1", () => {
     process.stdout.write(
       JSON.stringify({ ready: true, port: address.port }) + "\n",
     );
+  // Reconcile already stored tasks with the host; plugin restarts never resume a run.
+  void resident.ready().catch((error) =>
+    console.error("[Resident] 对账失败：" + String(error)),
+  );
 });
 const maintenance = setInterval(() => {
   try {
@@ -234,6 +309,7 @@ async function close(): Promise<void> {
   clearInterval(maintenance);
   clearInterval(cleanup);
   notifier.stop();
+  residentHost.close();
   server.close();
   server.closeAllConnections();
   await scheduler.close();

@@ -1,9 +1,12 @@
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
+import { useNavigate } from 'react-router-dom';
 
 import { useTheme } from '@/shared/context/ThemeContext';
 import { api } from '@/shared/api';
 import { usePlugins } from '@/modules/plugins/context/PluginsContext';
+import { SessionOutput } from '@/modules/chat';
 import type { Project, ProjectSession } from '@/shared/types';
 
 type PluginTabContentProps = {
@@ -60,6 +63,25 @@ export default function PluginTabContent({
   const contextCallbacksRef = useRef<Set<(ctx: PluginContext) => void>>(new Set());
 
   const moduleRef = useRef<any>(null);
+  const navigate = useNavigate();
+
+  /**
+   * A mounted read-only session viewer, published by a plugin through `mountSessionOutput`.
+   * It is rendered here, as a portal from this host tree, so the viewer keeps the app's React
+   * context — router, theme, socket provider — instead of starting a second root that would have
+   * none of it.
+   */
+  const [sessionOutput, setSessionOutput] = useState<{ container: HTMLElement; sessionId: string; key: number } | null>(null);
+  const sessionOutputKeyRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => () => { mountedRef.current = false; }, []);
+
+  const openSession = useCallback((sessionId: string) => {
+    const target = typeof sessionId === 'string' ? sessionId.trim() : '';
+    if (!target) return;
+    navigate(`/session/${encodeURIComponent(target)}`);
+  }, [navigate]);
 
   const plugin = plugins.find(p => p.name === pluginName);
 
@@ -155,6 +177,28 @@ export default function PluginTabContent({
             return body.data;
           },
 
+          // Read-only session output for a resident task's detail. The plugin decides where the
+          // transcript sits inside its own panel, but never imports host chat components or opens
+          // its own socket; disposal is always the plugin's responsibility.
+          mountSessionOutput(container: HTMLElement, options: { sessionId: string }): () => void {
+            if (!(container instanceof HTMLElement)) {
+              throw new Error('mountSessionOutput requires a DOM container');
+            }
+            const sessionId = typeof options?.sessionId === 'string' ? options.sessionId.trim() : '';
+            if (!sessionId) {
+              throw new Error('mountSessionOutput requires a sessionId');
+            }
+            const key = ++sessionOutputKeyRef.current;
+            setSessionOutput({ container, sessionId, key });
+            return () => {
+              if (!mountedRef.current) return;
+              setSessionOutput(current => (current?.key === key ? null : current));
+            };
+          },
+
+          /** Opens the writable session in the app; resident details link to it for input. */
+          openSession,
+
           async codexModelProviderModels(modelProvider: string): Promise<unknown> {
             if (typeof modelProvider !== 'string' || !modelProvider.trim()) {
               throw new Error('A model provider id is required');
@@ -189,12 +233,20 @@ export default function PluginTabContent({
       try { moduleRef.current?.unmount?.(container); } catch { /* ignore */ }
       contextCallbacks.clear();
       moduleRef.current = null;
+      setSessionOutput(null);
     };
-  }, [pluginName, plugin?.entry, plugin?.enabled]); // re-mount when plugin or enabled state changes
+  }, [pluginName, plugin?.entry, plugin?.enabled, openSession]); // re-mount when plugin or enabled state changes
 
   return (
     <div className="relative h-full w-full overflow-auto">
       <div ref={containerRef} className="h-full w-full overflow-auto" />
+      {/* Portals keep the viewer inside this tree, so it shares the app's context. */}
+      {sessionOutput && createPortal(
+        // Keyed by session: switching the mounted session remounts the viewer, so no
+        // pending-permission or replay watermark from the previous session survives it.
+        <SessionOutput key={sessionOutput.sessionId} sessionId={sessionOutput.sessionId} onOpenSession={openSession} />,
+        sessionOutput.container,
+      )}
       {loadError && (
         <div className="absolute inset-0 p-4 text-[13px] text-red-600">
           {t('common:misc.pluginLoadFailed', { error: loadError })}

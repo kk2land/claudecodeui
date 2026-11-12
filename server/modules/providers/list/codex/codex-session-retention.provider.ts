@@ -27,7 +27,14 @@ export async function cleanupExpiredCodexSessions(now: number, activeSessionIds:
     const indexed = sessionsDb.getSessionByProviderSessionId(thread.id, 'codex');
     // Native recency does not change when the app reads or resumes a thread.
     const lastUsedAt = Math.max(thread.lastUsedAt, indexed?.last_opened_at ? Date.parse(indexed.last_opened_at) : 0);
-    if (thread.active || activeSessionIds.has(thread.id) || lastUsedAt >= cutoff) {
+    // A resident task keeps the native thread and its transcript: retention
+    // must not delete a thread the user still sees in the plugin.
+    if (
+      thread.active
+      || activeSessionIds.has(thread.id)
+      || lastUsedAt >= cutoff
+      || sessionsDb.isProviderSessionResidentProtected('codex', thread.id)
+    ) {
       summary.skipped++;
       continue;
     }

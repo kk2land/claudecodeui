@@ -1,4 +1,9 @@
 import type {
+  ResidentContinueResponse,
+  ResidentRemoveResult,
+  ResidentTaskDetail,
+  ResidentTaskListResponse,
+  ResidentTaskRow,
   PublicSchedulerSettings,
   SchedulerImport,
   SchedulerLog,
@@ -87,6 +92,17 @@ export type SchedulerHost = {
    * request must read as "catalog unavailable" and leave authored values untouched.
    */
   models?(provider: "codex" | "dsh"): Promise<SchedulerModelCatalog>;
+  /**
+   * Optional host capability that renders the app's read-only session transcript into a DOM
+   * container the plugin owns. Absent on hosts that cannot show live output, in which case the
+   * detail must say so rather than fetching or polling a transcript of its own.
+   */
+  mountSessionOutput?(
+    container: HTMLElement,
+    options: { sessionId: string },
+  ): () => void;
+  /** Optional host capability that opens the writable session, where input is allowed. */
+  openSession?(sessionId: string): void;
 };
 
 /** Client endpoints centralized for the plugin's components and polling hooks. */
@@ -150,6 +166,43 @@ export function schedulerApi(host: SchedulerHost) {
       request<{ run: SchedulerRun; task: SchedulerTask | null }>(
         "GET",
         "/runs/" + encodeURIComponent(id),
+      ),
+    residentTasks: () => request<ResidentTaskListResponse>("GET", "/resident-tasks"),
+    residentTask: (id: string) =>
+      request<ResidentTaskDetail>(
+        "GET",
+        "/resident-tasks/" + encodeURIComponent(id),
+      ),
+    /**
+     * Binds an already-running foreground session. The host validates that the run is genuinely
+     * active, that its provider is supported and that the session is unbound, so a refusal is a
+     * regular answer and must be shown as one.
+     */
+    adoptResident: (sessionId: string) =>
+      request<{ task?: ResidentTaskRow }>("POST", "/resident-tasks", { sessionId }),
+    setResidentEnabled: (id: string, enabled: boolean) =>
+      request<ResidentTaskRow>("PATCH", "/resident-tasks/" + encodeURIComponent(id), {
+        enabled,
+      }),
+    setResidentVisible: (id: string, visible: boolean) =>
+      request<ResidentTaskRow>("PATCH", "/resident-tasks/" + encodeURIComponent(id), {
+        visible,
+      }),
+    stopResident: (id: string) =>
+      request<ResidentTaskRow>(
+        "POST",
+        "/resident-tasks/" + encodeURIComponent(id) + "/stop",
+      ),
+    continueResident: (id: string) =>
+      request<ResidentContinueResponse>(
+        "POST",
+        "/resident-tasks/" + encodeURIComponent(id) + "/continue",
+      ),
+    /** Stops silently first, then unbinds; the session itself is kept either way. */
+    removeResident: (id: string) =>
+      request<ResidentRemoveResult>(
+        "DELETE",
+        "/resident-tasks/" + encodeURIComponent(id),
       ),
     configuration: (projectId: string) =>
       request<SchedulerProjectConfig>(

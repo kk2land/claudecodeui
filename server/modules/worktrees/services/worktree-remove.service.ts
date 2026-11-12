@@ -4,6 +4,7 @@ import type {
   RemoveWorktreeResult,
   WorktreeProjectGateway,
 } from '@/shared/types.js';
+import { sessionsDb } from '@/modules/database/index.js';
 import { AppError } from '@/shared/utils.js';
 import {
   countChangedFiles,
@@ -46,6 +47,18 @@ export async function removeWorktree(
         },
       );
     }
+  }
+
+  // A resident session living in this worktree protects its directory: the
+  // git removal is the first destructive side effect and must not run.
+  const protectedSessions = sessionsDb
+    .getSessionsByProjectPathIncludingArchived(entry.path)
+    .filter((session) => sessionsDb.isSessionResidentProtected(session.session_id));
+  if (protectedSessions.length > 0) {
+    throw new AppError('This worktree contains a resident task. Remove the task first.', {
+      code: 'RESIDENT_PROTECTED',
+      statusCode: 409,
+    });
   }
 
   const removeArgs = ['worktree', 'remove'];

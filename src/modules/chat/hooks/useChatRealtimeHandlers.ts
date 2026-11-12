@@ -110,6 +110,18 @@ export function useChatRealtimeHandlers({
   activeViewSessionIdRef.current = selectedSession?.id || currentSessionId || null;
   const isActiveRef = useRef(isActive);
   isActiveRef.current = isActive;
+  /**
+   * Accumulated `stream_delta` text per session, plus that session's pending flush.
+   *
+   * A broadcast carries every running session's deltas to this one socket, and the provider
+   * sends bare text with no row identity. A single shared buffer therefore spliced one session's
+   * words into whichever transcript the timer happened to flush, which is exactly what a
+   * background run does to the conversation the user is reading. Each session owns its own text
+   * and timer, so a background run can neither leak into the viewed session nor lose its own
+   * output: its buffer is flushed to its own slot, ready when the user switches to it.
+   */
+  const streamTextBySessionRef = useRef(new Map<string, string>());
+  const streamTimersBySessionRef = useRef(new Map<string, number>());
 
   // Keep the latest pending-permission snapshot available to the websocket
   // listener so back-to-back permission events can dedupe and re-arm the
@@ -125,6 +137,30 @@ export function useChatRealtimeHandlers({
     // launched that are still running, or nothing, which marks it idle. The
     // store's records are what the transcript's cards fold their live status
     // from, so this reads the same answer they draw.
+    /**
+     * Flushes and finalizes one session's buffered stream text, leaving every other session's
+     * buffer untouched. Called by `stream_end` and by the terminal `complete`.
+     */
+    const finalizeSessionStream = (sid: string | null) => {
+      if (!sid) return;
+      const buffers = streamTextBySessionRef.current;
+      const timers = streamTimersBySessionRef.current;
+      const timer = timers.get(sid);
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timers.delete(sid);
+      }
+      const accumulated = buffers.get(sid) ?? '';
+      if (accumulated) {
+        sessionStore.updateStreaming(sid, accumulated, provider);
+        sessionStore.finalizeStreaming(sid);
+      }
+      buffers.delete(sid);
+      if (sid === activeViewSessionIdRef.current) {
+        accumulatedStreamRef.current = '';
+      }
+    };
+
     const reportRemainingBackgroundWork = (sid: string) => {
       onSessionBackground?.(sid, collectRunningBackgroundTasks(normalizedToChatMessages(sessionStore.getMessages(sid))));
     };
@@ -154,12 +190,25 @@ export function useChatRealtimeHandlers({
         return true;
       };
 
-      // Record replay progress for every sequenced live event.
+      // Record replay progress for every sequenced live event, and reject a frame this consumer
+      // already applied. A `chat.subscribe` replay overlaps the live broadcast (and every viewer
+      // of the run receives the same frames), so without this check a replayed `stream_delta`
+      // appends its text a second time and the output the user is already reading grows a
+      // duplicate tail. The watermark is per session and per execution, which the reset above
+      // establishes, so a new execution never inherits the previous one's position.
+      let alreadyConsumed = false;
       if (sid && typeof msg.seq === 'number') {
         const known = lastSeqRef.current.get(sid) ?? 0;
+        alreadyConsumed = msg.seq <= known;
         if (msg.seq > known) {
           lastSeqRef.current.set(sid, msg.seq);
         }
+      }
+
+      // A duplicate is dropped before it can touch any transcript or processing state. Frames
+      // without a `seq` (acks, lifecycle events) are unaffected: they are not replayed.
+      if (alreadyConsumed) {
+        return;
       }
 
       // A server-owned queue receipt belongs to the session that sent it, never
@@ -381,38 +430,35 @@ export function useChatRealtimeHandlers({
       /*  Provider NormalizedMessage handling                            */
       /* -------------------------------------------------------------- */
 
-      // --- Streaming: buffer for performance ---
+      // --- Streaming: buffer for performance, per owning session ---
       if (msg.kind === 'stream_delta') {
         const text = (msg.content as string) || '';
-        if (!text) return;
-        accumulatedStreamRef.current += text;
-        if (!streamTimerRef.current) {
-          streamTimerRef.current = window.setTimeout(() => {
-            streamTimerRef.current = null;
-            if (sid) {
-              sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
+        if (!text || !sid) return;
+        const buffers = streamTextBySessionRef.current;
+        const timers = streamTimersBySessionRef.current;
+        buffers.set(sid, (buffers.get(sid) ?? '') + text);
+        // The passed ref still tracks the viewed session's text, which is what a session switch
+        // clears; it is a mirror of that one buffer, not the accumulation itself.
+        if (sid === activeViewSessionId) {
+          accumulatedStreamRef.current = buffers.get(sid) ?? '';
+        }
+        if (!timers.has(sid)) {
+          timers.set(sid, window.setTimeout(() => {
+            timers.delete(sid);
+            const accumulated = buffers.get(sid);
+            if (accumulated) {
+              sessionStore.updateStreaming(sid, accumulated, provider);
             }
-          }, 100);
+          }, 100));
         }
-        // Also route to store for non-active sessions
-        if (sid && sid !== activeViewSessionId) {
-          sessionStore.appendRealtime(sid, msg as unknown as NormalizedMessage);
-        }
+        // Only the accumulated text is authoritative. Writing the raw per-frame deltas here as
+        // well would leave a background session holding both fragments and the full text, and the
+        // fragments differ from the summary row, so the merge cannot collapse them.
         return;
       }
 
       if (msg.kind === 'stream_end') {
-        if (streamTimerRef.current) {
-          clearTimeout(streamTimerRef.current);
-          streamTimerRef.current = null;
-        }
-        if (sid) {
-          if (accumulatedStreamRef.current) {
-            sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-          }
-          sessionStore.finalizeStreaming(sid);
-        }
-        accumulatedStreamRef.current = '';
+        finalizeSessionStream(sid);
         return;
       }
 
@@ -433,16 +479,9 @@ export function useChatRealtimeHandlers({
       // --- UI side effects for specific kinds ---
       switch (msg.kind) {
         case 'complete': {
-          // Flush any remaining streaming state
-          if (streamTimerRef.current) {
-            clearTimeout(streamTimerRef.current);
-            streamTimerRef.current = null;
-          }
-          if (sid && accumulatedStreamRef.current) {
-            sessionStore.updateStreaming(sid, accumulatedStreamRef.current, provider);
-            sessionStore.finalizeStreaming(sid);
-          }
-          accumulatedStreamRef.current = '';
+          // Flush and finalize this session's remaining streaming state; other sessions keep
+          // their own buffers.
+          finalizeSessionStream(sid);
 
           // `complete` is the unified terminal event — every provider run ends
           // with exactly one, regardless of success, failure, or abort. The

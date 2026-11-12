@@ -12,6 +12,7 @@ import {
   SESSION_DRAFTS_TABLE_SCHEMA_SQL,
   SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL,
   SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL,
+  RESIDENT_BINDINGS_TABLE_SCHEMA_SQL,
   SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL,
   SESSIONS_TABLE_SCHEMA_SQL,
   USER_PREFERENCES_TABLE_SCHEMA_SQL,
@@ -637,6 +638,8 @@ export const runMigrations = (db: Database) => {
     addSessionLastOpenedAtColumn(db);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
+    // Additive: resident bindings never rewrite or drop existing data.
+    db.exec(RESIDENT_BINDINGS_TABLE_SCHEMA_SQL);
 
     db.exec('CREATE INDEX IF NOT EXISTS idx_session_ids_lookup ON sessions(session_id)');
     db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_provider_session_id ON sessions(provider_session_id)');

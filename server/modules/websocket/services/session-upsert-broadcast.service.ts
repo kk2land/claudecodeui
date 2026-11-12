@@ -3,7 +3,27 @@ import path from 'node:path';
 import { projectsDb, sessionsDb } from '@/modules/database/index.js';
 import { generateDisplayName } from '@/modules/projects/index.js';
 import { broadcastToConnectedClients } from '@/modules/websocket/services/websocket-state.service.js';
-import type { SessionUpsertedEvent } from '@/shared/types.js';
+import type { ResidentSessionInfo, SessionUpsertedEvent } from '@/shared/types.js';
+
+/**
+ * Optional resident projection reader, registered by the project-scheduler
+ * composition root. It is the only extra metadata this builder attaches; when
+ * nothing is registered the payload keeps its pre-resident shape.
+ */
+let residentProjectionReader:
+  | ((input: { sessionId: string; provider: string }) => ResidentSessionInfo | null)
+  | null = null;
+
+/**
+ * Registers (or clears) the resident projection reader. Called once by the
+ * project-scheduler module's initialize so the websocket module never imports
+ * the host module back. Tests pass null to restore the old payload.
+ */
+export function setResidentProjectionReader(
+  reader: typeof residentProjectionReader,
+): void {
+  residentProjectionReader = reader;
+}
 
 /**
  * The single producer of the `session_upserted` delta.
@@ -47,6 +67,9 @@ async function buildSessionUpsertedEvent(
       summary: row.custom_name || '',
       messageCount: 0,
       lastActivity: row.updated_at ?? row.created_at ?? new Date().toISOString(),
+      ...(residentProjectionReader
+        ? { resident: residentProjectionReader({ sessionId: row.session_id, provider: row.provider }) }
+        : {}),
     },
     project: project
       ? {
@@ -59,6 +82,25 @@ async function buildSessionUpsertedEvent(
       : null,
     timestamp: new Date().toISOString(),
   };
+}
+
+/**
+ * Announces that a session must leave every foreground list without being
+ * archived. Used by the resident host when its own `visible` switch is turned
+ * off: the row, its counts and its search entry disappear from every connected
+ * sidebar through the existing authenticated chat socket, while lookup by id
+ * and the binding's protection stay intact.
+ */
+export function broadcastSessionRemoved(sessionId: string, projectId?: string | null): void {
+  if (!sessionId) return;
+  broadcastToConnectedClients(JSON.stringify({
+    kind: 'session_removed',
+    sessionId,
+    // Only the owning project id, so a loaded page can drop the row/counts
+    // without refetching every project.
+    ...(projectId ? { projectId } : {}),
+    timestamp: new Date().toISOString(),
+  }));
 }
 
 /** Announces one session. Used by the chat run registry when a run reports its provider-native id. */

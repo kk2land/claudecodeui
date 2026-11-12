@@ -271,6 +271,48 @@ CREATE INDEX IF NOT EXISTS idx_project_todos_user_project
 ON project_todos(user_id, project_id, status);
 `;
 
+
+/**
+ * Foreground sessions converted into resident ("常驻") tasks.
+ *
+ * One row per binding, unique by task and by session, owned exclusively by the
+ * project-scheduler host module: the plugin keeps only task metadata and its
+ * terminal cursor. `provider_session_id`, `model`, `effort`, `runtime` and the
+ * permission snapshot are captured from the real dispatch boundary so a host
+ * restart can resume the same native session exactly. `terminal_json` survives
+ * a new admission (only `stop_cause` is cleared), so the plugin can still
+ * process an unread terminal episode. The row's existence is the session's
+ * physical-deletion protection, independent of `enabled`, `visible` or whether
+ * the plugin process is running.
+ */
+export const RESIDENT_BINDINGS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS resident_bindings (
+    task_id TEXT PRIMARY KEY NOT NULL,
+    session_id TEXT NOT NULL UNIQUE,
+    project_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    provider TEXT NOT NULL,
+    provider_session_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 1,
+    visible INTEGER NOT NULL DEFAULT 1,
+    status TEXT NOT NULL DEFAULT 'idle',
+    execution_id TEXT,
+    stop_cause TEXT,
+    terminal_json TEXT,
+    permission_mode TEXT,
+    sandbox_mode TEXT,
+    model TEXT,
+    effort TEXT,
+    runtime TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_resident_bindings_provider_session
+ON resident_bindings(provider, provider_session_id);
+CREATE INDEX IF NOT EXISTS idx_resident_bindings_status
+ON resident_bindings(status);
+`;
+
 /** Database initialization and migrations persist session runtimes and queue holds, plus Codex's native mode. */
 export const SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL = `
 CREATE TABLE IF NOT EXISTS session_runtime_settings (
@@ -379,4 +421,6 @@ ${SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL}
 ${QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL}
 
 ${SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL}
+
+${RESIDENT_BINDINGS_TABLE_SCHEMA_SQL}
 `;

@@ -82,6 +82,19 @@ export async function deleteOrArchiveProject(projectId: string, force: boolean):
     return;
   }
 
+  // First side effect. A project holding a resident session must not lose its
+  // todo folders, transcript files or rows; the task owns that session until
+  // the user removes it, and force delete answers 409 like a protected session.
+  const protectedSessions = sessionsDb
+    .getSessionsByProjectPathIncludingArchived(row.project_path)
+    .filter((session) => sessionsDb.isSessionResidentProtected(session.session_id));
+  if (protectedSessions.length > 0) {
+    throw new AppError('This project contains a resident task. Remove the task first.', {
+      code: 'RESIDENT_PROTECTED',
+      statusCode: 409,
+    });
+  }
+
   // The todos module removes its private folders and rows first; a failure
   // aborts the hard delete before any project row disappears.
   await deleteProjectTodos(projectId);
