@@ -2315,12 +2315,17 @@ export class CodexSessionsProvider implements IProviderSessions {
     }
 
     if (raw.type === 'turn_complete') {
+      // A normalizer-produced terminal must carry its real outcome: this is the
+      // first terminal the registry sees for a successful exec turn, and the
+      // adapter's own trailing complete is dropped as the duplicate it is.
       return [createNormalizedMessage({
         id: baseId,
         sessionId,
         timestamp: ts,
         provider: PROVIDER,
         kind: 'complete',
+        success: true,
+        exitCode: 0,
       })];
     }
     if (raw.type === 'turn_failed') {
