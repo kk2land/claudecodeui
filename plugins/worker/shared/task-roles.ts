@@ -2,9 +2,9 @@
  * The single catalog of Worker task roles shared by the Worker plugin, the Codex host bridge,
  * and the UI.
  *
- * A role describes the kind of execution work delegated to a Worker. Technical solution design,
- * architecture, and planning are not Worker roles: the parent session owns them and may only ask
- * a Worker to review an already produced plan.
+ * A role describes the kind of execution work delegated to a Worker. Workers can research
+ * solution options or review an existing plan; the parent session owns technical solution
+ * decisions, architecture, and planning.
  *
  * This module is data and types only: importing it must never pull in plugin runtime code.
  */
@@ -25,6 +25,11 @@ export const WORKER_TASK_ROLES = [
     value: "ui_design",
     label: "UI设计",
     description: "界面布局、视觉样式和交互设计。",
+  },
+  {
+    value: "plan_research",
+    label: "方案调研",
+    description: "调研现状与可选方案，比较取舍并提供事实依据与建议。",
   },
   {
     value: "plan_review",
