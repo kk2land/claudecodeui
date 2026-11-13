@@ -119,6 +119,17 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
     headers: { authorization: "Bearer owner-token" },
   });
   assert.equal(wrong.status, 401);
+  const unauthenticatedInput = await fetch(
+    base + "/workers/missing/input?runId=run-1",
+  );
+  assert.equal(unauthenticatedInput.status, 401);
+  const unknownInput = await fetch(base + "/workers/missing/input", {
+    headers: { authorization: "Bearer ui-token" },
+  });
+  assert.equal(unknownInput.status, 400);
+  assert.deepEqual(await unknownInput.json(), {
+    error: { code: "WORKER_NOT_FOUND", message: "worker 不存在" },
+  });
   const wrongMcp = await fetch(base + "/api/worker-mcp", {
     method: "POST",
     headers: { authorization: "Bearer ui-token", "content-type": "application/json" },

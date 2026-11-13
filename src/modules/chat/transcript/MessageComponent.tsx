@@ -27,6 +27,14 @@ type MessageComponentProps = {
   onGrantToolPermission?: (suggestion: ClaudePermissionSuggestion) => PermissionGrantResult | null | undefined;
   showRawParameters?: boolean;
   showThinking?: boolean;
+  /**
+   * Whether this row may draw its own time, defaulted to true. Rows whose
+   * source has no per-entry timestamp (Worker log entries) pass false, so the
+   * placeholder value stays undisplayed instead of becoming 1970 or "now".
+   * Only the time text and its time-only containers depend on it; copy, tool
+   * and every other control keep rendering as before.
+   */
+  showTimestamp?: boolean;
   selectedProject?: Project | null;
   provider: LLMProvider | string;
   /**
@@ -63,7 +71,7 @@ function SideQuestionDismissButton({ label, onDismiss }: { label: string; onDism
  * Rendered by chat's ChatMessagesPane and ToolGroupContainer to draw one
  * transcript entry — user turn, assistant turn, or a tool call and its result.
  */
-const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, selectedProject, provider, onEditMessage, onForkFromMessage }: MessageComponentProps) => {
+const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, showRawParameters, showThinking, showTimestamp = true, selectedProject, provider, onEditMessage, onForkFromMessage }: MessageComponentProps) => {
   const { t } = useTranslation('chat');
   // A side question never groups with its neighbours: it is drawn as its own
   // tinted aside regardless of what came before or after it.
@@ -111,8 +119,34 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     !message.isThinking;
 
 
-  const formattedTime = useMemo(() => new Date(message.timestamp).toLocaleTimeString(), [message.timestamp]);
+  // Time is computed only when the caller allows it; a Worker log row passes
+  // false and therefore never derives one. When allowed, the value is formatted
+  // exactly as before, including a legitimate epoch 0 and any invalid source
+  // string, so no existing provider row changes behavior.
+  const formattedTime = useMemo(
+    () => (showTimestamp ? new Date(message.timestamp).toLocaleTimeString() : null),
+    [message.timestamp, showTimestamp]
+  );
   const shouldHideThinkingMessage = Boolean(message.isThinking && !showThinking);
+  // Footer of an assistant row: copy/speak, the reported model, and the time.
+  // It still renders whenever one of those can appear, so hiding the time never
+  // removes the other controls nor leaves bare spacing behind.
+  const shouldRenderAssistantFooter = shouldShowAssistantCopyControl ||
+    (!isGrouped && (Boolean(formattedTime) || Boolean(message.model)));
+  // Header name of the provider that produced this row. Providers without a
+  // translated name fall back to their own English name, which keeps a
+  // Worker-only provider such as Pi readable without claiming native support.
+  const providerLabel = provider === 'cursor'
+    ? t('messageTypes.cursor')
+    : provider === 'codex'
+      ? t('messageTypes.codex')
+      : provider === 'dsh'
+        ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' })
+        : provider === 'opencode'
+          ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
+          : provider === 'pi'
+            ? t('messageTypes.pi', { defaultValue: 'Pi' })
+            : t('messageTypes.claude');
 
   if (shouldHideThinkingMessage) {
     return null;
@@ -145,7 +179,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                 </Markdown>
               )}
             </div>
-            <div className="mt-1 text-xs text-muted-foreground">{formattedTime}</div>
+            {formattedTime && (
+              <div className="mt-1 text-xs text-muted-foreground">{formattedTime}</div>
+            )}
           </div>
         ) : (
           <div className={`${railClassName} rounded-t-lg pb-1.5 pt-2`}>
@@ -227,14 +263,16 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   {shouldShowUserCopyControl && (
                     <MessageCopyControl content={userCopyContent} messageType="user" />
                   )}
-                  <span>{formattedTime}</span>
+                  {formattedTime && <span>{formattedTime}</span>}
                 </div>
               </div>
             ) : (
-              /* Attachment-only turn: no text bubble, but the timestamp still shows */
-              <div className="flex items-center justify-end gap-1 text-xs text-muted-foreground">
-                <span>{formattedTime}</span>
-              </div>
+              /* Attachment-only turn: no text bubble, just the time when the row has one */
+              formattedTime && (
+                <div className="flex items-center justify-end gap-1 text-xs text-muted-foreground">
+                  <span>{formattedTime}</span>
+                </div>
+              )
             )}
           </div>
           {!isGrouped && (
@@ -304,13 +342,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                   ? t('messageTypes.error')
                   : message.type === 'tool'
                     ? t('messageTypes.tool')
-                    : (provider === 'cursor'
-                        ? t('messageTypes.cursor')
-                        : provider === 'codex'
-                          ? t('messageTypes.codex')
-                          : provider === 'dsh' ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' }) : provider === 'opencode'
-                              ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-                              : t('messageTypes.claude'))}
+                    : providerLabel}
               </div>
             </div>
           )}
@@ -490,7 +522,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
               <MemoryCitations citations={message.memoryCitations} />
             )}
 
-            {(shouldShowAssistantCopyControl || !isGrouped) && (
+            {shouldRenderAssistantFooter && (
               <div className="mt-1 flex w-full items-center gap-2 text-[11px] text-gray-400 dark:text-gray-500">
                 {shouldShowAssistantCopyControl && (
                   <MessageCopyControl content={assistantCopyContent} messageType="assistant" />
@@ -503,7 +535,7 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
                     copy and speak it is not gated on the copy control, and an
                     exported transcript keeps it wherever the footer renders. */}
                 <MessageModelLabel model={message.model} />
-                {!isGrouped && <span>{formattedTime}</span>}
+                {!isGrouped && formattedTime && <span>{formattedTime}</span>}
               </div>
             )}
           </div>

@@ -120,6 +120,35 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 通知重试；不展示宿主认证令牌或 MCP 控制令牌。用户自行配置的 Codex 环境变量可在设置页编辑。
 没有会话时禁用会话视图，没有项目时仅保留全部视图。
 
+### 运行详情的对话视图
+
+详情页默认显示「对话 | 原始事件 | stderr」三个标签。「对话」由插件在前端把该 run 已有的分页事件解析为
+只读行，服务端不新增会话聚合、状态缓存或会话映射：打开后按页串行排空到 EOF 或最新，运行中沿用同一游标
+每 1 秒刷新；只有服务端返回 `done` 或 `nextCursor: null` 才算运行结束，仍在运行的空页继续重试而不当作结束。
+离开该标签会停止该轮询并释放宿主视图，重新打开时从头读到最新。单页读取失败保留游标、显示简短错误并在同一
+1 秒定时器上重试，成功后清除错误。切到「原始事件」或 `stderr` 时保持原有每页 64 KiB 的分页读取与页数行为。
+
+- 用户输入只来自 `GET /workers/:workerId/input?runId`：run 目录的真实 `prompt.md`，排队中回退到已接受的
+  prompt，无记录时返回 `prompt: null`。不使用 `taskName` 或当前配置顶替；Pi 对同一输入的日志回显不会重复显示，
+  没有输入记录也没有回显时只显示「本次输入记录不可用」。该路由与 `logs` 一样校验 worker 归属和 run 归属。
+- 日志读到真正 EOF 后仍没有可读回答（思考行不算回答）时，才把存储的 `finalText` 作为一条 assistant 行交给
+  同一个视图渲染，并标注「仅显示存储的运行结果」，不单独渲染结果块，也不在 EOF 前提前显示。
+- 宿主可通过可选能力 `mountConversationOutput(container, { provider, messages })` 渲染对话，滚动与
+  「跟随最新」由宿主视图负责，插件只上报 `worker.type`，Pi 不会被标成 Codex。旧宿主没有该能力时退回基础
+  只读列表并提示「当前宿主不支持对话视图」，「回到最新」行为一致，原始事件与 stderr 诊断不受影响；插件不引入
+  裸 markdown 依赖。`.worker-conv-host` 提供固定 320px 高度且自身是唯一滚动容器，宿主视图填满它、不要自建
+  第二个滚动容器。
+- Pi JSON 模式的 `message_update` 只带 `assistantMessageEvent`（无累计 message）：`text_*`/`thinking_*` 的
+  `contentIndex` 决定稳定的 `base:index` 行并按 `delta` 追加，`*_end.content` 与 `message_end` 权威收尾；
+  工具用 `toolcall_start`（id/toolName）、`toolcall_delta`（JSON 参数片段，不渲染）、`toolcall_end`（toolCall）
+  与 `tool_execution_start/update/end`（args、partialResult、result）合并为同一 `toolCallId` 行，结果优先取
+  `content` 文本块而不是整块 JSON。`turn_end`/`agent_end` 的重放消息与 system/developer 角色被忽略。
+- Codex 按真实 `item.id` 更新全部可读条目：`agent_message`、`reasoning`、`command_execution`、`file_change`、
+  `mcp_tool_call`、`web_search`、`todo_list`，以及 item 级与 turn 级错误；工具输入输出按各条目字段渲染。
+- DSH 的 `text` 分块与 step 边界保留行身份，`final` 在 `turn_end` 之后到达时覆盖最后一个 step 的行而不新增
+  重复答案；不同 step 的文本各自成行。`thinking` 单独成行，`tool_call`/`tool_result` 按 call id 关联，
+  `error` 可读。未知的 init/status/session 事件只保留在原始事件中。
+
 ## 计划与验收记录
 
 每个父会话与项目维护一份 Markdown 计划。插件在现有 `worker.db` 中独立保存内容和更新时间，

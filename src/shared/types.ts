@@ -13,8 +13,13 @@ import type {
   ResidentStopCause,
   ResidentTaskStatus,
 } from 'plugins/project-scheduler/shared/contracts';
+// Type-only re-export of the Worker plugin's conversation row, the protocol it parses from a run's
+// own event log and hands to `mountConversationOutput`. Same erasure as above: the bundled plugin
+// contract is the single source of truth, so importing the type cannot pull plugin runtime code in
+// and the host must not restate the shape.
+import type { WorkerConversationMessage } from 'plugins/worker/shared/contracts';
 
-export type { ResidentSessionInfo, ResidentStopCause, ResidentTaskStatus };
+export type { ResidentSessionInfo, ResidentStopCause, ResidentTaskStatus, WorkerConversationMessage };
 
 //----------------- LLM PROVIDER MODEL CATALOG ------------
 

@@ -95,6 +95,17 @@ app.get(
   ),
 );
 
+app.get(
+  "/workers/:workerId/input",
+  uiOnly,
+  route((req) =>
+    service.input(String(req.params.workerId), {
+      runId:
+        typeof req.query.runId === "string" ? req.query.runId : undefined,
+    }),
+  ),
+);
+
 app.post(
   "/cancel",
   uiOnly,

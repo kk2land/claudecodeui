@@ -1,8 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, waitFor } from '@testing-library/react';
+import { act, render, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
 
 import '@/modules/i18n';
+import type * as ChatModule from '@/modules/chat';
 import PluginTabContent from '@/modules/plugins/PluginTabContent';
 import { ThemeProvider } from '@/shared/context/ThemeContext';
 import { PluginsProvider } from '@/modules/plugins/context/PluginsContext';
@@ -12,7 +13,8 @@ import type { Plugin, Project } from '@/shared/types';
  * The plugin host surface is built inside PluginTabContent and handed to whatever
  * module the plugin asset fetch returns. These tests mount a tiny fake plugin
  * module and drive the real host: the models capability must stay allowlisted
- * and read the authenticated provider catalog endpoint.
+ * and read the authenticated provider catalog endpoint, and a mounted session
+ * viewer must receive the options the host was called with verbatim.
  */
 
 const PLUGIN = {
@@ -44,7 +46,32 @@ type Host = {
   models?: (provider: 'codex' | 'dsh') => Promise<unknown>;
   codexModelProviders?: () => Promise<unknown>;
   codexModelProviderModels?: (modelProvider: string) => Promise<unknown>;
+  mountSessionOutput?: (
+    container: HTMLElement,
+    options: { sessionId: string; pollIntervalMs?: number },
+  ) => () => void;
 };
+
+/** The viewer props the host rendered, captured at the chat module boundary. */
+type CapturedViewerProps = { sessionId: string; pollIntervalMs?: number };
+
+// The host renders the mounted viewer itself, so standing a fake viewer in at the
+// module boundary is what lets the test assert on forwarding. Only the session
+// viewer is replaced; the rest of the chat module stays real.
+vi.mock('@/modules/chat', async importOriginal => {
+  const actual = await importOriginal<typeof ChatModule>();
+  return {
+    ...actual,
+    SessionOutput: (props: CapturedViewerProps) => {
+      (globalThis as Record<string, unknown>).__sessionViewerProps = props;
+      return null;
+    },
+  };
+});
+
+function capturedViewerProps(): CapturedViewerProps | null {
+  return ((globalThis as Record<string, unknown>).__sessionViewerProps ?? null) as CapturedViewerProps | null;
+}
 
 /** The host object the fake plugin received from the real host component. */
 let harness: Host | null = null;
@@ -84,8 +111,52 @@ beforeEach(() => {
   harness = null;
   vi.unstubAllGlobals();
   vi.stubGlobal('__schedulerHost', null);
+  vi.stubGlobal('__sessionViewerProps', null);
   (URL as unknown as Record<string, unknown>).createObjectURL = () => pluginUrl;
   (URL as unknown as Record<string, unknown>).revokeObjectURL = () => {};
+});
+
+async function mountHostAndHarness(): Promise<Host> {
+  stubAssetsAndPlugins();
+  renderHost();
+  await waitFor(() => {
+    harness = ((globalThis as Record<string, unknown>).__schedulerHost ?? null) as Host | null;
+    expect(harness).toBeTruthy();
+  });
+  return harness as Host;
+}
+
+describe('PluginTabContent session output mount', () => {
+  it('forwards the poll cadence to the viewer and keeps old plugins unpolled', async () => {
+    const host = await mountHostAndHarness();
+    const container = document.createElement('div');
+
+    let dispose: (() => void) | undefined;
+    act(() => {
+      dispose = host.mountSessionOutput!(container, { sessionId: ' session-1 ', pollIntervalMs: 1000 });
+    });
+    await waitFor(() => expect(capturedViewerProps()?.sessionId).toBe('session-1'));
+    expect(capturedViewerProps()?.pollIntervalMs).toBe(1000);
+
+    // A plugin that omits the option keeps the viewer's own no-poll default.
+    act(() => dispose!());
+    act(() => {
+      host.mountSessionOutput!(document.createElement('div'), { sessionId: 'session-2' });
+    });
+    await waitFor(() => expect(capturedViewerProps()?.sessionId).toBe('session-2'));
+    expect(capturedViewerProps()?.pollIntervalMs).toBeUndefined();
+  });
+
+  it('rejects a cadence that is not a positive finite number', async () => {
+    const host = await mountHostAndHarness();
+    const container = document.createElement('div');
+
+    for (const pollIntervalMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => host.mountSessionOutput!(container, { sessionId: 'session-1', pollIntervalMs }))
+        .toThrow(/positive finite pollIntervalMs/);
+    }
+    expect(capturedViewerProps()).toBeNull();
+  });
 });
 
 describe('PluginTabContent host models capability', () => {

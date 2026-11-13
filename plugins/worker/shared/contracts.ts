@@ -741,6 +741,48 @@ export type WorkerStateQuery = {
   parentSessionId?: string;
 };
 
+//----------------- CONVERSATION VIEW ------------
+
+/**
+ * One read-only row of a run's conversation view. The Worker plugin parses the run's existing
+ * `events.log` JSONL pages into these rows; there is no server-side aggregation, conversation
+ * cache, or session mapping behind it. `id` is stable per source row so the same row can be
+ * updated in place: a streaming placeholder, tool call, and tool result of one call share it.
+ *
+ * `role` is limited to what a user can read: `user`, `assistant`, `tool` (a call and/or its
+ * result) and `error`. Unknown init/status/system/developer events stay in the raw event log and
+ * never become rows. `thinking` marks a reasoning row, `streaming` a not-yet-authoritative row.
+ * Tool rows carry `toolId` (the provider's call id), `toolName`, `toolInput`, and `toolOutput`;
+ * `isError` marks a failed call or result.
+ */
+export type WorkerConversationMessage = {
+  id: string;
+  role: "user" | "assistant" | "tool" | "error";
+  text: string;
+  thinking?: boolean;
+  streaming?: boolean;
+  toolId?: string;
+  toolName?: string;
+  toolInput?: Record<string, unknown>;
+  toolOutput?: string;
+  isError?: boolean;
+};
+
+/**
+ * `GET /workers/:workerId/input` response: the prompt this run was actually launched with, or
+ * null when no record survives. `prompt.md` in the run directory is the durable source; the
+ * plugin's in-memory prompt is only a fallback for a run whose file is not written yet. The
+ * request task name and the current configuration are never substituted here.
+ */
+export type WorkerRunInput = {
+  prompt: string | null;
+};
+
+/** Query parameters for one run-scoped read; `runId` defaults to the worker's latest run. */
+export type WorkerRunQuery = {
+  runId?: string;
+};
+
 /** Error envelope returned by every protected UI REST endpoint. */
 export type WorkerApiError = {
   error: WorkerError;

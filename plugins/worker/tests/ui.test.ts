@@ -24,6 +24,7 @@ type Mounted = {
   container: HTMLElement;
   calls: Array<{ method: string; path: string; body: unknown }>;
   listeners: Set<(context: unknown) => void>;
+  views: ConversationViewRecord[];
   emit(context: unknown): void;
   unmount(): void;
   dom: { window: Window & typeof globalThis };
@@ -310,11 +311,21 @@ type Mode = {
   state?: (path: string) => Promise<unknown> | unknown;
   detail?: (workerId: string) => unknown;
   logs?: (workerId: string, path: string) => unknown;
+  input?: (workerId: string, path: string) => unknown;
+  /** Installs the optional host conversation view capability. */
+  conversation?: boolean;
   settings?: (body: unknown) => unknown;
   models?: (provider: "codex" | "dsh") => Promise<unknown>;
   codexProviders?: () => Promise<unknown>;
   codexProviderModels?: (modelProvider: string) => Promise<unknown>;
   piCatalog?: () => Promise<unknown>;
+};
+
+type ConversationViewRecord = {
+  provider: string;
+  messages: Array<Record<string, unknown>>;
+  updates: Array<Array<Record<string, unknown>>>;
+  disposed: boolean;
 };
 
 const DSH_MODELS = {
@@ -367,8 +378,9 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
   const container = dom.window.document.getElementById("host")!;
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
   const listeners = new Set<(context: unknown) => void>();
+  const views: ConversationViewRecord[] = [];
   let context = mode.context ?? DEFAULT_CONTEXT;
-  const host = {
+  const host: Record<string, unknown> = {
     models: mode.models ?? (async (provider: "codex" | "dsh") =>
       provider === "codex" ? CODEX_MODELS : DSH_MODELS),
     codexModelProviders: mode.codexProviders ?? (async () => CODEX_DIRECTORY),
@@ -400,6 +412,10 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         if (mode.logs) return mode.logs("worker-1", pathAndQuery);
         return { text: "", nextCursor: null, done: true };
       }
+      if (/\/workers\/[^/]+\/input/.test(pathAndQuery)) {
+        if (mode.input) return mode.input("worker-1", pathAndQuery);
+        return { prompt: null };
+      }
       if (pathAndQuery === "/cancel") return { workerIds: ["worker-1"] };
       if (pathAndQuery === "/catalog/pi") {
         if (mode.piCatalog) return mode.piCatalog();
@@ -423,11 +439,45 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       throw new Error("unexpected RPC " + method + " " + pathAndQuery);
     },
   };
+  if (mode.conversation) {
+    host.mountConversationOutput = (
+      element: HTMLElement,
+      options: {
+        provider: string;
+        messages: Array<Record<string, unknown>>;
+      },
+    ) => {
+      const record: ConversationViewRecord = {
+        provider: options.provider,
+        messages: options.messages,
+        updates: [],
+        disposed: false,
+      };
+      views.push(record);
+      const render = (messages: Array<Record<string, unknown>>) => {
+        record.messages = messages;
+        element.textContent = messages
+          .map((row) => String(row.text ?? row.toolName ?? ""))
+          .join("\n");
+      };
+      render(options.messages);
+      return {
+        update(messages: Array<Record<string, unknown>>) {
+          record.updates.push(messages);
+          render(messages);
+        },
+        dispose() {
+          record.disposed = true;
+        },
+      };
+    };
+  }
   module.mount(container, host);
   return {
     container,
     calls,
     listeners,
+    views,
     dom,
     emit(next) {
       context = next as TestContext;
@@ -1476,6 +1526,13 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
     await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
     (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
     await waitFor(
+      () => Boolean(findButton(mounted.container, "原始事件")),
+      "日志标签",
+    );
+    // The conversation tab owns the run's first drain; raw pages are an explicit request.
+    findButton(mounted.container, "原始事件")!.click();
+    const before = mounted.calls.length;
+    await waitFor(
       () => textOf(byLabel(mounted.container, "原始事件日志")).includes("第一页"),
       "首屏日志",
     );
@@ -1487,7 +1544,9 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
       () => textOf(byLabel(mounted.container, "原始事件日志")).includes("第二页"),
       "下一页日志",
     );
-    const logCalls = mounted.calls.filter((call) => call.path.includes("/logs?"));
+    const logCalls = mounted.calls
+      .slice(before)
+      .filter((call) => call.path.includes("/logs?"));
     assert.equal(logCalls.length, 2);
     assert.equal(
       logCalls[1]!.path,
@@ -2344,6 +2403,519 @@ test("DOM: dragenter moves the target outline before any dragover", async () => 
       "拖放排序",
     );
     assert.equal(configCards(mounted.container).length, 3);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+function jsonl(events: Array<Record<string, unknown>>): string {
+  return events.map((event) => JSON.stringify(event)).join("\n") + "\n";
+}
+
+test("DOM: the conversation tab is default and the host view reads /input plus parsed events", async () => {
+  const piRun = run();
+  const record = worker({
+    type: "pi",
+    configId: "pi-default",
+    configName: "Pi default",
+    latestRun: piRun,
+  });
+  const answer = {
+    role: "assistant",
+    content: [{ type: "text", text: "pi 答复" }],
+  };
+  const events = jsonl([
+    // Pi echoes the prompt; `/input` stays the single source of the user row.
+    {
+      type: "message_start",
+      message: { role: "user", content: [{ type: "text", text: "请执行任务" }] },
+    },
+    {
+      type: "message_end",
+      message: { role: "user", content: [{ type: "text", text: "请执行任务" }] },
+    },
+    { type: "message_start", message: { role: "assistant", content: [] } },
+    {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_start", contentIndex: 0 },
+    },
+    {
+      type: "message_update",
+      assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "pi " },
+    },
+    {
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_delta",
+        contentIndex: 0,
+        delta: "答复",
+      },
+    },
+    {
+      type: "message_update",
+      assistantMessageEvent: {
+        type: "text_end",
+        contentIndex: 0,
+        content: "pi 答复",
+      },
+    },
+    { type: "message_end", message: answer },
+    { type: "turn_end", message: answer },
+  ]);
+  const mounted = await mountPlugin({
+    conversation: true,
+    logs: () => ({ text: events, nextCursor: null, done: true }),
+    input: () => ({ prompt: "请执行任务" }),
+    detail: () => ({ worker: record, runs: [piRun] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => mounted.views.length === 1, "宿主对话视图");
+    await waitFor(
+      () => textOf(mounted.container).includes("pi 答复"),
+      "对话内容",
+    );
+    assert.equal(
+      findButton(mounted.container, "对话")!.getAttribute("aria-pressed"),
+      "true",
+    );
+    assert.deepEqual(
+      mounted.calls
+        .filter((call) => call.path.includes("/input"))
+        .map((call) => call.path),
+      ["/workers/worker-1/input?runId=run-1"],
+    );
+    const view = mounted.views[0]!;
+    assert.equal(view.provider, "pi");
+    const rows = view.messages;
+    // The prompt arrives once from `/input`; Pi's echo of the same prompt is not repeated.
+    assert.equal(
+      rows.filter((row) => row.text === "请执行任务").length,
+      1,
+    );
+    assert.deepEqual(rows[0], { id: "__input", role: "user", text: "请执行任务" });
+    assert.equal(rows.filter((row) => row.text === "pi 答复").length, 1);
+    // pi is reported as pi; the plugin never pretends to be Codex.
+    assert.equal(view.provider, "pi");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: an older host keeps a readable fallback and the raw/stderr pages", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+    finalText: "存储的最终答复",
+  });
+  const record = worker({ latestRun: completed });
+  const mounted = await mountPlugin({
+    logs: (_id, pathAndQuery) =>
+      pathAndQuery.includes("stream=stderr")
+        ? { text: "stderr 一行", nextCursor: null, done: true }
+        : {
+            text: jsonl([{ type: "final", text: "dsh 答复" }]),
+            nextCursor: null,
+            done: true,
+          },
+    input: () => {
+      throw new Error("服务器版本较旧");
+    },
+    detail: () => ({ worker: record, runs: [completed] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("dsh 答复"),
+      "回退对话",
+    );
+    assert.ok(textOf(mounted.container).includes("当前宿主不支持对话视图"));
+    // The stored final text is not duplicated under the conversation that already has it.
+    assert.equal(textOf(mounted.container).includes("存储的最终答复"), false);
+
+    findButton(mounted.container, "原始事件")!.click();
+    await waitFor(
+      () => textOf(byLabel(mounted.container, "原始事件日志")).includes("dsh 答复"),
+      "原始事件",
+    );
+    findButton(mounted.container, "stderr")!.click();
+    await waitFor(
+      () => textOf(byLabel(mounted.container, "stderr 日志")).includes("stderr 一行"),
+      "stderr",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: the stored result appears once, only after the log really ends", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    finalText: "过期运行的结果",
+  });
+  const record = worker({ latestRun: completed });
+  let polls = 0;
+  const mounted = await mountPlugin({
+    logs: () => {
+      polls += 1;
+      // Still no record and still not terminal: an empty running page, then the end.
+      return polls === 1
+        ? { text: "", nextCursor: "1", done: false }
+        : { text: "", nextCursor: null, done: true };
+    },
+    detail: () => ({ worker: record, runs: [completed] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => polls >= 1, "首次读取");
+    assert.equal(
+      textOf(mounted.container).includes("过期运行的结果"),
+      false,
+      "the stored result must not flash before terminal EOF",
+    );
+    await waitFor(
+      () => textOf(mounted.container).includes("仅显示存储的运行结果"),
+      "仅结果提示",
+    );
+    const body = textOf(mounted.container);
+    assert.equal(body.split("过期运行的结果").length - 1, 1);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: the conversation drains every page and retries an empty running page", async () => {
+  let cursorCalls = 0;
+  const mounted = await mountPlugin({
+    logs: (_id, pathAndQuery) => {
+      if (!pathAndQuery.includes("cursor="))
+        return {
+          text: jsonl([{ type: "text", text: "第一页" }]),
+          nextCursor: "1",
+          done: false,
+        };
+      cursorCalls++;
+      if (cursorCalls <= 1)
+        return { text: "", nextCursor: "1", done: false };
+      return {
+        text: jsonl([{ type: "text", text: "最新答复" }]),
+        nextCursor: null,
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("第一页最新答复"),
+      "拉取到最新",
+    );
+    const logCalls = mounted.calls.filter((call) => call.path.includes("/logs?"));
+    assert.ok(logCalls.length >= 3, JSON.stringify(logCalls.map((call) => call.path)));
+    assert.ok(
+      logCalls.filter((call) => call.path.includes("cursor=1")).length >= 2,
+      "an empty running page keeps the cursor and retries",
+    );
+    assert.ok(!logCalls.some((call) => call.path.includes("stream=stderr")));
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: switching runs never shows the previous run's conversation", async () => {
+  const older = run({
+    id: "run-1",
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    model: "old-model",
+  });
+  const latest = run({ id: "run-2", model: "new-model" });
+  const record = worker({ latestRun: older });
+  const pending: { release: ((value: unknown) => void) | null } = {
+    release: null,
+  };
+  const mounted = await mountPlugin({
+    detail: () => ({ worker: record, runs: [older, latest] }),
+    logs: (_id, pathAndQuery) => {
+      if (pathAndQuery.includes("runId=run-1"))
+        return new Promise((resolve) => {
+          pending.release = resolve;
+        });
+      return {
+        text: jsonl([{ type: "final", text: "run2 答复" }]),
+        nextCursor: null,
+        done: true,
+      };
+    },
+    input: (_id, pathAndQuery) => ({
+      prompt: pathAndQuery.includes("runId=run-1") ? "run1 输入" : "run2 输入",
+    }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(findButton(mounted.container, "new-model")), "运行列表");
+    findButton(mounted.container, "new-model")!.click();
+    await waitFor(
+      () => textOf(mounted.container).includes("run2 答复"),
+      "第二个运行的对话",
+    );
+    assert.ok(pending.release, "old run request is still pending");
+    pending.release!({
+      text: jsonl([{ type: "final", text: "run1 旧答复" }]),
+      nextCursor: null,
+      done: true,
+    });
+    await delay(50);
+    assert.equal(textOf(mounted.container).includes("run1 旧答复"), false);
+    assert.equal(textOf(mounted.container).includes("run2 答复"), true);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: leaving the conversation tab stops the pump and reopening reads to the latest", async () => {
+  let opens = 0;
+  let cursorCalls = 0;
+  const mounted = await mountPlugin({
+    conversation: true,
+    logs: (_id, pathAndQuery) => {
+      if (!pathAndQuery.includes("cursor=")) {
+        opens += 1;
+        if (opens === 1)
+          return {
+            text: jsonl([{ type: "text", text: "第一段" }]),
+            nextCursor: "1",
+            done: false,
+          };
+        return {
+          text: jsonl([{ type: "text", text: "重新打开后的最新内容" }]),
+          nextCursor: null,
+          done: true,
+        };
+      }
+      cursorCalls += 1;
+      return { text: "", nextCursor: "1", done: false };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => textOf(mounted.container).includes("第一段"), "首屏对话");
+    await waitFor(() => cursorCalls >= 1, "游标轮询");
+    findButton(mounted.container, "原始事件")!.click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "原始事件日志")), "原始事件");
+    const settled = cursorCalls;
+    await delay(150);
+    assert.equal(cursorCalls, settled, "leaving the tab clears the pump and timer");
+    assert.equal(mounted.views[0]!.disposed, true, "the host view is disposed");
+    findButton(mounted.container, "对话")!.click();
+    await waitFor(
+      () => textOf(mounted.container).includes("重新打开后的最新内容"),
+      "重开加载到最新",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a transient log failure keeps retrying and resumes live updates", async () => {
+  let attempts = 0;
+  const mounted = await mountPlugin({
+    logs: () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("网络抖动");
+      return {
+        text: jsonl([{ type: "text", text: "恢复后的内容" }]),
+        nextCursor: null,
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("读取失败，正在重试"),
+      "简短错误",
+    );
+    await waitFor(
+      () => textOf(mounted.container).includes("恢复后的内容"),
+      "重试恢复",
+    );
+    await waitFor(
+      () => !textOf(mounted.container).includes("读取失败"),
+      "错误清理",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a thinking-only log is not an answer, so the stored result still shows", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    finalText: "唯一结果",
+  });
+  const record = worker({ type: "pi", latestRun: completed });
+  const mounted = await mountPlugin({
+    logs: () => ({
+      text: jsonl([
+        {
+          type: "message_update",
+          assistantMessageEvent: { type: "thinking_start", contentIndex: 0 },
+        },
+        {
+          type: "message_update",
+          assistantMessageEvent: {
+            type: "thinking_delta",
+            contentIndex: 0,
+            delta: "只想不做",
+          },
+        },
+      ]),
+      nextCursor: null,
+      done: true,
+    }),
+    detail: () => ({ worker: record, runs: [completed] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => textOf(mounted.container).includes("只想不做"), "思考行");
+    await waitFor(
+      () => textOf(mounted.container).includes("仅显示存储的运行结果"),
+      "仅结果提示",
+    );
+    assert.equal(textOf(mounted.container).split("唯一结果").length - 1, 1);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a run without an input record says so instead of inventing one", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+  });
+  const record = worker({ latestRun: completed });
+  const mounted = await mountPlugin({
+    logs: () => ({ text: "", nextCursor: null, done: true }),
+    detail: () => ({ worker: record, runs: [completed] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("本次输入记录不可用"),
+      "输入记录提示",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: switching runs re-mounts the host conversation view instead of reusing it", async () => {
+  const older = run({
+    id: "run-1",
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    model: "old-model",
+  });
+  const latest = run({ id: "run-2", model: "new-model" });
+  const record = worker({ latestRun: older });
+  const pending: { release: ((value: unknown) => void) | null } = {
+    release: null,
+  };
+  const mounted = await mountPlugin({
+    conversation: true,
+    detail: () => ({ worker: record, runs: [older, latest] }),
+    logs: (_id, pathAndQuery) => {
+      if (pathAndQuery.includes("runId=run-1"))
+        return new Promise((resolve) => {
+          pending.release = resolve;
+        });
+      return {
+        text: jsonl([{ type: "text", text: "run2 答复" }]),
+        nextCursor: null,
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => mounted.views.length === 1, "第一个 run 的视图");
+    assert.equal(mounted.views[0]!.provider, "dsh");
+    findButton(mounted.container, "new-model")!.click();
+    // Same provider, different run: the old view is disposed and a fresh one mounts, so a
+    // scroll/follow state from the previous run cannot survive.
+    await waitFor(() => mounted.views.length === 2, "第二个 run 的视图");
+    assert.equal(mounted.views[0]!.disposed, true);
+    assert.equal(mounted.views[1]!.disposed, false);
+    assert.equal(mounted.views[1]!.provider, "dsh");
+    await waitFor(
+      () => textOf(mounted.container).includes("run2 答复"),
+      "新 run 的对话",
+    );
+    assert.ok(pending.release, "the old run request is still pending");
+    pending.release!({
+      text: jsonl([{ type: "text", text: "run1 旧答复" }]),
+      nextCursor: null,
+      done: true,
+    });
+    await delay(50);
+    assert.equal(textOf(mounted.container).includes("run1 旧答复"), false);
+    assert.equal(mounted.views[1]!.disposed, false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: switching runs re-mounts the fallback conversation so its follow state resets", async () => {
+  const older = run({
+    id: "run-1",
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    model: "old-model",
+  });
+  const latest = run({ id: "run-2", model: "new-model" });
+  const record = worker({ latestRun: older });
+  const mounted = await mountPlugin({
+    detail: () => ({ worker: record, runs: [older, latest] }),
+    logs: (_id, pathAndQuery) =>
+      pathAndQuery.includes("runId=run-1")
+        ? { text: jsonl([{ type: "text", text: "run1 答复" }]), nextCursor: null, done: true }
+        : {
+            text: jsonl([{ type: "text", text: "run2 答复" }]),
+            nextCursor: null,
+            done: true,
+          },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => Boolean(mounted.container.querySelector(".worker-conv-fallback")),
+      "回退视图",
+    );
+    const first = mounted.container.querySelector(".worker-conv-fallback");
+    findButton(mounted.container, "new-model")!.click();
+    await waitFor(() => {
+      const node = mounted.container.querySelector(".worker-conv-fallback");
+      return Boolean(node) && node !== first;
+    }, "回退视图重挂");
+    await waitFor(
+      () => textOf(mounted.container).includes("run2 答复"),
+      "新 run 的对话",
+    );
   } finally {
     mounted.unmount();
   }

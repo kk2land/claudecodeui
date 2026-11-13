@@ -52,6 +52,8 @@ import type {
   WorkerRecoverInput,
   WorkerResumeInput,
   WorkerRun,
+  WorkerRunInput,
+  WorkerRunQuery,
   WorkerSettings,
   WorkerSettingsInput,
   WorkerStartInput,
@@ -1752,6 +1754,23 @@ export class WorkerService {
       query.limit,
       TERMINAL.includes(run.status),
     );
+  }
+
+  /**
+   * The prompt one run was launched with. `prompt.md` in the run directory is the durable
+   * record; a run that is still queued has not written it yet and falls back to the accepted
+   * prompt held in memory. No record means null, never the task name or a current config value.
+   */
+  input(workerId: string, query: WorkerRunQuery, ownerId?: string): WorkerRunInput {
+    const worker = this.ownedWorker(ownerId, workerId);
+    const run = query.runId
+      ? this.store.run(query.runId)
+      : this.store.latestRun(worker.id);
+    if (!run || run.workerId !== worker.id)
+      throw new WorkerFailure("RUN_NOT_FOUND", "运行记录不存在");
+    const file = path.join(this.runDirectory(worker.id, run.id), "prompt.md");
+    if (fs.existsSync(file)) return { prompt: fs.readFileSync(file, "utf8") };
+    return { prompt: this.prompts.get(run.id) ?? null };
   }
 
   async wait(

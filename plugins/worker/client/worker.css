@@ -452,6 +452,91 @@
 .worker-console .worker-error {
   padding: 0 12px;
 }
+.worker-conv {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  min-height: 260px;
+  background: var(--worker-bg);
+}
+.worker-conv > .worker-muted {
+  margin: 0;
+}
+.worker-conv-host {
+  /* The wrapper is the only scrolling container for a host-rendered conversation; the host
+     view fills it and must not add a second scroller. */
+  height: 320px;
+  overflow: auto;
+}
+.worker-conv-fallback {
+  position: relative;
+  display: flex;
+  flex: 1;
+  min-height: 260px;
+}
+.worker-conv-scroll {
+  flex: 1;
+  max-height: 420px;
+  overflow: auto;
+}
+.worker-conv-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.worker-conv-row {
+  border-left: 3px solid var(--worker-border);
+  padding: 2px 0 2px 10px;
+}
+.worker-conv-user {
+  border-left-color: var(--worker-blue);
+}
+.worker-conv-tool {
+  border-left-color: var(--worker-amber);
+}
+.worker-conv-error {
+  border-left-color: var(--worker-red);
+}
+.worker-conv-thinking {
+  opacity: 0.75;
+}
+.worker-conv-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--worker-muted);
+}
+.worker-conv-live {
+  font-weight: 400;
+  color: var(--worker-blue);
+}
+.worker-conv-row pre {
+  margin: 4px 0 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.worker-conv-row pre.worker-conv-error {
+  color: var(--worker-red);
+}
+.worker-conv-latest {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--worker-border);
+  border-radius: 999px;
+  background: var(--worker-bg);
+  font-size: 11px;
+}
 .worker-result {
   margin-top: 14px;
 }

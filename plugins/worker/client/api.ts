@@ -1,5 +1,6 @@
 import type {
   PiModelCatalog,
+  WorkerConversationMessage,
   WorkerHostCatalogCapabilities,
   WorkerLogPage,
   WorkerLogStream,
@@ -7,6 +8,7 @@ import type {
   WorkerRecoverInput,
   WorkerRecord,
   WorkerRun,
+  WorkerRunInput,
   WorkerSettings,
   WorkerSettingsInput,
   WorkerCancelInput,
@@ -22,16 +24,39 @@ export type WorkerPluginContext = {
 };
 
 /**
+ * Handle of a conversation view rendered by the host: `update` replaces the rendered rows and
+ * `dispose` releases the host view when its tab, run, or worker goes away. Scrolling and
+ * "follow latest" behavior belong to the host view, never to the plugin.
+ */
+export type WorkerConversationOutput = {
+  update(messages: WorkerConversationMessage[]): void;
+  dispose(): void;
+};
+
+/**
+ * Optional authenticated host conversation capability. A host that does not implement it (an
+ * older CloudCLI) leaves the plugin on its basic readable fallback; the plugin never simulates
+ * the capability and never imports a markdown renderer of its own.
+ */
+export type WorkerHostConversationCapabilities = {
+  mountConversationOutput?(
+    container: HTMLElement,
+    options: { provider: string; messages: WorkerConversationMessage[] },
+  ): WorkerConversationOutput;
+};
+
+/**
  * Authenticated host surface. The plugin only calls its own protected REST routes through this
  * bridge; it never receives the host UI token, the MCP token, or any other credential.
  */
-export type WorkerHost = WorkerHostCatalogCapabilities & {
-  context: WorkerPluginContext;
-  onContextChange(
-    callback: (context: WorkerPluginContext) => void,
-  ): () => void;
-  rpc(method: string, path: string, body?: unknown): Promise<unknown>;
-};
+export type WorkerHost = WorkerHostCatalogCapabilities &
+  WorkerHostConversationCapabilities & {
+    context: WorkerPluginContext;
+    onContextChange(
+      callback: (context: WorkerPluginContext) => void,
+    ): () => void;
+    rpc(method: string, path: string, body?: unknown): Promise<unknown>;
+  };
 
 /** One worker plus its run history, as returned by `GET /workers/:workerId`. */
 export type WorkerDetail = {
@@ -79,6 +104,17 @@ export function workerApi(host: WorkerHost) {
           encodeURIComponent(workerId) +
           "/logs?" +
           params.toString(),
+      );
+    },
+    /**
+     * The prompt this run was launched with. Null means the server kept no record; callers must
+     * not fall back to `taskName` or the current configuration.
+     */
+    input: (workerId: string, runId: string | null) => {
+      const suffix = runId ? "?runId=" + encodeURIComponent(runId) : "";
+      return request<WorkerRunInput>(
+        "GET",
+        "/workers/" + encodeURIComponent(workerId) + "/input" + suffix,
       );
     },
     cancel: (input: WorkerCancelInput) =>
