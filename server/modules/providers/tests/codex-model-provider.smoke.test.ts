@@ -54,9 +54,14 @@ test('a new magpie conversation sends and resumes independently of the OpenAI de
     + `[model_providers.magpie]\nname="Magpie"\nbase_url="http://127.0.0.1:${address.port}/magpie"\nwire_api="responses"\nrequires_openai_auth=false\n`;
   await writeFile(path.join(root, 'config.toml'), config);
   const transports: CodexAppServerConnections[] = [];
+  // CI normally uses the package-pinned compat CLI. An explicit test-only binary
+  // lets a developer validate that same release without replacing the local
+  // launcher a proxy deployment owns.
+  const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
   const createTransport = () => {
     const transport = new CodexAppServerConnections((modelProvider) => new CodexAppServerTransport({
-      spawn: () => spawn(process.execPath, [APP_SERVER_COMPAT_LAUNCHER, 'app-server', '-c', 'thread_unload_delay_secs=0', '-c', 'features.goals=false',
+      spawn: () => spawn(binary || process.execPath, [...(binary ? [] : [APP_SERVER_COMPAT_LAUNCHER]), 'app-server',
+        '-c', 'thread_unload_delay_secs=0', '-c', 'features.goals=false',
         ...(modelProvider ? ['-c', `model_provider=${JSON.stringify(modelProvider)}`] : [])], {
         cwd: root, stdio: ['pipe', 'pipe', 'pipe'], env: { ...process.env, CODEX_HOME: root, OPENAI_API_KEY: 'local-test-only' },
       }), timeoutMs: 10_000,

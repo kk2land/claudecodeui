@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
 import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import os from 'node:os';
@@ -9,6 +10,7 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 import { CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import { isCodexGoalEnabled } from '@/shared/index.js';
 import type { AnyRecord } from '@/shared/index.js';
 
 test('bundled app-server supplies Worker MCP without config.toml entries and isolates thread credentials', { timeout: 30_000 }, async () => {
@@ -54,7 +56,17 @@ test('bundled app-server supplies Worker MCP without config.toml entries and iso
   const original = `model="gpt-5.4"\nmodel_provider="local"\n[model_providers.local]\nname="local"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`;
   await writeFile(path.join(root, 'config.toml'), original);
   process.env.CODEX_HOME = root;
-  const client = new CodexAppServerTransport();
+  // The default transport spawns the bundled compat launcher and forwards the
+  // injected Worker declaration itself. A test-only binary replaces only the
+  // executable, so keep that same app-server command line: the caller env,
+  // stdio pipes and the disabled Worker declaration this smoke asserts.
+  const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
+  const client = new CodexAppServerTransport(binary ? { spawn: () => spawn(binary, [
+    'app-server', '--listen', 'stdio://', '-c', 'thread_unload_delay_secs=0',
+    '-c', `features.goals=${isCodexGoalEnabled()}`,
+    '-c', `mcp_servers.cloudcli_workers.url=${JSON.stringify(url)}`,
+    '-c', 'mcp_servers.cloudcli_workers.enabled=false',
+  ], { env: process.env, stdio: ['pipe', 'pipe', 'pipe'] }) } : undefined);
   client.setWorkerMcpUrl(url);
   const completed = new Set<string>();
   client.onNotification((frame) => {

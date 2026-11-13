@@ -462,7 +462,14 @@ host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自�
 
 自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；另有真实 Codex app-server 与 DSH ACP
 连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用；它只是测试入口，不是 Worker 运行配置。
-Codex CLI 与 SDK 固定为 `0.165.0`。本地启动器被代理替换时，可用 `CLOUDCLI_CODEX_TEST_BINARY` 指向同版本官方二进制，
-验证原生预测、模型服务切换与 SDK 会话交接，避免代理改写本地测试请求。
+Codex 版本按包分别锁定：app-server 经 compat alias（`@openai/codex-app-server-compat`）使用官方 CLI `0.165.0`
+（上游 `0.166` 起改变了跨 provider 兼容语义）；根包 `@openai/codex` 与会话交接使用的 `@openai/codex-sdk` 为 `0.166.0`
+（SDK 依赖范围 `^0.166.0`，lock 固定 `0.166.0`），各自版本由 package 声明与锁文件确定。本地启动器被有意覆盖时，用
+`CLOUDCLI_CODEX_TEST_BINARY=/path/to/official-compatible-codex CLOUDCLI_CODEX_SDK_TEST_BINARY=/path/to/official-sdk-codex NODE_ENV=test npm test`
+跑完整后端测试：前者给 app-server、原生预测、模型服务切换与 Worker MCP，后者只在会话交接中为 SDK 选择独立的 `0.166.0` CLI，
+未设置时回退到前者。这些入口只影响测试启动的可执行文件，生产 runtime 与配置不变，目的是让原生协议回归运行在项目要求的版本组合上；
+默认 `npm ci` 环境按锁文件安装，不需要任何覆盖。
+CLI 状态冒烟（`provider-cli`）独立探测根包 `@openai/codex` 实际启动器的 `--version`；Worker 插件自己的 codex-cli 冒烟若同样读取
+`CLOUDCLI_CODEX_TEST_BINARY`，仍要求根 CLI `0.166.0`，不能改用上面 compat 的 `0.165.0` 命令。
 实际部署中的执行器、认证和模型联通仍需环境验收。浏览器验收先完成构建，
 再按 AGENTS.md 的本地手工测试流程由 Codex 直接启动或重启测试进程并检查日志，不要要求用户代为启动。

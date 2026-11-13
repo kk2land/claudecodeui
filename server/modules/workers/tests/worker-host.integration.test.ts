@@ -281,6 +281,42 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     assert.deepEqual(await host.bridge.prepareSession(codexInput), config);
   }
 
+  // A fresh plugin install ships only `pi-default`, while every case below starts a
+  // DSH-type child. Seed the missing canonical config through the entry's authenticated
+  // settings API instead of changing plugin defaults or the fixture data directory.
+  const freshState = await (await fetch(`http://127.0.0.1:${ready}/state`, {
+    headers: { authorization: 'Bearer plugin-ui-token' },
+  })).json() as { settings: { configs: Record<string, unknown>[]; defaultConfigId: string } };
+  assert.deepEqual(freshState.settings.configs.map((item) => item.type), ['pi'],
+    'a fresh entry data directory only ships the Pi config');
+  const seededResponse = await fetch(`http://127.0.0.1:${ready}/settings`, {
+    method: 'PUT',
+    headers: { authorization: 'Bearer plugin-ui-token', 'content-type': 'application/json' },
+    body: JSON.stringify({
+      configs: [
+        ...freshState.settings.configs,
+        {
+          id: 'dsh-default',
+          name: 'DSH default',
+          type: 'dsh',
+          enabled: true,
+          roles: [],
+          concurrency: 3,
+          model: null,
+          effort: null,
+        },
+      ],
+      defaultConfigId: freshState.settings.defaultConfigId,
+    }),
+  });
+  assert.equal(seededResponse.status, 200, 'the entry must accept the seeded canonical configs');
+  const seededSettings = await seededResponse.json() as {
+    defaultConfigId: string;
+    enabled: Record<string, boolean>;
+  };
+  assert.equal(seededSettings.enabled.dsh, true);
+  assert.equal(seededSettings.defaultConfigId, freshState.settings.defaultConfigId);
+
   const started = toolResult(await client.callTool({
     name: 'worker_start',
     arguments: {

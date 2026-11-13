@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
@@ -222,11 +223,18 @@ test('each provider reports the version its CLI prints for --version', async () 
     assert.equal(openCodeStatus.installed, true);
     assert.equal(openCodeStatus.installedVersion, '1.18.25');
 
-    // Codex chats run the @openai/codex build CloudCLI depends on, not a `codex` on PATH.
-    const bundledCodex = createRequire(import.meta.url)('@openai/codex/package.json') as { version: string };
+    // Codex chats run the @openai/codex build CloudCLI depends on, not a `codex`
+    // on PATH. That launcher's own --version output is the version contract: its
+    // package.json metadata can name the wrapper release while a deployment
+    // replaces the binary the launcher executes.
+    const codexLauncher = createRequire(import.meta.url).resolve('@openai/codex/bin/codex.js');
+    const probe = spawnSync(process.execPath, [codexLauncher, '--version'], { encoding: 'utf8', timeout: 5000 });
+    assert.equal(probe.status, 0, `the Codex launcher --version must succeed: ${probe.stderr ?? ''}`);
+    const expectedVersion = /[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?/.exec(probe.stdout)?.[0] ?? '';
+    assert.notEqual(expectedVersion, '', `the Codex launcher must print a version: ${JSON.stringify(probe.stdout)}`);
     const codexStatus = await new CodexProviderAuth().getStatus();
     assert.equal(codexStatus.installed, true);
-    assert.equal(codexStatus.installedVersion, bundledCodex.version);
+    assert.equal(codexStatus.installedVersion, expectedVersion);
   });
 });
 

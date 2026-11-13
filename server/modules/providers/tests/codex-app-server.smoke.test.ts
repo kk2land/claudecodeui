@@ -175,6 +175,8 @@ test('pinned native runtime reloads SDK additions after a confirmed runtime hand
   await writeFile(path.join(root, 'config.toml'), `model="gpt-5.4"\nmodel_provider="smoke"\n[model_providers.smoke]\nname="smoke"\nbase_url="http://127.0.0.1:${address.port}/v1"\nwire_api="responses"\nrequires_openai_auth=false\n`);
   const env = { ...Object.fromEntries(Object.entries(process.env).filter((entry): entry is [string, string] => typeof entry[1] === 'string')), CODEX_HOME: root };
   const binary = process.env.CLOUDCLI_CODEX_TEST_BINARY;
+  // App-server and SDK may pin independent binaries so each keeps its own package-declared version.
+  const sdkBinary = process.env.CLOUDCLI_CODEX_SDK_TEST_BINARY ?? binary;
   const transport = new CodexAppServerTransport({ spawn: () => spawn(binary || process.execPath,
     [...(binary ? [] : [launcher]), 'app-server', '-c', 'thread_unload_delay_secs=0'], {
     stdio: ['pipe', 'pipe', 'pipe'], env,
@@ -191,7 +193,7 @@ test('pinned native runtime reloads SDK additions after a confirmed runtime hand
   const writer = { send: () => {}, setSessionId: (id: string) => { threadId = id; } };
   const context: ProviderRuntimeContext = { resolveProviderSessionId: () => threadId, resolveResumeModel: async () => 'gpt-5.4',
     normalizeMessage: () => [], getProviderModels: async () => ({ DEFAULT: 'gpt-5.4', OPTIONS: [] }), isProviderInstalled: async () => true };
-  const sdk = new Codex({ env, ...(binary ? { codexPathOverride: binary } : {}) });
+  const sdk = new Codex({ env, ...(sdkBinary ? { codexPathOverride: sdkBinary } : {}) });
   const router = createCodexRuntimeRouter({ native: runtime, settings: settingsDb,
     stop: () => transport.stop(), isStopping: () => transport.isStopping, isCodexSession: () => true, sdk: {
     async run(command) {
