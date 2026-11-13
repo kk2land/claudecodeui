@@ -367,6 +367,77 @@
   overflow-wrap: anywhere;
   font: inherit;
 }
+/* ---------------------- run conversation tab ---------------------- */
+.cron-conversation-panel {
+  min-width: 0;
+}
+.cron-conversation-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--cron-border);
+  font-size: 11px;
+  color: var(--cron-muted);
+}
+/* The mounted transcript viewer fills this box and scrolls itself, so it needs a real height. */
+.cron-conversation {
+  display: flex;
+  flex-direction: column;
+  height: min(60vh, 520px);
+  min-height: 320px;
+}
+.cron-conversation > * {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+.cron-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 200px;
+  max-height: min(60vh, 520px);
+  padding: 14px 16px;
+  overflow: auto;
+}
+.cron-transcript > .cron-muted {
+  margin: 0;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.cron-transcript-row {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 0;
+}
+.cron-transcript-row > span {
+  font-size: 11px;
+  color: var(--cron-muted);
+}
+.cron-transcript-row pre {
+  margin: 0;
+  padding: 10px 12px;
+  border: 1px solid var(--cron-border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cron-transcript-user pre {
+  background: var(--cron-blue-soft);
+  font: inherit;
+}
+.cron-transcript-agent pre {
+  background: var(--cron-soft);
+  font:
+    12px/1.7 ui-monospace,
+    SFMono-Regular,
+    Consolas,
+    "PingFang SC",
+    monospace;
+}
 .cron-notice {
   display: flex;
   justify-content: space-between;
@@ -585,6 +656,10 @@
 @media (max-width: 650px) {
   .cron-plugin {
     padding: 20px 14px;
+  }
+  .cron-conversation {
+    height: min(50vh, 420px);
+    min-height: 280px;
   }
   .cron-run-layout {
     grid-template-columns: minmax(0, 1fr);
@@ -1043,6 +1118,12 @@
   background: transparent;
   color: var(--cron-blue);
   font-size: 10px;
+}
+.cron-editor-form .cron-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--cron-ink);
 }
 .cron-editor-section {
   border: 0;

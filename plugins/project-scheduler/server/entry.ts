@@ -15,10 +15,17 @@ if (!token || !directory || !catalog)
   throw new Error("定时任务插件必须通过宿主启动");
 const store = new SchedulerStore(directory);
 const notifier = new TelegramNotifier(store);
-const scheduler = new ProjectScheduler(store, catalog, () => {
-  void notifier.flush().catch((error) => console.error(String(error)));
-});
+// One host channel serves resident tasks and scheduled prompt runs; no second transport.
 const residentHost = new ResidentHost(processResidentTransport());
+const scheduler = new ProjectScheduler(
+  store,
+  catalog,
+  () => {
+    void notifier.flush().catch((error) => console.error(String(error)));
+  },
+  // Prompt tasks reserve their app session, attach the verified native id, and finish here.
+  residentHost,
+);
 // Resident runtime state always comes from the host; the plugin only stores task metadata.
 const resident = new ResidentTasks(
   store,
@@ -301,10 +308,12 @@ const server = app.listen(0, "127.0.0.1", () => {
     process.stdout.write(
       JSON.stringify({ ready: true, port: address.port }) + "\n",
     );
-  // Reconcile already stored tasks with the host; plugin restarts never resume a run.
-  void resident.ready().catch((error) =>
-    console.error("[Resident] 对账失败：" + String(error)),
-  );
+  // Reconcile already stored tasks and session bindings with the host; plugin restarts never
+  // resume a run, and a failed reconciliation is reported rather than treated as a deletion.
+  void resident
+    .ready()
+    .then(() => scheduler.syncHost())
+    .catch((error) => console.error("[Resident] 对账失败：" + String(error)));
 });
 const maintenance = setInterval(() => {
   try {
@@ -328,10 +337,11 @@ async function close(): Promise<void> {
   clearInterval(maintenance);
   clearInterval(cleanup);
   notifier.stop();
-  residentHost.close();
   server.close();
   server.closeAllConnections();
+  // Stop runs and release their host slots before the IPC channel is closed.
   await scheduler.close();
+  residentHost.close();
   // Notification transport may still be unwinding. It cannot access a closed database.
   process.exit(0);
 }

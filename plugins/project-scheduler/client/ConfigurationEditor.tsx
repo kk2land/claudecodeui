@@ -995,6 +995,30 @@ export function ConfigurationEditor({
                     writeTaskPath(selected, ["cron"], cron);
                     setForceCustom(cronTemplateOf(cron).kind === "custom");
                   }}
+                  onTypeChange={(type) =>
+                    mutate((document) => {
+                      const task = (document.tasks as ConfigTask[])[selected];
+                      if (!task) throw new Error("任务不存在");
+                      task.type = type;
+                      // Only the prompt-only reuse flag is cleared: script tasks ignore it, and
+                      // fields this editor does not understand stay exactly as authored.
+                      if (type !== "prompt")
+                        deleteConfigValueInPlace(task, ["reuseSession"]);
+                    })
+                  }
+                  onReuseSession={(reuse) =>
+                    mutate((document) => {
+                      const task = (document.tasks as ConfigTask[])[selected];
+                      if (!task) throw new Error("任务不存在");
+                      if (!reuse) {
+                        deleteConfigValueInPlace(task, ["reuseSession"]);
+                        return;
+                      }
+                      setConfigValueInPlace(task, ["reuseSession"], true);
+                      // One shared session cannot serve two runs at once; write it, don't imply it.
+                      setConfigValueInPlace(task, ["allowConcurrent"], false);
+                    })
+                  }
                   onField={(path, value) => writeTaskPath(selected, path, value)}
                   onAgentChange={(change) =>
                     writeAgentSelection("task", selected, change)
@@ -1159,6 +1183,10 @@ function TaskForm(props: {
   fallbackAgent: { provider: string; model: string; effort?: string };
   onSelectTemplateMode(mode: CronTemplate["kind"]): void;
   onCron(cron: string): void;
+  /** Changes the task type and clears the prompt-only fields the new type cannot carry. */
+  onTypeChange(type: "script" | "prompt"): void;
+  /** Switches session reuse, writing the concurrency value reuse requires in the same edit. */
+  onReuseSession(reuse: boolean): void;
   onField(path: string[], value: unknown): void;
   onAgentChange(change: AgentSelectionChange): void;
   onCopy(): void;
@@ -1191,6 +1219,15 @@ function TaskForm(props: {
   const envText = envField?.text ?? formatJson(task.env ?? {});
   const enabled = booleanValue(task.enabled);
   const allowConcurrent = booleanValue(task.allowConcurrent);
+  // Reuse binds every run of a prompt task to one native session. Concurrent runs cannot share it,
+  // so the form keeps concurrency off and shows the value the backend will enforce. Only prompt
+  // tasks can reuse a session; a stray flag on a script task is ignored here, not honoured.
+  const reuseSession = booleanValue(task.reuseSession) === true && type === "prompt";
+  const concurrentValue = reuseSession
+    ? "false"
+    : allowConcurrent === null
+      ? INHERIT
+      : String(allowConcurrent);
   const taskZone = stringValue(task.timezone);
   const id = configTaskId(task);
   const nextRunLabel = inheritedZone
@@ -1263,7 +1300,7 @@ function TaskForm(props: {
             aria-label="任务类型"
             value={type}
             onChange={(event) =>
-              props.onField(["type"], event.target.value || undefined)
+              props.onTypeChange(event.target.value === "script" ? "script" : "prompt")
             }
           >
             <option value="script">script（命令）</option>
@@ -1378,6 +1415,20 @@ function TaskForm(props: {
               }
             />
           </label>
+          <label className="cron-checkbox">
+            <input
+              type="checkbox"
+              aria-label="复用同一会话"
+              checked={reuseSession}
+              onChange={(event) => props.onReuseSession(event.target.checked)}
+            />
+            复用同一会话
+          </label>
+          <small>
+            {reuseSession
+              ? "开启后每次运行都接着同一个会话，适合需要连续上下文的提示词；因此不能并发运行。任务删除前该会话不能被删除，停用任务或关闭复用都只停止复用，不会解除已有的会话保护。"
+              : "默认关闭：每次运行使用独立上下文。开启后每次运行接着同一会话，任务删除前该会话不能被删除。"}
+          </small>
         </fieldset>
       )}
       <fieldset className="cron-editor-section">
@@ -1441,9 +1492,8 @@ function TaskForm(props: {
             allowConcurrent
             <select
               aria-label="任务 allowConcurrent"
-              value={
-                allowConcurrent === null ? INHERIT : String(allowConcurrent)
-              }
+              disabled={reuseSession}
+              value={concurrentValue}
               onChange={(event) =>
                 props.onField(
                   ["allowConcurrent"],
@@ -1457,6 +1507,9 @@ function TaskForm(props: {
               <option value="true">允许并发</option>
               <option value="false">禁止并发</option>
             </select>
+            {reuseSession && (
+              <small>复用同一会话时固定为禁止并发。</small>
+            )}
           </label>
         </div>
         <label>

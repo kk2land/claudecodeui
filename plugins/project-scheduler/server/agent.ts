@@ -6,12 +6,19 @@ import { StringDecoder } from "node:string_decoder";
 import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 import spawn from "cross-spawn";
+import { terminateTree } from "./process-tree.js";
 import type {
   SchedulerAgent,
   SchedulerTaskResult,
   SchedulerTokenUsage,
 } from "../shared/contracts.js";
-import { USAGE_DIRECTORY_ENV, UsageAccumulator, UsageSidecar } from "./usage.js";
+import {
+  USAGE_DIRECTORY_ENV,
+  UsageAccumulator,
+  UsageSidecar,
+  CodexPersistentUsage,
+  readCodexUsageBaseline,
+} from "./usage.js";
 
 /** Used by prompt workers and AGENT_EXEC; resolves the host dependency rather than a global CLI. */
 export function resolveCodexBinary(
@@ -83,9 +90,77 @@ export function resolveCodexBinary(
 }
 
 /**
+ * Native history root of a run's effective environment (process < settings.env < task.env). The
+ * host resolves a transcript from this root plus the verified native id, so it must follow the
+ * same provider home rules the host's own providers read. A relative configured home/root is
+ * resolved against the run's `cwd` — the same directory the CLI runs in — never the plugin cwd,
+ * and is rejected when no cwd is available instead of silently guessing.
+ */
+export function nativeSessionsRoot(
+  provider: SchedulerAgent["provider"],
+  environment: NodeJS.ProcessEnv,
+  cwd?: string,
+): string {
+  const resolve = (value: string, label: string): string => {
+    if (path.isAbsolute(value)) return path.resolve(value);
+    if (cwd) return path.resolve(cwd, value);
+    throw new Error(label + " 是相对路径，需要任务 cwd 才能解析");
+  };
+  // Same base order as os.homedir(), but read from the run's effective env.
+  const baseHome = () =>
+    resolve(
+      environment.HOME?.trim() ||
+        environment.USERPROFILE?.trim() ||
+        os.homedir(),
+      "HOME",
+    );
+  const home = (name: string, fallback: string): string => {
+    const configured = environment[name]?.trim();
+    return configured ? resolve(configured, name) : path.join(baseHome(), fallback);
+  };
+  if (provider === "codex")
+    return path.join(home("CODEX_HOME", ".codex"), "sessions");
+  // Mirrors the host DSH configuration, including its existing sessions-dir override.
+  const override = environment.CLOUDCLI_DSH_SESSIONS_DIR?.trim();
+  return override
+    ? resolve(override, "CLOUDCLI_DSH_SESSIONS_DIR")
+    : path.join(home("DSH_HOME", ".dsh"), "sessions");
+}
+
+/** Finds the rollout file of a persisted Codex thread under its real sessions root. */
+function findCodexSessionFile(
+  sessionsRoot: string,
+  threadId: string,
+): string | null {
+  const suffix = "-" + threadId + ".jsonl";
+  if (path.basename(threadId) !== threadId) return null;
+  const walk = (directory: string, depth: number): string | null => {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(directory, { withFileTypes: true });
+    } catch {
+      return null;
+    }
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        if (entry.name.endsWith(suffix)) return path.join(directory, entry.name);
+        continue;
+      }
+      if (!entry.isDirectory() || depth >= 5) continue;
+      const found = walk(path.join(directory, entry.name), depth + 1);
+      if (found) return found;
+    }
+    return null;
+  };
+  return walk(sessionsRoot, 0);
+}
+
+/**
  * Used by prompt workers and AGENT_EXEC to normalize streamed provider output. Prompt workers
  * require a successful agent terminal event and a valid final task result as well as a zero exit.
  * AGENT_EXEC keeps its process-exit policy and free-form output unless explicitly opted in.
+ * Native sessions stay single-use unless the caller opts in: persistence writes into the provider
+ * home the host already indexes, and a resume id is only ever continued, never replaced.
  */
 export async function runAgent(
   agent: SchedulerAgent,
@@ -99,14 +174,31 @@ export async function runAgent(
     /** Called with the invocation totals whenever more provider usage has been observed. */
     usage?(usage: SchedulerTokenUsage | null): void;
   },
-  options: { isolated?: boolean; requireTaskResult?: boolean } = {},
+  options: {
+    isolated?: boolean;
+    requireTaskResult?: boolean;
+    /** Keep the provider-native session instead of the default throwaway run. */
+    persistNativeSession?: boolean;
+    /** Continue this native session id; implies persistence and fails on a different id. */
+    resumeNativeSessionId?: string;
+    /** Receives the verified native session id once the provider reports it. */
+    onNativeSession?(sessionId: string): void;
+  } = {},
 ): Promise<{
   code: number | null;
   success: boolean;
   reason?: string;
   usage: SchedulerTokenUsage | null;
   taskResult?: SchedulerTaskResult;
+  /** The verified provider-native session id, present only for persisted runs. */
+  nativeSessionId?: string;
 }> {
+  const persistent = options.persistNativeSession === true;
+  const resume = options.resumeNativeSessionId?.trim() || undefined;
+  if (options.resumeNativeSessionId !== undefined && !resume)
+    throw new Error("resumeNativeSessionId 必须是非空字符串");
+  if (resume && !persistent)
+    throw new Error("续接 native session 需要显式 persistNativeSession");
   const accumulator = new UsageAccumulator();
   // AGENT_EXEC inherits this directory from the worker, so every invocation gets its own sidecar.
   const usageRoot = process.env[USAGE_DIRECTORY_ENV];
@@ -115,8 +207,10 @@ export async function runAgent(
       ? new UsageSidecar(usageRoot)
       : undefined;
   let reported: SchedulerTokenUsage | null = null;
+  // Set for a persisted Codex run: native turns report session-cumulative usage.
+  let persistentUsage: CodexPersistentUsage | undefined;
   const publish = () => {
-    const usage = accumulator.usage;
+    const usage = persistentUsage ? persistentUsage.usage : accumulator.usage;
     if (!usage) return;
     reported = usage;
     try {
@@ -134,16 +228,29 @@ export async function runAgent(
     delete env.CLOUDCLI_PLUGIN_TOKEN;
     let command: string, args: string[];
     if (agent.provider === "codex") {
+      if (persistent) {
+        // A resume continues existing history, so only the launch baseline separates this run.
+        const rolloutFile = resume
+          ? findCodexSessionFile(nativeSessionsRoot("codex", env, cwd), resume)
+          : null;
+        persistentUsage = new CodexPersistentUsage(
+          rolloutFile ? readCodexUsageBaseline(rolloutFile) : null,
+          Boolean(resume),
+        );
+      }
       command = resolveCodexBinary(env.CLOUDCLI_HOST_ROOT ?? process.cwd());
       args = [
         "exec",
-        "--ephemeral",
+        // --ephemeral keeps rollouts out of the provider home; a resume needs the real thread.
+        ...(persistent ? [] : ["--ephemeral"]),
         "--json",
         ...(agent.model === "default" ? [] : ["--model", agent.model]),
         // Passed as one argv item so a configured effort can never be parsed as extra CLI flags.
         ...(agent.effort && agent.effort !== "default"
           ? ["-c", "model_reasoning_effort=" + JSON.stringify(agent.effort)]
           : []),
+        // Exec-level options stay before the subcommand; the thread id is the only positional.
+        ...(resume ? ["resume", resume] : []),
         "-",
       ];
     } else {
@@ -154,11 +261,23 @@ export async function runAgent(
         !inherited.every((value) => typeof value === "string" && value)
       )
         throw new Error("CLOUDCLI_DSH_PATCHES 必须是文件路径数组");
-      const patch: unknown[] = [
-        { id: "session-persistence-jsonl", disabled: true },
-        // The checkpoint policy requires sessionPersistence, which is disabled above.
-        { id: "session-checkpoint-policy", disabled: true },
-      ];
+      // A persisted run keeps the profile defaults: the JSONL root is $DSH_HOME/sessions, where
+      // the host normalizer reads it. Only the host's own sessions-dir override is forwarded, so
+      // the native writer and the host reader stay on the same root. No home env is rewritten.
+      const patch: unknown[] = persistent
+        ? env.CLOUDCLI_DSH_SESSIONS_DIR?.trim()
+          ? [
+              {
+                id: "session-persistence-jsonl",
+                config: { root: nativeSessionsRoot("dsh", env, cwd) },
+              },
+            ]
+          : []
+        : [
+            { id: "session-persistence-jsonl", disabled: true },
+            // The checkpoint policy requires sessionPersistence, which is disabled above.
+            { id: "session-checkpoint-policy", disabled: true },
+          ];
       const effort =
         agent.effort && agent.effort !== "default" ? agent.effort : undefined;
       if (effort && agent.model === "default")
@@ -189,6 +308,7 @@ export async function runAgent(
         "--patch",
         patchFile,
         "--json",
+        ...(resume ? ["--session-id", resume] : []),
         "-",
       ];
     }
@@ -207,8 +327,31 @@ export async function runAgent(
       eventReason: string | undefined,
       terminal: { success: boolean; reason?: string } | undefined,
       finalText: string | undefined,
+      nativeSessionId: string | undefined,
+      sessionFault: string | undefined,
       buffer = "",
       lastDshText = "";
+    // Only a persisted run adopts an id, so default runs keep exactly their previous outcomes.
+    const captureSession = (id: unknown, event: string, mismatch: string) => {
+      if (!persistent || nativeSessionId !== undefined) return;
+      if (typeof id !== "string" || !id.trim()) {
+        sessionFault ??= event + " 缺少有效会话 ID";
+      } else if (resume && id !== resume) {
+        sessionFault = mismatch;
+      } else {
+        nativeSessionId = id;
+        options.onNativeSession?.(id);
+        return;
+      }
+      // An unverified provider session must not keep working on the task; the close below waits.
+      // Detached children own their process group, so a stop reaches the tools they already ran.
+      try {
+        if (child.pid && options.isolated !== false) terminateTree(child.pid);
+        else child.kill("SIGTERM");
+      } catch {
+        child.kill("SIGTERM");
+      }
+    };
     const printed = new Map<string, { length: number; digest: string }>();
     const digest = (text: string) =>
       createHash("sha256").update(text).digest("hex");
@@ -234,13 +377,22 @@ export async function runAgent(
       try {
         const event = JSON.parse(raw) as Record<string, any>;
         // Usage is read from provider terminal accounting events only, never from stdout text.
+        // A persisted Codex run keeps the last cumulative snapshot (minus its launch baseline).
         if (
-          agent.provider === "codex"
-            ? accumulator.codex(event)
-            : accumulator.dsh(event)
+          agent.provider === "dsh"
+            ? accumulator.dsh(event)
+            : persistentUsage
+              ? persistentUsage.observe(event)
+              : accumulator.codex(event)
         )
           publish();
         if (agent.provider === "codex") {
+          if (event.type === "thread.started")
+            captureSession(
+              event.thread_id,
+              "thread.started",
+              "Codex resume 返回了不同 thread_id",
+            );
           if (event.type === "turn.started") {
             terminal = undefined;
             finalText = undefined;
@@ -276,6 +428,12 @@ export async function runAgent(
           if (event.type === "turn.completed") terminal = { success: true };
         } else {
           // DSH reports the outcome on status/turn_end; final carries the answer text.
+          if (event.type === "session")
+            captureSession(
+              event.sessionId,
+              "session 事件",
+              "DSH resume 返回了不同会话 ID",
+            );
           if (event.type === "status" && event.phase === "turn_start") {
             terminal = undefined;
             finalText = undefined;
@@ -380,9 +538,17 @@ status 只能是 success 或 failed，summary 必须是非空字符串。
         resultError = "结果未确认：Agent 最终答复不是有效的任务结果 JSON";
       }
     }
-    const details = { code, usage: reported, ...(taskResult ? { taskResult } : {}) };
+    const details = {
+      code,
+      usage: reported,
+      ...(taskResult ? { taskResult } : {}),
+      ...(nativeSessionId ? { nativeSessionId } : {}),
+    };
     if (internalFault)
       return { ...details, success: false, reason: internalFault };
+    // A requested continuation that came back as another thread must never look successful.
+    if (sessionFault)
+      return { ...details, success: false, reason: sessionFault };
     if (code !== 0)
       return {
         ...details,
@@ -410,6 +576,16 @@ status 只能是 success 或 failed，summary 必须是非空字符串。
           reason: "任务未完成：" + taskResult.summary,
         };
     }
+    // A persisted run must hand back its identity, otherwise no later run could continue it.
+    if (persistent && !nativeSessionId)
+      return {
+        ...details,
+        success: false,
+        reason:
+          agent.provider === "codex"
+            ? "持久化运行未报告 thread.started"
+            : "持久化运行未报告 DSH 会话 ID",
+      };
     return { ...details, success: true };
   } finally {
     fs.rmSync(directory, { recursive: true, force: true });

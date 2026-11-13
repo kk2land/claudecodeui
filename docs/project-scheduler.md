@@ -15,8 +15,8 @@
 - 左侧任务草稿列表支持新增、复制、删除，标出新增、已修改及基线缺少的待删除任务并可撤销。
   复制自动分配 1–128 字符的唯一 ID；修改任务 ID 视为删除旧 ID、新增新 ID。
 - 右侧表单编辑名称、ID、配置中启用、类型、命令与 args 或 provider/model/effort 与 prompt、cwd、
-  timeout、allowConcurrent、env，以及项目默认时区、defaults.agent、timeoutSeconds、
-  allowConcurrent、alerts.telegram。留空表示继承，不会写入写死的默认值。
+  timeout、allowConcurrent、提示词任务的 reuseSession，以及项目默认时区、defaults.agent、timeoutSeconds、
+  allowConcurrent、alerts.telegram。留空表示继承，不会写入写死的默认值。开启复用会自动关闭并发。
 - 原始 JSON 文本是唯一草稿源，视觉表单与 JSON 视图共享同一份文本；未知字段、未修改的任务和
   省略的继承项原样保留。JSON 非法时保留原文并显示错误，可切到 JSON 修复，视觉表单与保存禁用。
 - 计划模板覆盖每隔 N 秒/分钟（1–59）、每天、每周加星期、自定义 Cron，生成 5 或 6 段表达式并
@@ -35,6 +35,8 @@ revision 冲突时保留草稿，并排显示最新文件原文，可明确选�
 「从文件重新装载」是次级入口，用于直接读取已有文件。
 按项目、任务 ID 新增或更新；勾选同步删除时删除配置中缺失的任务。重复装载不重复注册。
 每个项目先整体校验再原子提交；配置损坏或不存在不修改旧任务。装载不会中断当前运行。
+装载与保存后按已提交的完整任务 ID 同步会话绑定：只有真正删除的任务会解除绑定，
+配置损坏、任务停用或关闭 reuseSession 都不算删除。
 重启恢复已装载定义，不自动重读文件，不补跑停机期间的时间点。
 
 任务列表的「临时自动调度」开关仅更新插件数据库，不修改项目 JSON，重启后仍保留。
@@ -105,10 +107,12 @@ Cron 接受五或六段，六段首项为秒；时区使用 IANA 名称。cwd �
 脚本获得可执行包装器 AGENT_EXEC，调用方式为 "$AGENT_EXEC" "提示词"。
 脚本和提示词任务共用入口。Codex 从 claudecodeui 安装目录解析依赖的原生二进制；
 macOS arm64 优先 node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex。
-不依赖全局 Codex。以 exec --ephemeral --json 启动，通过 stdin 传递提示词。
-DSH 使用宿主 CLOUDCLI_DSH_BIN（默认 dsh）、DSH_HOME 和 CLOUDCLI_DSH_PATCHES，
-追加临时 patch 选择模型并禁用 session-persistence-jsonl 与 session-checkpoint-policy；
-该策略依赖已禁用的会话持久化，禁用后不再产生 pending 告警。不修改 profile，不恢复会话。
+不依赖全局 Codex。提示词任务以 exec --json 启动（保留原生会话，不再传 --ephemeral），
+通过 stdin 传递提示词；脚本中的 AGENT_EXEC 仍以 exec --ephemeral --json 启动，不保存会话。
+DSH 使用宿主 CLOUDCLI_DSH_BIN（默认 dsh）、DSH_HOME 和 CLOUDCLI_DSH_PATCHES。提示词任务启用
+session-persistence-jsonl（默认写入 $DSH_HOME/sessions；设置了 CLOUDCLI_DSH_SESSIONS_DIR 时
+用临时 patch 把原生写入对齐到该目录）并保留 session-checkpoint-policy；脚本中的 AGENT_EXEC
+沿用原来的禁用持久化与 checkpoint 策略，不产生 pending 告警。两种情况都不修改 profile。
 DSH headless 文本在步骤提交时产生，不承诺逐 token 显示。
 
 无人值守任务沿用 CLI 权限配置，需要审批时不自动授予额外权限。
@@ -130,7 +134,27 @@ error 事件或其他无效 JSON 行只作为诊断；恢复后最终满足成�
 运行记录保留真实退出码和已校验的任务报告；页面同时展示最终运行状态、报告摘要与失败原因。
 历史记录无需迁移，不重新判定历史结果。结构化结果仍是 Agent 的自报：必须客观验收的任务应使用
 脚本任务调用 AGENT_EXEC，再运行验收命令检查文件日期、内容或接口响应，以脚本退出码确定结果。
-Agent 会话不保存，调度日志仍保存；stderr 非空本身不代表失败。
+提示词任务的会话与日志分开保存：原生会话由宿主会话视图读取，调度日志仍按运行记录保存；
+stderr 非空本身不代表失败。会话绑定与复用的行为见下一节。
+
+## 会话与复用
+
+每次提示词任务执行前，调度器先让宿主准备一个真实 app 会话，并把 sessionId 与 executionId
+立即写入运行行，然后才启动 CLI；CLI 报告已核实的原生会话 ID 后，宿主把该 ID 和原生
+transcript 关联到同一会话。脚本任务和脚本中的 AGENT_EXEC 不建立这种绑定，行为保持不变。
+
+- `reuseSession`（仅提示词任务，缺省 false）：为 true 时，同一任务后续运行接着上次绑定的
+  同一 app/原生会话；provider 或 cwd 变化后旧绑定不再被选中，但仍受保护。
+  `reuseSession: true` 写在脚本任务上会校验失败；它也不能与 `allowConcurrent` 同时开启，
+  复用的会话同一时间只服务一次运行。
+- 未开启复用时每次运行创建新会话，历史运行仍可在运行详情中查看。
+- 运行详情的「对话」标签通过宿主已有的会话视图展示该次运行的原生会话（只读，按轮询刷新）；
+  stdout、stderr 与原始事件保留为诊断信息。旧运行没有绑定会话时按本次输出回退，不伪造回放。
+- 只要任务仍在已提交的配置中，它绑定过的会话就受保护：停用任务、关闭 `reuseSession`、
+  修改 provider/cwd、插件关闭或宿主重启都不解除保护。只有删除任务才解除绑定，解除绑定只
+  解锁会话，不删除会话或其历史。
+- 复用只支持现有两种 provider（Codex exec 与 DSH headless）且要求同一有效 cwd；宿主不可用时
+  提示词任务明确失败，不会退回无会话模式。运行中关闭插件会先停止 CLI，再释放宿主占用。
 
 ## 生命周期与日志
 

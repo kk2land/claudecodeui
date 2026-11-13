@@ -33,6 +33,12 @@ type ChatRun = {
   provider: LLMProvider;
   providerSessionId: string | null;
   status: ChatRunStatus;
+  /**
+   * True for a run the host admitted for a scheduled prompt CLI process. Only the
+   * scheduled finish entry may complete it, so a generic abort/complete can never
+   * release its busy slot before the process is confirmed stopped.
+   */
+  external: boolean;
   lastSeq: number;
   events: NormalizedMessage[];
   writer: ChatSessionWriter;
@@ -305,6 +311,8 @@ export const chatRunRegistry = {
      * replays the run from its start.
      */
     passive?: boolean;
+    /** Scheduled prompt CLI run: completion is restricted to `completeExternalRun`. */
+    external?: boolean;
     connection: RealtimeClientConnection | null;
     userId: string | number | null;
     /** Dispatch-boundary snapshot; omitted by control/passive runs that never start a turn. */
@@ -321,6 +329,7 @@ export const chatRunRegistry = {
       provider: input.provider,
       providerSessionId: input.providerSessionId,
       status: input.passive ? 'completed' : 'running',
+      external: input.external === true,
       lastSeq: 0,
       events: [],
       writer: null as unknown as ChatSessionWriter,
@@ -380,6 +389,16 @@ export const chatRunRegistry = {
 
   isProcessing(appSessionId: string): boolean {
     return runs.get(appSessionId)?.status === 'running';
+  },
+
+  /**
+   * True while the session's current run belongs to a scheduled prompt CLI process.
+   * Generic write paths consult it so a scheduled message cannot interrupt a run
+   * the host does not own, and generic completion skips it below.
+   */
+  isExternalRun(appSessionId: string): boolean {
+    const run = runs.get(appSessionId);
+    return Boolean(run && run.external && run.status === 'running');
   },
 
   listRunningRuns(): Array<{
@@ -443,7 +462,7 @@ export const chatRunRegistry = {
    */
   completeRun(appSessionId: string, opts: { exitCode: number; aborted?: boolean }): void {
     const run = runs.get(appSessionId);
-    if (!run || run.status !== 'running') {
+    if (!run || run.status !== 'running' || run.external) {
       return;
     }
 
@@ -459,11 +478,34 @@ export const chatRunRegistry = {
    * `completeRun` would terminate that newer run.
    */
   completeRunIfCurrent(run: ChatRun, opts: { exitCode: number; aborted?: boolean }): void {
-    if (runs.get(run.appSessionId) !== run || run.status !== 'running') {
+    if (runs.get(run.appSessionId) !== run || run.status !== 'running' || run.external) {
       return;
     }
 
     run.writer.sendComplete(opts);
+  },
+
+  /**
+   * The only completion path for a scheduled prompt CLI run. Scoped to the current
+   * run's execution id so a stale or duplicate finish cannot release a later run.
+   * Returns true only when this call completed the matching external run.
+   */
+  completeExternalRun(
+    appSessionId: string,
+    executionId: string,
+    opts: { exitCode: number; aborted?: boolean },
+  ): boolean {
+    const run = runs.get(appSessionId);
+    if (
+      !run
+      || !run.external
+      || run.status !== 'running'
+      || run.executionId !== executionId
+    ) {
+      return false;
+    }
+    run.writer.sendComplete(opts);
+    return true;
   },
 
   /**

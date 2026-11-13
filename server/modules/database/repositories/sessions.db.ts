@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { residentBindingsDb } from '@/modules/database/repositories/resident-bindings.db.js';
+import { scheduledTaskSessionsDb } from '@/modules/database/repositories/scheduled-task-sessions.db.js';
 import { normalizeProjectPath } from '@/shared/utils.js';
 
 type SessionRow = {
@@ -110,6 +111,26 @@ function normalizeSessionRows(rows: SessionRow[]): SessionRow[] {
 function normalizeProjectPathForProvider(provider: string, projectPath: string): string {
   void provider;
   return normalizeProjectPath(projectPath);
+}
+
+/**
+ * True when a persisted owner forbids physically deleting this app session.
+ *
+ * Resident bindings and scheduled prompt-task bindings share this single guard,
+ * so every physical deletion path — user force delete, project/worktree delete,
+ * provider retention, orphan pruning and native transcript removal — asks one
+ * place. Disabling a task, hiding a binding, or clearing `reuseSession` keeps
+ * the session protected; only deleting the task unbinds it.
+ */
+function isSessionOwned(sessionId: string): boolean {
+  return residentBindingsDb.isSessionProtected(sessionId)
+    || scheduledTaskSessionsDb.isSessionProtected(sessionId);
+}
+
+/** Native-id form of `isSessionOwned`, for retention walking provider ids. */
+function isProviderSessionOwned(provider: string, providerSessionId: string): boolean {
+  return residentBindingsDb.isProviderSessionProtected(provider, providerSessionId)
+    || scheduledTaskSessionsDb.isProviderSessionProtected(provider, providerSessionId);
 }
 
 export const sessionsDb = {
@@ -277,7 +298,8 @@ export const sessionsDb = {
     // it rather than leaving two sidebar entries for one conversation.
     db.transaction(() => {
       db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ? AND provider = ?
-        AND session_id NOT IN (SELECT session_id FROM resident_bindings)`)
+        AND session_id NOT IN (SELECT session_id FROM resident_bindings)
+        AND session_id NOT IN (SELECT session_id FROM scheduled_task_sessions)`)
         .run(input.providerSessionId, input.providerSessionId, input.sessionId, input.provider);
       db.prepare(
         `INSERT INTO sessions (session_id, provider, provider_session_id, custom_name, project_path, jsonl_path, model, effort, forked_from_session_id, isArchived, created_at, updated_at)
@@ -322,7 +344,7 @@ export const sessionsDb = {
         .get(providerSessionId, providerSessionId, sessionId, sessionId) as SessionRow | undefined;
 
       if (duplicate) {
-        if (!residentBindingsDb.isSessionProtected(duplicate.session_id)) {
+        if (!isSessionOwned(duplicate.session_id)) {
           db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
         }
         db.prepare(
@@ -370,7 +392,8 @@ export const sessionsDb = {
     db.transaction(() => {
       db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ?
         AND provider = (SELECT provider FROM sessions WHERE session_id = ?)
-        AND session_id NOT IN (SELECT session_id FROM resident_bindings)`)
+        AND session_id NOT IN (SELECT session_id FROM resident_bindings)
+        AND session_id NOT IN (SELECT session_id FROM scheduled_task_sessions)`)
         .run(input.providerSessionId, input.providerSessionId, sessionId, sessionId);
       db.prepare(
         `UPDATE sessions SET
@@ -577,19 +600,20 @@ export const sessionsDb = {
   },
 
   /**
-   * True while a resident binding owns this app session. Every physical
-   * deletion path — user force delete, project delete, provider retention,
-   * orphan pruning and native transcript removal — consults this before
-   * touching rows or files. Disabled, hidden and plugin-off bindings stay
-   * protected; only removing the task unbinds.
+   * True while a resident binding or a scheduled prompt-task binding owns this
+   * app session. Every physical deletion path — user force delete, project and
+   * worktree delete, provider retention, orphan pruning and native transcript
+   * removal — consults this before touching rows or files. Disabled, hidden and
+   * plugin-off bindings stay protected, as does a task whose `reuseSession` was
+   * cleared; only removing the task unbinds.
    */
   isSessionResidentProtected(sessionId: string): boolean {
-    return residentBindingsDb.isSessionProtected(sessionId);
+    return isSessionOwned(sessionId);
   },
 
-  /** Native-id form of the resident guard, for transcript retention walking provider ids. */
+  /** Native-id form of the guard above, for transcript retention walking provider ids. */
   isProviderSessionResidentProtected(provider: string, providerSessionId: string): boolean {
-    return residentBindingsDb.isProviderSessionProtected(provider, providerSessionId);
+    return isProviderSessionOwned(provider, providerSessionId);
   },
 
   getSessionById(sessionId: string): SessionRow | null {
@@ -814,11 +838,13 @@ export const sessionsDb = {
   deleteSessionsByProjectPath(projectPath: string): void {
     const db = getConnection();
     const normalizedProjectPath = normalizeProjectPath(projectPath);
-    // Resident bindings survive a project purge: their sessions are unbound
-    // only through the resident task, never as a side effect of a path delete.
+    // Task bindings survive a project purge exactly like resident bindings:
+    // their sessions are unbound only through the task, never as a side effect
+    // of a path delete.
     db.prepare(
       `DELETE FROM sessions WHERE project_path = ?
-         AND session_id NOT IN (SELECT session_id FROM resident_bindings)`
+         AND session_id NOT IN (SELECT session_id FROM resident_bindings)
+         AND session_id NOT IN (SELECT session_id FROM scheduled_task_sessions)`
     ).run(normalizedProjectPath);
   },
 
@@ -849,7 +875,7 @@ export const sessionsDb = {
   },
 
   deleteSessionById(sessionId: string): boolean {
-    if (residentBindingsDb.isSessionProtected(sessionId)) {
+    if (isSessionOwned(sessionId)) {
       return false;
     }
     const db = getConnection();
@@ -858,7 +884,7 @@ export const sessionsDb = {
 
   /** Used by the OpenCode synchronizer to remove indexed child sessions by their native id. */
   deleteSessionByProviderSessionId(providerSessionId: string, provider: string): boolean {
-    if (residentBindingsDb.isProviderSessionProtected(provider, providerSessionId)) {
+    if (isProviderSessionOwned(provider, providerSessionId)) {
       return false;
     }
     const db = getConnection();

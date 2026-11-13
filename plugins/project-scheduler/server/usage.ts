@@ -149,6 +149,96 @@ export class UsageAccumulator {
   }
 }
 
+/** Maps one Codex turn or rollout report; cached input stays distinct from input tokens. */
+function codexReport(value: unknown): SchedulerTokenUsage | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const source = value as Record<string, unknown>;
+  const usage: SchedulerTokenUsage = {
+    inputTokens: tokenCount(source.input_tokens),
+    outputTokens: tokenCount(source.output_tokens),
+    cacheReadTokens: tokenCount(source.cached_input_tokens),
+    // Codex does not report cache writes; leaving null keeps "unknown" distinct from zero.
+    cacheWriteTokens: null,
+  };
+  return METRICS.some((metric) => usage[metric] !== null) ? usage : null;
+}
+
+/**
+ * Codex reports each turn as the thread's cumulative totals, so a persisted run cannot add turns.
+ * Only the last snapshot counts, and a resume subtracts the launch baseline read from the thread's
+ * rollout. A resume whose baseline is unavailable stays unknown instead of re-reporting history.
+ */
+export class CodexPersistentUsage {
+  private snapshot: SchedulerTokenUsage | null = null;
+  constructor(
+    private readonly baseline: SchedulerTokenUsage | null,
+    private readonly resumed: boolean,
+  ) {}
+  /** True when a newer cumulative report replaced the previous one. */
+  observe(event: Record<string, unknown>): boolean {
+    if (event.type !== "turn.completed") return false;
+    const usage = codexReport(event.usage);
+    if (!usage) return false;
+    this.snapshot = usage;
+    return true;
+  }
+  get usage(): SchedulerTokenUsage | null {
+    if (!this.snapshot) return null;
+    if (!this.resumed) return this.snapshot;
+    if (!this.baseline) return null;
+    const usage = {} as SchedulerTokenUsage;
+    for (const metric of METRICS) {
+      const before = this.baseline[metric];
+      const after = this.snapshot[metric];
+      if (before === null || after === null) {
+        usage[metric] = null;
+        continue;
+      }
+      // History moving backwards means the delta is not this run; never report a guessed number.
+      if (after < before) return null;
+      usage[metric] = after - before;
+    }
+    return METRICS.some((metric) => usage[metric] !== null) ? usage : null;
+  }
+}
+
+/** Last cumulative token snapshot recorded by a Codex thread rollout, read before a resume. */
+export function readCodexUsageBaseline(file: string): SchedulerTokenUsage | null {
+  let source: string;
+  try {
+    source = fs.readFileSync(file, "utf8");
+  } catch {
+    return null;
+  }
+  let baseline: SchedulerTokenUsage | null = null;
+  for (const line of source.split("\n")) {
+    if (!line.trim()) continue;
+    let entry: unknown;
+    try {
+      entry = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+    const record = entry as Record<string, unknown>;
+    const payload =
+      record.payload &&
+      typeof record.payload === "object" &&
+      !Array.isArray(record.payload)
+        ? (record.payload as Record<string, unknown>)
+        : null;
+    if (payload?.type !== "token_count" && record.type !== "token_count")
+      continue;
+    const info = payload?.info ?? record.info;
+    if (!info || typeof info !== "object" || Array.isArray(info)) continue;
+    const report = codexReport(
+      (info as Record<string, unknown>).total_token_usage,
+    );
+    if (report) baseline = report;
+  }
+  return baseline;
+}
+
 /**
  * A sidecar per invocation keeps concurrent `AGENT_EXEC` calls from losing updates: each process
  * writes only its own snapshot via rename, and the scheduler sums immutable files. A crash can

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { ProjectScheduler } from "../server/scheduler.js";
 import { SchedulerStore } from "../server/store.js";
+import { fakeScheduledHost } from "./host-fixture.js";
 import { TelegramNotifier } from "../server/telegram.js";
 import { appendLog, readLog } from "../server/logs.js";
 import {
@@ -28,7 +29,7 @@ function fixture(t: TestContext) {
     }),
   );
   const store = new SchedulerStore(path.join(root, "data"));
-  const scheduler = new ProjectScheduler(store, catalog);
+  const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
   const config = (tasks: unknown[]) =>
     fs.writeFileSync(
       path.join(project, ".cloudcli", "project-schedules.json"),
@@ -140,7 +141,7 @@ test("prompt zero exit without a final event records an unconfirmed result and a
   const bin = path.join(f.root, "dsh");
   fs.writeFileSync(
     bin,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"text",text:"answer"})));',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"session",sessionId:"native-unconfirmed"}));console.log(JSON.stringify({type:"text",text:"answer"}))});',
     { mode: 0o700 },
   );
   const previous = process.env.CLOUDCLI_DSH_BIN,
@@ -207,7 +208,11 @@ test("prompt task results persist with the real zero exit code and drive Telegra
   const messages: string[] = [];
   const notifier = new TelegramNotifier(f.store, async (_settings, message) => { messages.push(message); });
   for (const scenario of scenarios) {
-    const events: object[] = [{ type: "status", phase: "turn_start", turn: 1 }];
+    // Every prompt run persists a session, so the CLI must report its verified native id.
+    const events: object[] = [
+      { type: "session", sessionId: "native-" + scenario.id },
+      { type: "status", phase: "turn_start", turn: 1 },
+    ];
     if (scenario.kind) events.push({ type: "status", phase: "turn_end", turn: 1,
       reason: scenario.kind === "completed" ? { kind: "completed" }
         : { kind: "error", error: { message: "request failed", code: "REQUEST_FAILED" } } });
@@ -733,7 +738,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   const dsh = path.join(root, "dsh");
   fs.writeFileSync(
     dsh,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH})}))});',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"session",sessionId:"native-env"}));console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH})}))});',
     { mode: 0o700 },
   );
   const script =
@@ -772,7 +777,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   process.env.CLOUDCLI_DSH_BIN = dsh;
   process.env.CLOUDCLI_PLUGIN_TOKEN = "host-token";
   const store = new SchedulerStore(path.join(root, "data"));
-  const scheduler = new ProjectScheduler(store, catalog);
+  const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
   t.after(async () => {
     await scheduler.close();
     store.close();

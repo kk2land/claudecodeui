@@ -13,6 +13,7 @@ import {
   SESSION_RUNTIME_SETTINGS_TABLE_SCHEMA_SQL,
   SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL,
   RESIDENT_BINDINGS_TABLE_SCHEMA_SQL,
+  SCHEDULED_TASK_SESSIONS_TABLE_SCHEMA_SQL,
   STAGE_LOGS_TABLE_SCHEMA_SQL,
   SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL,
   SESSIONS_TABLE_SCHEMA_SQL,
@@ -665,6 +666,8 @@ export const runMigrations = (db: Database) => {
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
     // Additive: resident bindings/logs never rewrite or drop existing data.
     db.exec(RESIDENT_BINDINGS_TABLE_SCHEMA_SQL);
+    // Additive: scheduled prompt-task session bindings keep existing rows untouched.
+    db.exec(SCHEDULED_TASK_SESSIONS_TABLE_SCHEMA_SQL);
     db.exec(STAGE_LOGS_TABLE_SCHEMA_SQL);
     migrateResidentLogsToStageLogs(db);
 

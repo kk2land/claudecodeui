@@ -13,6 +13,7 @@ import type {
   ResidentIpcEvent,
 } from '@/shared/index.js';
 
+import type { ScheduledRunHostService } from './scheduled-run.service.js';
 import type { ResidentHostService } from './resident-host.service.js';
 
 /** Bundled plugin name fixed by the scheduler manifest. */
@@ -27,6 +28,10 @@ const ACTIONS = new Set([
   'continue',
   'remove',
   'logs',
+  'scheduledPrepare',
+  'scheduledAttachNative',
+  'scheduledFinishRun',
+  'scheduledSyncTasks',
 ]);
 const ERROR_CODES = new Set<ResidentError['code']>([
   'invalid_request',
@@ -56,8 +61,13 @@ function readError(error: unknown): ResidentError {
  * answers with `kind: "response"`; the host pushes `sync`/`terminal`/`changed`
  * events. Request shapes are validated once here, and every semantic check
  * (real active run, provider, native id, uniqueness) stays in the host service.
+ * Scheduled prompt CLI actions are routed to their own service; both share this
+ * one channel and envelope.
  */
-export function createResidentIpcService(host: ResidentHostService) {
+export function createResidentIpcService(
+  host: ResidentHostService,
+  scheduled: ScheduledRunHostService,
+) {
   let unsubscribeMessage: (() => void) | null = null;
   let unsubscribeReady: (() => void) | null = null;
   let unsubscribeExit: (() => void) | null = null;
@@ -92,7 +102,9 @@ export function createResidentIpcService(host: ResidentHostService) {
     }
     const payload = readObjectRecord(message.payload) ?? {};
     try {
-      const value = await host.handleRequest(action, payload);
+      const value = action.startsWith('scheduled')
+        ? await scheduled.handleRequest(action, payload)
+        : await host.handleRequest(action, payload);
       send({ channel: CHANNEL, id, kind: 'response', ok: true, value });
     } catch (error) {
       send({ channel: CHANNEL, id, kind: 'response', ok: false, error: readError(error) });

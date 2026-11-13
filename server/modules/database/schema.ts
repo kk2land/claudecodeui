@@ -313,6 +313,32 @@ CREATE INDEX IF NOT EXISTS idx_resident_bindings_status
 ON resident_bindings(status);
 `;
 
+/**
+ * Sessions a scheduled prompt task reused across runs (its `reuseSession` binding).
+ *
+ * One row per project/task/session reference: a task may keep several historical
+ * bindings, and each stays physically protected until the task itself is removed.
+ * `cwd` is the effective run directory the session was used from, so editing a
+ * task's cwd or provider stops matching its old binding without unlocking it.
+ * Provider and provider-native id are read from `sessions` at query time, so a
+ * native re-point is reflected without duplicating that mapping here. Rows are
+ * written and removed only by the project-scheduler host module.
+ */
+export const SCHEDULED_TASK_SESSIONS_TABLE_SCHEMA_SQL = `
+CREATE TABLE IF NOT EXISTS scheduled_task_sessions (
+    project_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (project_id, task_id, session_id)
+);
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_sessions_task_cwd
+ON scheduled_task_sessions(project_id, task_id, cwd, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_scheduled_task_sessions_session
+ON scheduled_task_sessions(session_id);
+`;
+
 
 /**
  * Stage logs an agent reports for one resident task, kept for seven days by `created_at`.
@@ -450,6 +476,8 @@ ${QUEUED_STEER_RECEIPTS_TABLE_SCHEMA_SQL}
 ${SUPERSEDED_PROVIDER_SESSIONS_TABLE_SCHEMA_SQL}
 
 ${RESIDENT_BINDINGS_TABLE_SCHEMA_SQL}
+
+${SCHEDULED_TASK_SESSIONS_TABLE_SCHEMA_SQL}
 
 ${STAGE_LOGS_TABLE_SCHEMA_SQL}
 `;

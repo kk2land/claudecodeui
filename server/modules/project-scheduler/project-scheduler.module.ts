@@ -14,6 +14,7 @@ import { createStageLogService } from './stage-log.service.js';
 import { readResidentSessionInfo } from './resident-session-projection.js';
 import { createResidentHostService } from './resident-host.service.js';
 import { createResidentIpcService } from './resident-ipc.service.js';
+import { createScheduledRunHostService } from './scheduled-run.service.js';
 
 /**
  * Composition root for the resident ("常驻") host.
@@ -57,7 +58,13 @@ export function createProjectSchedulerModule(options: {
     logSystem: (input) => { logs.recordSystem(input); },
     logs: (query) => logs.list(query),
   });
-  const ipc = createResidentIpcService(host);
+  const scheduled = createScheduledRunHostService({
+    requestQueueDispatch: (sessionId) => requestQueuedMessageDispatch(sessionId),
+    announceSession: (sessionId) => {
+      void broadcastSessionUpserted(sessionId).catch(() => undefined);
+    },
+  });
+  const ipc = createResidentIpcService(host, scheduled);
   emitEvent = (event) => ipc.emit(event);
 
   return {

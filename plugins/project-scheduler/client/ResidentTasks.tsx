@@ -15,6 +15,8 @@ type ResidentApi = ReturnType<typeof schedulerApi>;
 type ResidentTasksProps = {
   api: ResidentApi;
   host: SchedulerHost;
+  /** Restricts the list to this project; omitted shows all projects. */
+  projectId?: string;
   /** The plugin's single status area, so resident operations report failures like every other one. */
   onMessage: (message: string) => void;
 };
@@ -24,8 +26,9 @@ type ResidentTasksProps = {
  * session, beside the cron tasks. Creation happens only from the session menu, so there is no
  * create form, no prompt editor and no project JSON involvement here.
  */
-export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
+export function ResidentTasks({ api, host, projectId, onMessage }: ResidentTasksProps) {
   const [tasks, setTasks] = useState<ResidentTaskRow[]>([]);
+  const visibleTasks = projectId ? tasks.filter((task) => task.projectId === projectId) : tasks;
   // Per-binding lock while an operation is in flight, so a double click cannot send it twice.
   const [pending, setPending] = useState<Set<string>>(new Set());
   // The one task whose stage log is expanded; opening another replaces it, so at most one log
@@ -77,7 +80,7 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
           <h2>常驻任务</h2>
           <p>沿用正在运行的前台会话，不新建 Agent，也不改项目 JSON</p>
         </div>
-        <span>{tasks.length} 项</span>
+        <span>{visibleTasks.length} 项</span>
       </header>
       <p className="cron-resident-note">{residentCapacityNote()}</p>
       {!canOpenSession && (
@@ -85,13 +88,14 @@ export function ResidentTasks({ api, host, onMessage }: ResidentTasksProps) {
           当前宿主不提供打开会话能力：任务名不可点击，启用、可见、停止、继续与删除仍可用。
         </p>
       )}
-      {tasks.length === 0 ? (
+      {visibleTasks.length === 0 ? (
         <p className="cron-resident-note">
-          还没有常驻任务。在侧边栏会话的三点菜单里对正在运行的会话选择“设为常驻”。
+          {projectId ? "当前项目还没有常驻任务。" : "还没有常驻任务。"}
+          在侧边栏会话的三点菜单里对正在运行的会话选择“设为常驻”。
         </p>
       ) : (
         <ul className="cron-resident-list">
-          {tasks.map((task) => {
+          {visibleTasks.map((task) => {
             const actions = residentTaskActions(task);
             const busy = pending.has(task.taskId);
             return (

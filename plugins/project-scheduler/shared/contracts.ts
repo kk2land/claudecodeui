@@ -76,6 +76,13 @@ export type SchedulerTask = {
   command?: string;
   args: string[];
   prompt?: string;
+  /**
+   * Prompt tasks only: reuse the same native provider session for every run instead of starting a
+   * new one each time. Omitted means `false`, which preserves the existing per-run session; script
+   * tasks ignore it. A bound session stays physically protected until the task is deleted, so
+   * disabling the task or clearing this flag only stops reuse and never unlocks the old session.
+   */
+  reuseSession?: boolean;
   notify: boolean;
 };
 /**
@@ -145,13 +152,14 @@ export type SchedulerRun = {
   source?: SchedulerRunSource;
   /** Resident binding task id; see `ResidentBindingView.taskId`. */
   residentTaskId?: string;
-  /** App session the resident turn ran in; the provider-native id lives in the host binding. */
+  /** App session a scheduled or resident run used; its provider-native id lives in the host. */
   sessionId?: string;
   /**
    * The chat run's own `executionId` — the identifier the websocket gateway assigned to that
-   * turn. It changes per admitted run and is never fabricated across a host restart; the stable
-   * replay identity is `ResidentTerminal.id`, which is also the run row's `id`, so re-delivering
-   * the same terminal keeps the existing row and its alert counters.
+   * turn. Present on resident terminal rows and on scheduled runs admitted through the host chat
+   * gateway. It changes per admitted run and is never fabricated across a host restart; the
+   * stable replay identity is `ResidentTerminal.id`, which is also the run row's `id`, so
+   * re-delivering the same terminal keeps the existing row and its alert counters.
    */
   executionId?: string;
 };
@@ -529,9 +537,11 @@ export type StageLogPage = {
 export type ResidentIpcChannel = "cloudcli-scheduler-resident";
 
 /**
- * Payload of each plugin-to-host request. Only ids and booleans cross the wire: the host resolves
- * the session, approval context, provider and owner itself, and the plugin never sends provider
- * options, prompts, or credentials.
+ * Payload of each plugin-to-host request. Resident actions carry only ids and booleans: the host
+ * resolves the session, approval context, provider and owner itself. Scheduled prompt actions also
+ * carry the committed task's effective agent, cwd and provider sessions root because the plugin
+ * owns the CLI process, but never a prompt, transcript contents, credentials, or arbitrary provider
+ * options.
  */
 export type ResidentIpcRequestPayloads = {
   /** Binds an already-running foreground session. The plugin generates `taskId`; the host rejects a duplicate session binding. */
@@ -546,6 +556,47 @@ export type ResidentIpcRequestPayloads = {
   remove: { taskId: string };
   /** Newest-first page of the host's seven-day stage logs for one task. */
   logs: StageLogQuery;
+  /**
+   * Reserves the app session and host busy slot before a scheduled prompt CLI run spawns. The
+   * plugin supplies the already-committed task identity, its effective agent and cwd, its
+   * decision to reuse a session, and the provider sessions root of the run's effective env.
+   * `nativeSessionId` is non-null only when an existing compatible binding is being resumed.
+   */
+  scheduledPrepare: {
+    projectId: string;
+    taskId: string;
+    runId: string;
+    agent: SchedulerAgent;
+    cwd: string;
+    reuseSession: boolean;
+    sessionsRoot: string;
+  };
+  /**
+   * Maps the native id the CLI reported to the app session and records the real transcript path.
+   * `transcriptPath` is optional: when omitted the host resolves it under `sessionsRoot`. A
+   * resumed run must report the id `scheduledPrepare` returned.
+   */
+  scheduledAttachNative: {
+    runId: string;
+    executionId: string;
+    nativeSessionId: string;
+    transcriptPath?: string;
+  };
+  /**
+   * Releases the host busy slot after the CLI process has been confirmed stopped. Scoped to the
+   * prepared run and its execution; a duplicate or stale finish is a no-op.
+   */
+  scheduledFinishRun: {
+    runId: string;
+    executionId: string;
+    outcome: { code: number | null; success: boolean; aborted?: boolean; reason?: string };
+  };
+  /**
+   * Reconciles session bindings against the project's complete committed task set. Task ids are
+   * only unique inside a project. Removing a binding never deletes its session and never depends
+   * on a task being enabled or still reusing a session.
+   */
+  scheduledSyncTasks: { projectId: string; taskIds: string[] };
 };
 
 /** Fixed IPC action names. */
@@ -561,6 +612,14 @@ export type ResidentIpcResponseValues = {
   continue: { result: ResidentContinueResult; binding: ResidentBindingView };
   remove: ResidentRemoveResult;
   logs: StageLogPage;
+  scheduledPrepare: {
+    sessionId: string;
+    executionId: string;
+    nativeSessionId: string | null;
+  };
+  scheduledAttachNative: { sessionId: string };
+  scheduledFinishRun: { finished: boolean };
+  scheduledSyncTasks: { released: number };
 };
 
 /**

@@ -363,6 +363,7 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           <RunDetail
             task={currentTask}
             api={api}
+            host={host}
             retention={settings?.retentionDays ?? 30}
             onBack={() => setView("tasks")}
             onSettings={(tab) => {
@@ -441,7 +442,12 @@ function Scheduler({ host }: { host: SchedulerHost }) {
           </div>
           {/* Resident bindings run in their own sessions, so they sit beside the cron tasks
               rather than inside the scheduled-task table. */}
-          <ResidentTasks api={api} host={host} onMessage={setMessage} />
+          <ResidentTasks
+            api={api}
+            host={host}
+            projectId={effectiveScope === "current" ? context.project?.name : undefined}
+            onMessage={setMessage}
+          />
           <ProjectAlertWarning tasks={visible} onEdit={editProjectAlerts} />
           <table className="cron-table">
             <thead>
@@ -677,9 +683,36 @@ function ProjectPicker({
   );
 }
 
+/** Run detail tabs: the conversation first, then the raw streams as diagnostics. */
+type RunTab = "conversation" | "stdout" | "stderr" | "events";
+const RUN_TABS: ReadonlyArray<{ value: RunTab; label: string }> = [
+  { value: "conversation", label: "对话" },
+  { value: "stdout", label: "stdout" },
+  { value: "stderr", label: "stderr" },
+  { value: "events", label: "原始事件" },
+];
+
+/**
+ * Mounts the app's read-only transcript for one bound session into a container this plugin owns.
+ * Used by the run detail's conversation tab; the host owns the viewer, so the returned disposer
+ * runs when the tab closes, another run is selected, or the plugin unmounts. Polling stays on for
+ * as long as the tab is open because a run's final message can land just after its status flips,
+ * and stopping then would leave the transcript one message short.
+ */
+function SessionConversation({ host, sessionId }: { host: SchedulerHost; sessionId: string }) {
+  const container = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const mount = host.mountSessionOutput;
+    if (!mount || !container.current) return;
+    return mount(container.current, { sessionId, pollIntervalMs: 1000 });
+  }, [host, sessionId]);
+  return <div ref={container} className="cron-conversation" data-session-id={sessionId} />;
+}
+
 function RunDetail({
   task,
   api,
+  host,
   retention,
   onBack,
   onSettings,
@@ -688,6 +721,7 @@ function RunDetail({
 }: {
   task: SchedulerTaskRow;
   api: ReturnType<typeof schedulerApi>;
+  host: SchedulerHost;
   retention: number;
   onBack(): void;
   onSettings(tab: SettingsTab): void;
@@ -698,8 +732,10 @@ function RunDetail({
   const [runs, setRuns] = useState<SchedulerRun[]>([]);
   // A null selection follows the newest active/latest run; clicking history pins a specific run.
   const [selected, setSelected] = useState<string | null>(null);
-  // Output streams have independent cursors and reset when a different stream/run is selected.
-  const [stream, setStream] = useState("stdout");
+  // The conversation is the default view; stdout/stderr/raw events stay as diagnostics. A legacy
+  // run has no bound session, so the conversation tab reads its own stdout for the fallback.
+  const [tab, setTab] = useState<RunTab>("conversation");
+  const stream = tab === "conversation" ? "stdout" : tab;
   // Only a bounded text tail stays in browser memory.
   const [logState, setLogState] = useState({
     key: "",
@@ -716,6 +752,9 @@ function RunDetail({
   // Follow mode lets the user inspect earlier output while new chunks arrive.
   const [follow, setFollow] = useState(true);
   const output = useRef<HTMLPreElement>(null);
+  // The legacy conversation fallback scrolls inside its own bounded box; the diagnostic log has
+  // its own node. A single follow effect drives whichever one is on screen.
+  const transcript = useRef<HTMLDivElement>(null);
   const active = task.activeRuns[0];
   const liveRun = active
     ? (runs.find((item) => item.id === active.id) ?? active)
@@ -740,6 +779,18 @@ function RunDetail({
   const text = logState.key === logKey ? logState.text : "";
   const runTask = snapshot && snapshot.id === runId ? snapshot.task : null;
   const definition = runTask ?? task.definition;
+  // What the run itself printed. The legacy conversation fallback shows this text instead of
+  // inventing a native session, and the diagnostic tabs show it verbatim.
+  const outputText = logInfo.expired
+    ? "日志已超过保留期限并被清理，最近一次结果摘要仍保留。"
+    : run?.status.startsWith("skipped_")
+      ? (run.reason ?? "")
+      : text || "暂无输出";
+  const canMountSession = typeof host.mountSessionOutput === "function";
+  // The native viewer brings its own scroll ownership, so the plugin's follow control does not
+  // apply to it and its checkbox must not be offered as if it did.
+  const showingNativeConversation =
+    tab === "conversation" && Boolean(run?.sessionId) && canMountSession;
   const duration = run
     ? Math.max(
         0,
@@ -825,9 +876,13 @@ function RunDetail({
     };
   }, [api, runId, runStatus, stream, logKey, onError]);
   useEffect(() => {
-    if (follow && output.current)
-      output.current.scrollTop = output.current.scrollHeight;
-  }, [text, follow]);
+    // Only the visible pane scrolls itself, and reusing `follow` keeps one follow control: entering
+    // a run or new output lands on the newest content, and switching follow off leaves the reader
+    // where they scrolled.
+    if (!follow) return;
+    const node = output.current ?? transcript.current;
+    if (node) node.scrollTop = node.scrollHeight;
+  }, [text, follow, tab]);
   return (
     <>
       <button className="cron-back" onClick={onBack}>
@@ -892,24 +947,26 @@ function RunDetail({
         <section className="cron-console">
           <div className="cron-console-header">
             <div className="cron-log-tabs">
-              {["stdout", "stderr", "events"].map((value) => (
+              {RUN_TABS.map((item) => (
                 <button
-                  key={value}
-                  aria-pressed={stream === value}
-                  onClick={() => setStream(value)}
+                  key={item.value}
+                  aria-pressed={tab === item.value}
+                  onClick={() => setTab(item.value)}
                 >
-                  {value === "events" ? "原始事件" : value}
+                  {item.label}
                 </button>
               ))}
             </div>
-            <label>
-              <input
-                type="checkbox"
-                checked={follow}
-                onChange={(event) => setFollow(event.target.checked)}
-              />
-              自动滚动
-            </label>
+            {!showingNativeConversation && (
+              <label>
+                <input
+                  type="checkbox"
+                  checked={follow}
+                  onChange={(event) => setFollow(event.target.checked)}
+                />
+                自动滚动
+              </label>
+            )}
           </div>
           <div className="cron-meta">
             {run ? (
@@ -932,13 +989,54 @@ function RunDetail({
               {run.taskResult.summary}
             </div>
           )}
-          <pre ref={output} className="cron-output">
-            {logInfo.expired
-              ? "日志已超过保留期限并被清理，最近一次结果摘要仍保留。"
-              : run?.status.startsWith("skipped_")
-                ? run.reason
-                : text || "暂无输出"}
-          </pre>
+          {tab === "conversation" ? (
+            <div className="cron-conversation-panel">
+              {run?.sessionId && canMountSession ? (
+                <SessionConversation host={host} sessionId={run.sessionId} />
+              ) : (
+                <>
+                  {run?.sessionId && (
+                    <div className="cron-conversation-head">
+                      <span>任务会话</span>
+                      {host.openSession && (
+                        <button
+                          className="cron-link"
+                          onClick={() => host.openSession?.(run.sessionId!)}
+                        >
+                          打开会话
+                        </button>
+                      )}
+                    </div>
+                  )}
+                  <div ref={transcript} className="cron-transcript">
+                    <p className="cron-muted">
+                      {!run
+                        ? "尚无运行记录。"
+                        : run.sessionId
+                          ? "当前宿主不提供只读会话视图，以下按本次运行记录回退展示。"
+                          : "这次运行没有绑定会话，以下按任务的提示词与实际输出回退展示，不是原生会话回放。"}
+                    </p>
+                    <div className="cron-transcript-row cron-transcript-user">
+                      <span>{definition.type === "prompt" ? "用户输入" : "命令"}</span>
+                      <pre>
+                        {definition.type === "prompt"
+                          ? (definition.prompt ?? "（本次运行的配置没有保存提示词）")
+                          : [definition.command, ...definition.args].join(" ")}
+                      </pre>
+                    </div>
+                    <div className="cron-transcript-row cron-transcript-agent">
+                      <span>{definition.type === "prompt" ? "Agent 输出" : "stdout"}</span>
+                      <pre>{outputText}</pre>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          ) : (
+            <pre ref={output} className="cron-output">
+              {outputText}
+            </pre>
+          )}
           {run?.reason && <div className="cron-log-note">{run.reason}</div>}
           {(logInfo.truncated || logInfo.clipped) && (
             <div className="cron-log-note">

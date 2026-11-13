@@ -173,6 +173,22 @@ export function parseTasks(
       !args.every((arg) => typeof arg === "string" && !arg.includes("\0"))
     )
       throw new Error(id + ": args 必须是字符串数组");
+    const allowConcurrent = boolean(
+      row.allowConcurrent,
+      id + ".allowConcurrent",
+      defaultConcurrency,
+    );
+    const reuseSession = boolean(
+      row.reuseSession,
+      id + ".reuseSession",
+      false,
+    );
+    // Reuse is a prompt-only promise: a script has no scheduler-owned agent session, and a reused
+    // session is exclusive so it cannot also allow overlapping runs.
+    if (reuseSession && row.type === "script")
+      throw new Error(id + ": reuseSession 仅适用于 prompt 任务");
+    if (reuseSession && allowConcurrent)
+      throw new Error(id + ": reuseSession 不能与 allowConcurrent 同时开启");
     const result: SchedulerTask = {
       id,
       name: text(row.name, id + ".name", id),
@@ -180,11 +196,9 @@ export function parseTasks(
       enabled: boolean(row.enabled, id + ".enabled", true),
       cron,
       timezone: taskTimezone,
-      allowConcurrent: boolean(
-        row.allowConcurrent,
-        id + ".allowConcurrent",
-        defaultConcurrency,
-      ),
+      allowConcurrent,
+      // Omitted when false so older JSON and existing snapshots stay byte-compatible.
+      ...(reuseSession ? { reuseSession: true } : {}),
       timeoutSeconds: integer(
         row.timeoutSeconds,
         id + ".timeoutSeconds",

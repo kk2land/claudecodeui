@@ -96,11 +96,13 @@ export type SchedulerHost = {
   /**
    * Optional host capability that renders the app's read-only session transcript into a DOM
    * container the plugin owns. Absent on hosts that cannot show live output, in which case the
-   * detail must say so rather than fetching or polling a transcript of its own.
+   * detail must say so rather than fetching or polling a transcript of its own. Passing
+   * `pollIntervalMs` asks the host to re-read the persisted transcript on that cadence, which is
+   * the only live source for a CLI-owned session.
    */
   mountSessionOutput?(
     container: HTMLElement,
-    options: { sessionId: string },
+    options: { sessionId: string; pollIntervalMs?: number },
   ): () => void;
   /** Optional host capability that opens the writable session, where input is allowed. */
   openSession?(sessionId: string): void;

@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { SchedulerStore } from "../server/store.js";
+import { fakeScheduledHost } from "./host-fixture.js";
 import { ProjectScheduler } from "../server/scheduler.js";
 
 test("script AGENT_EXEC invokes the configured provider and model and returns readable stdout", async (t) => {
@@ -58,7 +59,7 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   const store = new SchedulerStore(path.join(root, "data"));
   // Saved settings must reach the script and the AGENT_EXEC child it spawns.
   store.saveSettings({ ...store.settings(), env: { GLOBAL_AGENT_EXEC: "shared" } });
-  const scheduler = new ProjectScheduler(store, catalog);
+  const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
   t.after(async () => {
     await scheduler.close();
     store.close();
@@ -98,6 +99,8 @@ test("run usage aggregates prompt and every script AGENT_EXEC invocation", async
       "#!/usr/bin/env node\nconst prompt=require('fs').readFileSync(0,'utf8');",
       // Each fake model call reports one completed turn with a prompt-specific figure.
       "const n=prompt.includes('second')?20:10;",
+      // Persistent prompt runs must report the verified thread id; the script path ignores it.
+      "console.log(JSON.stringify({type:'thread.started',thread_id:'native-'+n}));",
       "console.log(JSON.stringify({type:'item.completed',item:{id:'answer',type:'agent_message',text:JSON.stringify({status:'success',summary:'任务与用量统计完成'})}}));",
       "console.log(JSON.stringify({type:'turn.completed',usage:{input_tokens:n,output_tokens:n/10,cached_input_tokens:n/2}}));",
       "process.stdout.write('answer '+prompt+'\\n');",
@@ -157,7 +160,7 @@ test("run usage aggregates prompt and every script AGENT_EXEC invocation", async
   const previous = process.env.CLOUDCLI_HOST_ROOT;
   process.env.CLOUDCLI_HOST_ROOT = root;
   const store = new SchedulerStore(path.join(root, "data"));
-  const scheduler = new ProjectScheduler(store, catalog);
+  const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
   t.after(async () => {
     await scheduler.close();
     store.close();

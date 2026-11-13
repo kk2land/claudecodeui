@@ -1,5 +1,6 @@
 import { isAppendSurfaceEvent } from '@deepseek-ai/dsh-session/surface';
 
+import { sessionsDb } from '@/modules/database/index.js';
 import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
 import { DshSessionStore } from '@/modules/providers/list/dsh/dsh-session-store.provider.js';
 import type { IProviderSessions } from '@/shared/interfaces.js';
@@ -13,7 +14,17 @@ export class DshSessionsProvider implements IProviderSessions {
   normalizeMessage(raw: unknown, sessionId: string | null) { return this.events.normalize(raw, sessionId); }
 
   async fetchHistory(sessionId: string, options: FetchHistoryOptions = {}): Promise<FetchHistoryResult> {
-    const log = await this.store.find(options.providerSessionId ?? sessionId);
+    const session = sessionsDb.getSessionById(sessionId);
+    const expectedId = options.providerSessionId ?? session?.provider_session_id ?? sessionId;
+    // A scheduled task may run with its own DSH home, so the configured root need not contain the
+    // transcript. The host's indexed path is authoritative for that session; the store still
+    // verifies the native header and follows the newest generation in the directory.
+    const indexedPath = session?.jsonl_path;
+    // An indexed conversation must not fall back to a scan of another (host-default) root: that
+    // could serve a different native file for the same id after a task's home changed.
+    const log = indexedPath
+      ? await this.store.readIndexed(indexedPath, expectedId).catch(() => null)
+      : await this.store.find(expectedId);
     const offset = Math.max(0, options.offset ?? 0);
     const limit = options.limit == null ? null : Math.max(0, options.limit);
     if (!log) return { messages: [], total: 0, hasMore: false, limit, offset };

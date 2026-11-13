@@ -47,6 +47,8 @@ process.on(
     type: string;
     task?: SchedulerTask;
     directory?: string;
+    /** Prompt tasks only: the app session and run reserved by the host before this spawn. */
+    session?: { executionId: string; resumeNativeSessionId: string | null };
   }) => {
     if (message.type === "stop") {
       stop();
@@ -124,7 +126,10 @@ process.on(
         reason?: string;
         taskResult?: SchedulerTaskResult;
       };
-      if (task.type === "prompt")
+      if (task.type === "prompt") {
+        // Every prompt run persists its native session; only a host-approved reuse resumes one.
+        const session = message.session;
+        if (!session) throw new Error("提示词任务缺少宿主会话准备");
         result = await runAgent(
           task.agent,
           task.prompt!,
@@ -138,9 +143,24 @@ process.on(
             child: onChild,
             usage: publishUsage,
           },
-          { requireTaskResult: true },
+          {
+            requireTaskResult: true,
+            persistNativeSession: true,
+            ...(session.resumeNativeSessionId
+              ? { resumeNativeSessionId: session.resumeNativeSessionId }
+              : {}),
+            // The plugin owns host IPC; the worker only reports the id it verified.
+            onNativeSession: (nativeSessionId) => {
+              if (process.connected)
+                process.send?.({
+                  type: "native",
+                  executionId: session.executionId,
+                  nativeSessionId,
+                });
+            },
+          },
         );
-      else {
+      } else {
         onChild(
           spawn(task.command!, task.args, {
             cwd: task.cwd,

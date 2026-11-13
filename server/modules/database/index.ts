@@ -28,6 +28,9 @@ export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
 export { residentBindingsDb } from '@/modules/database/repositories/resident-bindings.db.js';
 // stageLogsDb: used only by the project-scheduler host module's stage log service.
 export { stageLogsDb } from '@/modules/database/repositories/stage-logs.db.js';
+// scheduledTaskSessionsDb: the project-scheduler host module binds scheduled prompt-task
+// sessions; the sessions repository reads the same table for deletion protection.
+export { scheduledTaskSessionsDb } from '@/modules/database/repositories/scheduled-task-sessions.db.js';
 export type { ResidentBindingRecord } from '@/modules/database/repositories/resident-bindings.db.js';
 export { sessionRuntimeDb } from '@/modules/database/repositories/session-runtime.db.js';
 export { userDb } from '@/modules/database/repositories/users.js';

@@ -1054,6 +1054,17 @@ async function handleChatAbort(
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
     return;
   }
+  // A scheduled prompt CLI run belongs to its plugin process, not to this
+  // runtime: there is no native instance for `abort` to reach, so a foreground
+  // Stop would report success while the CLI kept running. Refuse before any
+  // queue hold or abort side effect; only the scheduler's own stop ends it.
+  if (chatRunRegistry.isExternalRun(sessionId)) {
+    sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId, ok: false,
+      code: 'EXTERNAL_RUN',
+      error: 'This session is running a scheduled task. Stop it from the scheduled tasks panel.',
+      codexState: state });
+    return;
+  }
   // A resident task must stay stopped whichever configured Codex runtime it
   // uses: the persisted queue hold is the same flag the dispatcher honours, so
   // a foreground Stop on an exec session holds it exactly like app-server.
@@ -1307,6 +1318,11 @@ export async function runDetachedChatTurn(
   const activePhase = dshState
     ? ['starting', 'stopping', 'stopFailed'].includes(dshState.phase)
     : ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
+  // A scheduled prompt CLI run is owned by its plugin process, not this runtime:
+  // no detached write may interrupt it, not even a scheduled message's timer.
+  if (activeRun?.status === 'running' && chatRunRegistry.isExternalRun(input.sessionId)) {
+    return { started: false, error: 'A scheduled task run is in progress for this session.' };
+  }
   if (activeRun?.status === 'running' || nativeState?.goal?.status === 'active' || activePhase) {
     if (!input.interruptActiveRun) {
       return { started: false, error: 'A run was already in progress for this session.' };

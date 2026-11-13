@@ -2441,6 +2441,24 @@ export type ResidentBindingRecord = {
 };
 
 /**
+ * One scheduled prompt-task session binding. `cwd` is the effective run directory and
+ * `createdAt` is host-issued; provider and provider-native id are joined from `sessions`.
+ */
+export type ScheduledTaskSessionRecord = {
+  projectId: string;
+  taskId: string;
+  sessionId: string;
+  cwd: string;
+  createdAt: string;
+};
+
+/** A scheduled task session binding resolved with the route needed to resume it. */
+export type ScheduledTaskSessionLookup = ScheduledTaskSessionRecord & {
+  provider: string;
+  providerSessionId: string;
+};
+
+/**
  * Host-facing subset of the bundled project-scheduler plugin's resident protocol: the single
  * typed IPC channel, the binding/terminal views the host module owns, and the session projection
  * metadata it attaches. The source of truth remains
@@ -2475,6 +2493,7 @@ export type {
   ResidentStopCause,
   ResidentTaskStatus,
   ResidentTerminal,
+  SchedulerAgent,
 } from '../../plugins/project-scheduler/shared/contracts.js';
 
 export {

@@ -1560,3 +1560,143 @@ test("DOM: prompt reports and unconfirmed results remain distinct from a zero ex
     });
   }
 });
+
+// --------------------------- reuse-session task flag ---------------------------
+
+const REUSE_CONFIG = JSON.stringify(
+  {
+    version: 1,
+    unknownTopLevel: { keep: ["me", 1] },
+    tasks: [
+      {
+        id: "script-task",
+        name: "Script",
+        type: "script",
+        cron: "0 0 9 * * *",
+        command: "bash",
+        args: ["-lc", "echo hi"],
+        unknownTaskField: "keep-me",
+      },
+      {
+        id: "prompt-task",
+        name: "Prompt",
+        type: "prompt",
+        cron: "0 0 9 * * *",
+        prompt: "状态",
+        allowConcurrent: true,
+        unknownPromptField: ["keep", 2],
+      },
+    ],
+  },
+  null,
+  2,
+);
+
+async function openConfigEditor(config: string) {
+  const mounted = await mountPlugin({
+    config: {
+      project: { id: "project-a", name: "项目 A", path: "/tmp/project-a" },
+      text: config,
+      revision: "rev-1",
+      exists: true,
+    },
+  });
+  const root = mounted.container;
+  await waitFor(() => Boolean(findButton(root, "编辑任务")), "任务列表");
+  button(root, "编辑任务").click();
+  await waitFor(() => Boolean(byLabel(root, "任务名称")), "编辑器打开");
+  return { mounted, root };
+}
+function savedTasks(mounted: Mounted): Record<string, unknown> {
+  const save = callsTo(mounted, "/configuration/save").at(-1)!;
+  return JSON.parse((save.body as { text: string }).text) as Record<string, unknown>;
+}
+
+test("DOM: reuse-session is prompt-only and writes concurrency off in the same draft", async () => {
+  const { mounted, root } = await openConfigEditor(REUSE_CONFIG);
+  try {
+    // The script task is selected first; it cannot reuse a session, so it has no such control.
+    assert.equal(byLabel(root, "复用同一会话"), null);
+
+    button(root, "Prompt").click();
+    await waitFor(() => Boolean(byLabel(root, "复用同一会话")), "提示词任务显示复用开关");
+    const reuse = byLabel(root, "复用同一会话") as HTMLInputElement;
+    assert.equal(reuse.checked, false);
+    const concurrent = byLabel(root, "任务 allowConcurrent") as HTMLSelectElement;
+    assert.equal(concurrent.disabled, false);
+    assert.equal(concurrent.value, "true");
+
+    reuse.click();
+    await waitFor(
+      () => (byLabel(root, "任务 allowConcurrent") as HTMLSelectElement).value === "false",
+      "开启复用后并发写成 false",
+    );
+    const locked = byLabel(root, "任务 allowConcurrent") as HTMLSelectElement;
+    assert.equal(locked.disabled, true);
+    assert.match(textOf(root), /复用同一会话时固定为禁止并发/);
+    // The explanation names the protection that outlives the flag and the task's enabled state.
+    assert.match(textOf(root), /任务删除前该会话不能被删除/);
+    assert.match(textOf(root), /停用任务或关闭复用/);
+
+    await waitFor(() => !button(root, "保存并装载").disabled, "保存可用");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "一次保存");
+    const saved = savedTasks(mounted);
+    const tasks = saved.tasks as Array<Record<string, unknown>>;
+    assert.equal(tasks[1]!.reuseSession, true);
+    assert.equal(tasks[1]!.allowConcurrent, false);
+    // Only the two intended keys changed: unknown authored fields survive on the edited task, the
+    // untouched script task is identical, and the document header is preserved.
+    assert.deepEqual(tasks[1]!.unknownPromptField, ["keep", 2]);
+    assert.deepEqual(tasks[0], (JSON.parse(REUSE_CONFIG) as { tasks: unknown[] }).tasks[0]);
+    assert.deepEqual(saved.unknownTopLevel, { keep: ["me", 1] });
+    // The project file never carries a session id.
+    assert.equal(JSON.stringify(saved).includes("sessionId"), false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: switching a reuse task to script clears only the reuse flag", async () => {
+  const config = JSON.stringify(
+    {
+      version: 1,
+      tasks: [
+        {
+          id: "prompt-task",
+          name: "Prompt",
+          type: "prompt",
+          cron: "0 0 9 * * *",
+          prompt: "状态",
+          allowConcurrent: false,
+          reuseSession: true,
+          unknownPromptField: ["keep", 2],
+        },
+      ],
+    },
+    null,
+    2,
+  );
+  const { mounted, root } = await openConfigEditor(config);
+  try {
+    const reuse = byLabel(root, "复用同一会话") as HTMLInputElement;
+    assert.equal(reuse.checked, true);
+    assert.equal((byLabel(root, "任务 allowConcurrent") as HTMLSelectElement).disabled, true);
+
+    await selectValue(byLabel(root, "任务类型") as HTMLSelectElement, "script");
+    // The flag is prompt-only, so the control leaves the form with the prompt fields.
+    await waitFor(() => byLabel(root, "复用同一会话") === null, "脚本任务不再显示复用开关");
+
+    await waitFor(() => !button(root, "保存并装载").disabled, "保存可用");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "一次保存");
+    const task = (savedTasks(mounted).tasks as Array<Record<string, unknown>>)[0]!;
+    assert.equal(task.type, "script");
+    assert.equal("reuseSession" in task, false);
+    // Clearing the known flag does not rewrite anything else.
+    assert.equal(task.allowConcurrent, false);
+    assert.deepEqual(task.unknownPromptField, ["keep", 2]);
+  } finally {
+    mounted.unmount();
+  }
+});

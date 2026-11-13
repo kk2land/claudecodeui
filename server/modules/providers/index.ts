@@ -34,6 +34,10 @@ export { reapOrphanedOpenCodeServers } from './list/opencode/opencode-runtime.pr
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 
+// resolveDshTranscript: used by the project-scheduler host to map a scheduled DSH run's
+// native id and indexed transcript to the generation native history actually serves.
+export { resolveDshTranscript } from './list/dsh/dsh-session-store.provider.js';
+
 
 // setCodexWorkerBridge: used by the server composition root to inject Worker
 // lifecycle callbacks without providers importing the workers module.

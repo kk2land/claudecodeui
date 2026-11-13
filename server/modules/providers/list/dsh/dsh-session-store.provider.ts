@@ -7,6 +7,16 @@ import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-confi
 import type { DshSessionLog } from '@/shared/types.js';
 import { sanitizeLeafDirectoryName } from '@/shared/utils.js';
 
+const DSH_SESSION_LOG_PATTERN = /^session(?:\.v[1-9]\d*)?\.jsonl(?:\.zstd)?$/;
+
+/** Newest committed generation first; historical generations stay on disk but are not served. */
+function newestGenerations<T extends { name: string }>(entries: T[]): T[] {
+  const logs = entries.filter((entry) => DSH_SESSION_LOG_PATTERN.test(entry.name));
+  return logs.sort(
+    (a, b) => Number(b.name.match(/\.v(\d+)/)?.[1] ?? 0) - Number(a.name.match(/\.v(\d+)/)?.[1] ?? 0),
+  );
+}
+
 /** Read-only native DSH history access used by sessions, models, and indexing. */
 export class DshSessionStore {
   constructor(private readonly configuration: DshConfigurationProvider) {}
@@ -19,11 +29,10 @@ export class DshSessionStore {
         if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
         throw error;
       }
-      const logs = entries.filter((entry) => entry.isFile() && /^session(?:\.v[1-9]\d*)?\.jsonl(?:\.zstd)?$/.test(entry.name));
       // Retain only the newest committed generation; historical generations
       // remain next to it and must not be indexed as duplicate conversations.
-      logs.sort((a, b) => Number(b.name.match(/\.v(\d+)/)?.[1] ?? 0) - Number(a.name.match(/\.v(\d+)/)?.[1] ?? 0));
-      if (logs[0]) files.push(path.join(directory, logs[0].name));
+      const [latest] = newestGenerations(entries.filter((entry) => entry.isFile()));
+      if (latest) files.push(path.join(directory, latest.name));
       if (depth < 2) for (const entry of entries) if (entry.isDirectory()) await walk(path.join(directory, entry.name), depth + 1);
     };
     await walk(this.configuration.sessionsRoot, 0);
@@ -45,6 +54,31 @@ export class DshSessionStore {
     const target = await realpath(filePath);
     const relative = path.relative(root, target);
     if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) throw new Error('DSH transcript is outside its configured root.');
+    return this.decode(target);
+  }
+
+  /**
+   * Reads the newest committed generation of an indexed conversation even when its directory is
+   * outside the currently configured root: a scheduled task may run with its own DSH home. The
+   * header id is still the identity check, so a wrong or compressed file cannot be served as the
+   * requested conversation. Used by native history; the directory comes from the host's own
+   * session row, never from a caller-supplied transcript path.
+   */
+  async readIndexed(filePath: string, expectedId: string): Promise<DshSessionLog | null> {
+    const target = await realpath(filePath);
+    const directory = path.dirname(target);
+    const entries = await readdir(directory, { withFileTypes: true });
+    const [latest] = newestGenerations(entries.filter((entry) => entry.isFile()));
+    if (!latest) return null;
+    try {
+      const log = await this.decode(await realpath(path.join(directory, latest.name)));
+      return log.header.id === expectedId ? log : null;
+    } catch {
+      return null;
+    }
+  }
+
+  private async decode(target: string): Promise<DshSessionLog> {
     const info = await stat(target);
     if (info.size > 256 * 1024 * 1024) throw new Error('DSH transcript exceeds the 256 MiB reader limit.');
     let bytes = await readFile(target);
@@ -110,4 +144,37 @@ export class DshSessionStore {
     }
     return frames;
   }
+}
+
+/**
+ * Resolves a scheduled DSH run's native id to the generation its history reader will serve.
+ *
+ * Used by the project-scheduler host to map `session.jsonl_path` at attach time. It reuses the
+ * store's own generation selection, root containment, decompression and header validation instead
+ * of duplicating the DSH file format. An optional indexed file narrows the search to its directory,
+ * which is how a resumed run follows a compaction from `session.vN` to `session.vN+1`.
+ */
+export async function resolveDshTranscript(input: {
+  sessionsRoot: string;
+  nativeSessionId: string;
+  filePath?: string;
+}): Promise<string | null> {
+  const configuration = new DshConfigurationProvider({
+    CLOUDCLI_DSH_SESSIONS_DIR: input.sessionsRoot,
+  });
+  const store = new DshSessionStore(configuration);
+  const root = await realpath(input.sessionsRoot);
+  if (input.filePath) {
+    const target = await realpath(input.filePath);
+    const relative = path.relative(root, target);
+    if (!relative || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return null;
+    const log = await store.readIndexed(target, input.nativeSessionId);
+    return log?.filePath ?? null;
+  }
+  for (const file of await store.files()) {
+    if (path.basename(path.dirname(file)) !== input.nativeSessionId) continue;
+    const log = await store.read(file);
+    if (log.header.id === input.nativeSessionId) return log.filePath;
+  }
+  return null;
 }
