@@ -108,3 +108,47 @@ test('retired provider rows stay in storage without affecting visible pages or t
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('the superseded-session reason migration keeps populated legacy rows as edits', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'superseded-reason-db-'));
+  const previous = process.env.DATABASE_PATH;
+  closeConnection(); process.env.DATABASE_PATH = path.join(root, 'auth.db');
+  try {
+    await initializeDatabase();
+    const db = getConnection();
+    // A row written before clearing context existed: no reason column at all.
+    db.exec(`DROP TABLE superseded_provider_sessions;
+      CREATE TABLE superseded_provider_sessions (
+        provider_session_id TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        session_id TEXT NOT NULL,
+        jsonl_path TEXT,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        PRIMARY KEY (provider_session_id, provider));
+      CREATE INDEX idx_superseded_legacy_path ON superseded_provider_sessions(jsonl_path);
+      INSERT INTO superseded_provider_sessions(provider_session_id, provider, session_id, jsonl_path)
+      VALUES('native-old','claude','session-1','/transcripts/old.jsonl');`);
+
+    runMigrations(db);
+    runMigrations(db);
+
+    assert.deepEqual(
+      db.prepare('SELECT provider_session_id, session_id, jsonl_path, reason FROM superseded_provider_sessions').all(),
+      [{ provider_session_id: 'native-old', session_id: 'session-1', jsonl_path: '/transcripts/old.jsonl', reason: 'edit' }],
+      'a legacy row is preserved and reads as an edit',
+    );
+    assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_superseded_legacy_path'").get(), 'the legacy index survives');
+    db.prepare(`INSERT INTO superseded_provider_sessions(provider_session_id, provider, session_id, jsonl_path, reason)
+      VALUES('native-cleared','claude','session-1','/transcripts/old.jsonl','context_cleared')`).run();
+    assert.deepEqual(
+      db.prepare('SELECT reason FROM superseded_provider_sessions ORDER BY provider_session_id').all(),
+      [{ reason: 'context_cleared' }, { reason: 'edit' }],
+      'the additive column keeps both reasons side by side',
+    );
+  } finally {
+    closeConnection();
+    if (previous === undefined) delete process.env.DATABASE_PATH;
+    else process.env.DATABASE_PATH = previous;
+    await rm(root, { recursive: true, force: true });
+  }
+});

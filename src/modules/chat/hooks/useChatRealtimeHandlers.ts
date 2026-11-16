@@ -384,13 +384,13 @@ export function useChatRealtimeHandlers({
             // may describe a genuinely running main turn and keep it busy.
             // Every other refusal ends this send's optimistic processing, as
             // before. A refused stop request is not about the run: the task
-            // had already settled, and idling here would drop a response in
-            // flight on that session.
+            // had already settled or could not be stopped, and idling here
+            // would drop a response in flight on that session.
             const fallbackBusy = protocolCode === 'QUEUE_LIMIT_REACHED' || protocolCode === 'CONTENT_REQUIRED';
             if (
               !reportNativeState()
               && !fallbackBusy
-              && !['NO_SUCH_TASK', 'TASK_ID_REQUIRED', 'RUN_IN_PROGRESS', 'NO_ACTIVE_RUN'].includes(protocolCode)
+              && !['NO_SUCH_TASK', 'TASK_ID_REQUIRED', 'TASK_STOP_FAILED', 'RUN_IN_PROGRESS', 'NO_ACTIVE_RUN'].includes(protocolCode)
             ) {
               onSessionIdle?.(sid);
             }

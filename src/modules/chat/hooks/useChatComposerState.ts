@@ -108,6 +108,8 @@ type UseChatComposerStateArgs = {
   onSessionEstablished?: (sessionId: string, context: SessionEstablishedContext) => void;
   onFileOpen?: (filePath: string, diffInfo?: unknown) => void;
   onShowSettings?: () => void;
+  /** Runs the `/clear` command: clears the open session's context. */
+  onClearContext?: () => void;
   scrollToBottom: () => void;
   addMessage: (msg: ChatMessage) => void;
   setIsUserScrolledUp: (isScrolledUp: boolean) => void;
@@ -343,6 +345,7 @@ export function useChatComposerState({
   onSessionEstablished,
   onFileOpen,
   onShowSettings,
+  onClearContext,
   scrollToBottom,
   addMessage,
   setIsUserScrolledUp,
@@ -606,11 +609,15 @@ export function useChatComposerState({
           onShowSettings?.();
           break;
 
+        case 'clear':
+          onClearContext?.();
+          break;
+
         default:
           console.warn('Unknown built-in command action:', action);
       }
     },
-    [onFileOpen, onShowSettings, addMessage],
+    [onClearContext, onFileOpen, onShowSettings, addMessage],
   );
 
   const closeCommandModal = useCallback(() => {
@@ -803,10 +810,40 @@ export function useChatComposerState({
    * its queue untouched. Used after a send, queue or successful todo save.
    */
   const clearComposerDraft = useCallback((scope: string | null) => {
-    draftMetaRef.current = null;
-    setDraftMetaState({ scope, meta: null });
+    // Only the composer actually open for this scope owns the ref and the
+    // rendered meta; a scope switched away from is cleared in the store alone,
+    // so a background send cannot empty the chat opened since.
+    if (!scope || scope === draftScopeRef.current) {
+      draftMetaRef.current = null;
+      setDraftMetaState({ scope, meta: null });
+    }
     if (scope) clearDraftInput(scope);
   }, []);
+
+  /**
+   * Clears the draft another chat sent from while it was not the open composer:
+   * its text only while it still holds what was sent, and its todo sources only
+   * while they are still the ones that send carried. Text typed or sources
+   * added since in that chat stay, and the open composer is never touched.
+   */
+  const clearSubmittedDraftInput = useCallback(
+    (scope: string, submitted: { text: string; todoIds: string[]; attachments: ChatAttachment[] }) => {
+      if (readDraftText(scope) === submitted.text) {
+        writeDraftText(scope, '');
+      }
+      const meta = readDraftMeta(scope);
+      if (!meta) return;
+      // Stored descriptors carry no id: the values that identify one are its
+      // own fields, so the submitted set is compared as those serialized values.
+      const submittedAttachments = new Set(submitted.attachments.map((attachment) => JSON.stringify(attachment)));
+      const unchanged = meta.todoIds.every((id) => submitted.todoIds.includes(id))
+        && meta.attachments.every((attachment) => submittedAttachments.has(JSON.stringify(attachment)));
+      if (unchanged) {
+        writeDraftMeta(scope, null);
+      }
+    },
+    [],
+  );
 
   /** Removes one copied todo attachment from the draft, dropping the source when nothing is left. */
   const removeStoredTodoAttachment = useCallback((index: number) => {
@@ -1158,7 +1195,20 @@ export function useChatComposerState({
   // while editing a sent message must not leave `editingAnchorId` set over
   // the now-empty composer, which previously turned the next plain send into
   // a `chat.edit-send` that replaced the edited turn and everything after it.
-  const clearComposerAfterSideQuestion = useCallback(() => {
+  //
+  // `scope` is the chat the question was typed in: a send that waited for an
+  // upload can be answered from the background-work dialog after a chat
+  // switch, and the chat open by then keeps its text. The chat left keeps text edited since, too.
+  const clearComposerAfterSideQuestion = useCallback((text: string, scope: string | null = draftScopeRef.current) => {
+    if (scope !== draftScopeRef.current) {
+      if (scope && readDraftText(scope) === text) {
+        writeDraftText(scope, '');
+      }
+      return;
+    }
+    if (scope) {
+      writeDraftText(scope, '');
+    }
     setInput('');
     inputValueRef.current = '';
     setEditingAnchorId(null);
@@ -1166,9 +1216,6 @@ export function useChatComposerState({
     setIsTextareaExpanded(false);
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto';
-    }
-    if (draftScopeRef.current) {
-      writeDraftText(draftScopeRef.current, '');
     }
   }, [resetCommandMenuState, setInput]);
 
@@ -1178,7 +1225,7 @@ export function useChatComposerState({
   // refuse the same way when there is nothing to ask it on — no connection,
   // no provider support, or (a brand-new chat) no session yet.
   const askSideQuestionAndClear = useCallback(
-    (sessionId: string | null, text: string) => {
+    (sessionId: string | null, text: string, scope?: string | null) => {
       if (!supportsSideQuestions) {
         addMessage({
           type: 'error',
@@ -1196,7 +1243,7 @@ export function useChatComposerState({
         return;
       }
       if (askSideQuestion(sessionId, text, { model: currentProviderModel }, isConnected)) {
-        clearComposerAfterSideQuestion();
+        clearComposerAfterSideQuestion(text, scope);
       }
     },
     [addMessage, askSideQuestion, clearComposerAfterSideQuestion, currentProviderModel, isConnected, supportsSideQuestions, t],
@@ -1213,7 +1260,15 @@ export function useChatComposerState({
   // ordered queue. Used while a turn is in flight and when the user chooses to
   // queue behind background work. Attachments must already be uploaded.
   const queueMessage = useCallback(
-    (draft: QueuedDraft, queuedSessionKey: string | null, { fromComposer = true } = {}): boolean => {
+    (
+      draft: QueuedDraft,
+      queuedSessionKey: string | null,
+      { fromComposer = true, submittedTodoIds = [], submittedAttachments = [] }: {
+        fromComposer?: boolean;
+        submittedTodoIds?: string[];
+        submittedAttachments?: ChatAttachment[];
+      } = {},
+    ): boolean => {
       // Reuse one ticket across the synchronous write, UI state and persistence effect.
       const durableDraft = { ...draft, id: draft.id ?? createUuid() };
       if (queuedSessionKey) {
@@ -1231,10 +1286,19 @@ export function useChatComposerState({
           // the composer: nothing was queued, so nothing may be cleared.
           if (error instanceof QueueLimitError) {
             addMessage({ type: 'error', content: queueFullMessage, timestamp: new Date() });
+            // The queue write happens after the upload took this message's
+            // files out of the composer; a refused message brings them back.
+            setAttachedFiles((files) => [...durableDraft.attachments, ...files]);
             return false;
           }
           throw error;
         }
+      }
+
+      // Attachments are not kept per chat: the queued ones leave even when
+      // another chat is open now, or a send from there would take them along.
+      if (fromComposer) {
+        setAttachedFiles((files) => files.filter((file) => !durableDraft.attachments.includes(file)));
       }
 
       // Recorded under the session the message was queued FOR, and before
@@ -1246,6 +1310,14 @@ export function useChatComposerState({
       // sessions during upload, the durable record is already enough; do
       // not attach its UI card to the newly opened composer.
       if (fromComposer && queuedSessionKey && sessionKeyRef.current !== queuedSessionKey) {
+        // The composer they left still holds the text and sources as its draft:
+        // clear what this message took, or going back and pressing Enter would
+        // queue it a second time.
+        clearSubmittedDraftInput(queuedSessionKey, {
+          text: durableDraft.content,
+          todoIds: submittedTodoIds,
+          attachments: submittedAttachments,
+        });
         return true;
       }
 
@@ -1264,7 +1336,6 @@ export function useChatComposerState({
       if (fromComposer) {
         setInput('');
         inputValueRef.current = '';
-        setAttachedFiles([]);
         setFileErrors(new Map());
         resetCommandMenuState();
         setIsTextareaExpanded(false);
@@ -1275,7 +1346,7 @@ export function useChatComposerState({
       }
       return true;
     },
-    [addMessage, clearComposerDraft, queueFullMessage, recordSentMessage, resetCommandMenuState, setInput],
+    [addMessage, clearComposerDraft, clearSubmittedDraftInput, queueFullMessage, recordSentMessage, resetCommandMenuState, setInput],
   );
 
   // Every change to the pending steers goes through here so the ref the
@@ -1313,11 +1384,12 @@ export function useChatComposerState({
         },
       });
       recordSentMessage(message.content, steerSessionKey);
+      // Attachments are not kept per chat: the steered ones leave even when another chat is open now.
+      setAttachedFiles((files) => files.filter((file) => !message.attachments.includes(file)));
 
       if (sessionKeyRef.current === steerSessionKey) {
         setInput('');
         inputValueRef.current = '';
-        setAttachedFiles([]);
         setFileErrors(new Map());
         resetCommandMenuState();
         setIsTextareaExpanded(false);
@@ -1472,6 +1544,9 @@ export function useChatComposerState({
       ) {
         return;
       }
+      // The chat this send belongs to: the upload and session allocation below can outlast a
+      // chat switch, and the cleanup at the end must not empty whichever chat is open by then.
+      const submittedScope = draftScopeRef.current;
 
       // A draft carrying todo sources treats its text as literal todo content:
       // leading slashes stay literal, and only the explicit final `/todo` line
@@ -1616,7 +1691,7 @@ export function useChatComposerState({
           attachments: currentAttachments,
           uploadedAttachments: mergedAttachments,
           options: queuedOptions,
-        }, queuedSessionKey);
+        }, queuedSessionKey, { submittedTodoIds: submissionTodoIds, submittedAttachments: draftStoredAttachments });
         return;
       }
 
@@ -1757,11 +1832,17 @@ export function useChatComposerState({
           .map((task) => describeBackgroundTask(task, t));
         const choice = submitOptions?.presetBackgroundChoice
           ?? await askBeforeSendingOverBackgroundWork(work, !editingAnchorId);
-        if (choice === 'cancel' || sessionKeyRef.current !== targetSessionId) {
+        if (choice === 'cancel') {
           return;
         }
+        // A side question belongs to the chat it was typed in, even one the
+        // user left during the upload; it never touches the open chat.
         if (choice === 'sideQuestion') {
-          askSideQuestionAndClear(targetSessionId, currentInput);
+          askSideQuestionAndClear(targetSessionId, currentInput, submittedScope);
+          return;
+        }
+        // Sending or queueing into a chat that is no longer open stops here.
+        if (sessionKeyRef.current !== targetSessionId) {
           return;
         }
         if (choice === 'queue') {
@@ -1785,7 +1866,7 @@ export function useChatComposerState({
             // `uploadedAttachments` already merged the draft's stored descriptors.
             uploadedAttachments,
             options: { ...buildSendOptions(currentInput, submissionTodoIds), ...(planTask ? { collaborationMode: 'plan' } : {}) },
-          }, targetSessionId);
+          }, targetSessionId, { submittedTodoIds: submissionTodoIds, submittedAttachments: draftStoredAttachments });
           return;
         }
       }
@@ -1860,17 +1941,36 @@ export function useChatComposerState({
         content: messageContent,
         options: sendOptions,
       });
-      setEditingAnchorId(null);
+      // Only this send's edit: an edit begun in another chat during the upload stays.
+      setEditingAnchorId((current) => (current === editingAnchorId ? null : current));
 
       // Recorded under the (possibly just-allocated) session id, so the first
       // message of a new chat lands in the history of the session the user is
       // navigated to. Queued drafts were recorded when they were queued; the
       // consecutive-duplicate check keeps this second call a no-op.
       recordSentMessage(currentInput, targetSessionId);
+      // Attachments are not kept per chat, so only the ones just sent go.
+      setAttachedFiles((files) => files.filter((file) => !currentAttachments.includes(file)));
+      // A brand-new chat moves from its project scope to its allocated session id meanwhile.
+      const stillOpen = draftScopeRef.current === submittedScope || draftScopeRef.current === targetSessionId;
+      if (!stillOpen) {
+        // The chat left keeps text the user went back and edited during the
+        // upload, and its sources, while they are still the ones sent.
+        if (submittedScope) {
+          clearSubmittedDraftInput(submittedScope, {
+            text: currentInput,
+            todoIds: submissionTodoIds,
+            attachments: draftStoredAttachments,
+          });
+        }
+        return;
+      }
+      if (submittedScope) {
+        writeDraftText(submittedScope, '');
+      }
       setInput('');
       inputValueRef.current = '';
       resetCommandMenuState();
-      setAttachedFiles([]);
       setFileErrors(new Map());
       setIsTextareaExpanded(false);
 

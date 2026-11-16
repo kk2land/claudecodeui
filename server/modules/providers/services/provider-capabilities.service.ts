@@ -80,6 +80,13 @@ type ProviderCapabilities = {
    * runtime it is configured with.
    */
   supportsResidentTasks: boolean;
+  /**
+   * Whether a session's context can be cleared: the next message starts a new
+   * provider session while the earlier conversation stays readable as history.
+   * Requires a history reader that can read a transcript the session row no
+   * longer points at, and an indexer that leaves such a transcript alone.
+   */
+  supportsContextClearing: boolean;
 };
 
 /**
@@ -112,6 +119,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // Resident tasks reuse a native app-server/DSH session; the Claude SDK has
     // no equivalent session the host could keep owning.
     supportsResidentTasks: false,
+    supportsContextClearing: true,
   },
   cursor: {
     provider: 'cursor',
@@ -129,6 +137,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsSideQuestions: false,
     supportsSteering: false,
     supportsResidentTasks: false,
+    supportsContextClearing: false,
   },
   codex: {
     provider: 'codex',
@@ -153,6 +162,9 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // Both existing runtimes (app-server and the exec/SDK adapter) resume a
     // persistent native thread, so either can stay resident.
     supportsResidentTasks: true,
+    // Codex's history reader only reads the thread the row points at, and its
+    // indexer owns that transcript, so an earlier context cannot be stitched.
+    supportsContextClearing: false,
   },
   dsh: {
     provider: 'dsh',
@@ -178,6 +190,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsSteering: false,
     // ACP and headless both expose a durable native session the host can resume.
     supportsResidentTasks: true,
+    supportsContextClearing: false,
   },
   opencode: {
     provider: 'opencode',
@@ -202,6 +215,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsSideQuestions: true,
     supportsSteering: false,
     supportsResidentTasks: false,
+    supportsContextClearing: false,
   },
 };
 

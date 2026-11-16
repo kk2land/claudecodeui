@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { CheckSquare, Plus, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { CheckSquare, ChevronRight, Plus, Trash2 } from 'lucide-react';
 import type { TFunction } from 'i18next';
 
 import { Button } from '@/shared/ui';
@@ -7,6 +7,10 @@ import { cn } from '@/shared/utils';
 import type { LLMProvider, Project, ProjectSession, SessionWithProvider, SidebarSessionSelection } from '@/shared/types';
 import SidebarSessionItem from '@/modules/sidebar/SidebarSessionItem';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
+import { buildProjectSessionTree } from '@/modules/sidebar/utils/projectSessionTree';
+
+const FORK_INDENT_PX = 12;
+const MAX_FORK_INDENT_DEPTH = 4;
 
 /** How many of a project's loaded sessions one page of the sidebar list shows. */
 const PROJECT_SESSIONS_PAGE_SIZE = 5;
@@ -144,13 +148,72 @@ export default function SidebarProjectSessions({
       pendingServerRevealRef.current = null;
     }
   }, [isLoadingMoreSessions, sessions.length]);
+  // The rows this project currently shows: the branch pages over what is
+  // already loaded before it asks the server for more.
+  const visibleSessions = useMemo(
+    () => sessions.slice(0, visibleSessionCount),
+    [sessions, visibleSessionCount],
+  );
+  // Fork grouping runs over the rows this project is showing: a page that ends
+  // in the middle of a branch simply renders its older rows as roots.
+  const treeRows = useMemo(() => buildProjectSessionTree(visibleSessions, project.projectId), [visibleSessions, project.projectId]);
+  const selectedSessionId = selectedSession?.id ?? null;
+  const targetAncestors = useMemo(() => {
+    const parents = new Map(treeRows.map((row) => [row.session.id, row.parentId]));
+    const reveal = new Set<string>();
+    for (const target of [selectedSessionId, sessionRenameId]) {
+      let parentId = target ? parents.get(target) : null;
+      while (parentId && !reveal.has(parentId)) {
+        reveal.add(parentId);
+        parentId = parents.get(parentId);
+      }
+    }
+    return reveal;
+  }, [treeRows, selectedSessionId, sessionRenameId]);
+  // Retain explicit branch collapses, while revealing a newly selected or renamed descendant.
+  const [forkTreeState, setForkTreeState] = useState(() => ({
+    targetAncestors, selectedSessionId, sessionRenameId, collapsedForks: new Set<string>(),
+  }));
+  const { collapsedForks } = forkTreeState;
+
+  // Reveal a newly selected/renamed fork before committing a hidden row. Later
+  // title/activity updates must not undo an explicit collapse by the user.
+  if (forkTreeState.selectedSessionId !== selectedSessionId
+    || forkTreeState.sessionRenameId !== sessionRenameId
+    || forkTreeState.targetAncestors.size !== targetAncestors.size
+    || [...targetAncestors].some((id) => !forkTreeState.targetAncestors.has(id))) {
+    setForkTreeState({
+      targetAncestors, selectedSessionId, sessionRenameId,
+      collapsedForks: new Set([...collapsedForks].filter((id) => !targetAncestors.has(id))),
+    });
+  }
+
+  const visibleRows = useMemo(() => {
+    let hiddenBelowDepth = Infinity;
+    const visible: (typeof treeRows[number] & { continuationDepths: number[] })[] = [];
+    const continuingAncestors = new Set<number>();
+    for (const row of treeRows) {
+      if (row.depth > hiddenBelowDepth) continue;
+      hiddenBelowDepth = row.hasChildren && collapsedForks.has(row.session.id) ? row.depth : Infinity;
+      // Keep sibling rails running through an expanded child's descendants.
+      // Only visible columns are retained, so a deep chain stays linear in size.
+      for (const depth of continuingAncestors) {
+        if (depth >= row.depth) continuingAncestors.delete(depth);
+      }
+      visible.push({ ...row, continuationDepths: [...continuingAncestors] });
+      if (row.depth > 0 && row.depth < MAX_FORK_INDENT_DEPTH && !row.isLastSibling) {
+        continuingAncestors.add(row.depth);
+      }
+    }
+    return visible;
+  }, [treeRows, collapsedForks]);
+  const hasForks = treeRows.some((row) => row.hasChildren);
 
   if (!isExpanded) {
     return null;
   }
 
   const hasSessions = sessions.length > 0;
-  const visibleSessions = sessions.slice(0, visibleSessionCount);
   // Loaded sessions the reveal window still hides; independent of the server.
   const hasHiddenSessions = sessions.length > visibleSessionCount;
   const isSelecting = selectedSessionIds !== null;
@@ -158,11 +221,11 @@ export default function SidebarProjectSessions({
   // row's options menu applies — so it is not selectable either.
   const isSessionRunning = (session: SessionWithProvider) =>
     activeSessions.has(session.id) && !backgroundSessionIds.has(session.id);
-  // Selection is scoped to the rows on screen: a bulk delete must never reach a
-  // session the pager hides, nor one the server has not sent yet.
-  const selectableSessionIds = visibleSessions
-    .filter((session) => !isSessionRunning(session))
-    .map((session) => session.id);
+  // Only rows on screen are selectable: a collapsed fork's descendants are
+  // hidden, so a bulk delete must not reach them.
+  const selectableSessionIds = visibleRows
+    .filter(({ session }) => !isSessionRunning(session))
+    .map(({ session }) => session.id);
   // Re-derived from the selectable rows rather than read straight off the
   // selection, so a row that started running after it was ticked drops out of
   // the count, the button and the ids the confirmation is opened with.
@@ -202,7 +265,7 @@ export default function SidebarProjectSessions({
   };
 
   return (
-    <div className="ml-3 space-y-1 border-l border-border pl-3">
+    <div className="ml-1.5 space-y-1 border-l border-border/70 pl-1.5">
       {isCompact ? (
         <div className="px-3 pb-1 pt-1">
           <button
@@ -297,33 +360,95 @@ export default function SidebarProjectSessions({
         </div>
       ) : (
         <>
-          {visibleSessions.map((session) => (
-            <SidebarSessionItem
-              key={session.id}
-              project={project}
-              session={session}
-              selectedSession={selectedSession}
-              isProcessing={isSessionRunning(session)}
-              hasBackgroundWork={backgroundSessionIds.has(session.id)}
-              needsAttention={attentionSessionIds.has(session.id)}
-              currentTime={currentTime}
-              onRenameDraftChange={onRenameDraftChange}
-              isEditing={session.id === sessionRenameId}
-              renameDraft={session.id === sessionRenameId ? sessionRenameDraft : ''}
-              onStartEditingSession={onStartEditingSession}
-              onCancelEditingSession={onCancelEditingSession}
-              onSaveEditingSession={onSaveEditingSession}
-              onProjectSelect={onProjectSelect}
-              onSessionSelect={onSessionSelect}
-              onArchiveSession={onArchiveSession}
-              onDeleteSession={onDeleteSession}
-              onForkSession={onForkSession}
-              isSelecting={isSelecting}
-              isChecked={checkedSessionIds.has(session.id)}
-              onToggleSessionSelected={onToggleSessionSelected}
-              t={t}
-            />
-          ))}
+          <div className={cn(!hasForks && 'space-y-1')} data-testid="project-session-tree">
+            {visibleRows.map(({ session, parentId, depth, hasChildren, isLastSibling, continuationDepths }) => (
+              <div
+                key={session.id}
+                data-session-id={session.id}
+                data-parent-session-id={parentId ?? undefined}
+                data-fork-depth={depth}
+                data-fork-branch={hasChildren || undefined}
+                className="relative flex min-w-0 items-stretch"
+                style={depth > 0 ? { paddingLeft: `${Math.min(depth, MAX_FORK_INDENT_DEPTH) * FORK_INDENT_PX}px` } : undefined}
+              >
+                {parentId && (
+                  <span
+                    aria-hidden="true"
+                    data-fork-connector={isLastSibling ? 'last' : 'branch'}
+                    className="pointer-events-none absolute inset-y-0"
+                    style={{ left: `${(Math.min(depth, MAX_FORK_INDENT_DEPTH) - 1) * FORK_INDENT_PX + FORK_INDENT_PX / 2}px`, width: `${FORK_INDENT_PX}px` }}
+                  >
+                    <span className={cn('absolute left-0 top-0 border-l border-muted-foreground/50', isLastSibling ? 'bottom-1/2' : 'bottom-0')} />
+                    <span className="absolute left-0 top-1/2 border-t border-muted-foreground/50" style={{ width: hasChildren ? '6px' : '12px' }} />
+                  </span>
+                )}
+                {continuationDepths.map((ancestorDepth) => (
+                  <span
+                    key={ancestorDepth}
+                    aria-hidden="true"
+                    data-fork-continuation={ancestorDepth}
+                    className="pointer-events-none absolute inset-y-0 border-l border-muted-foreground/50"
+                    style={{ left: `${(ancestorDepth - 1) * FORK_INDENT_PX + FORK_INDENT_PX / 2}px` }}
+                  />
+                ))}
+                {hasChildren && !collapsedForks.has(session.id) && (
+                  <span
+                    aria-hidden="true"
+                    data-fork-stem=""
+                    className="pointer-events-none absolute bottom-0 border-l border-muted-foreground/50"
+                    style={{ left: `${Math.min(depth, MAX_FORK_INDENT_DEPTH - 1) * FORK_INDENT_PX + FORK_INDENT_PX / 2}px`, top: 'calc(50% + 7px)' }}
+                  />
+                )}
+                {hasForks && (
+                  hasChildren ? (
+                    <button
+                      type="button"
+                      className="relative flex w-3 flex-shrink-0 items-center justify-center rounded text-foreground/70 hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                      aria-expanded={!collapsedForks.has(session.id)}
+                      aria-label={collapsedForks.has(session.id)
+                        ? t('sessions.expandForks', { session: session.summary || session.name || t('projects.newSession') })
+                        : t('sessions.collapseForks', { session: session.summary || session.name || t('projects.newSession') })}
+                      onClick={() => setForkTreeState((previous) => {
+                        const next = new Set(previous.collapsedForks);
+                        if (next.has(session.id)) next.delete(session.id);
+                        else next.add(session.id);
+                        return { ...previous, collapsedForks: next };
+                      })}
+                    >
+                      <ChevronRight className={cn('h-3 w-3 transition-transform', !collapsedForks.has(session.id) && 'rotate-90')} strokeWidth={2.5} aria-hidden="true" />
+                    </button>
+                  ) : <span className="w-3 flex-shrink-0" aria-hidden="true" />
+                )}
+                <div className="min-w-0 flex-1">
+                  <SidebarSessionItem
+                    project={project}
+                    session={session}
+                    selectedSession={selectedSession}
+                    isProcessing={isSessionRunning(session)}
+                    hasBackgroundWork={backgroundSessionIds.has(session.id)}
+                    needsAttention={attentionSessionIds.has(session.id)}
+                    currentTime={currentTime}
+                    onRenameDraftChange={onRenameDraftChange}
+                    isEditing={session.id === sessionRenameId}
+                    renameDraft={session.id === sessionRenameId ? sessionRenameDraft : ''}
+                    onStartEditingSession={onStartEditingSession}
+                    onCancelEditingSession={onCancelEditingSession}
+                    onSaveEditingSession={onSaveEditingSession}
+                    onProjectSelect={onProjectSelect}
+                    onSessionSelect={onSessionSelect}
+                    onArchiveSession={onArchiveSession}
+                    onDeleteSession={onDeleteSession}
+                    onForkSession={onForkSession}
+                    isSelecting={isSelecting}
+                    isChecked={checkedSessionIds.has(session.id)}
+                    onToggleSessionSelected={onToggleSessionSelected}
+                    treeRow={hasForks}
+                    t={t}
+                  />
+                </div>
+              </div>
+            ))}
+          </div>
 
           {/* One control for both stages: it reveals the next local page, then
               once every loaded row is on screen it asks the server for more.

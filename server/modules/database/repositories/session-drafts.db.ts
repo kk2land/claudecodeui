@@ -309,17 +309,20 @@ export const sessionDraftsDb = {
    * The claim token is the whole stored value, which makes a claim fail when
    * any part of the queue changed between listing and claiming. Retired
    * provider drafts remain stored and unclaimed.
+   *
+   * With a `sessionId` only that session's queue is listed, which is how an
+   * independent per-session dispatch pass picks its single candidate.
    */
-  listQueuedMessages(): QueuedSessionMessageRecord[] {
-    const rows = getConnection()
-      .prepare(
-        `SELECT drafts.user_id, drafts.draft_scope, drafts.queued_message
+  listQueuedMessages(sessionId?: string): QueuedSessionMessageRecord[] {
+    const sql = `SELECT drafts.user_id, drafts.draft_scope, drafts.queued_message
          FROM session_drafts AS drafts
          INNER JOIN sessions ON sessions.session_id = drafts.draft_scope
          WHERE drafts.queued_message IS NOT NULL AND drafts.queue_status = 'queued'
-           AND sessions.provider <> 'gptweb'`
-      )
-      .all() as QueuedMessageRow[];
+           AND sessions.provider <> 'gptweb'`;
+    const statement = getConnection().prepare(
+      sessionId === undefined ? sql : `${sql} AND drafts.draft_scope = ?`,
+    );
+    const rows = (sessionId === undefined ? statement.all() : statement.all(sessionId)) as QueuedMessageRow[];
 
     return rows.flatMap((row) => {
       const head = readQueuedMessages(row.queued_message)[0];

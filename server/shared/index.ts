@@ -18,6 +18,7 @@ export type {
   CodexComposerPredictionReason,
   CodexControlAction,
   CodexModelSelection,
+  ClearedContextSegment,
   CodexPredictionConfigResult,
   CodexPredictionConfiguration,
   CodexGoal,
