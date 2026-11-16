@@ -25,6 +25,9 @@ beforeEach(() => {
     const method = init?.method ?? 'GET';
     const body = typeof init?.body === 'string' ? JSON.parse(init.body) as Record<string, unknown> : {};
     const scope = String(body.scope ?? '');
+    if (path.endsWith('/api/commands/list')) {
+      return json({ builtIn: [{ name: '/help', description: 'Show help', namespace: 'builtin' }], custom: [] });
+    }
     if (path.endsWith('/api/user/drafts')) {
       if (method === 'GET') return json({ drafts: [...server].map(([scope, draft]) => ({ scope, ...draft })) });
       if (method === 'PUT') {
@@ -52,6 +55,7 @@ afterEach(() => {
 });
 
 const render = () => {
+  const sendMessage = vi.fn();
   const view = renderHook(({ session }: { session: ProjectSession }) => useChatComposerState({
     selectedProject: PROJECT,
     selectedSession: session,
@@ -65,7 +69,7 @@ const render = () => {
     isLoading: true,
     canAbortSession: true,
     tokenBudget: null,
-    sendMessage: () => undefined,
+    sendMessage,
     scrollToBottom: () => undefined,
     addMessage: () => undefined,
     setIsUserScrolledUp: () => undefined,
@@ -79,8 +83,62 @@ const render = () => {
     await act(async () => { await view.result.current.handleSubmit({ preventDefault: () => undefined } as never); });
     await waitFor(() => assert.equal(server.get('session-1')?.text, ''), { timeout: 5_000 });
   };
-  return { view, submit };
+  return { view, submit, sendMessage };
 };
+
+test.each([
+  { text: 'Please explain /help', ctrlKey: false, metaKey: false },
+  { text: 'Please inspect /', ctrlKey: false, metaKey: false },
+  { text: '/help', ctrlKey: false, metaKey: false },
+  { text: 'Please explain /help', ctrlKey: true, metaKey: false },
+  { text: 'Please explain /help', ctrlKey: false, metaKey: true },
+])('Enter queues the literal busy draft with the slash menu open: $text (Ctrl=$ctrlKey, Meta=$metaKey)', async ({ text, ctrlKey, metaKey }) => {
+  const { view, sendMessage } = render();
+  await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 2));
+  await act(async () => {
+    view.result.current.handleInputChange({
+      target: { value: text, selectionStart: text.length },
+    } as never);
+  });
+  assert.equal(view.result.current.showCommandMenu, true);
+
+  await act(async () => {
+    view.result.current.handleKeyDown({
+      key: 'Enter', ctrlKey, metaKey, shiftKey: false, altKey: false,
+      nativeEvent: { isComposing: false }, preventDefault: () => undefined,
+    } as never);
+  });
+
+  await waitFor(() => assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), [text]));
+  await waitFor(() => assert.deepEqual(server.get('session-1')?.queuedMessages.map(({ content }) => content), [text]));
+  assert.equal(view.result.current.input, '');
+  assert.equal(view.result.current.showCommandMenu, false);
+  assert.equal(sendMessage.mock.calls.length, 0);
+  assert.equal(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/commands/execute')), false);
+});
+
+test('Tab still completes a slash command while a turn is running', async () => {
+  const { view, sendMessage } = render();
+  await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 2));
+  const textarea = document.createElement('textarea');
+  textarea.value = '/he';
+  textarea.setSelectionRange(3, 3);
+  Object.assign(view.result.current.textareaRef, { current: textarea });
+  await act(async () => {
+    view.result.current.handleInputChange({ target: textarea } as never);
+  });
+  await act(async () => {
+    view.result.current.handleKeyDown({
+      key: 'Tab', nativeEvent: { isComposing: false }, preventDefault: () => undefined,
+    } as never);
+  });
+
+  assert.equal(view.result.current.input, '/help ');
+  assert.equal(view.result.current.showCommandMenu, false);
+  assert.deepEqual(view.result.current.queuedDrafts, []);
+  assert.equal(sendMessage.mock.calls.length, 0);
+  assert.equal(vi.mocked(fetch).mock.calls.some(([url]) => String(url).endsWith('/api/commands/execute')), false);
+});
 
 test('follow-ups A, B and C remain separate in both the cards and durable queue', async () => {
   const { view, submit } = render();

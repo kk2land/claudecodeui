@@ -2363,7 +2363,9 @@ export function useChatComposerState({
         }
       }
 
-      if (handleCommandMenuKeyDown(event)) {
+      // During a run, Enter must reach submitMessage so the whole draft is
+      // queued instead of executing a command suggested by an inline slash.
+      if ((event.key !== 'Enter' || !isLoading) && handleCommandMenuKeyDown(event)) {
         return;
       }
 
@@ -2431,6 +2433,7 @@ export function useChatComposerState({
       handleFileMentionsKeyDown,
       handleHistoryKeyDown,
       handleSubmit,
+      isLoading,
       sendByCtrlEnter,
       sessionKey,
       showCommandMenu,
