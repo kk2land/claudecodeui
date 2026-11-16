@@ -271,15 +271,15 @@ function ChatInterface({
         addMessage({ type: 'assistant', content: t('misc.clearContextEmpty'), timestamp: Date.now() });
         return;
       }
-      // The counter described the context that was just left behind.
-      setTokenBudget(null);
-      // Brings in the divider the server now ends the history with.
+      // Brings in the divider the server now ends the history with, and the
+      // cleared usage. The refresh is scoped to `sessionId`, so a clear that
+      // finishes after the user opened another chat leaves that chat's counter.
       await requestLatestMessages(sessionId, true);
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       addMessage({ type: 'error', content: t('misc.clearContextFailed', { message }), timestamp: Date.now() });
     }
-  }, [addMessage, currentSessionId, requestLatestMessages, selectedSession?.id, setTokenBudget, supportsContextClearing, t]);
+  }, [addMessage, currentSessionId, requestLatestMessages, selectedSession?.id, supportsContextClearing, t]);
 
   // The button asks first: unlike a typed `/clear`, a click can be a slip.
   const handleClearContextClick = useCallback(() => {

@@ -224,9 +224,33 @@ for (const [name, submitOptions] of [
   });
 }
 
+test('a queue that fills during the upload refuses without duplicating the kept file', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => undefined);
+  const { view } = renderComposer(SESSION_A, undefined, { isLoading: true });
+  const fileA = new File(['a'], 'a.txt');
+  await act(async () => {
+    for (const id of ['queued-1', 'queued-2']) {
+      writeQueuedMessage('session-a', { id, content: id, attachments: [] });
+    }
+    view.result.current.setInput('a fourth message');
+    view.result.current.setAttachedFiles([fileA]);
+  });
+  await act(async () => { void submit(view); });
+  // Another update fills the third slot while this message's upload is pending.
+  await act(async () => {
+    writeQueuedMessage('session-a', { id: 'queued-3', content: 'queued-3', attachments: [] });
+  });
+  await release(pendingUploads, { attachments: [{ path: '/store/asset-a.txt', name: 'asset-a.txt' }] });
+
+  assert.deepEqual(readQueuedMessages('session-a').map((message) => message.id), ['queued-1', 'queued-2', 'queued-3'],
+    'the refused message never joins the full queue');
+  assert.equal(view.result.current.input, 'a fourth message', 'the refused message keeps its text');
+  assert.deepEqual(view.result.current.attachedFiles, [fileA], 'the file it already had stays exactly once');
+});
+
 test('a queue refused for a full queue keeps its text and files to retry', async () => {
-  // This branch refuses a queue entry in its own store, before anything leaves
-  // the composer: the message and the files the upload took come back.
+  // A full queue is refused by the composer's own store before anything leaves:
+  // the message keeps its text and its file, which were never taken out.
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   const { view } = renderComposer(SESSION_A, undefined, { isLoading: true });
   await act(async () => {

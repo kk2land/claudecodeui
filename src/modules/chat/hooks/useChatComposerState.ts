@@ -1286,9 +1286,6 @@ export function useChatComposerState({
           // the composer: nothing was queued, so nothing may be cleared.
           if (error instanceof QueueLimitError) {
             addMessage({ type: 'error', content: queueFullMessage, timestamp: new Date() });
-            // The queue write happens after the upload took this message's
-            // files out of the composer; a refused message brings them back.
-            setAttachedFiles((files) => [...durableDraft.attachments, ...files]);
             return false;
           }
           throw error;
