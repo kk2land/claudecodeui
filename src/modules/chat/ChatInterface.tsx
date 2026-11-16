@@ -25,7 +25,7 @@ import { useCodexControls } from '@/modules/chat/hooks/useCodexControls';
 import { useCodexModelProviders } from '@/modules/chat/hooks/useCodexModelProviders';
 import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
-import { ProjectTodoDialog } from '@/modules/todos';
+import { ProjectTodoDialog, useProjectTodos } from '@/modules/todos';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
 import {
   useProcessingSessions,
@@ -80,6 +80,10 @@ function ChatInterface({
   const { subscribe, isConnected } = useWebSocket();
   const { t } = useTranslation('chat');
   const processingSessions = useProcessingSessions();
+  const projectTodos = useProjectTodos({
+    projectId: selectedProject?.projectId ?? '',
+    enabled: isActive && Boolean(selectedProject),
+  });
   const {
     markSessionProcessing: onSessionProcessing,
     markSessionIdle: onSessionIdle,
@@ -686,6 +690,8 @@ function ChatInterface({
           onRemoveStoredAttachment={removeStoredTodoAttachment}
           onDetachTodoSource={detachTodoSource}
           todoNotice={todoNotice}
+          pendingTodoCount={projectTodos.todos.filter((todo) => todo.status === 'pending').length}
+          onOpenTodoList={() => setTodoDialogOpen(true)}
           localTodoCommand={localTodoCommand}
           onRemoveAttachment={(index) =>
             setAttachedFiles((previous) =>
@@ -734,6 +740,7 @@ function ChatInterface({
         <ProjectTodoDialog
           projectId={selectedProject.projectId}
           projectName={selectedProject.displayName || selectedProject.projectId}
+          todosState={projectTodos}
           open={todoDialogOpen}
           onOpenChange={setTodoDialogOpen}
           onSelectTodo={selectProjectTodo}

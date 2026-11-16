@@ -6,6 +6,7 @@ import { beforeEach, test, vi } from 'vitest';
 
 import '@/modules/i18n';
 import type ChatComposer from '@/modules/chat/composer/ChatComposer';
+import { api } from '@/shared/api';
 import type { LLMProvider, Project, ProjectSession, ServerEvent } from '@/shared/types';
 
 /**
@@ -98,6 +99,7 @@ const project: Project = { projectId: 'p1', displayName: 'repo', fullPath: '/wor
 const session: ProjectSession = { id: 'session-a', provider: 'claude' };
 
 beforeEach(() => {
+  vi.spyOn(api.todos, 'list').mockImplementation(async () => Response.json({ todos: [] }));
   harness.provider = 'claude';
   harness.sessionId = 'session-a';
   harness.servicesAvailable = true;

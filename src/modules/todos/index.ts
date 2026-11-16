@@ -1,8 +1,9 @@
 /**
  * Public surface of the todos module.
  *
- * The chat module renders the dialog when the user runs the local `/todo`
- * command; everything else — list fetching, the editor and the attachment
- * preview — stays module-private.
+ * The chat module shares one live list between the Todo button count and the
+ * dialog opened by that button or `/todo`. The editor and attachment preview
+ * stay module-private.
  */
 export { ProjectTodoDialog } from '@/modules/todos/ProjectTodoDialog';
+export { useProjectTodos } from '@/modules/todos/hooks/useProjectTodos';

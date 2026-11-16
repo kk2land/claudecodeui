@@ -10,7 +10,7 @@ import type {
   RefObject,
   TouchEvent,
 } from 'react';
-import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIcon, PlusIcon, SlidersHorizontalIcon, ActivityIcon, MicIcon } from 'lucide-react';
+import { PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIcon, PlusIcon, SlidersHorizontalIcon, ActivityIcon, MicIcon, ListTodoIcon } from 'lucide-react';
 
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
@@ -124,6 +124,9 @@ type ChatComposerProps = {
   onDetachTodoSource?: () => void;
   /** Short local feedback for a todo save or append; never a chat turn. */
   todoNotice?: string | null;
+  /** Pending items in the selected project's live todo list. */
+  pendingTodoCount?: number;
+  onOpenTodoList?: () => void;
   /** Set by the composer hook when this input runs the local `/todo` command. */
   localTodoCommand?: boolean;
   fileErrors: Map<string, string>;
@@ -223,6 +226,8 @@ export default function ChatComposer({
   onRemoveStoredAttachment,
   onDetachTodoSource,
   todoNotice,
+  pendingTodoCount = 0,
+  onOpenTodoList,
   localTodoCommand = false,
   fileErrors,
   showFileDropdown,
@@ -525,6 +530,18 @@ export default function ChatComposer({
     </PromptInputSubmit>
   );
 
+  const todoButton = onOpenTodoList && (
+    <button
+      type="button"
+      onClick={onOpenTodoList}
+      aria-haspopup="dialog"
+      className="flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-border/60 bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+    >
+      <ListTodoIcon className="h-4 w-4" aria-hidden="true" />
+      <span>Todo({pendingTodoCount})</span>
+    </button>
+  );
+
   return (
     <div className={`chat-composer-shell relative px-2 pb-[calc(1.5rem+env(safe-area-inset-bottom,0px))] pt-0 sm:px-4 sm:pb-4 md:px-4 md:pb-6 ${codexControls?.state?.questions.length ? 'flex min-h-0 flex-col' : 'flex-shrink-0'}`}>
       {showFloatingActivity && (
@@ -567,7 +584,7 @@ export default function ChatComposer({
         </div>
       )}
 
-      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} modelProviders={codexModelProviders} hasQueuedDraft={hasQueuedDraft} hasRunningTasks={isLoading || Boolean(activity)} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
+      {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} modelProviders={codexModelProviders} hasQueuedDraft={hasQueuedDraft} hasRunningTasks={isLoading || Boolean(activity)} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} todoButton={isMobile ? undefined : todoButton} />}
       {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} hasQueuedDraft={hasQueuedDraft} providerLabel={providerLabel} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
       <BackgroundSendDialog
         prompt={backgroundSendPrompt}
@@ -941,6 +958,7 @@ export default function ChatComposer({
                   onSelectPermissionMode={onSelectPermissionMode}
                   providerLabel={providerLabel}
                 />
+                {!codexControls && todoButton}
               </>
             )}
 
@@ -1009,6 +1027,13 @@ export default function ChatComposer({
                 label={t('mobileComposer.settings', { defaultValue: 'Chat settings' })}
                 onClick={openMobileSettings}
               />
+              {onOpenTodoList && (
+                <MobileSheetAction
+                  icon={<ListTodoIcon />}
+                  label={`Todo(${pendingTodoCount})`}
+                  onClick={() => { close(); onOpenTodoList(); }}
+                />
+              )}
               <MobileSheetAction
                 icon={<PaperclipIcon />}
                 label={t('input.attachFiles')}

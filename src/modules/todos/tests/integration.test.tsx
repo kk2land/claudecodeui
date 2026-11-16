@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
-import { ProjectTodoDialog } from '@/modules/todos';
+import { ProjectTodoDialog, useProjectTodos } from '@/modules/todos';
 import { api } from '@/shared/api';
 import {
   hydrateChatDrafts,
@@ -76,14 +76,33 @@ const makeTodo = (overrides: Partial<ProjectTodo> = {}): ProjectTodo => ({
   ...overrides,
 });
 
-const renderDialog = (onSelectTodo: (todo: ProjectTodo) => Promise<boolean> = async () => true) => render(
-  <ProjectTodoDialog
-    projectId={PROJECT_ID}
-    projectName="Project One"
-    open
-    onOpenChange={() => undefined}
-    onSelectTodo={onSelectTodo}
-  />,
+function TodoDialogHarness({
+  projectId = PROJECT_ID,
+  open = true,
+  onSelectTodo = async () => true,
+}: {
+  projectId?: string;
+  open?: boolean;
+  onSelectTodo?: (todo: ProjectTodo) => Promise<boolean>;
+}) {
+  const todosState = useProjectTodos({ projectId, enabled: true });
+  return (
+    <>
+      <output aria-label="Pending todos">{todosState.todos.filter((todo) => todo.status === 'pending').length}</output>
+      <ProjectTodoDialog
+        projectId={projectId}
+        projectName="Project One"
+        todosState={todosState}
+        open={open}
+        onOpenChange={() => undefined}
+        onSelectTodo={onSelectTodo}
+      />
+    </>
+  );
+}
+
+const renderDialog = (onSelectTodo?: (todo: ProjectTodo) => Promise<boolean>) => render(
+  <TodoDialogHarness onSelectTodo={onSelectTodo} />,
 );
 
 beforeEach(() => {
@@ -137,6 +156,33 @@ test('a todos_changed frame refetches only this project while the dialog stays o
   const afterUnmount = vi.mocked(api.todos.list).mock.calls.length;
   await act(async () => { emit({ kind: 'todos_changed', projectId: PROJECT_ID }); });
   expect(vi.mocked(api.todos.list).mock.calls.length).toBe(afterUnmount);
+});
+
+test('the pending count stays live with the dialog closed and changes with the project', async () => {
+  vi.mocked(api.todos.list).mockImplementation(async () => Response.json({
+    todos: [
+      makeTodo(),
+      makeTodo({ id: 'submitted', status: 'submitted' }),
+      makeTodo({ id: 'deleted', status: 'deleted' }),
+    ],
+  }));
+  const view = render(<TodoDialogHarness open={false} />);
+  await waitFor(() => expect(screen.getByLabelText('Pending todos').textContent).toBe('1'));
+  expect(screen.queryByRole('dialog')).toBeNull();
+
+  vi.mocked(api.todos.list).mockImplementation(async () => Response.json({ todos: [] }));
+  await act(async () => { emit({ kind: 'todos_changed', projectId: PROJECT_ID }); });
+  await waitFor(() => expect(screen.getByLabelText('Pending todos').textContent).toBe('0'));
+
+  vi.mocked(api.todos.list).mockImplementation(async () => Response.json({
+    todos: [makeTodo({ id: 'another-project-todo', projectId: 'project-2' })],
+  }));
+  view.rerender(<TodoDialogHarness projectId="project-2" open={false} />);
+  await waitFor(() => expect(screen.getByLabelText('Pending todos').textContent).toBe('1'));
+  expect(api.todos.list).toHaveBeenLastCalledWith('project-2');
+  const requests = vi.mocked(api.todos.list).mock.calls.length;
+  await act(async () => { emit({ kind: 'todos_changed', projectId: PROJECT_ID }); });
+  expect(api.todos.list).toHaveBeenCalledTimes(requests);
 });
 
 test('selecting a pending row prepares it without submitting, and its draft meta survives a reload', async () => {

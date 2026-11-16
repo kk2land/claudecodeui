@@ -393,6 +393,16 @@ export type ProjectTodo = {
   submittedSessionId: string | null;
 };
 
+/** Shared project todo list and actions used by the chat's count and the todo dialog. */
+export type ProjectTodosState = {
+  todos: ProjectTodo[];
+  isLoading: boolean;
+  hasError: boolean;
+  reload: () => Promise<void>;
+  removeTodo: (todoId: string) => Promise<void>;
+  restoreTodo: (todoId: string) => Promise<void>;
+};
+
 /** Todo ids and their current chat attachments saved alongside a draft, queue entry or steer so the send that consumes it can submit those todos. */
 export type TodoDraftMeta = {
   todoIds: string[];

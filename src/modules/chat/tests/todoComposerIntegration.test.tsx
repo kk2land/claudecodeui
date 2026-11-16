@@ -32,7 +32,9 @@ vi.mock('@/shared/api', () => {
         savePreferences: () => okJson({ success: true, preferences: {} }),
       },
       commands: { list: () => okJson({ success: true, commands: [] }) },
+      providers: { skills: () => okJson({ data: { skills: [] } }) },
       files: { search: () => okJson({ success: true, files: [] }) },
+      getFiles: () => okJson([]),
       assets: { uploadFiles: () => okJson({ attachments: [] }) },
       todos: {
         create: (_pid: string, formData: FormData) => {
@@ -56,9 +58,9 @@ const missingModelControls = (): CodexControls => ({
   control: vi.fn().mockResolvedValue(undefined), steer: vi.fn().mockResolvedValue(undefined),
 });
 
-type Args = { isLoading: boolean; codexControls?: CodexControls; onAbortSession: () => void; background?: boolean };
+type Args = { isLoading: boolean; codexControls?: CodexControls; onAbortSession: () => void; background?: boolean; pendingTodoCount?: number; onOpenTodoList?: () => void };
 
-function Harness({ isLoading, codexControls, onAbortSession, background = false }: Args) {
+function Harness({ isLoading, codexControls, onAbortSession, background = false, pendingTodoCount, onOpenTodoList }: Args) {
   const send = (message: unknown) => { sentMessages.push(message); };
   const composer = useChatComposerState({
     selectedProject: PROJECT,
@@ -129,6 +131,8 @@ function Harness({ isLoading, codexControls, onAbortSession, background = false 
       storedAttachments={composer.storedAttachments}
       todoSourceIds={composer.todoSourceIds}
       todoNotice={composer.todoNotice}
+      pendingTodoCount={pendingTodoCount}
+      onOpenTodoList={onOpenTodoList}
       localTodoCommand={composer.localTodoCommand}
       onRemoveAttachment={() => {}}
       fileErrors={composer.fileErrors}
@@ -181,6 +185,35 @@ beforeEach(() => {
 afterEach(() => {
   vi.unstubAllGlobals();
   resetChatDrafts();
+});
+
+test.each([false, true])('desktop Todo shows the pending count and opens the list (Codex controls: %s)', async (withCodexControls) => {
+  const onOpenTodoList = vi.fn();
+  const codexControls = withCodexControls ? missingModelControls() : undefined;
+  const view = render(<Harness isLoading={false} codexControls={codexControls} onAbortSession={() => {}} pendingTodoCount={3} onOpenTodoList={onOpenTodoList} />);
+  const button = screen.getByRole('button', { name: 'Todo(3)' });
+  if (withCodexControls) {
+    assert.equal(button.previousElementSibling?.textContent, 'Execute');
+  }
+  await act(async () => { fireEvent.click(button); });
+  assert.equal(onOpenTodoList.mock.calls.length, 1);
+  assert.equal(sentMessages.length, 0);
+
+  view.rerender(<Harness isLoading={false} codexControls={codexControls} onAbortSession={() => {}} pendingTodoCount={0} onOpenTodoList={onOpenTodoList} />);
+  assert.ok(screen.getByRole('button', { name: 'Todo(0)' }));
+});
+
+test('mobile Todo is in the plus menu and closes the menu before opening the list', async () => {
+  vi.stubGlobal('innerWidth', 412);
+  const onOpenTodoList = vi.fn();
+  render(<Harness isLoading={false} codexControls={missingModelControls()} onAbortSession={() => {}} pendingTodoCount={2} onOpenTodoList={onOpenTodoList} />);
+  assert.equal(screen.queryByRole('button', { name: 'Todo(2)' }), null);
+
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' })); });
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Todo(2)' })); });
+  assert.equal(onOpenTodoList.mock.calls.length, 1);
+  assert.equal(screen.queryByRole('dialog'), null);
+  assert.equal(sentMessages.length, 0);
 });
 
 test('the real send button runs a local /todo save even with no model and no turn', async () => {

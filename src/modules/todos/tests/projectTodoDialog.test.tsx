@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import type { MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
 
-import { ProjectTodoDialog } from '@/modules/todos';
+import { ProjectTodoDialog, useProjectTodos } from '@/modules/todos';
 import { api } from '@/shared/api';
 import type { ProjectTodo } from '@/shared/types';
 
@@ -61,11 +61,16 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-const renderDialog = (props: Partial<Parameters<typeof ProjectTodoDialog>[0]> = {}) => {
+function TodoDialogHarness(props: Omit<Parameters<typeof ProjectTodoDialog>[0], 'todosState'>) {
+  const todosState = useProjectTodos({ projectId: props.projectId, enabled: props.open });
+  return <ProjectTodoDialog {...props} todosState={todosState} />;
+}
+
+const renderDialog = (props: Partial<Parameters<typeof TodoDialogHarness>[0]> = {}) => {
   const onOpenChange = vi.fn();
   const onSelectTodo = vi.fn(async (_todo: ProjectTodo): Promise<boolean> => true);
   const view = render(
-    <ProjectTodoDialog
+    <TodoDialogHarness
       projectId={PROJECT_ID}
       projectName={PROJECT_NAME}
       open

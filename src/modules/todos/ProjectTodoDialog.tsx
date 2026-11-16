@@ -10,13 +10,12 @@ import {
   X,
 } from 'lucide-react';
 
-import { useProjectTodos } from '@/modules/todos/hooks/useProjectTodos';
 import {
   TodoAttachmentImage,
   TodoAttachmentPreview,
 } from '@/modules/todos/TodoAttachmentPreview';
 import { TodoEditor } from '@/modules/todos/TodoEditor';
-import type { ProjectTodo } from '@/shared/types';
+import type { ProjectTodo, ProjectTodosState } from '@/shared/types';
 import { Button, Dialog, DialogContent, DialogTitle, Pill, PillBar } from '@/shared/ui';
 import { cn } from '@/shared/utils';
 
@@ -55,6 +54,7 @@ const remainingRetentionDays = (stateChangedAt: string): number => {
 type ProjectTodoDialogProps = {
   projectId: string;
   projectName: string;
+  todosState: ProjectTodosState;
   open: boolean;
   onOpenChange: (open: boolean) => void;
   /**
@@ -70,22 +70,20 @@ type ProjectTodoDialogProps = {
 /**
  * The project todo dialog: pending todos to append to the composer plus the
  * submitted/deleted history with restore. Used by the chat module from the
- * local `/todo` command; it only lists and edits todos and never sends any
- * todo content to a model.
+ * Todo button or local `/todo` command; it lists and edits todos without sending
+ * their content to a model.
  */
 export function ProjectTodoDialog({
   projectId,
   projectName,
+  todosState,
   open,
   onOpenChange,
   onSelectTodo,
   onNavigateToSession,
 }: ProjectTodoDialogProps) {
   const { t, i18n } = useTranslation('chat');
-  const { todos, isLoading, hasError, reload, removeTodo, restoreTodo } = useProjectTodos({
-    projectId,
-    open,
-  });
+  const { todos, isLoading, hasError, reload, removeTodo, restoreTodo } = todosState;
 
   // Which lifecycle tab is showing; dialog opens on pending every time.
   const [activeTab, setActiveTab] = useState<ProjectTodoTab>('pending');

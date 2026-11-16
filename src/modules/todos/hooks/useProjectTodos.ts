@@ -2,34 +2,25 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 
 import { api, readApiJson } from '@/shared/api';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
-import type { ProjectTodo } from '@/shared/types';
+import type { ProjectTodo, ProjectTodosState } from '@/shared/types';
 
 type UseProjectTodosOptions = {
   projectId: string;
-  /** The list is only held while the dialog is open, so a closed dialog stops fetching. */
-  open: boolean;
-};
-
-type UseProjectTodosResult = {
-  todos: ProjectTodo[];
-  isLoading: boolean;
-  hasError: boolean;
-  reload: () => Promise<void>;
-  removeTodo: (todoId: string) => Promise<void>;
-  restoreTodo: (todoId: string) => Promise<void>;
+  /** Keep the list current while the project's chat is active, including with the dialog closed. */
+  enabled: boolean;
 };
 
 /**
  * Loads one project's todos and refreshes them from `todos_changed` websocket
- * frames; used by the todos module's ProjectTodoDialog only.
+ * frames; used by chat's ChatInterface for both the count and ProjectTodoDialog.
  *
  * The server list is the single source of truth for all three tabs: every
  * mutation reloads it rather than patching local rows, so a pending row that
  * the server moved to another state can never linger in the wrong tab.
  */
-export function useProjectTodos({ projectId, open }: UseProjectTodosOptions): UseProjectTodosResult {
+export function useProjectTodos({ projectId, enabled }: UseProjectTodosOptions): ProjectTodosState {
   // The fetched list backing all three tabs; kept in state because it arrives
-  // asynchronously after the dialog opens.
+  // asynchronously when a project's chat becomes active.
   const [todos, setTodos] = useState<ProjectTodo[]>([]);
   // Distinguishes the initial load (spinner) from a silent background refresh.
   const [isLoading, setIsLoading] = useState(false);
@@ -37,7 +28,7 @@ export function useProjectTodos({ projectId, open }: UseProjectTodosOptions): Us
   // than misleading the user with an empty state.
   const [hasError, setHasError] = useState(false);
   // Monotonic request id: only the newest request may write state, so a slow
-  // response cannot overwrite a newer list, and closing the dialog cannot be
+  // response cannot overwrite a newer list, and disabling the hook cannot be
   // undone by an in-flight response.
   const requestIdRef = useRef(0);
   const { subscribe } = useWebSocket();
@@ -67,8 +58,8 @@ export function useProjectTodos({ projectId, open }: UseProjectTodosOptions): Us
   }, [projectId]);
 
   useEffect(() => {
-    if (!open) {
-      // Invalidate any in-flight request and clear the list, so reopening on
+    if (!enabled) {
+      // Invalidate any in-flight request and clear the list, so enabling on
       // another project never flashes the previous project's todos.
       requestIdRef.current += 1;
       setTodos([]);
@@ -77,23 +68,24 @@ export function useProjectTodos({ projectId, open }: UseProjectTodosOptions): Us
       return;
     }
 
+    setTodos([]);
     void reload();
-  }, [open, projectId, reload]);
+  }, [enabled, projectId, reload]);
 
   useEffect(() => {
-    if (!open) {
+    if (!enabled) {
       return undefined;
     }
 
     return subscribe((event) => {
-      // Every `todos_changed` frame names its project; only this dialog's
+      // Every `todos_changed` frame names its project; only this chat's
       // project reloads.
       if (event.kind !== 'todos_changed' || event.projectId !== projectId) {
         return;
       }
       void reload();
     });
-  }, [open, projectId, reload, subscribe]);
+  }, [enabled, projectId, reload, subscribe]);
 
   const removeTodo = useCallback(async (todoId: string) => {
     await readApiJson<{ success: true }>(await api.todos.remove(projectId, todoId));

@@ -1,4 +1,5 @@
 import { useId, useState } from 'react';
+import type { ReactNode } from 'react';
 import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import { ChevronDown, Loader2, Square, Settings2 } from 'lucide-react';
@@ -52,11 +53,13 @@ function NativeQuestion({ request, controls }: { request: CodexUserInputRequest;
  * null renders only the blocking notices/questions that must stay beside the
  * input; an element portals the settings into it.
  */
-export function CodexControlPanel({ controls, modelProviders, onExecutePlan, settingsContainer, hasQueuedDraft = false, hasRunningTasks = false }: {
+export function CodexControlPanel({ controls, modelProviders, onExecutePlan, settingsContainer, todoButton, hasQueuedDraft = false, hasRunningTasks = false }: {
   controls: CodexControls;
   modelProviders?: CodexModelProviderControls;
   onExecutePlan(): void;
   settingsContainer?: Element | null;
+  /** Project todo entry supplied by ChatComposer beside the desktop execution mode. */
+  todoButton?: ReactNode;
   hasQueuedDraft?: boolean;
   /** Includes composer activity such as background tasks that outlive a native turn. */
   hasRunningTasks?: boolean;
@@ -93,6 +96,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
                 onClick={() => void controls.control({ action: 'queue-resume' }).catch(() => {})}>{t('codex.resumeQueue')}</button>}
             </>}
           </>}
+          {todoButton}
         </div>
         {hasActiveWorkers && <span role="status" className="sr-only">{t('codex.workersActive')}</span>}
         <button type="button" className={`${button} gap-1.5`} aria-expanded={runtimeOpen}
