@@ -155,6 +155,7 @@ function blankConfig(type: WorkerType, name: string, id: string): WorkerConfig {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
     ...(type === "codex"
@@ -443,6 +444,11 @@ export function SettingsView({
               !Number.isSafeInteger(config.concurrency) || config.concurrency < 1,
           )
         ? "并发必须是大于 0 的整数。"
+        : draft.configs.some(
+              (config) => config.hardTimeoutSeconds !== null &&
+                (!Number.isSafeInteger(config.hardTimeoutSeconds) || config.hardTimeoutSeconds < 1),
+            )
+          ? "硬超时必须是大于 0 的整数，留空表示不限时。"
         : draft.configs.find(
               (config) =>
                 config.type === "dsh" && config.effort && !config.model,
@@ -834,6 +840,7 @@ export function SettingsView({
                     {config.model ?? "沿用执行器模型"}
                   </span>
                   <span>并发 {config.concurrency}</span>
+                  <span>硬超时 {config.hardTimeoutSeconds === null ? "不限时" : `${config.hardTimeoutSeconds} 秒`}</span>
                   {active ? <span>运行中 {configUsage!.activeRuns}</span> : null}
                 </span>
                 <ChevronRight size={16} className="worker-type-chevron" aria-hidden="true" />
@@ -899,6 +906,21 @@ export function SettingsView({
                       update(config.id, { concurrency: Number(event.target.value) })
                     }
                   />
+                </label>
+                <label>
+                  硬超时（秒）
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    aria-label={"配置 " + position + " 硬超时（秒）"}
+                    value={config.hardTimeoutSeconds ?? ""}
+                    placeholder="不限时"
+                    onChange={(event) => update(config.id, {
+                      hardTimeoutSeconds: event.target.value === "" ? null : Number(event.target.value),
+                    })}
+                  />
+                  <small>默认 300 秒；到时终止本轮运行，留空表示不限时。</small>
                 </label>
                 </div>
                 <label className="worker-checkbox worker-form-wide">
@@ -1137,11 +1159,8 @@ export function SettingsView({
             没有匹配时使用默认配置。
             模型或 reasoning 留空表示沿用执行器现有配置；未知或目录外已保存的值会显示为“当前已保存”，
             普通保存不会清掉它们。软提醒默认 {settings.softReminderSeconds} 秒 /{" "}
-            {settings.softReminderSteps} 步，硬超时
-            {settings.hardTimeoutSeconds === null
-              ? "默认关闭"
-              : "默认 " + settings.hardTimeoutSeconds + " 秒"}
-            。
+            {settings.softReminderSteps} 步。硬超时按各配置设置，默认 300 秒，新建和续接均适用；
+            单次任务显式指定的超时优先，修改配置不影响已接受的运行。
           </p>
           {validationMessage ? (
             <p className="worker-error" role="alert">

@@ -145,13 +145,13 @@ test("legacy settings migrate once into fixed initial configs and canonical stor
   assert.equal(settings.softReminderSeconds, 42);
   assert.equal(settings.softReminderSteps, 7);
   assert.equal(settings.hardTimeoutSeconds, 90);
+  assert.deepEqual(settings.configs.map((config) => config.hardTimeoutSeconds), [90, 90, 90]);
 
   const persisted = rawSettings(data);
   assert.equal(persisted.schemaVersion, 2);
   assert.deepEqual(Object.keys(persisted).sort(), [
     "configs",
     "defaultConfigId",
-    "hardTimeoutSeconds",
     "retentionDays",
     "schemaVersion",
     "softReminderSeconds",
@@ -174,6 +174,37 @@ test("legacy settings migrate once into fixed initial configs and canonical stor
     ["dsh-default", "codex-default"],
   );
 });
+
+for (const legacyTimeout of [undefined, null, 90]) {
+  test(`canonical settings migrate global timeout ${legacyTimeout} into each config once`, (t) => {
+    const root = temporaryRoot("worker-config-timeout-migration-");
+    const data = path.join(root, "data");
+    const store = new WorkerStore(data);
+    t.after(() => store.close());
+    store.settings();
+    const initial = rawSettings(data);
+    store.saveSettings({
+      ...initial,
+      hardTimeoutSeconds: legacyTimeout,
+      configs: [
+        { ...(initial.configs as object[])[0], hardTimeoutSeconds: undefined },
+        { ...(initial.configs as object[])[0], id: "custom", hardTimeoutSeconds: 600 },
+        { ...(initial.configs as object[])[0], id: "unlimited", hardTimeoutSeconds: null },
+      ],
+    });
+    const settings = store.settings();
+    assert.deepEqual(
+      settings.configs.map((config) => config.hardTimeoutSeconds),
+      [legacyTimeout ?? 300, 600, null],
+    );
+    const persisted = rawSettings(data);
+    assert.equal("hardTimeoutSeconds" in persisted, false);
+    const reopened = new WorkerStore(data);
+    t.after(() => reopened.close());
+    assert.deepEqual(reopened.settings(), settings);
+    assert.deepEqual(rawSettings(data), persisted);
+  });
+}
 
 test("migration preserves explicit empty Codex env/args", (t) => {
   const root = temporaryRoot("worker-settings-migration-empty-");
@@ -313,6 +344,7 @@ test("a store without a settings row persists defaults and backfills legacy work
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
   }]);

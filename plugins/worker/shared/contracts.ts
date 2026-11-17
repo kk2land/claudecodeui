@@ -166,8 +166,8 @@ export type WorkerStartInput = {
    */
   effort?: string;
   /**
-   * Hard timeout in seconds for this run. Omitted uses `WorkerSettings.hardTimeoutSeconds`;
-   * null explicitly disables the hard timeout.
+   * Hard timeout in seconds for this run. Omitted uses the selected config's
+   * `hardTimeoutSeconds` for both start and resume; null explicitly disables the hard timeout.
    */
   timeoutSeconds?: number | null;
   /**
@@ -191,8 +191,8 @@ export type WorkerResumeInput = {
   provider?: string;
   effort?: string;
   /**
-   * Hard timeout in seconds for this run. Omitted retains the previous run's resolved timeout;
-   * null explicitly disables the hard timeout.
+   * Hard timeout in seconds for this run. Omitted uses the worker config's current
+   * `hardTimeoutSeconds`; null explicitly disables the hard timeout.
    */
   timeoutSeconds?: number | null;
   /**
@@ -453,6 +453,8 @@ export type WorkerConfig = {
   enabled: boolean;
   roles: WorkerTaskRole[];
   concurrency: number;
+  /** Default hard timeout for each run, initially 300 seconds; null disables it. */
+  hardTimeoutSeconds: number | null;
   model: string | null;
   effort: string | null;
   codex?: WorkerCodexConfig;
@@ -497,10 +499,11 @@ export type WorkerCodexSettings = {
  * Effective worker settings: the canonical read shape of `GET /state` and `PUT /settings`.
  *
  * Persisted canonical state is `schemaVersion`, `configs`, `defaultConfigId`, and the global
- * retention/reminder/timeout values. `schemaVersion` is server-managed and is never supplied by
+ * retention/reminder values. `schemaVersion` is server-managed and is never supplied by
  * clients. `defaultConfigId` must reference an enabled entry in `configs`.
  *
- * `concurrency`, `enabled`, `roles`, `defaults`, `codex`, and `defaultWorkerType` are READ-ONLY
+ * `concurrency`, `enabled`, `roles`, `defaults`, `codex`, `defaultWorkerType`, and
+ * `hardTimeoutSeconds` are READ-ONLY
  * compatibility projections, never a second persistence source. Per engine they project the
  * engine's default config when `defaultConfigId` belongs to that engine, otherwise the first
  * config of that engine in list order; when an engine has no config, `enabled` is false, `roles`
@@ -508,8 +511,8 @@ export type WorkerCodexSettings = {
  * `defaultWorkerType` projects the type of `defaultConfigId`. Writers must update `configs`.
  *
  * Concurrency applies per `(parentSessionId, projectId, configId)` key. The first soft reminder
- * defaults to 600 seconds / 20 steps, followed by timed reviews every `softReminderSeconds`; no
- * hard timeout is applied by default.
+ * defaults to 600 seconds / 20 steps, followed by timed reviews every `softReminderSeconds`.
+ * Each config defaults to a 300-second hard timeout; explicit per-run timeouts override it.
  *
  * A config's `enabled` gates both newly accepted starts and newly accepted resumes; a run that
  * was already accepted, including queued work, is unchanged. `roles` only routes the config of a
@@ -542,14 +545,16 @@ export type WorkerSettings = {
   retentionDays: number;
   softReminderSeconds: number;
   softReminderSteps: number;
-  hardTimeoutSeconds: number | null;
+  /** Read-only compatibility projection of the default config's hard timeout. */
+  readonly hardTimeoutSeconds: number | null;
 };
 
 /**
  * Canonical `PUT /settings` input. `configs` is replaced as a whole and validated atomically
  * before anything is persisted: ids are unique, `defaultConfigId` references an enabled config,
- * and an existing config keeps its `type` while referenced. Deployment-owned reminder and
- * timeout values stay server-owned. An omitted `retentionDays` keeps the stored value.
+ * and an existing config keeps its `type` while referenced. Reminder values stay server-owned.
+ * An omitted config timeout defaults to 300 seconds; null disables it.
+ * An omitted `retentionDays` keeps the stored value.
  */
 export type WorkerSettingsUpdate = {
   configs: WorkerConfig[];

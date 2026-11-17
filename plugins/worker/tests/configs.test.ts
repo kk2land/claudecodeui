@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
 import { WorkerStore } from "../server/store.js";
-import type { WorkerConfig } from "../shared/contracts.js";
+import type { WorkerConfig, WorkerMcpSettings } from "../shared/contracts.js";
 import {
   createService,
   owner,
@@ -21,6 +21,7 @@ function dsh(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
     ...overrides,
@@ -35,6 +36,7 @@ function pi(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
     ...overrides,
@@ -49,6 +51,7 @@ function codex(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
     codex: {
@@ -101,7 +104,6 @@ test("canonical settings persist only canonical fields and project per-engine de
   assert.deepEqual(Object.keys(persisted).sort(), [
     "configs",
     "defaultConfigId",
-    "hardTimeoutSeconds",
     "retentionDays",
     "schemaVersion",
     "softReminderSeconds",
@@ -112,6 +114,68 @@ test("canonical settings persist only canonical fields and project per-engine de
   t.after(() => reopened.close());
   assert.deepEqual(reopened.settings().configs, configs);
   assert.equal(reopened.settings().retentionDays, 4);
+});
+
+test("config timeouts apply independently to starts and resumes with per-run overrides", async (t) => {
+  const root = temporaryRoot("worker-configs-timeout-");
+  const { service } = createService(t, root);
+  const configs = [
+    dsh({ hardTimeoutSeconds: 60 }),
+    dsh({ id: "dsh-unlimited", hardTimeoutSeconds: null }),
+  ];
+  service.updateSettings({ configs, defaultConfigId: "dsh-default" });
+  assert.deepEqual(
+    (service.context("owner-1").settings as WorkerMcpSettings).configs.map((config) => config.hardTimeoutSeconds),
+    [60, null],
+  );
+  const first = await service.start("owner-1", startInput());
+  const unlimited = await service.start("owner-1", startInput({ configId: "dsh-unlimited" }));
+  const overridden = await service.start("owner-1", startInput({ timeoutSeconds: 45 }));
+  const disabled = await service.start("owner-1", startInput({ timeoutSeconds: null }));
+  assert.equal(first.run.timeoutSeconds, 60);
+  assert.equal(unlimited.run.timeoutSeconds, null);
+  assert.equal(overridden.run.timeoutSeconds, 45);
+  assert.equal(disabled.run.timeoutSeconds, null);
+  await waitStatus(service, overridden.worker.id, ["completed"]);
+
+  service.updateSettings({
+    configs: [dsh({ hardTimeoutSeconds: 600 }), configs[1]!],
+    defaultConfigId: "dsh-default",
+  });
+  assert.equal(service.get(first.worker.id).worker.latestRun?.timeoutSeconds, 60);
+  const resumed = await service.resume("owner-1", {
+    workerId: overridden.worker.id,
+    prompt: "continue",
+    requestId: "resume-config-timeout",
+  });
+  assert.equal(resumed.run.timeoutSeconds, 600);
+  await waitStatus(service, resumed.worker.id, ["completed"]);
+  const resumeOverride = await service.resume("owner-1", {
+    workerId: resumed.worker.id,
+    prompt: "continue with a per-run timeout",
+    requestId: "resume-timeout-override",
+    timeoutSeconds: 90,
+  });
+  assert.equal(resumeOverride.run.timeoutSeconds, 90);
+});
+
+test("config timeout defaults to 300 and rejects invalid values atomically", (t) => {
+  const root = temporaryRoot("worker-configs-timeout-validation-");
+  const { service } = createService(t, root);
+  const config = dsh();
+  delete (config as Partial<WorkerConfig>).hardTimeoutSeconds;
+  const saved = service.updateSettings({ configs: [config], defaultConfigId: config.id });
+  assert.equal(saved.configs[0]!.hardTimeoutSeconds, 300);
+  for (const hardTimeoutSeconds of [0, -1, 1.5, "300", Number.MAX_SAFE_INTEGER + 1]) {
+    assert.throws(
+      () => service.updateSettings({
+        configs: [dsh({ hardTimeoutSeconds: hardTimeoutSeconds as number })],
+        defaultConfigId: config.id,
+      }),
+      /hardTimeoutSeconds 必须是正整数或 null/,
+    );
+    assert.deepEqual(service.settings(), saved);
+  }
 });
 
 test("config routing filters by enabled configs, type, role, then default and list order", async (t) => {

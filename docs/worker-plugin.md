@@ -110,13 +110,14 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 同一个 `workerId`，保留原会话、cwd 与已有修改。取消未确认或状态为 `unknown` 时不能续接；反复纠偏无进展时
 报告阻塞，不机械重复提示词。运行结束后，尚未投递的提醒转为 `held`，只自动投递终态结果，已投递的提醒保留记录。
 
-派发时按本轮交付设置 `timeoutSeconds`，长工作按可验收阶段续接；确需不限时则说明原因和停止条件。
+新建和续接默认省略 `timeoutSeconds`，使用对应 Worker 配置的硬超时（默认 300 秒）；
+仅需覆盖本轮预算时显式传入，传 `null` 可关闭本轮硬超时，并须说明原因和停止条件。长工作按可验收阶段续接。
 交接提示词须约定命令预算：长命令后台执行，单次同步等待不超过 60 秒；测试已报超时但进程未退出时，
 停止该任务自己的进程并保留日志。同一失败已在未修改基线上复现后，记录限制并继续剩余交付，不再重复完整测试。
 
 父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi/Codex 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。列表与详情显示任务记录的角色，历史记录缺少
-角色时详情显示未指定，列表不额外展示。设置页按每个 Worker 配置管理启用开关、并发和倾向任务；配置
+角色时详情显示未指定，列表不额外展示。设置页按每个 Worker 配置管理启用开关、并发、硬超时和倾向任务；配置
 停用后保留模型、角色等内容，重新启用后继续使用。页面只读状态并执行取消、暂停、恢复、清理和
 通知重试；不展示宿主认证令牌或 MCP 控制令牌。用户自行配置的 Codex 环境变量可在设置页编辑。
 没有会话时禁用会话视图，没有项目时仅保留全部视图。
@@ -178,18 +179,18 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 [Worker skill](../plugins/worker/skills/cloudcli-workers/SKILL.md) 和
 [协作案例与模板](../plugins/worker/skills/cloudcli-workers/references/workflows.md)。
 
-## Worker 配置：引擎、启用、角色、并发、模型与 Codex 服务
+## Worker 配置：引擎、启用、角色、并发、硬超时、模型与 Codex 服务
 
 执行引擎固定为 `dsh`、`pi`、`codex` 三种。用户可以管理多个具名 Worker 配置；首次使用只创建并启用
 `pi-default`（pi default），`defaultConfigId` 为 `pi-default`。DSH 和 Codex 配置由用户按需添加。
 从旧设置迁移时仍生成三个初始配置并保留原 `defaultWorkerType`，映射为对应初始配置的
 `defaultConfigId`；只有旧值缺失或无效时才回退 `dsh-default`，迁移结果不会一律改成 DSH。每个配置包含
-`id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`model`、
+`id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`hardTimeoutSeconds`、`model`、
 `effort`；Codex 配置另有 `codex.modelProvider`、`codex.env` 和保留的 `codex.legacyExtraArgs`。`id` 在创建时
 生成，重命名保持不变；只要该配置已被任何 worker 或 run 历史引用，就不能修改其 `type`。模型的真实能力以
 执行器配置为准，插件不虚构未支持的参数。
 
-设置页按实际能力提供新增、复制、拖动排序、删除、设为默认、启停和并发编辑，并以整份 `configs`/
+设置页按实际能力提供新增、复制、拖动排序、删除、设为默认、启停、并发和硬超时编辑，并以整份 `configs`/
 `defaultConfigId` 文档原子保存。`configs` 数组顺序就是持久化的路由顺序（`taskRole` 取首个匹配项），拖动
 排序只是重新保存整份数组，无需额外字段或接口，且不改变 `defaultConfigId`。默认配置必须已启用，且至少有
 一个配置启用；停用当前默认配置时界面自动改选配置列表中首个
@@ -198,23 +199,28 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 仍有排队或运行中任务的配置不能删除。停用只阻止之后的新建和续接，已接受（包括已排队）的运行继续；配置
 内容保留，重新启用后继续使用。角色、模型和 reasoning 的修改只影响之后新建的任务；并发修改立即参与排队。
 
+每个配置的 `hardTimeoutSeconds` 默认为 300 秒，正整数表示本轮最长运行秒数，`null` 表示不限时；
+设置页留空保存为 `null`。新建与续接均读取该配置当前的值，单次请求显式传入的 `timeoutSeconds` 优先，
+续接时不再默认继承上轮时限。配置修改不影响已接受的运行（包括排队任务），请求幂等重放也保留原运行时限。
+
 ### 设置结构与兼容投影
 
 `GET /state` 的 `settings` 以 schema 2 的 `configs` 与 `defaultConfigId` 为唯一持久化来源，另含保留天数及
-由服务端管理的软提醒/硬超时值（`PUT /settings` 不接受后者）。`concurrency`、`enabled`、`roles`、
+由服务端管理的软提醒值。硬超时通过 `PUT /settings` 中各配置的 `hardTimeoutSeconds` 保存。
+顶层 `hardTimeoutSeconds` 只读投影默认配置的时限，不再单独持久化。`concurrency`、`enabled`、`roles`、
 `defaults`、`defaultWorkerType`、`codex` 是只读兼容投影：按引擎取 `defaultConfigId` 属于该引擎时的默认
 配置，否则取列表中该引擎的第一个配置；某引擎没有配置时 `enabled` 为 `false`、`roles` 为 `[]`、
 `concurrency` 为 1、`defaults` 为 null model/effort、`codex` 为空 env/args。`defaultWorkerType` 投影
 `defaultConfigId` 的类型。旧客户端仍可提交旧版映射更新，但它只能编辑三个初始固定配置；任一初始配置已被
 删除时整次更新失败。
 
-首次使用时 `GET /state` 的 `settings` 形状示例（软提醒 600 秒 / 20 步、硬超时默认关闭）：
+首次使用时 `GET /state` 的 `settings` 形状示例（软提醒 600 秒 / 20 步、硬超时默认 300 秒）：
 
     {
       "schemaVersion": 2,
       "configs": [
         { "id": "pi-default", "name": "pi default", "type": "pi", "enabled": true,
-          "roles": [], "concurrency": 3, "model": null, "effort": null }
+          "roles": [], "concurrency": 3, "hardTimeoutSeconds": 300, "model": null, "effort": null }
       ],
       "defaultConfigId": "pi-default",
       "concurrency": { "dsh": 1, "pi": 3, "codex": 1 },
@@ -230,12 +236,13 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
       "retentionDays": 1,
       "softReminderSeconds": 600,
       "softReminderSteps": 20,
-      "hardTimeoutSeconds": null
+      "hardTimeoutSeconds": 300
     }
 
 规范的 `PUT /settings` 整份替换 `configs`，并在保存前原子校验：`id` 唯一且非空、`name` 非空、`type` 合法、
 `enabled` 为布尔值、`roles` 只含任务角色目录中的值、`concurrency` 为正整数、`defaultConfigId` 引用已启用
-配置；Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同时配置模型；Codex 配置必须带 `codex`
+配置；每项 `hardTimeoutSeconds` 为正整数或 `null`，省略时补为 300 秒。
+Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同时配置模型；Codex 配置必须带 `codex`
 对象，`env` 为字符串到字符串映射，`legacyExtraArgs` 为字符串数组，含 `-C`/`--cd` 的项被拒绝。任一项非法
 都会让整次更新失败且不保存任何字段。`retentionDays` 为正整数，省略时保留原值；`schemaVersion` 由服务端
 管理，客户端不提供。
@@ -253,6 +260,9 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 补齐缺失的 model/provider/effort；没有证据时保留原 null 而不从当前设置猜测。旧 Codex run 没有可靠
 provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配置的 `modelProvider`。迁移只执行一次，
 之后不会重建已被删除的配置，也不会重写历史 run 记录。
+
+已有 schema 2 设置也会在读取时补齐各配置的硬超时：保留配置中已有的秒数或 `null`；缺少该字段时，
+沿用旧全局设置中的明确秒数，否则使用 300 秒。旧全局字段随后从持久化记录中移除，历史运行的时限保持不变。
 
 ### 模型选择界面
 

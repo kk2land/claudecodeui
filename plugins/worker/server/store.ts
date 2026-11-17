@@ -142,8 +142,24 @@ export class WorkerStore {
       return projectSettings(record);
     }
     const stored = JSON.parse(row.body) as Record<string, unknown>;
-    if (isCanonicalSettings(stored))
-      return projectSettings(stored as unknown as WorkerSettingsRecord);
+    if (isCanonicalSettings(stored)) {
+      const { hardTimeoutSeconds, ...record } = stored as unknown as WorkerSettingsRecord & {
+        hardTimeoutSeconds?: number | null;
+      };
+      if (
+        hardTimeoutSeconds !== undefined ||
+        record.configs.some((config) => config.hardTimeoutSeconds === undefined)
+      ) {
+        record.configs = record.configs.map((config) => ({
+          ...config,
+          hardTimeoutSeconds: config.hardTimeoutSeconds === undefined
+            ? hardTimeoutSeconds ?? 300
+            : config.hardTimeoutSeconds,
+        }));
+        this.saveSettings(record);
+      }
+      return projectSettings(record);
+    }
     const record = migrateLegacySettings(stored);
     this.transaction(() => {
       this.saveSettings(record);

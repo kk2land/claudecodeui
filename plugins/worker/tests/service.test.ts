@@ -28,7 +28,11 @@ test("starts, records, logs, and deduplicates one DSH run", async (t) => {
   const worker = await waitStatus(service, started.worker.id, ["completed"]);
   assert.equal(worker.latestRun?.status, "completed");
   assert.equal(worker.latestRun?.nativeSessionId, "session-fixture-1");
-  assert.equal(worker.latestRun?.progress.hardTimeoutAt, null);
+  assert.equal(worker.latestRun?.timeoutSeconds, 300);
+  assert.equal(
+    worker.latestRun?.progress.hardTimeoutAt,
+    new Date(Date.parse(worker.latestRun!.startedAt!) + 300_000).toISOString(),
+  );
   assert.ok(worker.latestRun?.nativeSessionFile?.endsWith("session.v4.jsonl.zstd"));
   assert.match(worker.latestRun?.finalText ?? "", /fixture answer/);
   assert.deepEqual(worker.latestRun?.usage, {
@@ -281,9 +285,14 @@ test("runs and resumes Pi through an explicit session file", async (t) => {
 test("hard timeout fails the run with guardian evidence", async (t) => {
   const root = temporaryRoot("worker-timeout-");
   const { service } = createService(t, root, { TEST_SCENARIO: "hang" });
+  const settings = service.settings();
+  service.updateSettings({
+    configs: settings.configs.map((config) => ({ ...config, hardTimeoutSeconds: 1 })),
+    defaultConfigId: settings.defaultConfigId,
+  });
   const started = await service.start(
     "owner-1",
-    startInput({ timeoutSeconds: 1, requestId: "timeout-1" }),
+    startInput({ requestId: "timeout-1" }),
   );
   assert.equal(
     started.run.progress.hardTimeoutAt,

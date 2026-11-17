@@ -194,6 +194,7 @@ const CONFIG_DEFAULTS = {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
   },
@@ -204,6 +205,7 @@ const CONFIG_DEFAULTS = {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
   },
@@ -214,6 +216,7 @@ const CONFIG_DEFAULTS = {
     enabled: true,
     roles: [],
     concurrency: 3,
+    hardTimeoutSeconds: 300,
     model: null,
     effort: null,
     codex: {
@@ -766,6 +769,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
         enabled: true,
         roles: [],
         concurrency: 3,
+        hardTimeoutSeconds: 300,
         model: null,
         effort: null,
       },
@@ -1022,6 +1026,7 @@ test("DOM: Codex service errors stay on their own card and late responses never 
       enabled: true,
       roles: [],
       concurrency: 2,
+      hardTimeoutSeconds: 300,
       model: null,
       effort: null,
       codex: { modelProvider: "openai", env: {}, legacyExtraArgs: [] },
@@ -1774,6 +1779,37 @@ test("DOM: selecting a historical run shows that run's usage instead of the late
     assert.ok(usage.includes("缓存写入 5"));
     assert.ok(usage.includes("合计 110"));
     assert.equal(usage.includes("200"), false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: each config edits its timeout, validates it, and copies it on duplication", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openSettings(mounted);
+    const first = byLabel(mounted.container, "配置 1 硬超时（秒）") as HTMLInputElement;
+    const second = byLabel(mounted.container, "配置 2 硬超时（秒）") as HTMLInputElement;
+    assert.equal(first.value, "300");
+    assert.equal(second.value, "300");
+    await typeInto(first, "0");
+    await waitFor(() => button(mounted.container, "保存设置").disabled, "拒绝零秒超时");
+    assert.ok(textOf(mounted.container).includes("硬超时必须是大于 0 的整数"));
+    await typeInto(first, "1.5");
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    await typeInto(first, "600");
+    await typeInto(second, "");
+    (byLabel(mounted.container, "新增 Codex 配置") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 硬超时（秒）")), "新增默认超时");
+    assert.equal((byLabel(mounted.container, "配置 4 硬超时（秒）") as HTMLInputElement).value, "300");
+    (byLabel(mounted.container, "配置 1 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 硬超时（秒）")), "复制超时配置");
+    assert.equal((byLabel(mounted.container, "配置 5 硬超时（秒）") as HTMLInputElement).value, "600");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "可保存超时配置");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存各配置超时");
+    const body = callsTo(mounted, "/settings")[0]!.body as { configs: Array<{ hardTimeoutSeconds: number | null }> };
+    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 300, 300, 600]);
   } finally {
     mounted.unmount();
   }

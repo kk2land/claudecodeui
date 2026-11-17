@@ -260,7 +260,6 @@ export class WorkerService {
       retentionDays: input.retentionDays ?? current.retentionDays,
       softReminderSeconds: current.softReminderSeconds,
       softReminderSteps: current.softReminderSteps,
-      hardTimeoutSeconds: current.hardTimeoutSeconds,
     };
     this.store.saveSettings(record);
     this.pruneHistory();
@@ -343,6 +342,7 @@ export class WorkerService {
         enabled: config.enabled,
         roles: [...config.roles],
         concurrency: config.concurrency,
+        hardTimeoutSeconds: config.hardTimeoutSeconds,
         model: config.model,
         effort: config.effort,
       };
@@ -436,7 +436,6 @@ export class WorkerService {
       retentionDays: input.retentionDays ?? current.retentionDays,
       softReminderSeconds: current.softReminderSeconds,
       softReminderSteps: current.softReminderSteps,
-      hardTimeoutSeconds: current.hardTimeoutSeconds,
     };
     this.store.saveSettings(record);
     this.pruneHistory();
@@ -466,6 +465,12 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_SETTINGS", "配置 roles 必须是合法任务角色数组");
     if (!Number.isSafeInteger(entry.concurrency) || (entry.concurrency as number) < 1)
       throw new WorkerFailure("INVALID_SETTINGS", "配置 concurrency 必须是正整数");
+    if (
+      entry.hardTimeoutSeconds !== undefined &&
+      entry.hardTimeoutSeconds !== null &&
+      (!Number.isSafeInteger(entry.hardTimeoutSeconds) || (entry.hardTimeoutSeconds as number) < 1)
+    )
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 hardTimeoutSeconds 必须是正整数或 null");
     if (entry.model !== undefined && entry.model !== null && typeof entry.model !== "string")
       throw new WorkerFailure("INVALID_SETTINGS", "配置 model 必须是字符串或 null");
     if (entry.effort !== undefined && entry.effort !== null && typeof entry.effort !== "string")
@@ -479,6 +484,9 @@ export class WorkerService {
       enabled: entry.enabled,
       roles: [...(entry.roles as WorkerConfig["roles"])],
       concurrency: entry.concurrency as number,
+      hardTimeoutSeconds: entry.hardTimeoutSeconds === undefined
+        ? 300
+        : entry.hardTimeoutSeconds as number | null,
       model,
       effort,
     };
@@ -645,7 +653,7 @@ export class WorkerService {
     this.rejectNonCodexProvider(type, input.provider);
     const selection = this.startSelection(type, input, config);
     this.validateSelection(type, selection);
-    const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, settings);
+    const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     const id = randomUUID();
     const runId = randomUUID();
     const createdAt = new Date(this.now()).toISOString();
@@ -772,10 +780,7 @@ export class WorkerService {
     const selection = this.resumeSelection(worker.type, input, previous, worker.id);
     this.validateSelection(worker.type, selection);
     const runId = randomUUID();
-    const timeoutSeconds =
-      input.timeoutSeconds === undefined
-        ? previous.timeoutSeconds
-        : this.timeoutFor(input.timeoutSeconds, settings);
+    const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     const run: WorkerRun = {
       id: runId,
       workerId: worker.id,
@@ -1130,11 +1135,9 @@ export class WorkerService {
 
   private timeoutFor(
     value: number | null | undefined,
-    settings: WorkerSettings,
+    config: WorkerConfig,
   ): number | null {
-    if (value === null) return null;
-    if (value === undefined) return settings.hardTimeoutSeconds;
-    return value;
+    return value === undefined ? config.hardTimeoutSeconds : value;
   }
 
   //------------------ DISPATCH AND GUARDIAN ----------------
@@ -1689,6 +1692,7 @@ export class WorkerService {
         enabled: config.enabled,
         roles: [...config.roles],
         concurrency: config.concurrency,
+        hardTimeoutSeconds: config.hardTimeoutSeconds,
         model: config.model,
         effort: config.effort,
         ...(config.type === "codex"

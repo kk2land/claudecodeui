@@ -18,7 +18,6 @@ export type WorkerSettingsRecord = Pick<
   | "retentionDays"
   | "softReminderSeconds"
   | "softReminderSteps"
-  | "hardTimeoutSeconds"
 >;
 
 /** Validated internal error raised by service boundaries; `code` is stable for API responses. */

@@ -121,6 +121,7 @@ export function defaultSettingsRecord(): WorkerSettingsRecord {
       enabled: true,
       roles: [],
       concurrency: DEFAULT_CONCURRENCY,
+      hardTimeoutSeconds: 300,
       model: null,
       effort: null,
     }],
@@ -128,7 +129,6 @@ export function defaultSettingsRecord(): WorkerSettingsRecord {
     retentionDays: 1,
     softReminderSeconds: 600,
     softReminderSteps: 20,
-    hardTimeoutSeconds: null,
   };
 }
 
@@ -189,6 +189,7 @@ export function migrateLegacySettings(
         typeof enabled[type] === "boolean" ? (enabled[type] as boolean) : true,
       roles: roleList(roles[type], []),
       concurrency: positiveInteger(concurrency[type], DEFAULT_CONCURRENCY),
+      hardTimeoutSeconds: positiveInteger(stored.hardTimeoutSeconds, 300),
       model: defaultEntry(defaults[type]).model,
       effort: defaultEntry(defaults[type]).effort,
     };
@@ -215,12 +216,6 @@ export function migrateLegacySettings(
     retentionDays: positiveInteger(stored.retentionDays, 1),
     softReminderSeconds: positiveInteger(stored.softReminderSeconds, 600),
     softReminderSteps: positiveInteger(stored.softReminderSteps, 20),
-    hardTimeoutSeconds:
-      typeof stored.hardTimeoutSeconds === "number" &&
-      Number.isSafeInteger(stored.hardTimeoutSeconds) &&
-      stored.hardTimeoutSeconds > 0
-        ? stored.hardTimeoutSeconds
-        : null,
   };
 }
 
@@ -287,7 +282,7 @@ export function projectSettings(record: WorkerSettingsRecord): WorkerSettings {
     retentionDays: record.retentionDays,
     softReminderSeconds: record.softReminderSeconds,
     softReminderSteps: record.softReminderSteps,
-    hardTimeoutSeconds: record.hardTimeoutSeconds,
+    hardTimeoutSeconds: defaultConfig.hardTimeoutSeconds,
   };
 }
 
