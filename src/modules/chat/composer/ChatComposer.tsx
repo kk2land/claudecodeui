@@ -1074,6 +1074,15 @@ export default function ChatComposer({
                 label={t('mobileComposer.tokenUsage', { defaultValue: 'Token usage' })}
                 onClick={() => { close(); onShowTokenUsage(); }}
               />
+              {onClearContext && (
+                <MobileSheetAction
+                  icon={<EraserIcon />}
+                  label={t('misc.clearContext')}
+                  // A running turn is still writing to the context being cleared.
+                  disabled={isLoading}
+                  onClick={() => { close(); onClearContext(); }}
+                />
+              )}
               <MobileSheetAction
                 icon={<MessageSquareIcon />}
                 label={t('input.showAllCommands')}
