@@ -42,7 +42,7 @@ function createDependencies(
         // The gateway writer's shape: a runtime that feature-detects it (codex)
         // hands it objects to serialize, as the real one expects.
         writer: { isWebSocketWriter: true, send: (data: unknown) => input.connection?.send(JSON.stringify(data)), getSessionId: () => null },
-        events: [],
+        aborted: false,
       })) as unknown as AgentDependencies['runs']['startRun'],
       completeRunIfCurrent: () => undefined,
       isProcessing: () => false,

@@ -165,7 +165,7 @@ export class ChatSessionWriter {
   }
 
   private forward(message: NormalizedMessage): void {
-    const payload = JSON.stringify(message);
+    let payload: string | undefined;
 
     // Sending is also when dead sockets get collected: a refreshed tab leaves
     // its old connection behind, and without dropping it here the set would
@@ -173,6 +173,9 @@ export class ChatSessionWriter {
     // for a Set — the removed entry is simply not revisited.
     for (const connection of this.connections) {
       if (connection.readyState === WS_OPEN_STATE) {
+        // Detached runs still record replay state without allocating JSON that
+        // has no audience. All live subscribers share a single serialization.
+        payload ??= JSON.stringify(message);
         connection.send(payload);
       } else {
         this.connections.delete(connection);

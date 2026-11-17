@@ -367,12 +367,19 @@ things in order:
 2. Assigns the next `seq` and rewrites `sessionId` to the **app** session id (`:93-99`).
 3. On `complete`, sets `actualSessionId` to the app id too, flips the run to `completed` and
    schedules eviction (`:101-108`).
-4. Pushes the event into the replay buffer, trimming the oldest past the cap (`:110-113`).
+4. Records the event in sequence order, keeping only the first and latest snapshot for
+   each `text`, `thinking`, `tool_use` or `tool_result` id. The first anchors row placement;
+   the latest carries every update a reconnecting client missed. Deltas and control
+   events remain intact. The oldest entries are trimmed past the cap.
 
 | Constant | Value | Why |
 | --- | --- | --- |
 | `COMPLETED_RUN_RETENTION_MS` (`:43`) | 5 minutes | A finished run stays addressable while a sleeping tab catches up. Eviction is a single `setTimeout`, `unref`'d so it never holds the process open (`:62-72`) |
-| `MAX_BUFFERED_EVENTS_PER_RUN` (`:51`) | 5000 events | Past this the oldest events are dropped; a client whose `lastSeq` predates the buffer silently gets a short replay and relies on the REST history refresh instead |
+| `MAX_BUFFERED_EVENTS_PER_RUN` | 5000 replay entries | Superseded full snapshots do not consume entries. Past the cap, the oldest entries are dropped; a client whose `lastSeq` predates the buffer silently gets a short replay and relies on the REST history refresh instead |
+
+The writer serializes an event only when it finds an open subscriber, and shares that
+JSON string across all subscribers. Detached runs still record replay state without
+allocating a serialized copy on every update.
 
 `replayEvents` (`:265-272`) filters the buffer by `seq > afterSeq` and nothing else — it does
 **not** check run status. The "completed runs are not replayed" rule lives in the caller, in

@@ -1111,7 +1111,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       // A tab can now abort the run (`chat.abort`), on which the runtime
       // returns as it does on completion. What the interrupted agent left
       // behind is not a result to branch or open a PR from.
-      const aborted = run.events.some((event) => event.kind === 'complete' && event.aborted === true);
+      const aborted = run.aborted;
       if (aborted) {
         writer.send({ type: 'status', message: 'Run aborted', aborted: true });
       }

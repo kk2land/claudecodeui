@@ -134,7 +134,9 @@ Three things in that picture are easy to get backwards:
   can attach a result inline on the `tool_use` frame, so the projection checks
   `msg.toolResult` first and only then consults its map of `toolId` to result row.
 - **The run outlives the socket.** It is keyed by app session id in the registry, keeps
-  its last 5000 events for replay, and stays available for five minutes after finishing.
+  up to 5000 replay entries, and stays available for five minutes after finishing.
+  Full transcript snapshots keep their first appearance and latest state rather than
+  every growing intermediate copy; deltas and control events are retained individually.
   A reconnecting client sends `lastSeq` and gets only what it missed — and only if the
   run is still running, because a completed run is already on disk and served over REST.
 
@@ -469,8 +471,10 @@ question rendered twice in another.
   originates from a provider or from the local optimistic echo.
 - **Realtime rows are capped at 500 per session** (`MAX_REALTIME_MESSAGES`), oldest
   dropped. A tool-heavy run can exceed that; the persisted transcript is the fallback.
-- **The server's replay buffer is 5000 events per run, retained 5 minutes after
-  completion**, and completed runs are deliberately *not* replayed on subscribe — they
+- **The server's replay buffer is 5000 entries per run, retained 5 minutes after
+  completion.** Repeated full snapshots retain only their first and latest versions,
+  preserving row order and partial reconnect catch-up without retaining every copy.
+  Completed runs are deliberately *not* replayed on subscribe — they
   are already served by the history endpoint, and replaying them would duplicate rows.
 - **Subagent rows must be skipped in the second projection pass.** They are folded into
   their `Task` container in the first pass by `parentToolUseId`; dropping the

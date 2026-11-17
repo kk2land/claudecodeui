@@ -40,7 +40,9 @@ type ChatRun = {
    */
   external: boolean;
   lastSeq: number;
-  events: NormalizedMessage[];
+  events: Map<number, NormalizedMessage>;
+  /** First appearance anchors row order; the latest snapshot catches up reconnecting clients. */
+  snapshotSeqs: Map<string, { first: number; latest: number }>;
   writer: ChatSessionWriter;
   startedAt: number;
   completedAt: number | null;
@@ -67,12 +69,27 @@ type ChatRun = {
 const COMPLETED_RUN_RETENTION_MS = 5 * 60 * 1000;
 
 /**
- * Upper bound on buffered events per run so a very long tool-heavy run cannot
- * grow memory unbounded. When exceeded, the oldest events are dropped —
+ * Upper bound on replay entries per run. Full row snapshots retain only their
+ * first and latest versions, avoiding thousands of growing copies of one reply.
+ * When exceeded, the oldest entries are dropped —
  * a reconnecting client whose `lastSeq` predates the buffer falls back to a
  * REST history refresh, which is always the authoritative source.
  */
 const MAX_BUFFERED_EVENTS_PER_RUN = 5000;
+
+/** Only full transcript rows replace earlier versions; deltas and controls must replay in full. */
+function snapshotReplayKey(message: NormalizedMessage): string | null {
+  if (!message.id) return null;
+  switch (message.kind) {
+    case 'text':
+    case 'thinking':
+    case 'tool_use':
+    case 'tool_result':
+      return `${message.kind}:${message.id}`;
+    default:
+      return null;
+  }
+}
 
 /**
  * Active and recently-completed runs keyed by app session id.
@@ -212,9 +229,24 @@ function decorateAndRecordEvent(run: ChatRun, message: NormalizedMessage): Norma
     evictRunLater(run);
   }
 
-  run.events.push(outbound);
-  if (run.events.length > MAX_BUFFERED_EVENTS_PER_RUN) {
-    run.events.splice(0, run.events.length - MAX_BUFFERED_EVENTS_PER_RUN);
+  const snapshotKey = snapshotReplayKey(outbound);
+  if (snapshotKey !== null) {
+    const previous = run.snapshotSeqs.get(snapshotKey);
+    // Keep the first occurrence so an interleaved tool or reply retains its
+    // original row position, and keep the latest seq for partial reconnects.
+    if (previous && previous.latest !== previous.first) run.events.delete(previous.latest);
+    run.snapshotSeqs.set(snapshotKey, { first: previous?.first ?? run.lastSeq, latest: run.lastSeq });
+  }
+  run.events.set(run.lastSeq, outbound);
+  if (run.events.size > MAX_BUFFERED_EVENTS_PER_RUN) {
+    const [seq, event] = run.events.entries().next().value!;
+    run.events.delete(seq);
+    const evictedKey = snapshotReplayKey(event);
+    if (evictedKey !== null) {
+      const snapshot = run.snapshotSeqs.get(evictedKey)!;
+      if (snapshot.latest === seq) run.snapshotSeqs.delete(evictedKey);
+      else snapshot.first = snapshot.latest;
+    }
   }
 
   if (message.kind === 'complete') {
@@ -331,7 +363,8 @@ export const chatRunRegistry = {
       status: input.passive ? 'completed' : 'running',
       external: input.external === true,
       lastSeq: 0,
-      events: [],
+      events: new Map(),
+      snapshotSeqs: new Map(),
       writer: null as unknown as ChatSessionWriter,
       startedAt: Date.now(),
       completedAt: null,
@@ -441,7 +474,9 @@ export const chatRunRegistry = {
   },
 
   /**
-   * Returns buffered events with `seq` greater than `afterSeq` for replay.
+   * Returns buffered events with `seq` greater than `afterSeq` in sequence order.
+   * Superseded full snapshots are omitted; their first occurrence and latest
+   * state preserve transcript placement and reconnect catch-up respectively.
    *
    * An empty array with `run.lastSeq > afterSeq` not covered by the buffer
    * means the buffer was truncated; the client should refresh over REST.
@@ -452,7 +487,7 @@ export const chatRunRegistry = {
       return [];
     }
 
-    return run.events.filter((event) => typeof event.seq === 'number' && event.seq > afterSeq);
+    return Array.from(run.events.values()).filter((event) => event.seq! > afterSeq);
   },
 
   /**

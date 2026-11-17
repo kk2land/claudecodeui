@@ -226,6 +226,148 @@ test('replayEvents returns only events after the requested seq', async () => {
   });
 });
 
+test('replay retains the first and latest full snapshots without retaining every growing copy', async () => {
+  await withIsolatedDatabase(() => {
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'snapshot-memory', provider: 'codex', providerSessionId: null, connection: null, userId: null,
+    });
+    assert.ok(run);
+
+    let content = '';
+    for (let index = 0; index < 1000; index++) {
+      content += '内容'.repeat(64);
+      run.writer.send({ kind: 'thinking', id: 'reasoning', provider: 'codex', content });
+    }
+
+    const replay = chatRunRegistry.replayEvents('snapshot-memory', 0);
+    assert.equal(replay.at(-1)?.content, content);
+    assert.deepEqual(replay.map((event) => event.seq), [1, 1000]);
+    assert.ok(replay.reduce((total, event) => total + (event.content?.length ?? 0), 0) <= content.length + 128);
+    assert.deepEqual(chatRunRegistry.replayEvents('snapshot-memory', 500).map((event) => event.content), [content]);
+  });
+});
+
+test('compacted snapshot replay preserves message order, live delivery and interleaved controls', async () => {
+  await withIsolatedDatabase(() => {
+    const connection = new FakeConnection();
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'snapshot-order', provider: 'codex', providerSessionId: null, connection, userId: null,
+    });
+    assert.ok(run);
+
+    run.writer.send({ kind: 'text', id: 'reply', provider: 'codex', content: 'first' });
+    run.writer.send({ kind: 'tool_use', id: 'command', provider: 'codex', toolId: 'command', toolName: 'Bash' });
+    run.writer.send({ kind: 'text', id: 'reply', provider: 'codex', content: 'first update' });
+    run.writer.send({ kind: 'permission_request', id: 'approval', provider: 'codex', requestId: 'approval' });
+    run.writer.send({ kind: 'text', id: 'reply', provider: 'codex', content: 'first update finished' });
+    run.writer.send({ kind: 'permission_resolved', id: 'approval', provider: 'codex', requestId: 'approval' });
+
+    assert.deepEqual(connection.frames.map((frame) => frame.seq), [1, 2, 3, 4, 5, 6]);
+    const replay = chatRunRegistry.replayEvents('snapshot-order', 0);
+    assert.deepEqual(replay.map((event) => event.seq), [1, 2, 4, 5, 6]);
+    // Applying these frames by message id leaves the reply before its tool card.
+    const rows = new Map<string, string | undefined>();
+    for (const event of replay) if (event.kind === 'text' || event.kind === 'tool_use') rows.set(event.id, event.content);
+    assert.deepEqual([...rows], [['reply', 'first update finished'], ['command', undefined]]);
+    assert.deepEqual(chatRunRegistry.replayEvents('snapshot-order', 3).map((event) => event.seq), [4, 5, 6]);
+  });
+});
+
+test('interleaved tool snapshots keep only the first and latest state of each row', async () => {
+  await withIsolatedDatabase(() => {
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'snapshot-tool', provider: 'codex', providerSessionId: null, connection: null, userId: null,
+    });
+    assert.ok(run);
+
+    for (let index = 1; index <= 1000; index++) {
+      run.writer.send({ kind: 'tool_use', id: 'command', provider: 'codex', toolId: 'command', toolName: 'Bash',
+        status: index === 1000 ? 'completed' : 'in_progress' });
+      // A provider may use the same id for a tool call and its result.
+      run.writer.send({ kind: 'tool_result', id: 'command', provider: 'codex', toolId: 'command', content: `output ${index}` });
+    }
+
+    const replay = chatRunRegistry.replayEvents('snapshot-tool', 0);
+    assert.deepEqual(replay.map((event) => event.seq), [1, 2, 1999, 2000]);
+    assert.equal(replay.at(-2)?.status, 'completed');
+    assert.equal(replay.at(-1)?.content, 'output 1000');
+  });
+});
+
+test('delta and control events sharing an id remain complete and ordered', async () => {
+  await withIsolatedDatabase(() => {
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'delta-replay', provider: 'claude', providerSessionId: null, connection: null, userId: null,
+    });
+    assert.ok(run);
+
+    for (const content of ['a', 'b', 'c']) {
+      run.writer.send({ kind: 'stream_delta', id: 'reply', provider: 'claude', content });
+    }
+    run.writer.send({ kind: 'stream_end', id: 'reply', provider: 'claude' });
+    run.writer.send({ kind: 'status', id: 'status', provider: 'claude', text: 'working' });
+    run.writer.send({ kind: 'status', id: 'status', provider: 'claude', text: 'done' });
+
+    const replay = chatRunRegistry.replayEvents('delta-replay', 0);
+    assert.deepEqual(replay.map((event) => event.seq), [1, 2, 3, 4, 5, 6]);
+    assert.equal(replay.slice(0, 3).map((event) => event.content).join(''), 'abc');
+  });
+});
+
+test('snapshot compaction remains bounded and replayable after the event cap evicts an anchor', async () => {
+  await withIsolatedDatabase(() => {
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'snapshot-cap', provider: 'codex', providerSessionId: null, connection: null, userId: null,
+    });
+    assert.ok(run);
+
+    for (let index = 0; index < 5000; index++) {
+      run.writer.send({ kind: 'text', id: `reply-${index}`, provider: 'codex', content: `message ${index}` });
+    }
+    for (const content of ['updated', 'updated again', 'finished']) {
+      run.writer.send({ kind: 'text', id: 'reply-0', provider: 'codex', content });
+    }
+
+    const replay = chatRunRegistry.replayEvents('snapshot-cap', 0);
+    assert.equal(replay.length, 5000);
+    assert.deepEqual(replay.filter((event) => event.id === 'reply-0').map((event) => event.seq), [5001, 5003]);
+    assert.equal(replay.at(-1)?.content, 'finished');
+    assert.deepEqual(chatRunRegistry.replayEvents('snapshot-cap', 5001).map((event) => event.content), ['finished']);
+  });
+});
+
+test('outbound JSON is serialized once for live subscribers and skipped for detached or closed sockets', async () => {
+  await withIsolatedDatabase(() => {
+    const run = chatRunRegistry.startRun({
+      appSessionId: 'lazy-json', provider: 'codex', providerSessionId: null, connection: null, userId: null,
+    });
+    assert.ok(run);
+
+    let serializations = 0;
+    const message = { kind: 'tool_use', id: 'command', provider: 'codex', toolInput: {
+      toJSON() { serializations++; return { command: 'echo hello' }; },
+    } };
+    run.writer.send(message);
+    assert.equal(serializations, 0);
+    assert.equal(chatRunRegistry.replayEvents('lazy-json', 0).length, 1);
+
+    const closed = new FakeConnection();
+    closed.readyState = 3;
+    chatRunRegistry.attachConnection('lazy-json', closed);
+    run.writer.send(message);
+    assert.equal(serializations, 0);
+
+    const first = new FakeConnection();
+    const second = new FakeConnection();
+    chatRunRegistry.attachConnection('lazy-json', first);
+    chatRunRegistry.attachConnection('lazy-json', second);
+    run.writer.send(message);
+    assert.equal(serializations, 1);
+    assert.deepEqual(first.frames, second.frames);
+    assert.deepEqual(closed.frames, []);
+  });
+});
+
 test('attachConnection adds a socket without cutting off the ones already watching', async () => {
   await withIsolatedDatabase(() => {
     sessionsDb.createAppSession('app-run-5', 'opencode', '/workspace/demo');
