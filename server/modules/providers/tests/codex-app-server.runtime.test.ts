@@ -147,7 +147,7 @@ test('failed sessions retain their own process diagnostics while another service
   assert.equal(h.rpc.status?.pid, 6002);
 });
 
-test('model providers switch only after the current task ends and resume the same native thread', async () => {
+test('model providers switch only after the current task ends, and a switch on an existing thread requires a branch', async () => {
   const h = harness();
   h.handlers.set('thread/start', async () => ({ thread: { id: 'native-thread' }, model: 'test-model', modelProvider: 'alpha' }));
   h.handlers.set('thread/resume', async (params) => ({ thread: { id: params.threadId }, model: params.model, modelProvider: params.modelProvider }));
@@ -156,25 +156,15 @@ test('model providers switch only after the current task ends and resume the sam
   await assert.rejects(h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' }), { code: 'CODEX_MODEL_PROVIDER_BUSY' });
   assert.equal(h.settings().modelSelection, undefined);
   h.finish(); await first;
-  await h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' });
-  assert.deepEqual(h.runtime.getState('app-session').modelSelection, { modelProvider: 'beta', model: 'second-model' });
+  // Codex cannot change an existing thread's provider on resume, so the
+  // switch is refused before the selection is persisted anywhere.
+  await assert.rejects(h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' }), { code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+  assert.equal(h.settings().modelSelection, undefined);
   assert.deepEqual(h.runtime.getState('app-session').activeModelSelection, { modelProvider: 'alpha', model: 'test-model' });
-  assert.equal(h.calls.some(({ method }) => method === 'thread/unsubscribe'), false);
   assert.equal(h.settingsDb.get('another-session').modelSelection, undefined);
-  let inputStarted = false;
-  const next = h.run('queued input', { model: 'stale-model', onTurnStarting: () => { inputStarted = true; } });
-  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-2');
-  const resume = h.calls.find(({ method }) => method === 'thread/resume')!;
-  assert.equal(resume.params.threadId, 'native-thread');
-  assert.equal(resume.params.modelProvider, 'beta');
-  assert.equal(resume.params.model, 'second-model');
-  assert.ok(h.calls.findIndex(({ method }) => method === 'thread/unsubscribe') < h.calls.indexOf(resume));
+  assert.equal(h.calls.some(({ method }) => method === 'thread/unsubscribe'), false);
+  assert.equal(h.calls.some(({ method }) => method === 'thread/resume'), false);
   assert.equal(h.calls.filter(({ method }) => method === 'thread/start').length, 1);
-  assert.equal(h.calls.filter(({ method }) => method === 'turn/start').at(-1)?.params.collaborationMode.settings.model, 'second-model');
-  assert.equal(h.calls.filter(({ method }) => method === 'turn/start').at(-1)?.params.collaborationMode.settings.reasoning_effort, 'high');
-  assert.equal(inputStarted, true);
-  assert.deepEqual(h.runtime.getState('app-session').activeModelSelection, { modelProvider: 'beta', model: 'second-model' });
-  h.finish('turn-2'); await next;
   await h.runtime.close();
 });
 
@@ -235,19 +225,88 @@ test('unavailable models clear the selection and failed resumes hold the queue b
   const first = h.run();
   await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
   h.finish(); await first;
-  await h.control({ action: 'model-provider', modelProvider: 'beta', model: 'missing-model' });
-  assert.deepEqual(h.settings().modelSelection, { modelProvider: 'beta', model: null });
+  // The model, not the service, is what is missing here: an unavailable model
+  // still clears the selection inside the conversation's own provider.
+  await h.control({ action: 'model-provider', modelProvider: 'alpha', model: 'missing-model' });
+  assert.deepEqual(h.settings().modelSelection, { modelProvider: 'alpha', model: null });
   await assert.rejects(h.run('must remain unsent', { model: 'test-model' }), { code: 'CODEX_MODEL_REQUIRED' });
   assert.equal(h.settings().queueHeld, false);
-  await h.control({ action: 'model-provider', modelProvider: 'beta', model: 'test-model' });
+  await h.control({ action: 'model-provider', modelProvider: 'alpha', model: 'test-model' });
+  // A failed cold resume must not deliver the queued input or clear the hold.
   h.handlers.set('thread/resume', async () => { throw new Error('provider unavailable'); });
+  h.settingsDb.update('cold-session', { modelSelection: { modelProvider: 'alpha', model: 'test-model' } });
+  h.context.resolveProviderSessionId = (sessionId) => sessionId === 'cold-session' ? 'native-thread' : null;
   let delivered = false;
-  await assert.rejects(h.run('retain this input', { onTurnStarting: () => { delivered = true; } }), /provider unavailable/);
+  await assert.rejects(h.runtime.run('retain this input', {
+    ...h.options, sessionId: 'cold-session', onTurnStarting: () => { delivered = true; },
+  }, h.writer, h.context), /provider unavailable/);
   assert.equal(delivered, false);
   assert.equal(h.calls.filter(({ method }) => method === 'turn/start').length, 1);
-  assert.equal(h.settings().queueHeld, true);
-  assert.equal(h.runtime.getState('app-session').phase, 'failed');
-  assert.deepEqual(h.settings().modelSelection, { modelProvider: 'beta', model: 'test-model' });
+  assert.equal(h.settingsDb.get('cold-session').queueHeld, true);
+  assert.equal(h.runtime.getState('cold-session').phase, 'failed');
+  assert.deepEqual(h.settingsDb.get('cold-session').modelSelection, { modelProvider: 'alpha', model: 'test-model' });
+  await h.runtime.close();
+});
+
+test('a cold goal read with no model chosen reports the real source route without resuming or starting a Goal', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: null } });
+  h.handlers.set('thread/read', async () => ({ thread: { id: 'native-thread', modelProvider: 'alpha', model: 'source-model' } }));
+  await h.control({ action: 'goal', operation: 'get' });
+  // Read-only: the source route is reported beside the pending target, and
+  // nothing was resumed, prepared or activated.
+  assert.deepEqual(h.calls.map(({ method }) => method), ['thread/read']);
+  const state = h.runtime.getState('app-session');
+  assert.deepEqual(state.modelSelection, { modelProvider: 'beta', model: null });
+  assert.deepEqual(state.activeModelSelection, { modelProvider: 'alpha', model: 'source-model' });
+  await h.runtime.close();
+});
+
+test('Goal activation with no model chosen still fails as a model choice, not as a fork requirement', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: null } });
+  h.handlers.set('thread/read', async () => ({ thread: { id: 'native-thread', modelProvider: 'alpha' } }));
+  for (const operation of ['set', 'resume'] as const) {
+    await assert.rejects(h.control({ action: 'goal', operation, objective: 'must not start' }), { code: 'CODEX_MODEL_REQUIRED' });
+  }
+  assert.equal(h.calls.some(({ method }) => ['thread/resume', 'thread/start', 'thread/goal/set', 'thread/goal/get'].includes(method)), false);
+  assert.equal(h.runtime.getState('app-session').goal, null);
+  assert.deepEqual(h.runtime.getState('app-session').modelSelection, { modelProvider: 'beta', model: null });
+  await h.runtime.close();
+});
+
+test('a native provider without a model still counts as the source route when a selection targets another service', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: 'second-model' } });
+  // Legacy rollouts can carry the provider but no model; the provider alone is
+  // the route and must not be ignored just because the model is missing.
+  h.handlers.set('thread/read', async () => ({ thread: { id: 'native-thread', modelProvider: 'alpha' } }));
+  await assert.rejects(h.control({ action: 'goal', operation: 'get' }), { code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+  const state = h.runtime.getState('app-session');
+  assert.deepEqual(state.activeModelSelection, { modelProvider: 'alpha', model: null });
+  assert.deepEqual(state.modelSelection, { modelProvider: 'beta', model: 'second-model' });
+  assert.equal(h.calls.some(({ method }) => method === 'thread/resume'), false);
+  await h.runtime.close();
+});
+
+test('sending into a loaded thread whose selection names another service requires a fork and leaves it loaded', async () => {
+  const h = harness();
+  h.handlers.set('thread/start', async () => ({ thread: { id: 'native-thread' }, model: 'test-model', modelProvider: 'alpha' }));
+  const first = h.run();
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+  h.finish(); await first;
+  h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: 'second-model' } });
+  const turnsBefore = h.calls.filter(({ method }) => method === 'turn/start').length;
+  await assert.rejects(h.run('never sent'), { code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+  // The source thread is not unloaded or re-routed, and no input is delivered.
+  assert.equal(h.calls.some(({ method }) => method === 'thread/unsubscribe'), false);
+  assert.equal(h.calls.some(({ method }) => method === 'thread/resume'), false);
+  assert.equal(h.calls.filter(({ method }) => method === 'turn/start').length, turnsBefore);
+  assert.deepEqual(h.runtime.getState('app-session').activeModelSelection, { modelProvider: 'alpha', model: 'test-model' });
+  assert.deepEqual(h.runtime.getState('app-session').modelSelection, { modelProvider: 'beta', model: 'second-model' });
   await h.runtime.close();
 });
 
@@ -255,12 +314,31 @@ test('a saved model-provider selection is applied when reopening a session after
   const h = harness();
   h.writer.setSessionId!('native-thread');
   h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: 'second-model' } });
+  // The native thread is authoritative: the saved selection is only applied
+  // because the thread really runs on that same service.
+  h.handlers.set('thread/read', async () => ({ thread: { id: 'native-thread', modelProvider: 'beta', model: 'second-model' } }));
   h.handlers.set('thread/resume', async (params) => ({ thread: { id: params.threadId }, model: params.model, modelProvider: params.modelProvider }));
   await h.control({ action: 'goal', operation: 'get' });
-  assert.equal(h.calls[0].method, 'thread/resume');
-  assert.equal(h.calls[0].params.modelProvider, 'beta');
-  assert.equal(h.calls[0].params.model, 'second-model');
+  assert.deepEqual(h.calls.slice(0, 2).map(({ method }) => method), ['thread/read', 'thread/resume']);
+  assert.equal(h.calls[1].params.modelProvider, 'beta');
+  assert.equal(h.calls[1].params.model, 'second-model');
   assert.deepEqual(h.runtime.getState('app-session').activeModelSelection, h.settings().modelSelection);
+  await h.runtime.close();
+});
+
+test('a cold resume whose native thread runs another service requires a fork and keeps both routes visible', async () => {
+  const h = harness();
+  h.writer.setSessionId!('native-thread');
+  h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: 'second-model' } });
+  h.handlers.set('thread/read', async () => ({ thread: { id: 'native-thread', modelProvider: 'alpha', model: 'source-model' } }));
+  await assert.rejects(h.control({ action: 'goal', operation: 'get' }), { code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+  assert.equal(h.calls.some(({ method }) => method === 'thread/resume'), false);
+  assert.equal(h.calls.some(({ method }) => method === 'thread/unsubscribe'), false);
+  // The pending selection stays the branch target; the snapshot names the
+  // service the source thread actually runs.
+  const state = h.runtime.getState('app-session');
+  assert.deepEqual(state.modelSelection, { modelProvider: 'beta', model: 'second-model' });
+  assert.deepEqual(state.activeModelSelection, { modelProvider: 'alpha', model: 'source-model' });
   await h.runtime.close();
 });
 
@@ -270,11 +348,13 @@ test('a missing model survives reconnect without resuming defaults and blocks th
   h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'beta', model: null } });
   const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb });
   await h.control({ action: 'goal', operation: 'get' });
-  assert.equal(h.calls.length, 0);
+  // The read-only route probe is the only native call: no resume, no Worker
+  // preparation and no Goal read/activation while the model is unchosen.
+  assert.deepEqual(h.calls.map(({ method }) => method), ['thread/read']);
   assert.equal(router.isQueueBlocked!('app-session'), true);
   await assert.rejects(h.run('blocked prompt', { model: 'old-model' }), { code: 'CODEX_MODEL_REQUIRED' });
   await assert.rejects(h.control({ action: 'goal', operation: 'set', objective: 'blocked goal' }), { code: 'CODEX_MODEL_REQUIRED' });
-  assert.equal(h.calls.length, 0);
+  assert.deepEqual(h.calls.map(({ method }) => method), ['thread/read']);
   await h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' });
   assert.equal(router.isQueueBlocked!('app-session'), false);
   h.handlers.set('thread/resume', async (params) => ({ thread: { id: params.threadId }, model: params.model, modelProvider: params.modelProvider }));
@@ -298,7 +378,7 @@ test('changing the next model within the current service remains available while
   await h.runtime.close();
 });
 
-test('an active goal must pause before changing model providers', async () => {
+test('an active goal must pause before changing model providers, and the switch itself needs a branch', async () => {
   const h = harness();
   h.handlers.set('thread/start', async () => ({ thread: { id: 'native-thread' }, model: 'test-model', modelProvider: 'alpha' }));
   h.handlers.set('thread/resume', async (params) => ({ thread: { id: params.threadId }, model: params.model, modelProvider: params.modelProvider }));
@@ -306,13 +386,14 @@ test('an active goal must pause before changing model providers', async () => {
   await assert.rejects(h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' }), { code: 'CODEX_MODEL_PROVIDER_BUSY' });
   assert.equal(h.calls.some(({ method }) => method === 'thread/unsubscribe'), false);
   await h.control({ action: 'goal', operation: 'pause' });
-  await h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' });
+  // Pausing frees the busy check, but the provider still belongs to the
+  // thread: only a branch can change it.
+  await assert.rejects(h.control({ action: 'model-provider', modelProvider: 'beta', model: 'second-model' }), { code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+  assert.equal(h.settings().modelSelection, undefined);
   await h.control({ action: 'goal', operation: 'resume' });
-  assert.equal(h.runtime.getState('app-session').activeModelSelection?.modelProvider, 'beta');
+  assert.equal(h.runtime.getState('app-session').activeModelSelection?.modelProvider, 'alpha');
   assert.equal(h.runtime.getState('app-session').goal?.status, 'active');
-  assert.equal(h.calls.filter(({ method }) => method === 'thread/settings/update').at(-1)?.params.collaborationMode.settings.model, 'second-model');
-  assert.equal(h.calls.filter(({ method }) => method === 'thread/settings/update').at(-1)?.params.collaborationMode.settings.reasoning_effort, 'high');
-  assert.equal(h.calls.find(({ method }) => method === 'thread/resume')?.params.threadId, 'native-thread');
+  assert.equal(h.calls.find(({ method }) => method === 'thread/resume'), undefined);
   await h.runtime.close();
 });
 

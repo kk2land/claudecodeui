@@ -248,7 +248,16 @@
     "recoverDelivery": "处理未确认的消息",
     "unknownDelivery": "尚无法确认 Codex 是否已接收。重新排队可能导致重复发送。",
     "queueAgain": "作为新消息排队",
-    "discardQueue": "移除排队副本"
+    "discardQueue": "移除排队副本",
+    "branchError": {
+      "providerChange": "当前会话保留原有服务。如需改用其他服务，请带历史创建分支。",
+      "unsupported": "当前会话无法切换服务。",
+      "busy": "当前会话仍在运行。请先清空队列并结束或停止任务，再创建分支。",
+      "sourceNotReady": "当前会话还没有可复制的历史。",
+      "mismatch": "Codex 未能按所选服务创建分支，请重试或换一个服务。",
+      "modelUnavailable": "所选模型已不再由该服务提供，请重新选择有效模型后再创建分支。",
+      "serviceMissing": "所选服务已被移除，请重新选择有效服务后再创建分支。"
+    }
   },
   "voice": {
     "input": "语音输入",
@@ -426,7 +435,14 @@
       "title": "正在替换先前的消息",
       "filesNotReverted": "已修改的文件不会被还原",
       "cancel": "取消"
-    }
+    },
+    "branchWithHistory": "带历史创建分支",
+    "branching": "正在创建分支…",
+    "branchModel": "分支模型",
+    "branchModelPlaceholder": "选择模型",
+    "branchModelRequired": "选择模型后才能创建分支。",
+    "branchHint": "将完整对话复制到所选服务的新会话；当前会话保留原有服务与历史。",
+    "branchModelUnavailable": "所选服务不提供模型 {{model}}，请重新选择模型后再创建分支。"
   },
   "prediction": {
     "accept": "采用",

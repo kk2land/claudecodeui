@@ -1,6 +1,9 @@
 import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
+import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type { IProviderFork } from '@/shared/interfaces.js';
+import { AppError } from '@/shared/index.js';
+import type { ProviderForkInput, ProviderForkResult } from '@/shared/index.js';
 
 /**
  * Branches a Codex conversation into an independent thread.
@@ -17,23 +20,38 @@ import type { IProviderFork } from '@/shared/interfaces.js';
  * one thing — and the coarser one is the more useful of the two anyway.
  */
 export class CodexForkProvider implements IProviderFork {
-  async forkSession(input: {
-    providerSessionId: string;
-    jsonlPath: string;
-    projectPath: string;
-    upToAnchorId?: string;
-    title?: string;
-  }): Promise<{ providerSessionId: string; jsonlPath: string }> {
+  async forkSession(input: ProviderForkInput): Promise<ProviderForkResult> {
     const source = sessionsDb.getSessionByProviderSessionId(input.providerSessionId, 'codex');
     const settings = source ? sessionRuntimeDb.get(source.session_id) : undefined;
     // `title` is deliberately not forwarded. The sidebar name lives in this
     // app's own session row, and naming the thread inside Codex would mean a
     // second call that could fail after the fork already succeeded.
+    //
+    // An explicit target wins over whatever the source had pending: the user
+    // asked for this branch to run somewhere else, and a plain fork still
+    // inherits the source's active service/model pair as before.
+    const target = input.codexModelSelection;
+    if (target) {
+      // The native response proves what Codex accepted, not that the route is
+      // one the user's config can serve. Confirm the pair against that
+      // provider's catalog once, before any thread is created, so an unknown
+      // service/model never leaves a fork behind. A plain fork inherits the
+      // source's existing selection and is deliberately not re-validated.
+      const catalog = await codexModelProviderService.models(target.modelProvider);
+      if (!catalog.models.includes(target.model)) {
+        throw new AppError(`Model "${target.model}" is not available for "${target.modelProvider}".`, {
+          code: 'CODEX_MODEL_NOT_AVAILABLE',
+          statusCode: 409,
+        });
+      }
+    }
+    const modelSelection = target
+      ?? (settings?.runtime === 'app-server' && settings.modelSelection ? settings.modelSelection : undefined);
     const fork = await codexAppServer.forkThread({
       threadId: input.providerSessionId,
       lastTurnId: input.upToAnchorId,
       cwd: input.projectPath,
-      ...(settings?.runtime === 'app-server' && settings.modelSelection ? { modelSelection: settings.modelSelection } : {}),
+      ...(modelSelection ? { modelSelection } : {}),
     });
 
     // The path is the one the server reported and already confirmed on disk,

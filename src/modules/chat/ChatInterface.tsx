@@ -223,10 +223,17 @@ function ChatInterface({
     && runtimeControls.state?.runtime === 'acp'
     && runtimeControls.state.workerEnabled === true;
 
+  // A history-preserving branch is an ordinary session row; navigating to it
+  // leaves the source conversation, its selection and its queue untouched.
+  const handleSessionForked = useCallback((forkedSessionId: string) => {
+    onNavigateToSession?.(forkedSessionId);
+  }, [onNavigateToSession]);
+
   const codexModelProviders = useCodexModelProviders({
     enabled: provider === 'codex' && codexControls.state?.runtime !== 'sdk',
     controls: codexControls, model: currentProviderModel,
     knownModels: providerModelCatalog.codex?.OPTIONS ?? currentProviderModelOptions,
+    onSessionForked: handleSessionForked,
   });
   const composerModel = codexModelProviders.selection ? codexModelProviders.model : currentProviderModel;
   const composerModelOptions = codexModelProviders.available ? codexModelProviders.modelOptions ?? [] : currentProviderModelOptions;
@@ -234,8 +241,12 @@ function ChatInterface({
   // and Codex fallback choices instead of interpreting missing metadata as no support.
   const composerEffortOptions = composerModel ? currentProviderEffortOptions : [];
   const composerSessionId = selectedSession?.id || currentSessionId;
-  const { available: codexModelProvidersAvailable, selection: codexModelSelection, select: selectCodexModel, modelProvider: codexModelProvider } = codexModelProviders;
-  const confirmedCodexModel = codexModelSelection?.model;
+  const { available: codexModelProvidersAvailable, selection: codexModelSelection, appliedSelection: codexAppliedSelection,
+    select: selectCodexModel, modelProvider: codexModelProvider } = codexModelProviders;
+  // Only the route the composer shows may be synced back. A saved target for
+  // another service is a branch-form value and must never replace the source's
+  // model in the shared provider-state controller.
+  const confirmedCodexModel = codexAppliedSelection?.model;
   useEffect(() => {
     if (!composerSessionId || !confirmedCodexModel || confirmedCodexModel === currentProviderModel) return;
     let active = true;

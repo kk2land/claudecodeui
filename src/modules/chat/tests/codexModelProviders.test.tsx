@@ -18,8 +18,9 @@ const response = (data: unknown) => Promise.resolve(new Response(JSON.stringify(
 
 function controller(patch: Partial<CodexModelProviderControls> = {}): CodexModelProviderControls {
   return { available: true, providers: directory.providers, modelProvider: 'alpha', model: 'shared-model', modelOptions: models,
-    loading: false, pending: false, error: null, refresh: vi.fn().mockResolvedValue(undefined),
-    loadModels: vi.fn().mockResolvedValue(['shared-model', 'beta-only']), select: vi.fn().mockResolvedValue(undefined), ...patch };
+    modelOptionsFor: vi.fn(() => null), loading: false, pending: false, error: null, refresh: vi.fn().mockResolvedValue(undefined),
+    loadModels: vi.fn().mockResolvedValue(['shared-model', 'beta-only']), select: vi.fn().mockResolvedValue(undefined),
+    forkWithHistory: vi.fn().mockResolvedValue({ ok: true, sessionId: 'forked-session' }), ...patch };
 }
 
 const nativeControls: CodexControls = {
@@ -108,12 +109,13 @@ test('an empty model directs selection back to the composer instead of adding a 
   expect(select).toHaveBeenCalledWith('beta-only');
 });
 
-test('next-turn state names the chosen service while the active turn still uses the original service', () => {
-  const controls = controller({ modelProvider: 'beta', selection: { modelProvider: 'beta', model: 'shared-model' },
+test('next-turn state names the chosen model while the active turn still uses the original one', () => {
+  const controls = controller({ modelProvider: 'alpha', selection: { modelProvider: 'alpha', model: 'alpha-only' },
     activeSelection: { modelProvider: 'alpha', model: 'shared-model' } });
   openSettings(controls);
-  expect(screen.getByText('Next turn: Beta service · shared-model')).toBeTruthy();
+  expect(screen.getByText('Next turn: Alpha service · alpha-only')).toBeTruthy();
   expect(screen.getByText('Currently using: Alpha service · shared-model')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: 'Create branch with history' })).toBeNull();
 });
 
 test('mobile service selection is inside the portalled Codex settings panel', () => {
@@ -132,7 +134,7 @@ test('directory discovery is disabled outside native Codex and an unextended con
   const read = vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response({ ...directory, hasCustomProviders: false }));
   const load = vi.spyOn(api.providers, 'codexModelProviderModels');
   const controls: CodexControls = { state: null, pending: false, error: null, delivery: null, control: vi.fn(), steer: vi.fn() };
-  const view = renderHook(({ enabled }) => useCodexModelProviders({ enabled, controls, model: 'shared-model', knownModels: models }), { initialProps: { enabled: false } });
+  const view = renderHook(({ enabled }) => useCodexModelProviders({ enabled, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }), { initialProps: { enabled: false } });
   expect(read).not.toHaveBeenCalled();
   view.rerender({ enabled: true });
   await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
@@ -145,9 +147,9 @@ test('reopened sessions use their saved choice and service-specific model list i
   const load = vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['shared-model', 'unknown-model'] }));
   const control = vi.fn().mockResolvedValue(undefined);
   const controls: CodexControls = { state: { runtime: 'app-server', mode: 'default', phase: 'running', turnId: 'turn-1', goal: null, questions: [],
-    modelSelection: { modelProvider: 'beta', model: 'unknown-model' }, activeModelSelection: { modelProvider: 'alpha', model: 'shared-model' } },
+    modelSelection: { modelProvider: 'beta', model: 'unknown-model' }, activeModelSelection: { modelProvider: 'beta', model: 'shared-model' } },
     pending: false, error: null, delivery: null, control, steer: vi.fn() };
-  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'global-model', knownModels: models }));
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'global-model', knownModels: models, onSessionForked: () => {} }));
   await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(2));
   expect(load).toHaveBeenCalledWith('beta');
   expect(view.result.current.model).toBe('unknown-model');
@@ -156,12 +158,30 @@ test('reopened sessions use their saved choice and service-specific model list i
   expect(control).toHaveBeenCalledWith({ action: 'model-provider', modelProvider: 'beta', model: 'shared-model' });
 });
 
+test('a saved target on another service is a branch form value, not the route the composer shows', async () => {
+  vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
+  const load = vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['shared-model', 'a-model'] }));
+  const controls: CodexControls = { ...nativeControls, state: { ...nativeControls.state!,
+    modelSelection: { modelProvider: 'beta', model: 'b-model' }, activeModelSelection: { modelProvider: 'alpha', model: 'a-model' } } };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'global-model', knownModels: models, onSessionForked: () => {} }));
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(2));
+
+  // The composer follows the native run; the saved target stays available for the branch form.
+  expect(load).toHaveBeenCalledWith('alpha');
+  expect(view.result.current.modelProvider).toBe('alpha');
+  expect(view.result.current.model).toBe('a-model');
+  expect(view.result.current.appliedSelection).toEqual({ modelProvider: 'alpha', model: 'a-model' });
+  expect(view.result.current.selection).toEqual({ modelProvider: 'beta', model: 'b-model' });
+  expect(view.result.current.activeSelection).toEqual({ modelProvider: 'alpha', model: 'a-model' });
+  expect(view.result.current.modelOptionsFor('beta')).toBeNull();
+});
+
 test('a persisted empty model never falls back to the global or active thread model on reopen', async () => {
   vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
   vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['beta-only'] }));
   const controls: CodexControls = { ...nativeControls, state: { ...nativeControls.state!,
-    modelSelection: { modelProvider: 'beta', model: null }, activeModelSelection: { modelProvider: 'alpha', model: 'shared-model' } } };
-  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'global-model', knownModels: models }));
+    modelSelection: { modelProvider: 'beta', model: null }, activeModelSelection: { modelProvider: 'beta', model: 'shared-model' } } };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'global-model', knownModels: models, onSessionForked: () => {} }));
   await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
   expect(view.result.current.model).toBe('');
   expect(view.result.current.modelProvider).toBe('beta');
@@ -173,7 +193,7 @@ test('a settings save announcement re-reads the directory so new conversations u
     .mockImplementation(() => response({ ...directory, defaultProvider: 'beta' }));
   vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['shared-model'] }));
   const controls: CodexControls = { ...nativeControls, state: null };
-  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models }));
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
   await waitFor(() => expect(view.result.current.modelProvider).toBe('alpha'));
 
   act(() => { window.dispatchEvent(new Event(CODEX_MODEL_PROVIDERS_CHANGED_EVENT)); });
@@ -189,7 +209,7 @@ test('switching to another conversation re-reads the directory default', async (
   vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['shared-model'] }));
   const controls: CodexControls = { ...nativeControls, state: null };
   const view = renderHook(
-    ({ sessionId }) => useCodexModelProviders({ enabled: true, controls: { ...controls, sessionId }, model: 'shared-model', knownModels: models }),
+    ({ sessionId }) => useCodexModelProviders({ enabled: true, controls: { ...controls, sessionId }, model: 'shared-model', knownModels: models, onSessionForked: () => {} }),
     { initialProps: { sessionId: 'session-one' } },
   );
   await waitFor(() => expect(view.result.current.modelProvider).toBe('alpha'));
@@ -208,7 +228,7 @@ test('a saved session selection still wins after the session changes and the dir
   const controls: CodexControls = { ...nativeControls, state: { ...nativeControls.state!,
     modelSelection: { modelProvider: 'beta', model: 'beta-only' } } };
   const view = renderHook(
-    ({ sessionId }) => useCodexModelProviders({ enabled: true, controls: { ...controls, sessionId }, model: 'shared-model', knownModels: models }),
+    ({ sessionId }) => useCodexModelProviders({ enabled: true, controls: { ...controls, sessionId }, model: 'shared-model', knownModels: models, onSessionForked: () => {} }),
     { initialProps: { sessionId: 'session-one' } },
   );
   await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));

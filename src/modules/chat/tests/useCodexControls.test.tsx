@@ -539,3 +539,32 @@ test('an unconfirmed user control is not cleared by a successful automatic refre
   hook.unmount();
   vi.useRealTimers();
 });
+
+test('a rejected control keeps the server code on the thrown error for code-based handling', async () => {
+  const listeners = new Set<(event: ServerEvent) => void>();
+  subscribe.mockImplementation((listener: (event: ServerEvent) => void) => {
+    listeners.add(listener);
+    return () => { listeners.delete(listener); };
+  });
+  vi.spyOn(api.providers, 'capabilities').mockResolvedValue(Response.json({ success: true, data: { providers: [] } }));
+  vi.spyOn(api.user, 'drafts').mockImplementation(async () => Response.json({ drafts: [] }));
+  const idle: CodexSessionState = { runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [] };
+  const sendMessage = vi.fn((message) => queueMicrotask(() => {
+    const rejected = message.control?.action === 'model-provider';
+    for (const listener of listeners) listener({ kind: 'control_result', sessionId: 'session-code', requestId: message.requestId,
+      ok: !rejected, codexState: idle,
+      ...(rejected ? { error: 'Model service cannot change on this thread.', code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' } : {}) } as ServerEvent);
+  }));
+  const hook = renderHook(() => useCodexControls({
+    enabled: true, sessionId: 'session-code', project: { projectId: 'project', fullPath: '/project' } as Project,
+    options: {}, sendMessage, onSessionEstablished: () => {},
+  }));
+
+  await act(async () => {
+    // The settings localize by code, so the English server text must not be the only signal.
+    await expect(hook.result.current.control({ action: 'model-provider', modelProvider: 'gateway', model: 'gateway-model' }))
+      .rejects.toMatchObject({ code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+  });
+  expect(hook.result.current.pending).toBe(false);
+  hook.unmount();
+});

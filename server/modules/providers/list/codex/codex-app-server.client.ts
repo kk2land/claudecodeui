@@ -18,6 +18,14 @@ import type { CodexModelSelection, CodexRpcClient, CodexRpcFrame } from '@/share
  */
 const SIDE_QUESTION_TURN_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * How long a released fork may keep the new thread loaded before we give up.
+ * Matches the runtime's own thread-unload deadline: `thread/unsubscribe`
+ * acknowledges detachment before the native shutdown finishes, and only
+ * `thread/closed` proves it.
+ */
+const FORKED_THREAD_CLOSE_TIMEOUT_MS = 10_000;
+
 /** One side question asked on an ephemeral fork of a Codex thread. */
 export type CodexSideQuestionInput = {
   threadId: string;
@@ -77,6 +85,18 @@ export const codexAppServer = {
    * and that field is what the session indexer keys a session's project off —
    * omitting it would file every fork under whatever directory this server
    * happens to be running from.
+   *
+   * `modelSelection` is the inference route the copy must run with. It is sent
+   * explicitly and then confirmed against the thread Codex reports back, so a
+   * fork can never answer from the source's service by accident.
+   *
+   * The new thread is unsubscribed and awaited closed before this returns. A
+   * fork loads and subscribes the copy immediately, while a loaded
+   * `thread/resume` ignores thread config overrides. Leaving it open would make
+   * the new app session's first turn a hot resume of this process's copy; a
+   * cold resume is the path on which that session presents its own thread
+   * config. The source thread is never touched; the caller only ever gets a
+   * detached rollout.
    */
   async forkThread(input: {
     threadId: string;
@@ -84,7 +104,6 @@ export const codexAppServer = {
     cwd: string;
     modelSelection?: CodexModelSelection;
   }): Promise<{ threadId: string; path: string }> {
-
     const result = await codexAppServerTransport.request('thread/fork', {
       threadId: input.threadId,
       ...(input.lastTurnId ? { lastTurnId: input.lastTurnId } : {}),
@@ -93,7 +112,8 @@ export const codexAppServer = {
       // even when its parent was resumed with a different model provider.
       ...(input.modelSelection ? { modelProvider: input.modelSelection.modelProvider,
         ...(input.modelSelection.model ? { model: input.modelSelection.model } : {}) } : {}),
-    }) as { thread?: { id?: unknown; path?: unknown } } | undefined;
+    }) as { thread?: { id?: unknown; path?: unknown; modelProvider?: unknown; model?: unknown };
+      modelProvider?: unknown; model?: unknown } | undefined;
 
     const threadId = typeof result?.thread?.id === 'string' ? result.thread.id : '';
     const path = typeof result?.thread?.path === 'string' ? result.thread.path : '';
@@ -114,6 +134,60 @@ export const codexAppServer = {
         code: 'FORK_FAILED',
         statusCode: 502,
       });
+    }
+
+    if (input.modelSelection) {
+      // The response is the only proof of what the copy really runs with.
+      // Reading both envelope and thread keeps this working across protocol
+      // revisions that moved the field, and a missing field is a failure:
+      // the caller asked for an exact route and cannot be told it was applied.
+      const appliedProvider = typeof result?.modelProvider === 'string' ? result.modelProvider
+        : typeof result?.thread?.modelProvider === 'string' ? result.thread.modelProvider : '';
+      const appliedModel = typeof result?.model === 'string' ? result.model
+        : typeof result?.thread?.model === 'string' ? result.thread.model : '';
+      if (appliedProvider !== input.modelSelection.modelProvider
+        || (input.modelSelection.model !== null && appliedModel !== input.modelSelection.model)) {
+        throw new AppError('Codex did not apply the requested model service to the fork.', {
+          code: 'FORK_MODEL_PROVIDER_MISMATCH',
+          statusCode: 502,
+        });
+      }
+    }
+
+    // The copy loaded and subscribed itself with `thread/fork`. Detach that
+    // subscription and wait for the native close notification here, so the new
+    // app session's first open takes the cold-resume path and presents its own
+    // thread config instead of reusing this process's loaded copy. Only the
+    // copy is touched; the source thread stays loaded exactly as it was.
+    let detach = () => {};
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let confirmClosed!: () => void;
+    const closed = new Promise<void>((resolve, reject) => {
+      confirmClosed = resolve;
+      detach = codexAppServerTransport.onNotification((frame) => {
+        if (frame.method === 'thread/closed' && frame.params?.threadId === threadId) resolve();
+      });
+      timer = setTimeout(() => reject(new AppError('Codex did not confirm that the forked thread was released.', {
+        code: 'FORK_FAILED',
+        statusCode: 502,
+      })), FORKED_THREAD_CLOSE_TIMEOUT_MS);
+    });
+    // A failed unsubscribe check abandons this promise; keep that from
+    // surfacing as an unhandled rejection while the caller gets the real error.
+    closed.catch(() => {});
+    try {
+      const released = await codexAppServerTransport.request('thread/unsubscribe', { threadId }) as { status?: unknown } | undefined;
+      if (released?.status === 'notLoaded') confirmClosed();
+      else if (!['unsubscribed', 'notSubscribed'].includes(String(released?.status))) {
+        throw new AppError('Codex did not confirm that the forked thread was unsubscribed.', {
+          code: 'FORK_FAILED',
+          statusCode: 502,
+        });
+      }
+      await closed;
+    } finally {
+      clearTimeout(timer);
+      detach();
     }
 
     return { threadId, path };

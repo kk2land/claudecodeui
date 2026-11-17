@@ -9,7 +9,7 @@ import test from 'node:test';
 import { closeConnection, initializeDatabase, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { codexAppServerTransport, CodexAppServerConnections, CodexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
-import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
+import { CodexModelProviderService, codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
 import type { AnyRecord, ProviderRuntimeContext, SessionRuntimeSettings } from '@/shared/index.js';
 
@@ -177,7 +177,12 @@ test('pinned Codex preserves model services across switching, forking, and indep
   }
   // The production fork client shares this same isolated native process.
   t.mock.method(codexAppServerTransport, 'request', (method: string, params: unknown) => transport.request(method, params));
+  // The fork client waits for `thread/closed` on this transport; forward the
+  // isolated process's notifications so that confirmation is observed here too.
+  t.mock.method(codexAppServerTransport, 'onNotification', (listener: Parameters<typeof transport.onNotification>[0]) => transport.onNotification(listener));
   const modelProviders = new CodexModelProviderService({ home: root, environment: {} });
+  // The fork adapter validates its target against this same isolated config.
+  t.mock.method(codexModelProviderService, 'models', (modelProvider: string) => modelProviders.models(modelProvider));
   const runtime = new CodexAppServerRuntime(transport, sessionRuntimeDb, 10_000, () => {}, async () => [], 30_000,
     { modelProviders });
   const bindings = new Map<string, string>();
@@ -204,14 +209,20 @@ test('pinned Codex preserves model services across switching, forking, and indep
     const completeFirst = finishFirst;
     finishFirst = undefined;
     completeFirst(); await first;
-    await runtime.control('one', { action: 'model-provider', modelProvider: 'beta', model: 'gpt-5.4' }, options('one'), writer('one'), context);
+    // Moving an existing thread to another service is a branch decision:
+    // Codex cannot change a loaded thread's provider on resume, so the switch
+    // is refused instead of silently re-pointing the source thread.
+    await assert.rejects(runtime.control('one', { action: 'model-provider', modelProvider: 'beta', model: 'gpt-5.4' }, options('one'), writer('one'), context), { code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED' });
+    assert.equal(runtime.getState('one').modelSelection, undefined);
+    // With no switch persisted, the same thread keeps taking its own service's
+    // turns exactly as before.
     await runtime.run('next-input', { ...options('one'), model: 'stale-queued-model' }, writer('one'), context);
     assert.equal(bindings.get('one'), originalThread);
-    assert.equal(runtime.getState('one').activeModelSelection?.modelProvider, 'beta');
+    assert.equal(runtime.getState('one').activeModelSelection?.modelProvider, 'alpha');
     assert.equal(runtime.getState('one').diagnostics?.cliVersion, APP_SERVER_COMPAT_CLI_VERSION);
     assert.equal(runtime.getState('two').activeModelSelection?.modelProvider, 'alpha');
     await runtime.run('other-session-again', options('two'), writer('two'), context);
-    assert.deepEqual(requests.map((request) => request.url), ['/alpha/responses', '/alpha/responses', '/beta/responses', '/alpha/responses']);
+    assert.deepEqual(requests.map((request) => request.url), ['/alpha/responses', '/alpha/responses', '/alpha/responses', '/alpha/responses']);
     assert.ok(JSON.stringify(requests[2].body.input).includes('remember-first-input'));
     assert.ok(JSON.stringify(requests[2].body.input).includes('next-input'));
     assert.equal(requests[2].body.model, 'gpt-5.4');
@@ -220,23 +231,32 @@ test('pinned Codex preserves model services across switching, forking, and indep
 
     const source = await transport.request<{ thread: { path: string } }>('thread/read', { threadId: originalThread });
     sessionsDb.repointSessionToProviderSession('one', { providerSessionId: originalThread!, jsonlPath: source.thread.path });
-    const fork = await sessionsService.forkSessionById('one');
+    // The explicit target is what the user asked for; the source's own
+    // settings must not change when the branch is created.
+    const fork = await sessionsService.forkSessionById('one', { codexModelSelection: { modelProvider: 'beta', model: 'gpt-5.4' } });
     const childThread = sessionsDb.getSessionById(fork.sessionId)!.provider_session_id!;
     assert.notEqual(childThread, originalThread);
     bindings.set(fork.sessionId, childThread);
     assert.deepEqual(sessionRuntimeDb.get(fork.sessionId).modelSelection, { modelProvider: 'beta', model: 'gpt-5.4' });
+    assert.equal(sessionRuntimeDb.get('one').modelSelection, undefined);
 
     await runtime.run('fork-only-input', options(fork.sessionId), writer(fork.sessionId), context);
     assert.equal(runtime.getState(fork.sessionId).activeModelSelection?.modelProvider, 'beta');
     assert.equal(requests[4].url, '/beta/responses');
     assert.equal(requests[4].body.model, 'gpt-5.4');
+    // The branch carries every completed turn of its source (including the
+    // most recent one), not the other session's turn.
     for (const prompt of ['remember-first-input', 'next-input', 'fork-only-input']) {
-      assert.ok(JSON.stringify(requests[4].body.input).includes(prompt));
+      assert.ok(JSON.stringify(requests[4].body.input).includes(prompt), prompt);
     }
     assert.equal(JSON.stringify(requests[4].body.input).includes('other-session-input'), false);
     await runtime.run('source-after-fork', options('one'), writer('one'), context);
     assert.equal(bindings.get('one'), originalThread);
-    assert.equal(requests[5].url, '/beta/responses');
+    assert.equal(requests[5].url, '/alpha/responses');
+    // The source keeps its own two turns and never sees the branch-only one.
+    for (const prompt of ['remember-first-input', 'next-input']) {
+      assert.ok(JSON.stringify(requests[5].body.input).includes(prompt), prompt);
+    }
     assert.equal(JSON.stringify(requests[5].body.input).includes('fork-only-input'), false);
 
     // Saving the global default affects only threads created afterwards: the

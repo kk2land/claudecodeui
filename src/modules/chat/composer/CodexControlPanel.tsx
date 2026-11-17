@@ -125,7 +125,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
             {t('codex.stopAppServer')}
           </button>
         </div>
-        {native && modelProviders?.available && <CodexModelProviderSettings controls={modelProviders} blocked={busy || hasRunningTasks || hasQueuedDraft} />}
+        {native && modelProviders?.available && <CodexModelProviderSettings controls={modelProviders} blocked={busy || hasRunningTasks || hasQueuedDraft || Boolean(state?.queueHeld)} />}
         {state?.diagnostics && <div className="mt-3 min-w-0 border-t border-border/60 pt-3 text-xs text-muted-foreground">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex flex-wrap items-center gap-2">

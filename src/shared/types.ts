@@ -2414,21 +2414,48 @@ export type CodexModelProviders = {
   providers: Array<{ id: string; name: string }>;
 };
 
+/**
+ * Outcome of a history-preserving branch request. A failure never changes the
+ * source conversation, so the settings can report it and let the user retry.
+ * `code` is the server's machine-readable reason and is preferred over its
+ * English `message` when the UI can localize it.
+ */
+export type CodexBranchForkResult =
+  | { ok: true; sessionId: string }
+  | { ok: false; code: string | null; message: string };
+
 /** Codex settings manage session-scoped service choices; the composer uses the selected model catalog. */
 export type CodexModelProviderControls = {
   available: boolean;
   providers: CodexModelProviders['providers'];
   modelProvider: string;
+  /** Saved next-turn selection; a different provider than `activeSelection` is a pending branch target, not an applied service. */
   selection?: CodexModelSelection;
+  /** Route the composer must show and sync from: `selection`, except when that names another service than the native thread runs. */
+  appliedSelection?: CodexModelSelection;
+  /** Route the native thread really runs, which the settings show as "currently using". */
   activeSelection?: CodexModelSelection;
   model: string;
   modelOptions: ProviderModelOption[] | null;
+  /**
+   * Model catalog of a service the settings are only previewing, such as a
+   * branch target. Null until that service's catalog has been loaded, which
+   * keeps the active conversation's own options untouched.
+   */
+  modelOptionsFor(modelProvider: string): ProviderModelOption[] | null;
   loading: boolean;
   pending: boolean;
   error: string | null;
   refresh(): Promise<void>;
   loadModels(modelProvider: string): Promise<string[]>;
   select(modelProvider: string, model: string | null): Promise<void>;
+  /**
+   * Copies the whole conversation into a new session on `target` without
+   * touching this conversation's saved selection, queue or drafts. On success
+   * the new branch is navigated to; on failure the server code is returned so
+   * the caller can explain it without matching the English message.
+   */
+  forkWithHistory(target: { modelProvider: string; model: string }): Promise<CodexBranchForkResult>;
 };
 
 /** Server-owned native session snapshot, including next-turn and active model selections. */
@@ -2446,7 +2473,9 @@ export type CodexSessionState = {
   };
   runtime: 'app-server' | 'sdk';
   mode: 'default' | 'plan';
+  /** Persisted next-turn route; on an existing thread it can only change within the same service, so a different provider here is a branch target instead. */
   modelSelection?: CodexModelSelection;
+  /** Route the native thread actually runs; never the pending selection, so the UI must not present a mismatch as applied. */
   activeModelSelection?: CodexModelSelection;
   queueHeld?: boolean;
   /** True once the backend configured the Worker MCP on this session's native thread; do not infer it from provider capabilities. */

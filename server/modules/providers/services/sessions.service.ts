@@ -2,9 +2,10 @@ import { randomUUID } from 'node:crypto';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 
-import { projectsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
+import { projectsDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { broadcastSessionUpserted, chatRunRegistry } from '@/modules/websocket/index.js';
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
+import { codexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { listBusyClaudeCliSessions } from '@/modules/providers/services/claude-cli-liveness.service.js';
 import { providerCapabilitiesService } from '@/modules/providers/services/provider-capabilities.service.js';
 import { sessionHistoryCache } from '@/modules/providers/services/session-history-cache.service.js';
@@ -15,6 +16,7 @@ import type {
   FetchHistoryResult,
   LLMProvider,
   NormalizedMessage,
+  SessionForkOptions,
   WorkflowAgentActivity,
 } from '@/shared/index.js';
 import { AppError, createNormalizedMessage, sliceTailPage } from '@/shared/index.js';
@@ -479,7 +481,7 @@ export const sessionsService = {
    */
   async forkSessionById(
     sessionId: string,
-    options: { upToAnchorId?: string; title?: string } = {},
+    options: SessionForkOptions = {},
   ): Promise<CreateAppSessionResult> {
     const source = sessionsDb.getSessionById(sessionId);
     if (!source) {
@@ -510,6 +512,31 @@ export const sessionsService = {
     const sessionName = options.title?.trim()
       || `${source.custom_name?.trim() || 'Session'} (fork)`;
     const codexSettings = provider === 'codex' ? sessionRuntimeDb.get(sessionId) : undefined;
+    const forkTarget = options.codexModelSelection;
+    if (forkTarget) {
+      // The target is a Codex app-server thread setting, so it is only
+      // expressible where that runtime actually owns the transcript. The
+      // session's stored runtime is the one the next turn would use, which is
+      // why a stale SDK mode must not accept it either.
+      if (provider !== 'codex' || codexSettings?.runtime !== 'app-server') {
+        throw new AppError('Forking onto a model service is only available for Codex app-server sessions.', {
+          code: 'CODEX_MODEL_PROVIDER_FORK_UNSUPPORTED',
+          statusCode: 409,
+        });
+      }
+      // A fork that must re-route a live conversation cannot race work still
+      // writing to the source: a running turn, held queue entry or native goal
+      // would keep the source busy while the copy claims to be independent.
+      const hasBackgroundWork = (providerRegistry.resolveProvider(provider).runtime.listBackgroundWork?.() ?? [])
+        .some((entry) => entry.sessionId === sessionId);
+      if (chatRunRegistry.isProcessing(sessionId) || hasBackgroundWork
+        || codexAppServerRuntime.isBusy(sessionId) || sessionDraftsDb.hasQueuedMessages(sessionId)) {
+        throw new AppError('Finish or stop the session and empty its queue before forking onto a model service.', {
+          code: 'CODEX_MODEL_PROVIDER_FORK_BUSY',
+          statusCode: 409,
+        });
+      }
+    }
 
     const forked = await fork.forkSession({
       providerSessionId: source.provider_session_id,
@@ -517,6 +544,7 @@ export const sessionsService = {
       projectPath: source.project_path ?? '',
       upToAnchorId: options.upToAnchorId,
       title: sessionName,
+      ...(forkTarget ? { codexModelSelection: forkTarget } : {}),
     });
 
     const forkSessionId = randomUUID();
@@ -530,10 +558,14 @@ export const sessionsService = {
       forkedFromSessionId: sessionId,
       // A fork that silently dropped to the catalog default would answer
       // differently from the conversation it was branched from.
-      model: source.model,
+      model: forkTarget?.model ?? source.model,
       effort: source.effort,
     });
-    if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection) {
+    if (forkTarget) {
+      // The fork adapter confirmed the native thread really runs this target,
+      // so the row and its next-turn settings can name it directly.
+      sessionRuntimeDb.update(forkSessionId, { runtime: 'app-server', modelSelection: forkTarget });
+    } else if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection) {
       // Keep the service/model pair for future resumes, without copying the
       // parent's queue hold or collaboration mode into an independent branch.
       sessionRuntimeDb.update(forkSessionId, { runtime: 'app-server', modelSelection: codexSettings.modelSelection });

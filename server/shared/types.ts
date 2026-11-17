@@ -998,6 +998,14 @@ export type CodexComposerPrediction = {
  */
 export type CodexModelSelection = { modelProvider: string; model: string | null };
 
+/**
+ * Inference route a fork must adopt, unlike the nullable `CodexModelSelection`
+ * a session persists. `model` is non-empty because a fork that asks for a
+ * provider must also name the model it should run; callers that only want to
+ * branch the transcript omit the whole target instead.
+ */
+export type CodexForkModelSelection = { modelProvider: string; model: string };
+
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Resolved launcher and CLI identity; reading this never starts a process. */
@@ -1060,6 +1068,41 @@ export type SessionRuntimeSettings = {
   queueHeld: boolean;
   /** Optional per-session override; absence preserves Codex's configured default. */
   modelSelection?: CodexModelSelection;
+};
+
+//----------------- SESSION FORK CONTRACT ------------
+
+/** One provider-native fork's outcome: the new session id and the transcript it wrote. */
+export type ProviderForkResult = { providerSessionId: string; jsonlPath: string };
+
+/**
+ * Typed input shared by `IProviderFork#forkSession` and its adapters.
+ *
+ * `codexModelSelection` is a Codex app-server-only target. Omitted, the fork
+ * keeps whatever the source thread runs with, so every other provider and
+ * every plain fork ignores it.
+ */
+export type ProviderForkInput = {
+  providerSessionId: string;
+  jsonlPath: string;
+  /** The session's working directory — how providers scope a session lookup. */
+  projectPath: string;
+  upToAnchorId?: string;
+  title?: string;
+  codexModelSelection?: CodexForkModelSelection;
+};
+
+/**
+ * Validated body/options for POST /api/providers/sessions/:sessionId/fork.
+ *
+ * A request without `codexModelSelection` is the historical fork and behaves
+ * exactly as before; the target is only accepted for Codex app-server
+ * sources and only when its model is non-empty.
+ */
+export type SessionForkOptions = {
+  upToAnchorId?: string;
+  title?: string;
+  codexModelSelection?: CodexForkModelSelection;
 };
 
 /** Bidirectional app-server frame after JSON parsing. RPC ids are strings or numbers. */

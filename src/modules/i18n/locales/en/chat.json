@@ -281,7 +281,16 @@
     "recoverDelivery": "Resolve uncertain delivery",
     "unknownDelivery": "Codex has not confirmed delivery. Queueing again may send this message twice.",
     "queueAgain": "Queue as a new message",
-    "discardQueue": "Remove queued copy"
+    "discardQueue": "Remove queued copy",
+    "branchError": {
+      "providerChange": "This conversation keeps its current service. Create a branch with history to use another service.",
+      "unsupported": "This conversation cannot be moved to another service.",
+      "busy": "This conversation is still running. Empty its queue and finish or stop it before creating a branch.",
+      "sourceNotReady": "This conversation has no saved history to copy yet.",
+      "mismatch": "Codex did not create the branch on the selected service. Try again or choose another service.",
+      "modelUnavailable": "The selected model is no longer offered by this service. Choose a valid model and create the branch again.",
+      "serviceMissing": "The selected service is no longer configured. Choose a valid service to create the branch."
+    }
   },
   "voice": {
     "input": "Voice input",
@@ -353,7 +362,14 @@
       "title": "Replacing an earlier message",
       "filesNotReverted": "files the agent already changed are not reverted",
       "cancel": "Cancel"
-    }
+    },
+    "branchWithHistory": "Create branch with history",
+    "branching": "Creating branch…",
+    "branchModel": "Branch model",
+    "branchModelPlaceholder": "Choose a model",
+    "branchModelRequired": "Choose a model to create the branch.",
+    "branchHint": "Copies this whole conversation into a new chat on the selected service. This conversation keeps its current service and history.",
+    "branchModelUnavailable": "The model {{model}} is not available from this service. Choose a model to create the branch."
   },
   "prediction": {
     "accept": "Use",

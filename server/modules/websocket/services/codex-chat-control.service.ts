@@ -37,6 +37,8 @@ type ControlResult = {
   ok: boolean;
   delivery?: string;
   error?: string | null;
+  /** Typed rejection code (for example a model-service fork requirement); the message stays human-readable. */
+  code?: string;
   codexState?: CodexSessionState;
 };
 
@@ -154,6 +156,9 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
     const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL', 'CODEX_MODEL_REQUIRED'].includes(error.code));
     const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;
     return { ...response, ok: delivery === 'accepted', error: delivery === 'accepted' ? undefined : message, delivery,
+      // The UI distinguishes recoverable rejections (fork onto the chosen
+      // service) from ordinary control failures by this code.
+      ...(error instanceof AppError ? { code: error.code } : {}),
       codexState: sessionId ? runtime.getState?.('codex', sessionId) : undefined };
   }
 }

@@ -11,6 +11,8 @@ import type {
   ProviderSkillListOptions,
   ProviderAuthStatus,
   ProviderCurrentActiveModel,
+  ProviderForkInput,
+  ProviderForkResult,
   ProviderModelsDefinition,
   ProviderMcpServer,
   ProviderSkillCreateInput,
@@ -139,14 +141,7 @@ export interface IProviderFork {
    * so the caller can insert the database row before the filesystem watcher
    * notices the file and indexes it as an unrelated session.
    */
-  forkSession(input: {
-    providerSessionId: string;
-    jsonlPath: string;
-    /** The session's working directory — how providers scope a session lookup. */
-    projectPath: string;
-    upToAnchorId?: string;
-    title?: string;
-  }): Promise<{ providerSessionId: string; jsonlPath: string }>;
+  forkSession(input: ProviderForkInput): Promise<ProviderForkResult>;
 }
 
 // ---------------------------

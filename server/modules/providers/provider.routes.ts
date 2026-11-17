@@ -16,6 +16,7 @@ import { codexRateLimitsService } from '@/modules/providers/list/codex/codex-rat
 import { readResidentSessionInfo } from '@/modules/project-scheduler/index.js';
 import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type {
+  CodexForkModelSelection,
   CustomProviderModelEffort,
   CustomProviderModelInput,
   LLMProvider,
@@ -25,6 +26,7 @@ import type {
   ProviderSkillCreateInput,
   ProviderSkillSetEnabledInput,
   ProviderRuntimeAction,
+  SessionForkOptions,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
 import { AppError, asyncHandler, createApiSuccessResponse, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
@@ -376,8 +378,35 @@ const parseProvider = (value: unknown): LLMProvider => {
   });
 };
 
-/** Both fields are optional: an empty body forks the whole conversation. */
-const parseSessionForkPayload = (payload: unknown): { upToAnchorId?: string; title?: string } => {
+/**
+ * A fork target must name both the Codex model provider and a non-empty
+ * model. A partial shape is rejected instead of degrading to a plain fork:
+ * the caller asked for a different inference route and must hear that it
+ * could not be expressed.
+ */
+const parseCodexForkModelSelection = (value: unknown): CodexForkModelSelection | undefined => {
+  if (value === undefined) return undefined;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new AppError('codexModelSelection must be an object.', {
+      code: 'INVALID_CODEX_MODEL_SELECTION',
+      statusCode: 400,
+    });
+  }
+
+  const { modelProvider, model } = value as Record<string, unknown>;
+  if (typeof modelProvider !== 'string' || !modelProvider.trim()
+    || typeof model !== 'string' || !model.trim()) {
+    throw new AppError('codexModelSelection requires a modelProvider and a model.', {
+      code: 'INVALID_CODEX_MODEL_SELECTION',
+      statusCode: 400,
+    });
+  }
+
+  return { modelProvider: modelProvider.trim(), model: model.trim() };
+};
+
+/** Every field is optional: an empty body forks the whole conversation. */
+const parseSessionForkPayload = (payload: unknown): SessionForkOptions => {
   if (payload === undefined || payload === null) {
     return {};
   }
@@ -391,10 +420,12 @@ const parseSessionForkPayload = (payload: unknown): { upToAnchorId?: string; tit
   const body = payload as Record<string, unknown>;
   const upToAnchorId = typeof body.upToAnchorId === 'string' ? body.upToAnchorId.trim() : '';
   const title = typeof body.title === 'string' ? body.title.trim() : '';
+  const codexModelSelection = parseCodexForkModelSelection(body.codexModelSelection);
 
   return {
     ...(upToAnchorId ? { upToAnchorId } : {}),
     ...(title ? { title } : {}),
+    ...(codexModelSelection ? { codexModelSelection } : {}),
   };
 };
 

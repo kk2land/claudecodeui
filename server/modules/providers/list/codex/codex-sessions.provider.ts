@@ -5,6 +5,7 @@ import readline from 'node:readline';
 
 import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
+import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
 import type {
   AnyRecord,
@@ -1979,6 +1980,22 @@ export class CodexSessionsProvider implements IProviderSessions {
     }
 
     const settings = sessionRuntimeDb.get(sessionId);
+    if (settings.runtime === 'app-server' && settings.modelSelection) {
+      // A rewind forks at `keepThroughId` and re-points this same app session,
+      // so it can only keep the thread's own service: Codex refuses a
+      // cross-provider resume, and a branch would otherwise move the session
+      // silently instead of through an explicit history-preserving fork. The
+      // native thread is authoritative — a stale saved selection is only a
+      // pending target. Metadata only; turns are not loaded here.
+      const read = await codexAppServerTransport.request('thread/read', { threadId: supersededThreadId }) as { thread?: AnyRecord } | undefined;
+      const nativeProvider = read?.thread && typeof read.thread.modelProvider === 'string' ? read.thread.modelProvider : '';
+      if (nativeProvider && nativeProvider !== settings.modelSelection.modelProvider) {
+        throw new AppError(`This conversation runs on "${nativeProvider}". Create a branch to use "${settings.modelSelection.modelProvider}".`, {
+          code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED',
+          statusCode: 409,
+        });
+      }
+    }
     const fork = await codexAppServer.forkThread({
       threadId: supersededThreadId,
       lastTurnId: keepThroughId,

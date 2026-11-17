@@ -90,7 +90,14 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
       clearTimeout(entry.timer);
       pending.current.delete(String(event.requestId));
       setPendingSessions(new Set([...pending.current.values()].map((item) => item.sessionId)));
-      if (event.ok) entry.resolve(); else entry.reject(new Error(String(event.error ?? 'Control failed')));
+      if (event.ok) entry.resolve(); else {
+        // Keep the machine-readable reason on the rejection so a caller can act
+        // on it (for example the cross-service fork requirement) instead of
+        // matching the server's English message.
+        const rejection = new Error(String(event.error ?? 'Control failed')) as Error & { code?: string };
+        if (typeof event.code === 'string' && event.code) rejection.code = event.code;
+        entry.reject(rejection);
+      }
     }
     void hydrateChatDrafts();
   }), [subscribe]);

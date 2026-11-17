@@ -259,6 +259,23 @@ test('invalid native controls are acknowledged without reserving a run or changi
   });
 });
 
+test('a rejected Codex control keeps its typed code beside the readable message', async () => {
+  await harness(async (h) => {
+    h.runtime.control = async () => {
+      throw new AppError('This conversation runs on "alpha". Create a branch to use "beta".', {
+        code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED', statusCode: 409,
+      });
+    };
+    h.send({ action: 'goal', operation: 'get' });
+    await settle();
+    const frame = h.frames.at(-1)!;
+    assert.equal(frame.kind, 'control_result');
+    assert.equal(frame.ok, false);
+    assert.equal(frame.code, 'CODEX_MODEL_PROVIDER_FORK_REQUIRED');
+    assert.match(frame.error, /Create a branch/);
+  });
+});
+
 test('the queue dispatcher cannot claim a message while its steer acknowledgement is pending', async () => {
   await harness(async (h) => {
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: queued });

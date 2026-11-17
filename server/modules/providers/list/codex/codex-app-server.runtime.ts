@@ -214,6 +214,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private keepalivePending = false;
   // Stop/close invalidate any in-flight check so it cannot send after teardown.
   private keepaliveGeneration = 0;
+  // The route a native thread was last seen running with. A persisted
+  // `modelSelection` may name a different service the user wants to branch
+  // onto; this keeps the *actual* source visible in a rejected control snapshot.
+  private readonly nativeRoutes = new Map<string, CodexModelSelection>();
   private readonly keepaliveIntervalMs: number;
 
   constructor(
@@ -377,9 +381,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       ...(session.modelProvider && session.model ? { activeModelSelection: { modelProvider: session.modelProvider, model: session.model } } : {}),
       goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions], ...(session.state.prediction ? { prediction: { ...session.state.prediction } } : {}) };
     const failure = this.failures.get(sessionId);
+    const nativeRoute = this.nativeRoutes.get(sessionId);
     // The failure snapshot names the exited process; pool status may belong to another service.
-    if (failure) return { ...failure.state, ...settings, predictionSupported };
-    return { ...settings, diagnostics: this.client.status, predictionSupported, phase: 'idle', turnId: null, goal: null, questions: [] };
+    if (failure) return { ...failure.state, ...settings, predictionSupported,
+      ...(nativeRoute ? { activeModelSelection: nativeRoute } : {}) };
+    return { ...settings, diagnostics: this.client.status, predictionSupported, phase: 'idle', turnId: null, goal: null, questions: [],
+      ...(nativeRoute ? { activeModelSelection: nativeRoute } : {}) };
   }
 
   private publish(session: NativeSession): void {
@@ -534,6 +541,66 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     session.model = selection?.model ?? await context.resolveResumeModel(session.id, session.options.model) ?? session.model;
   }
 
+  /**
+   * Reads the inference route a native thread really runs with.
+   *
+   * Only the native thread is authoritative here: a persisted
+   * `modelSelection` is a target for a future branch, not evidence of the
+   * service the existing rollout uses.
+   */
+  private async readNativeRoute(threadId: string): Promise<CodexModelSelection | null> {
+    const result = await this.client.request('thread/read', { threadId }) as { thread?: AnyRecord } | undefined;
+    const thread = result?.thread;
+    const modelProvider = typeof thread?.modelProvider === 'string' ? thread.modelProvider : '';
+    // Older rollouts can name a provider without a model. The provider alone is
+    // still the thread's actual route, and treating a missing model as "no
+    // route" would hide exactly the mismatch this check exists for.
+    if (!modelProvider) return null;
+    return { modelProvider, model: typeof thread?.model === 'string' && thread.model ? thread.model : null };
+  }
+
+  /**
+   * Resolves and remembers the route a native thread really runs with.
+   * A loaded session already reports it; otherwise one read is issued. The
+   * remembered copy keeps the route visible in a rejection snapshot even when
+   * no session was loaded.
+   */
+  private async resolveNativeRoute(sessionId: string, threadId: string | null): Promise<CodexModelSelection | null> {
+    if (!threadId) return null;
+    const loaded = this.sessions.get(sessionId);
+    const route = loaded?.threadId === threadId && loaded.modelProvider
+      ? { modelProvider: loaded.modelProvider, model: loaded.model || null }
+      : await this.readNativeRoute(threadId);
+    if (route) this.nativeRoutes.set(sessionId, route);
+    return route;
+  }
+
+  /**
+   * Refuses a persisted selection that names another service than the native
+   * thread already runs.
+   *
+   * Codex cannot change a thread's provider on resume — hot or cold — so this
+   * must be an explicit branch instead of a silent service switch or a fallback
+   * to the CLI default. Checked before any release/unload, Worker preparation or
+   * Goal activation so the source thread and its owner stay untouched. The
+   * actual route is remembered for the rejection snapshot, while the pending
+   * selection stays published as the branch target the UI can recover from.
+   */
+  private async assertSelectionMatchesNative(sessionId: string, threadId: string | null, selection?: CodexModelSelection): Promise<void> {
+    // Only the app-server runtime has native thread routes to compare against;
+    // an SDK selection is applied by that runtime's own process.
+    if (!selection || !threadId || this.settings.get(sessionId).runtime !== 'app-server') return;
+    // An unreadable route is left to the post-resume response check; refusing
+    // here would block sessions whose native metadata is not available yet.
+    const route = await this.resolveNativeRoute(sessionId, threadId);
+    if (!route) return;
+    if (route.modelProvider === selection.modelProvider) return;
+    throw new AppError(`This conversation runs on "${route.modelProvider}". Create a branch to use "${selection.modelProvider}".`, {
+      code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED',
+      statusCode: 409,
+    });
+  }
+
   private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null, composerPredictions = false, workerBatchId?: string): NativeTurn {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
@@ -568,10 +635,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     });
     let session: NativeSession;
     try {
-      const loaded = this.sessions.get(sessionId);
-      if (selection && loaded?.modelProvider !== selection.modelProvider) {
-        await this.releaseSession(sessionId, context.resolveProviderSessionId(sessionId));
-      }
+      // A conversation can only run where its native thread already runs. The
+      // selection may name another service the user wants to branch onto, so
+      // refuse before tearing anything down or preparing a Worker owner.
+      await this.assertSelectionMatchesNative(sessionId, context.resolveProviderSessionId(sessionId), selection);
       if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
         throw new AppError('Codex app-server was stopped.', { code: 'CODEX_APP_SERVER_STOPPED', statusCode: 409 });
       }
@@ -1405,6 +1472,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (action.modelProvider !== currentProvider && this.hasNativeWork(sessionId)) {
         throw new AppError('Finish running tasks before switching model services.', { code: 'CODEX_MODEL_PROVIDER_BUSY', statusCode: 409 });
       }
+      // Choosing another service for a thread that already exists is a branch
+      // decision, not a live switch: the native thread keeps its provider.
+      await this.assertSelectionMatchesNative(sessionId,
+        this.sessions.get(sessionId)?.threadId ?? context.resolveProviderSessionId(sessionId),
+        { modelProvider: action.modelProvider, model: action.model ?? '' });
       const catalog = await this.modelProviders.models(action.modelProvider);
       // Keep a shared model, otherwise require a new choice in the composer.
       // Never substitute the service's first model or the CLI default.
@@ -1423,7 +1495,16 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     if (selected?.model === null) {
       // Reconnect must keep the empty choice instead of resuming with a CLI
       // default. Existing work can still be paused/cleared on its loaded thread.
-      if (action.action === 'goal' && action.operation === 'get') return this.getState(sessionId);
+      if (action.action === 'goal' && action.operation === 'get') {
+        // A read still reports the thread's real route while the model is
+        // unchosen, so the UI can show the pending target next to the actual
+        // source. Nothing is resumed, no Worker is prepared, no Goal starts.
+        if (this.settings.get(sessionId).runtime === 'app-server') {
+          await this.resolveNativeRoute(sessionId,
+            this.sessions.get(sessionId)?.threadId ?? context.resolveProviderSessionId(sessionId));
+        }
+        return this.getState(sessionId);
+      }
       if (action.action === 'steer' || action.action === 'goal' && (!loaded || ['set', 'resume'].includes(action.operation))) {
         throw new AppError('Choose a model before sending a prompt.', { code: 'CODEX_MODEL_REQUIRED', statusCode: 409 });
       }
@@ -1474,11 +1555,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       return this.getState(sessionId);
     }
     if (action.operation === 'get' && !context.resolveProviderSessionId(sessionId) && !this.sessions.has(sessionId)) return this.getState(sessionId);
-    if (['set', 'resume'].includes(action.operation) && selected && loaded?.modelProvider !== selected.modelProvider) {
-      if (this.hasNativeWork(sessionId)) throw new AppError('Pause the current goal before applying the selected model provider.', {
-        code: 'CODEX_RUNTIME_BUSY', statusCode: 409,
-      });
-      await this.unloadSession(sessionId, context.resolveProviderSessionId(sessionId));
+    if (['get', 'set', 'resume'].includes(action.operation) && selected) {
+      // A Goal read or activation resumes the same thread and installs its
+      // Worker owner, so the service rule applies before any of that work.
+      await this.assertSelectionMatchesNative(sessionId,
+        this.sessions.get(sessionId)?.threadId ?? context.resolveProviderSessionId(sessionId), selected);
     }
     const session = await this.ensure(sessionId, options, writer, context);
     this.assertLiveSession(session);

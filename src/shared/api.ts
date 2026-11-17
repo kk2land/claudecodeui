@@ -290,8 +290,16 @@ export const api = {
   restoreSession: (sessionId: string) => post(`/api/providers/sessions/${sessionId}/restore`),
   // Creates an independent session holding this one's conversation up to
   // `upToAnchorId` (all of it when omitted). The source is left untouched.
-  forkSession: (sessionId: string, body: { upToAnchorId?: string; title?: string } = {}) =>
-    post(`/api/providers/sessions/${encodeURIComponent(sessionId)}/fork`, body),
+  // `codexModelSelection` is a Codex app-server-only target: when present it
+  // names both the provider and a non-empty model for the new thread.
+  forkSession: (
+    sessionId: string,
+    body: {
+      upToAnchorId?: string;
+      title?: string;
+      codexModelSelection?: { modelProvider: string; model: string };
+    } = {},
+  ) => post(`/api/providers/sessions/${encodeURIComponent(sessionId)}/fork`, body),
   // Starts the session's next message on a fresh context. Its history stays
   // visible; `cleared` is false when there was no context to clear.
   clearSessionContext: (sessionId: string) =>

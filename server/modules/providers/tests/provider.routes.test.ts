@@ -680,3 +680,44 @@ test('the workflow agent route reads an agent\'s timeline and status from its ru
     assert.equal(missing.error.code, 'WORKFLOW_AGENT_NOT_FOUND');
   });
 });
+
+test('the fork endpoint validates an optional Codex model service target without changing plain forks', async () => {
+  await withProviderServer(async (baseUrl, workspacePath) => {
+    const created = await fetch(`${baseUrl}/api/providers/sessions`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider: 'codex', projectPath: workspacePath }),
+    });
+    assert.equal(created.status, 201);
+    const sessionId = (await created.json() as { data: { sessionId: string } }).data.sessionId;
+    const fork = (body: unknown) => fetch(`${baseUrl}/api/providers/sessions/${sessionId}/fork`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+
+    for (const codexModelSelection of [
+      { modelProvider: ' ' , model: 'gpt-5.4' },
+      { modelProvider: 'alpha', model: '' },
+      { modelProvider: 7, model: 'gpt-5.4' },
+      null,
+      'alpha',
+    ]) {
+      const response = await fork({ codexModelSelection });
+      const payload = await response.json() as { error: { code: string } };
+      assert.equal(response.status, 400);
+      assert.equal(payload.error.code, 'INVALID_CODEX_MODEL_SELECTION');
+    }
+
+    // A well-formed target reaches the service; this session has no transcript
+    // yet, so the only refusal left is the ordinary source-not-ready one.
+    const accepted = await fork({ codexModelSelection: { modelProvider: 'alpha', model: 'gpt-5.4' } });
+    const acceptedBody = await accepted.json() as { error: { code: string } };
+    assert.equal(accepted.status, 409);
+    assert.equal(acceptedBody.error.code, 'FORK_SOURCE_NOT_READY');
+
+    // The historical body is untouched: an empty fork still reaches the same
+    // service-level refusal instead of failing validation.
+    const plain = await fork({});
+    const plainBody = await plain.json() as { error: { code: string } };
+    assert.equal(plain.status, 409);
+    assert.equal(plainBody.error.code, 'FORK_SOURCE_NOT_READY');
+  });
+});

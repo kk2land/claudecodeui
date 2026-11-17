@@ -2,14 +2,23 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 
 import { api } from '@/shared/api';
 import { CODEX_MODEL_PROVIDERS_CHANGED_EVENT } from '@/shared/constants';
-import type { CodexControls, CodexModelProviderControls, CodexModelProviders, ProviderModelOption } from '@/shared/types';
+import type { CodexBranchForkResult, CodexControls, CodexModelProviderControls, CodexModelProviders, ProviderModelOption } from '@/shared/types';
+
+/** Body of a fork request; only the fields this hook reads are typed. */
+type ForkResponseBody = {
+  data?: { sessionId?: unknown };
+  error?: { code?: unknown; message?: unknown };
+  message?: unknown;
+};
 
 /** ChatInterface exposes the saved service and its model catalog to Codex settings and the composer. */
-export function useCodexModelProviders({ enabled, controls, model, knownModels }: {
+export function useCodexModelProviders({ enabled, controls, model, knownModels, onSessionForked }: {
   enabled: boolean;
   controls: CodexControls;
   model: string;
   knownModels: ProviderModelOption[];
+  /** ChatInterface opens the new branch; the source conversation is never navigated away from on failure. */
+  onSessionForked: (sessionId: string) => void;
 }): CodexModelProviderControls {
   // The directory determines whether this installation has any extra services to expose.
   const [directory, setDirectory] = useState<CodexModelProviders | null>(null);
@@ -21,7 +30,12 @@ export function useCodexModelProviders({ enabled, controls, model, knownModels }
   const [errors, setErrors] = useState<Record<string, string | null>>({});
   const selection = enabled ? controls.state?.modelSelection : undefined;
   const activeSelection = enabled ? controls.state?.activeModelSelection : undefined;
-  const modelProvider = selection?.modelProvider ?? activeSelection?.modelProvider ?? directory?.defaultProvider ?? 'openai';
+  // A saved selection naming another service can only be a branch target: the
+  // native thread keeps its own route, so the composer shows what really runs
+  // and the settings recover the target from `selection`.
+  const pendingBranchTarget = Boolean(selection && activeSelection && selection.modelProvider !== activeSelection.modelProvider);
+  const appliedSelection = pendingBranchTarget ? activeSelection : selection;
+  const modelProvider = appliedSelection?.modelProvider ?? activeSelection?.modelProvider ?? directory?.defaultProvider ?? 'openai';
   const available = enabled && directory?.hasCustomProviders === true;
 
   const refresh = useCallback(async () => {
@@ -71,20 +85,47 @@ export function useCodexModelProviders({ enabled, controls, model, knownModels }
     return () => { active = false; };
   }, [available, modelProvider, loadModels]);
 
-  const modelOptions = useMemo(() => {
-    const ids = catalogs[modelProvider];
+  const modelOptionsFor = useCallback((id: string) => {
+    const ids = catalogs[id];
     if (!available || !ids) return null;
     // Keep remote ids intact and reuse known display metadata. The shared
     // provider-state controller resolves reasoning options, including fallback levels.
-    return ids.map((id) => knownModels.find((option) => option.value === id) ?? { value: id, label: id });
-  }, [available, catalogs, modelProvider, knownModels]);
+    return ids.map((modelId) => knownModels.find((option) => option.value === modelId) ?? { value: modelId, label: modelId });
+  }, [available, catalogs, knownModels]);
+
+  const modelOptions = useMemo(() => modelOptionsFor(modelProvider), [modelOptionsFor, modelProvider]);
 
   const control = controls.control;
   const select = useCallback((id: string, nextModel: string | null) => control({
     action: 'model-provider', modelProvider: id, model: nextModel,
   }), [control]);
 
-  return { available, providers: directory?.providers ?? [], modelProvider, selection, activeSelection,
-    model: selection ? selection.model ?? '' : model, modelOptions, loading: loadingProviders.has(modelProvider),
-    pending: controls.pending, error: errors[modelProvider] ?? null, refresh, loadModels, select };
+  const sourceSessionId = controls.sessionId;
+  const forkWithHistory = useCallback(async (target: { modelProvider: string; model: string }): Promise<CodexBranchForkResult> => {
+    if (!sourceSessionId) return { ok: false, code: null, message: 'Open a saved conversation before branching.' };
+    try {
+      // Full history: no anchor is sent, so the copy carries every turn. The
+      // source's saved selection stays exactly as it is.
+      const response = await api.forkSession(sourceSessionId, { codexModelSelection: target });
+      const body = await response.json().catch(() => null) as ForkResponseBody | null;
+      const forkedSessionId = body?.data?.sessionId;
+      if (!response.ok || typeof forkedSessionId !== 'string') {
+        const failureCode = body?.error?.code;
+        const failureMessage = body?.error?.message ?? body?.message;
+        return {
+          ok: false,
+          code: typeof failureCode === 'string' && failureCode ? failureCode : null,
+          message: typeof failureMessage === 'string' && failureMessage ? failureMessage : `HTTP ${response.status}`,
+        };
+      }
+      onSessionForked(forkedSessionId);
+      return { ok: true, sessionId: forkedSessionId };
+    } catch (error) {
+      return { ok: false, code: null, message: error instanceof Error ? error.message : String(error) };
+    }
+  }, [onSessionForked, sourceSessionId]);
+
+  return { available, providers: directory?.providers ?? [], modelProvider, selection, appliedSelection, activeSelection,
+    model: appliedSelection ? appliedSelection.model ?? '' : model, modelOptions, modelOptionsFor, loading: loadingProviders.has(modelProvider),
+    pending: controls.pending, error: errors[modelProvider] ?? null, refresh, loadModels, select, forkWithHistory };
 }

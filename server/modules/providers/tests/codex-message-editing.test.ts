@@ -201,10 +201,15 @@ test('the edit anchor resolves to the turn before the one being replaced', { con
   });
 });
 
-test('rewinding a Codex session keeps its model service while moving onto the branch and retiring the old thread', { concurrency: false }, async () => {
+test('rewinding a Codex session keeps its model service while moving onto the branch and retiring the old thread', { concurrency: false }, async (t) => {
   await withIndexedSession(THREE_TURNS, async ({ sessionId, homeDir, workspacePath }) => {
     const modelSelection = { modelProvider: 'beta', model: 'gateway/new-model' };
     sessionRuntimeDb.update(sessionId, { runtime: 'app-server', modelSelection });
+    // The thread really runs on the saved service, so the rewind may keep it.
+    t.mock.method(codexAppServerTransport, 'request', async (method: string) => {
+      assert.equal(method, 'thread/read');
+      return { thread: { id: 'thread-1', modelProvider: 'beta', model: 'gateway/new-model' } };
+    });
     const forkPath = path.join(homeDir, '.codex', 'sessions', '2026', '07', '08', 'rollout-thread-2.jsonl');
     await mkdir(path.dirname(forkPath), { recursive: true });
     await writeFile(forkPath, `${JSON.stringify({ type: 'session_meta', payload: { id: 'thread-2', cwd: workspacePath } })}\n`, 'utf8');
@@ -232,6 +237,85 @@ test('rewinding a Codex session keeps its model service while moving onto the br
     // the user just edited away from, for good.
     assert.equal(session?.jsonl_path, forkPath);
     assert.equal(sessionsDb.isProviderSessionSuperseded('thread-1', 'codex'), true);
+  });
+});
+
+test('a rewind whose saved service differs from the native thread is refused without touching the conversation', { concurrency: false }, async (t) => {
+  await withIndexedSession(THREE_TURNS, async ({ sessionId, homeDir, workspacePath }) => {
+    // A pending target from a service switch that never happened: the thread
+    // still runs alpha, so re-pointing it onto beta would move the session
+    // silently instead of going through an explicit history-preserving fork.
+    const modelSelection = { modelProvider: 'beta', model: 'gateway/new-model' };
+    sessionRuntimeDb.update(sessionId, { runtime: 'app-server', modelSelection });
+    t.mock.method(codexAppServerTransport, 'request', async (method: string) => {
+      assert.equal(method, 'thread/read');
+      return { thread: { id: 'thread-1', modelProvider: 'alpha', model: 'source-model' } };
+    });
+    const forkPath = path.join(homeDir, '.codex', 'sessions', '2026', '07', '08', 'rollout-thread-2.jsonl');
+    const realForkThread = codexAppServer.forkThread;
+    let forked = false;
+    codexAppServer.forkThread = async () => { forked = true; return { threadId: 'thread-2', path: forkPath }; };
+    const before = sessionsDb.getSessionById(sessionId)!;
+
+    try {
+      await assert.rejects(new CodexSessionsProvider().rewindSession(sessionId, 'turn-b'), {
+        code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED', statusCode: 409,
+      });
+    } finally {
+      codexAppServer.forkThread = realForkThread;
+    }
+
+    assert.equal(forked, false);
+    assert.equal(sessionsDb.isProviderSessionSuperseded('thread-1', 'codex'), false);
+    const after = sessionsDb.getSessionById(sessionId)!;
+    assert.equal(after.provider_session_id, before.provider_session_id);
+    assert.equal(after.jsonl_path, before.jsonl_path);
+    assert.deepEqual(sessionRuntimeDb.get(sessionId).modelSelection, modelSelection);
+  });
+});
+
+test('a rewind whose saved service has no chosen model is still refused cross-provider and never picks a default', { concurrency: false }, async (t) => {
+  await withIndexedSession(THREE_TURNS, async ({ sessionId, homeDir }) => {
+    const modelSelection = { modelProvider: 'beta', model: null };
+    sessionRuntimeDb.update(sessionId, { runtime: 'app-server', modelSelection });
+    t.mock.method(codexAppServerTransport, 'request', async () => ({
+      thread: { id: 'thread-1', modelProvider: 'alpha', model: 'source-model' },
+    }));
+    const forkPath = path.join(homeDir, '.codex', 'sessions', '2026', '07', '08', 'rollout-thread-2.jsonl');
+    const realForkThread = codexAppServer.forkThread;
+    let forked = false;
+    codexAppServer.forkThread = async () => { forked = true; return { threadId: 'thread-2', path: forkPath }; };
+
+    try {
+      await assert.rejects(new CodexSessionsProvider().rewindSession(sessionId, 'turn-b'), {
+        code: 'CODEX_MODEL_PROVIDER_FORK_REQUIRED', statusCode: 409,
+      });
+    } finally {
+      codexAppServer.forkThread = realForkThread;
+    }
+
+    assert.equal(forked, false);
+    assert.equal(sessionsDb.isProviderSessionSuperseded('thread-1', 'codex'), false);
+    // The raw target is preserved; no default model was invented for it.
+    assert.deepEqual(sessionRuntimeDb.get(sessionId).modelSelection, modelSelection);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.provider_session_id, 'thread-1');
+  });
+});
+
+test('a rewind on the SDK runtime does not consult the native route', { concurrency: false }, async (t) => {
+  await withIndexedSession(THREE_TURNS, async ({ sessionId, homeDir, workspacePath }) => {
+    sessionRuntimeDb.update(sessionId, { runtime: 'sdk', modelSelection: { modelProvider: 'beta', model: 'gateway/new-model' } });
+    const read = t.mock.method(codexAppServerTransport, 'request', async () => ({ thread: { modelProvider: 'alpha' } }));
+    const forkPath = path.join(homeDir, '.codex', 'sessions', '2026', '07', '08', 'rollout-thread-2.jsonl');
+    const realForkThread = codexAppServer.forkThread;
+    codexAppServer.forkThread = async () => ({ threadId: 'thread-2', path: forkPath });
+    try {
+      await new CodexSessionsProvider().rewindSession(sessionId, 'turn-b');
+    } finally {
+      codexAppServer.forkThread = realForkThread;
+    }
+    assert.equal(read.mock.callCount(), 0);
+    assert.equal(sessionsDb.getSessionById(sessionId)?.provider_session_id, 'thread-2');
   });
 });
 
