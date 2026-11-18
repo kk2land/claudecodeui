@@ -17,12 +17,19 @@ import type { CodexModelProviders, ProviderAuthStatus } from '@/shared/types';
 const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   save: vi.fn(),
+  create: vi.fn(),
+  update: vi.fn(),
 }));
-const { read, save } = mocks;
+const { read, save, create, update } = mocks;
 
 vi.mock('@/shared/api', async (importOriginal) => ({
   ...(await importOriginal<typeof SharedApi>()),
-  api: { providers: { codexModelProviders: mocks.read, setCodexDefaultModelProvider: mocks.save } },
+  api: { providers: {
+    codexModelProviders: mocks.read,
+    setCodexDefaultModelProvider: mocks.save,
+    createCodexModelProvider: mocks.create,
+    updateCodexModelProvider: mocks.update,
+  } },
 }));
 
 // The CLI row is unrelated to this card and would make its own status request.
@@ -33,10 +40,13 @@ vi.mock('@/modules/settings/tabs/agents-settings/sections/content/ProviderCliVer
 const directory: CodexModelProviders = {
   defaultProvider: 'alpha',
   hasCustomProviders: true,
+  canChangeDefault: true,
   providers: [
-    { id: 'openai', name: 'OpenAI' },
-    { id: 'alpha', name: 'Alpha service' },
-    { id: 'beta', name: 'Beta service' },
+    { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', canEdit: false, settings: { type: 'openai' } },
+    { id: 'alpha', name: 'Alpha service', baseUrl: 'https://alpha.example.com/v1', canEdit: true,
+      settings: { type: 'customGateway', auth: { mode: 'environmentVariable', envKey: 'ALPHA_API_KEY' } } },
+    { id: 'beta', name: 'Beta service', baseUrl: 'https://beta.example.com/v1', canEdit: true,
+      settings: { type: 'customGateway', auth: { mode: 'externallyConfigured', envKey: 'BETA_API_KEY' } } },
   ],
 };
 
@@ -53,6 +63,11 @@ const respond = (data: unknown, status = 200) => Promise.resolve(new Response(
   { status },
 ));
 
+const fail = (status: number, error: { code: string; message: string }) => Promise.resolve(new Response(
+  JSON.stringify({ success: false, error }),
+  { status },
+));
+
 const renderAccount = (agent: 'codex' | 'claude' = 'codex') => render(
   <AccountContent agent={agent} authStatus={authStatus} onLogin={() => {}} />,
 );
@@ -63,6 +78,8 @@ beforeEach(() => {
   read.mockReset();
   read.mockImplementation(() => respond(directory));
   save.mockReset();
+  create.mockReset();
+  update.mockReset();
 });
 
 afterEach(() => {
@@ -159,5 +176,114 @@ describe('Codex default model service card', () => {
     renderAccount('claude');
     expect(screen.queryByRole('combobox', { name: 'Default model service' })).toBeNull();
     expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe('Codex model service editing', () => {
+  it('edits a custom gateway with only the fields the user changed and leaves its external credential alone', async () => {
+    const changed = vi.fn();
+    window.addEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, changed);
+    update.mockImplementation(() => respond({ provider: { ...directory.providers[2], name: 'Beta renamed' } }));
+    read.mockImplementationOnce(() => respond(directory))
+      .mockImplementation(() => respond({ ...directory, providers: [directory.providers[0], directory.providers[1],
+        { ...directory.providers[2], name: 'Beta renamed' }] }));
+
+    renderAccount();
+    await select();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[1]);
+    const name = screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement;
+    // The externally configured key is shown as a hint and is never re-sent on an unrelated edit.
+    expect((screen.getByRole('textbox', { name: 'Environment variable' }) as HTMLInputElement).value).toBe('BETA_API_KEY');
+    fireEvent.change(name, { target: { value: 'Beta renamed' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(update).toHaveBeenCalledWith('beta', { type: 'customGateway', providerId: 'beta', name: 'Beta renamed' }));
+    await waitFor(() => expect(changed).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(screen.queryByTestId('codex-model-provider-editor')).toBeNull());
+    expect(screen.getByRole('option', { name: 'Beta renamed' })).toBeTruthy();
+    window.removeEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, changed);
+  });
+
+  it('creates a custom gateway with the name, endpoint and optional environment variable it was given', async () => {
+    create.mockImplementation(() => respond({ provider: {
+      id: 'gateway-2', name: 'Team gateway', baseUrl: 'https://team.example.com/v1', canEdit: true,
+      settings: { type: 'customGateway', auth: { mode: 'environmentVariable', envKey: 'TEAM_KEY' } },
+    } }));
+    renderAccount();
+    await select();
+    fireEvent.click(await screen.findByRole('button', { name: 'Add custom gateway' }));
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), { target: { value: 'Team gateway' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Base URL' }), { target: { value: 'https://team.example.com/v1' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Environment variable' }), { target: { value: 'TEAM_KEY' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(create).toHaveBeenCalledWith({
+      type: 'customGateway', name: 'Team gateway', baseUrl: 'https://team.example.com/v1', envKey: 'TEAM_KEY',
+    }));
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed write open and shows the native reason', async () => {
+    update.mockImplementation(() => respond(null, 500));
+    renderAccount();
+    await select();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), { target: { value: 'Alpha offline' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }));
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Service offline');
+    expect(screen.getByTestId('codex-model-provider-editor')).toBeTruthy();
+    expect((screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement).value).toBe('Alpha offline');
+  });
+
+  it('reports a stored default-service change that does not take effect and shows the effective directory', async () => {
+    const changed = vi.fn();
+    window.addEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, changed);
+    // The write is stored, but another config layer still decides the default.
+    save.mockImplementation(() => fail(409, {
+      code: 'CODEX_MODEL_PROVIDER_DEFAULT_OVERRIDDEN', message: 'Locked by a managed policy',
+    }));
+    read.mockImplementationOnce(() => respond(directory))
+      .mockImplementation(() => respond({ ...directory, defaultProvider: 'beta' }));
+
+    renderAccount();
+    const control = await select();
+    await waitFor(() => expect(control.value).toBe('alpha'));
+    fireEvent.change(control, { target: { value: 'openai' } });
+
+    const alert = await screen.findByRole('alert');
+    expect(alert.textContent).toContain('Codex accepted the change');
+    expect(alert.textContent).toContain('Locked by a managed policy');
+    // The effective directory, not the requested value, is what the card shows.
+    await waitFor(() => expect(control.value).toBe('beta'));
+    expect(changed).toHaveBeenCalled();
+    window.removeEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, changed);
+  });
+
+  it('keeps an externally configured credential field read-only while every other field still edits', async () => {
+    renderAccount();
+    await select();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[1]);
+
+    expect((screen.getByRole('textbox', { name: 'Environment variable' }) as HTMLInputElement).disabled).toBe(true);
+    expect((screen.getByRole('textbox', { name: 'Name' }) as HTMLInputElement).disabled).toBe(false);
+    expect((screen.getByRole('textbox', { name: 'Base URL' }) as HTMLInputElement).disabled).toBe(false);
+  });
+
+  it('shows native services read-only when the user layer or Codex forbids writing them', async () => {
+    renderAccount();
+    await select();
+    // OpenAI and the editable custom services are both listed; only OpenAI is read-only.
+    expect((await screen.findAllByRole('button', { name: 'Edit' })).length).toBe(2);
+    expect(screen.getAllByText('Read-only: change this service in Codex\'s own configuration.').length).toBe(1);
+  });
+
+  it('disables the default service and explains why when the layer forbids changing it', async () => {
+    read.mockImplementation(() => respond({ ...directory, canChangeDefault: false }));
+    renderAccount();
+    const control = await select();
+    await waitFor(() => expect(control.disabled).toBe(true));
+    expect(screen.getByText('This user layer does not allow changing the default model service.')).toBeTruthy();
   });
 });

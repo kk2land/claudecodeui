@@ -7,6 +7,7 @@ import { ChevronDown, Loader2, Square, Settings2 } from 'lucide-react';
 import type { CodexControls, CodexModelProviderControls, CodexUserInputRequest } from '@/shared/types';
 import { cn } from '@/shared/utils';
 import { CodexModelProviderSettings } from '@/modules/chat/composer/CodexModelProviderSettings';
+import { usePlanHandoff } from '@/modules/chat/context/PlanHandoffContext';
 
 function NativeQuestion({ request, controls }: { request: CodexUserInputRequest; controls: CodexControls }) {
   const { t } = useTranslation('chat');
@@ -66,6 +67,15 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
 }) {
   const { t, i18n } = useTranslation('chat');
   const { state, error, pending, hasActiveWorkers = false } = controls;
+  const planHandoff = usePlanHandoff();
+  // ChatInterface publishes a plan only when the tool, mode, transcript load and
+  // connection all allow a native handoff; the toolbar only decides to show it.
+  const latestPlan = planHandoff?.latestPlan ?? null;
+  // A creation failure is remembered with the exact plan it tried, so switching
+  // session or producing another plan never carries a stale error along.
+  const [handoffFailure, setHandoffFailure] = useState<{ scope: string; message: string } | null>(null);
+  const planScope = latestPlan ? `${latestPlan.sourceSessionId ?? ''}\u0000${latestPlan.markdown}` : null;
+  const handoffFailureMessage = handoffFailure?.scope === planScope ? handoffFailure.message : null;
   const showResumeQueue = Boolean(state?.queueHeld && hasQueuedDraft);
   const runtimePanelId = useId();
   // Keep advanced runtime controls out of the toolbar until the user opens them.
@@ -79,6 +89,19 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
   const native = state?.runtime !== 'sdk';
   const startedAt = state?.diagnostics?.startedAt != null ? new Date(state.diagnostics.startedAt) : null;
   const button = 'inline-flex h-8 shrink-0 items-center justify-center whitespace-nowrap rounded-lg border border-border/60 bg-background px-2.5 text-xs font-medium transition-colors hover:bg-accent focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:cursor-not-allowed disabled:opacity-40';
+  const handleImplementLatestPlan = async () => {
+    if (!planHandoff || !latestPlan || !planScope || planHandoff.pending) return;
+    setHandoffFailure(null);
+    try {
+      await planHandoff.implementInNewSession({ markdown: latestPlan.markdown });
+    } catch (failure) {
+      setHandoffFailure({
+        scope: planScope,
+        message: failure instanceof Error ? failure.message : String(failure),
+      });
+    }
+  };
+
   const settings = <div className="min-w-0 shrink-0 space-y-2 text-sm">
       <div className="flex items-start gap-2">
         <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
@@ -89,6 +112,12 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
             </button>
             {state?.mode === 'plan' && <button type="button" className={button} disabled={pending || busy}
               onClick={() => void controls.control({ action: 'mode', mode: 'default' }).then(onExecutePlan).catch(() => {})}>{t('codex.executePlan')}</button>}
+            {state?.mode === 'plan' && latestPlan && <button type="button" className={button}
+              disabled={planHandoff?.pending === true} title={t('codex.implementInNewSessionTooltip')}
+              onClick={() => void handleImplementLatestPlan()}>
+              {planHandoff?.pending ? t('codex.implementInNewSessionPending') : t('codex.implementInNewSession')}
+            </button>}
+            {handoffFailureMessage && <span role="alert" className="text-xs text-destructive">{handoffFailureMessage}</span>}
             {settingsContainer === undefined && <>
               {state?.phase === 'stopping' && <span role="status" className="text-xs text-muted-foreground">{t('codex.stopping')}</span>}
               {state?.phase === 'stopFailed' && <span role="alert" className="text-xs text-destructive">{t('codex.stopFailed')}</span>}

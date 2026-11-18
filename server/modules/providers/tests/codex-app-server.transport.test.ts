@@ -224,8 +224,11 @@ test('process stop during a turn abort never lets old cleanup spawn a replacemen
     update: (_id, patch) => settings = { ...settings, ...patch },
   }, undefined, undefined, undefined, undefined, {
     modelProviders: {
-      list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] }),
-      models: async (modelProvider) => ({ modelProvider, models: ['test-model'], expiresAt: 0 }),
+      list: async () => ({
+        defaultProvider: 'openai', hasCustomProviders: false, canChangeDefault: true,
+        providers: [{ id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: false, settings: { type: 'openai' } }],
+      }),
+      models: async (modelProvider) => ({ modelProvider, models: ['test-model'], items: [] }),
     },
   });
   let interrupted!: () => void;
@@ -340,6 +343,22 @@ test('notifications and string-id server questions are independent of client RPC
   await h.transport.request('ping'); await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(notifications, ['turn/started']);
   assert.deepEqual(h.frames.find((frame) => frame.id === 'native-question')?.result, { answer: 'yes' });
+  await h.transport.close();
+});
+
+test('RPC rejections keep app-server’s rpc code and structured error data', async () => {
+  const h = fakeProcess();
+  h.onFrame((frame) => {
+    h.reply({ id: frame.id, error: {
+      code: -32600,
+      message: 'Enter an HTTP(S) base URL without credentials.',
+      data: { config_write_error_code: 'configValidationError' },
+    } });
+  });
+  await assert.rejects(h.transport.request('modelProvider/config/write', { settings: { type: 'customGateway' } }),
+    (error: any) => error.code === 'CODEX_APP_SERVER_REJECTED'
+      && error.details.rpcCode === -32600
+      && error.details.rpcData?.config_write_error_code === 'configValidationError');
   await h.transport.close();
 });
 
@@ -602,10 +621,20 @@ function runtimeHarness(timeoutMs = 20) {
   // stay pending while it aborts.
   const transport = new CodexAppServerTransport({ spawn: () => h.child, timeoutMs });
   let settings: SessionRuntimeSettings = { runtime: 'app-server', mode: 'default', queueHeld: false };
+  // The runtime resolves the default service for a new thread through the model
+  // provider service; inject a scripted directory so this lifecycle test never
+  // reaches the production singleton or the machine's Codex configuration.
+  const modelProviders = {
+    list: async () => ({
+      defaultProvider: 'openai', hasCustomProviders: false, canChangeDefault: true,
+      providers: [{ id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: false, settings: { type: 'openai' as const } }],
+    }),
+    models: async (modelProvider: string) => ({ modelProvider, models: ['test-model'], items: [] }),
+  };
   const runtime = new CodexAppServerRuntime(transport, {
     get: () => settings,
     update: (_id, patch) => { settings = { ...settings, ...patch }; return settings; },
-  }, 2000, () => {});
+  }, 2000, () => {}, async () => [], 30_000, { modelProviders });
   const writer = { send() {}, setSessionId() {}, nextTurn() { return writer; } };
   const context = {
     resolveProviderSessionId: () => 'native-thread',

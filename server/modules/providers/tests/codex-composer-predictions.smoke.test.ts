@@ -149,7 +149,7 @@ async function verifyNativePrediction(t: TestContext, workerEnabled: boolean): P
   const runtime = new CodexAppServerRuntime(transport, settingsDb, 5_000, () => {}, async () => [], 30_000, {
     configProvider,
     providerEligible: () => true,
-    modelProviders: new CodexModelProviderService({ home: root, environment: {} }),
+    modelProviders: new CodexModelProviderService(transport),
   });
   if (workerEnabled) runtime.setWorkerBridge({
     async prepareSession() {

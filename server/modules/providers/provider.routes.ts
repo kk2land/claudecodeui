@@ -17,6 +17,7 @@ import { readResidentSessionInfo } from '@/modules/project-scheduler/index.js';
 import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
 import type {
   CodexForkModelSelection,
+  CodexModelProviderPatch,
   CustomProviderModelEffort,
   CustomProviderModelInput,
   LLMProvider,
@@ -29,7 +30,7 @@ import type {
   SessionForkOptions,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
-import { AppError, asyncHandler, createApiSuccessResponse, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
+import { AppError, asyncHandler, createApiSuccessResponse, readObjectRecord, SIDE_QUESTION_ID_PATTERN } from '@/shared/utils.js';
 
 const router = express.Router();
 
@@ -711,9 +712,115 @@ router.get(
   }),
 );
 
+/**
+ * Reads the `{ settings }` body shared by the Codex model-provider POST and
+ * PATCH routes.
+ *
+ * Only the shape this server forwards is checked: the discriminator and the
+ * provider id, plus the field types of the variant being sent. Real constraints
+ * (URL syntax, env-key names, AWS/GCP values) stay with app-server. An omitted
+ * field stays omitted and an explicit null is kept, because the native patch
+ * distinguishes "preserve" from "clear".
+ */
+const parseCodexModelProviderPatch = (payload: unknown): CodexModelProviderPatch => {
+  const body = readObjectRecord(payload);
+  if (!body) {
+    throw new AppError('Request body must be an object.', { code: 'INVALID_REQUEST_BODY', statusCode: 400 });
+  }
+  const settings = readObjectRecord(body.settings);
+  if (!settings) {
+    throw new AppError('settings must be an object.', { code: 'INVALID_CODEX_MODEL_PROVIDER_SETTINGS', statusCode: 400 });
+  }
+
+  const invalidField = (name: string, expected: string): AppError => new AppError(`${name} must be ${expected}.`, {
+    code: 'INVALID_CODEX_MODEL_PROVIDER_SETTINGS', statusCode: 400,
+  });
+  const readString = (name: string): string | undefined => {
+    const value = settings[name];
+    if (value === undefined) return undefined;
+    if (typeof value !== 'string') throw invalidField(name, 'a string');
+    return value;
+  };
+  const readNullableString = (name: string): string | null | undefined => {
+    const value = settings[name];
+    if (value === undefined || value === null) return value;
+    if (typeof value !== 'string') throw invalidField(name, 'a string or null');
+    return value;
+  };
+  // app-server rejects unknown patch fields; rejecting them here keeps a typo
+  // from being dropped silently and "saving" without changing anything.
+  const rejectUnknownFields = (known: readonly string[]): void => {
+    const unknown = Object.keys(settings).find((key) => !known.includes(key));
+    if (unknown) {
+      throw new AppError(`settings.${unknown} is not a supported provider field.`, {
+        code: 'INVALID_CODEX_MODEL_PROVIDER_SETTINGS', statusCode: 400,
+      });
+    }
+  };
+
+  switch (settings.type) {
+    case 'customGateway': {
+      rejectUnknownFields(['type', 'providerId', 'name', 'baseUrl', 'envKey']);
+      const providerId = readNullableString('providerId');
+      const name = readString('name');
+      const baseUrl = readNullableString('baseUrl');
+      const envKey = readNullableString('envKey');
+      return {
+        type: 'customGateway',
+        ...(providerId !== undefined ? { providerId } : {}),
+        ...(name !== undefined ? { name } : {}),
+        ...(baseUrl !== undefined ? { baseUrl } : {}),
+        ...(envKey !== undefined ? { envKey } : {}),
+      };
+    }
+    case 'bedrock': {
+      rejectUnknownFields(['type', 'providerId', 'region', 'profile']);
+      const providerId = settings.providerId;
+      if (providerId !== 'amazon-bedrock' && providerId !== 'amazon-bedrock-runtime') {
+        throw invalidField('settings.providerId', 'amazon-bedrock or amazon-bedrock-runtime');
+      }
+      const region = readNullableString('region');
+      const profile = readNullableString('profile');
+      return {
+        type: 'bedrock', providerId,
+        ...(region !== undefined ? { region } : {}),
+        ...(profile !== undefined ? { profile } : {}),
+      };
+    }
+    case 'gcp': {
+      rejectUnknownFields(['type', 'providerId', 'location', 'projectId', 'credentialFile']);
+      if (settings.providerId !== 'gcp') throw invalidField('settings.providerId', 'gcp');
+      const location = readNullableString('location');
+      const projectId = readNullableString('projectId');
+      const credentialFile = readNullableString('credentialFile');
+      return {
+        type: 'gcp', providerId: 'gcp',
+        ...(location !== undefined ? { location } : {}),
+        ...(projectId !== undefined ? { projectId } : {}),
+        ...(credentialFile !== undefined ? { credentialFile } : {}),
+      };
+    }
+    default:
+      throw invalidField('settings.type', 'customGateway, bedrock or gcp');
+  }
+};
+
 /** Codex's model picker reads configured inference services without exposing their credentials. */
 router.get('/codex/model-providers', asyncHandler(async (_req: Request, res: Response) => {
   res.json(createApiSuccessResponse(await codexModelProviderService.list()));
+}));
+
+/** Creates one custom-gateway Codex model provider; app-server allocates its id. */
+router.post('/codex/model-providers', asyncHandler(async (req: Request, res: Response) => {
+  const provider = await codexModelProviderService.create(parseCodexModelProviderPatch(req.body));
+  res.status(201).json(createApiSuccessResponse({ provider }));
+}));
+
+/** Patches one configured Codex model provider named by the path. */
+router.patch('/codex/model-providers/:modelProvider', asyncHandler(async (req: Request, res: Response) => {
+  const modelProvider = readPathParam(req.params.modelProvider, 'modelProvider').trim();
+  const provider = await codexModelProviderService.update(modelProvider, parseCodexModelProviderPatch(req.body));
+  res.json(createApiSuccessResponse({ provider }));
 }));
 
 /** Saves the default inference service for Codex threads created afterwards. */

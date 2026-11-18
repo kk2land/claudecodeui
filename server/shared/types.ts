@@ -1006,6 +1006,125 @@ export type CodexModelSelection = { modelProvider: string; model: string | null 
  */
 export type CodexForkModelSelection = { modelProvider: string; model: string };
 
+/**
+ * Authentication a custom-gateway Codex model provider uses.
+ *
+ * `none` sends no key, `environmentVariable` names the variable the app-server
+ * host reads, and `externallyConfigured` means the credential lives outside the
+ * gateway form: configuration edits must preserve it, and `envKey`, when known,
+ * is only a display hint. The secret value itself is never part of this
+ * contract, so it can cross the WS/routes boundary safely.
+ */
+export type CodexGatewayAuth =
+  | { mode: 'none' }
+  | { mode: 'environmentVariable'; envKey: string }
+  | { mode: 'externallyConfigured'; envKey?: string | null };
+
+/**
+ * Safe settings of one Codex model provider, mirroring app-server's
+ * `ProviderSettings`. Only non-secret configuration is represented: endpoint
+ * credentials appear as environment-variable names or app-server-host file
+ * paths, never as values. Provider name and endpoint stay on the summary, so a
+ * variant here only says which kind of service this is and what it needs.
+ */
+export type CodexModelProviderSettings =
+  | { type: 'openai' }
+  | { type: 'customGateway'; auth: CodexGatewayAuth }
+  | { type: 'bedrock'; region?: string | null; profile?: string | null }
+  | { type: 'gcp'; location?: string | null; projectId?: string | null; credentialFile?: string | null };
+
+/**
+ * One credential-free entry of the Codex model-provider directory.
+ *
+ * `id` is the Codex config id (also used by `CodexModelSelection` and thread
+ * routes), `baseUrl` is null when the endpoint is absent or unsafe to display,
+ * and `canEdit` reflects the active user layer rather than this app's
+ * permissions.
+ */
+export type CodexModelProviderSummary = {
+  id: string;
+  name: string;
+  baseUrl: string | null;
+  canEdit: boolean;
+  settings: CodexModelProviderSettings;
+};
+
+/**
+ * Safe model-provider directory returned by the Codex model-provider routes and
+ * read by the settings card.
+ *
+ * `defaultProvider` is app-server's default provider id, `canChangeDefault` is
+ * forwarded from app-server, and `hasCustomProviders` is derived from the listed
+ * settings (any non-built-in provider) because app-server's list response does
+ * not carry it. The directory never contains endpoint credentials.
+ */
+export type CodexModelProviders = {
+  defaultProvider: string;
+  hasCustomProviders: boolean;
+  canChangeDefault: boolean;
+  providers: CodexModelProviderSummary[];
+};
+
+/**
+ * Provider edit accepted by app-server's model-provider write request.
+ *
+ * Omitted fields preserve their stored value; an explicit `null` clears a
+ * nullable field. `providerId` differs per variant: a custom gateway omits it
+ * or sends `null` to allocate a new id, while bedrock and gcp must name one of
+ * their built-in ids. Codex's built-in `openai` provider has no patch variant,
+ * so it cannot be written through this contract.
+ */
+export type CodexModelProviderPatch =
+  | {
+      type: 'customGateway';
+      providerId?: string | null;
+      name?: string;
+      baseUrl?: string | null;
+      envKey?: string | null;
+    }
+  | {
+      type: 'bedrock';
+      providerId: 'amazon-bedrock' | 'amazon-bedrock-runtime';
+      region?: string | null;
+      profile?: string | null;
+    }
+  | {
+      type: 'gcp';
+      providerId: 'gcp';
+      location?: string | null;
+      projectId?: string | null;
+      credentialFile?: string | null;
+    };
+
+/**
+ * Complete model catalog of one Codex model provider, aggregated by the backend
+ * across app-server pages.
+ *
+ * `models` is the ordered id list a model picker submits, while `items` keeps the
+ * metadata those same rows render — label, description, reasoning-effort choices,
+ * and the provider's own default/hidden marks. `hidden` rows stay in the catalog
+ * so a saved selection can still be displayed and explained. This is the public
+ * catalog; cache expiry stays inside the provider service.
+ */
+export type CodexModelCatalog = {
+  modelProvider: string;
+  models: string[];
+  items: Array<ProviderModelOption & { isDefault: boolean; hidden: boolean }>;
+};
+
+/**
+ * Plan the user approved in the composer, handed to the turn that executes it.
+ *
+ * `markdown` is the plan text exactly as presented for approval; the runtime
+ * must not rewrite it. `modelSelection` copies the source thread's actual native
+ * route to its new target, so it names the provider and model that are really
+ * running — never a pending selection that has not been applied yet.
+ */
+export type CodexApprovedPlan = {
+  markdown: string;
+  modelSelection?: CodexForkModelSelection;
+};
+
 /** Authoritative control snapshot sent to every subscriber, including between goal turns. */
 export type CodexSessionState = {
   /** Resolved launcher and CLI identity; reading this never starts a process. */
@@ -1047,6 +1166,14 @@ export type CodexSessionState = {
    * False for older/unknown builds, whose UI must not offer suggestions at all.
    */
   predictionSupported?: boolean;
+  /**
+   * Whether this session's installed app-server CLI actually implements the
+   * experimental approved-plan handoff (`thread/prepareApprovedPlan`), which only
+   * exists from 0.169.1 on. False for the SDK runtime, unknown builds and older
+   * CLIs, so the composer must require both this snapshot flag and the adapter's
+   * `nativeControls.planHandoff` before offering the handoff.
+   */
+  planHandoffSupported?: boolean;
   error?: string;
 };
 

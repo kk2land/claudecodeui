@@ -108,8 +108,8 @@ async function harness(runTest: (h: GoalHarness) => Promise<void>) {
       30_000,
       {
         modelProviders: {
-          list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] }),
-          models: async (modelProvider: string) => ({ modelProvider, models: ['test-model'], expiresAt: Date.now() + 60_000 }),
+          list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, canChangeDefault: true, providers: [{ id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: true, settings: { type: 'openai' as const } }] }),
+          models: async (modelProvider: string) => ({ modelProvider, models: ['test-model'], items: [] }),
         },
       } as never,
     );

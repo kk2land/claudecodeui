@@ -24,6 +24,8 @@ import {
 import type {
   AnyRecord,
   AuthenticatedWebSocketRequest,
+  CodexApprovedPlan,
+  CodexForkModelSelection,
   LLMProvider,
   ProviderRuntimeGateway,
   ProviderRuntimeState,
@@ -330,6 +332,32 @@ async function handleChatSend(
     return;
   }
 
+  // Composer-approved plan handoff. The client field is read once here, so the
+  // rest of the gateway (busy queue, run options, provider runtimes) only ever
+  // sees the server-owned argument built from it.
+  const plan = readApprovedPlanAtBoundary(ws, data, resolved, dependencies);
+  if (plan.status === 'rejected') {
+    return;
+  }
+  if (plan.status === 'accepted') {
+    const clientOptions = data.options as AnyRecord | undefined;
+    if (clientOptions) delete clientOptions.approvedPlan;
+    // The handoff always runs on the native runtime, whatever deployment
+    // default the SDK-compat mode names, and the target's own settings are the
+    // only place that changes. A route is written only when the client sent the
+    // source conversation's real selection.
+    sessionRuntimeDb.update(resolved.sessionId, {
+      runtime: 'app-server',
+      mode: 'default',
+      ...(plan.approvedPlan.modelSelection
+        ? { modelSelection: plan.approvedPlan.modelSelection }
+        : {}),
+    });
+    await dispatchRun(ws, userId, resolved.sessionId, resolved.session, data, dependencies,
+      { approvedPlan: plan.approvedPlan });
+    return;
+  }
+
   // A browser that thought the session was idle can still race an existing
   // turn. Worker-enabled Codex sessions keep that turn durable instead of
   // answering RUN_IN_PROGRESS; every other provider keeps the old behaviour.
@@ -338,6 +366,87 @@ async function handleChatSend(
   }
 
   await dispatchRun(ws, userId, resolved.sessionId, resolved.session, data, dependencies);
+}
+
+/**
+ * True when a client frame carries the composer's approved plan.
+ *
+ * Every path except a first `chat.send` on a new Codex conversation refuses it,
+ * so it is checked before that path can reserve a run, rewind a conversation or
+ * interrupt a scheduled turn.
+ */
+function carriesApprovedPlan(options: unknown): boolean {
+  return Boolean(options && typeof options === 'object'
+    && (options as AnyRecord).approvedPlan !== undefined);
+}
+
+/** Result of reading the approved plan of one `chat.send` frame. */
+type ApprovedPlanBoundary =
+  | { status: 'absent' }
+  | { status: 'rejected' }
+  | { status: 'accepted'; approvedPlan: CodexApprovedPlan };
+
+/**
+ * Reads the approved plan a `chat.send` may hand to a brand-new Codex thread.
+ *
+ * This is the single boundary for the field: it refuses a malformed plan, a
+ * non-Codex session and a target that is not a fresh conversation, and it
+ * reports the refusal as a protocol error instead of silently dropping the
+ * plan. The markdown is forwarded exactly as approved — it is the plan the user
+ * read, and native `thread/prepareApprovedPlan` decides whether it is accepted.
+ */
+function readApprovedPlanAtBoundary(
+  ws: WebSocket,
+  data: AnyRecord,
+  resolved: ResolvedSendTarget,
+  dependencies: ChatWebSocketDependencies,
+): ApprovedPlanBoundary {
+  const rawOptions = (data.options ?? {}) as AnyRecord;
+  if (!carriesApprovedPlan(rawOptions)) return { status: 'absent' };
+
+  const reject = (code: string, error: string): ApprovedPlanBoundary => {
+    sendProtocolError(ws, code, error, resolved.sessionId);
+    return { status: 'rejected' };
+  };
+
+  if (resolved.provider !== 'codex') {
+    return reject('APPROVED_PLAN_UNSUPPORTED', 'An approved plan can only start a Codex conversation.');
+  }
+  const raw = rawOptions.approvedPlan;
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
+    return reject('INVALID_APPROVED_PLAN', 'options.approvedPlan must be an object.');
+  }
+  const markdown = (raw as AnyRecord).markdown;
+  if (typeof markdown !== 'string' || !markdown.trim()) {
+    return reject('INVALID_APPROVED_PLAN', 'options.approvedPlan.markdown must be non-empty plan text.');
+  }
+
+  const rawSelection = (raw as AnyRecord).modelSelection;
+  let modelSelection: CodexForkModelSelection | undefined;
+  if (rawSelection !== undefined) {
+    const selection = rawSelection as AnyRecord | null;
+    if (!selection || typeof selection !== 'object' || Array.isArray(selection)
+      || typeof selection.modelProvider !== 'string' || !selection.modelProvider.trim()
+      || typeof selection.model !== 'string' || !selection.model.trim()) {
+      return reject('INVALID_APPROVED_PLAN', 'options.approvedPlan.modelSelection needs a non-empty modelProvider and model.');
+    }
+    modelSelection = { modelProvider: selection.modelProvider, model: selection.model };
+  }
+
+  // The handoff is the first turn of a new native thread. Anything already
+  // started — a native thread, transcript content, a queued message, a running
+  // turn — must be refused here instead of being queued or retried later.
+  if (resolved.session.provider_session_id || resolved.session.jsonl_path
+    || sessionDraftsDb.hasQueuedMessages(resolved.sessionId)) {
+    return reject('APPROVED_PLAN_REQUIRES_NEW_THREAD',
+      'An approved plan can only start a new conversation. Open a new chat and try again.');
+  }
+  if (isChatTurnBusy(resolved.sessionId, resolved.provider, dependencies.runtime)) {
+    return reject('APPROVED_PLAN_BUSY',
+      'This conversation is already running. Wait for it to finish before handing off a plan.');
+  }
+
+  return { status: 'accepted', approvedPlan: { markdown, ...(modelSelection ? { modelSelection } : {}) } };
 }
 
 type ResolvedSendTarget = {
@@ -838,6 +947,15 @@ async function handleChatEditSend(
     return;
   }
 
+  // Replacing a message rewinds a conversation that already has content, so an
+  // approved plan can never ride this path. Refused before the anchor lookup or
+  // any run/rewind side effect.
+  if (carriesApprovedPlan(data.options)) {
+    sendProtocolError(ws, 'APPROVED_PLAN_UNSUPPORTED',
+      'An approved plan can only be sent as a new chat message, not by editing one.', resolved.sessionId);
+    return;
+  }
+
   const { sessionId, session, provider } = resolved;
   const anchorId = typeof data.anchorId === 'string' ? data.anchorId.trim() : '';
   if (!anchorId) {
@@ -1285,6 +1403,11 @@ export async function runDetachedChatTurn(
   },
   dependencies: ChatWebSocketDependencies,
 ): Promise<{ started: boolean; error: string | null }> {
+  // A scheduled, queued or detached turn has no new native thread to hand a
+  // plan to. Refused before a due message can abort or reserve anything.
+  if (carriesApprovedPlan(input.options)) {
+    return { started: false, error: 'An approved plan can only be sent as a new chat message.' };
+  }
   const session = sessionsDb.getSessionById(input.sessionId);
   if (!session) {
     return { started: false, error: 'The session no longer exists.' };

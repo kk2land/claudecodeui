@@ -168,7 +168,10 @@
       "plan": "計畫模式 - 不執行任何指令"
     },
     "technicalDetails": "技術細節",
-    "workersActive": "本工作階段有活動 Worker"
+    "workersActive": "本工作階段有活動 Worker",
+    "implementInNewSession": "新工作階段執行",
+    "implementInNewSessionTooltip": "在新工作階段實作完整計畫",
+    "implementInNewSessionPending": "正在建立新工作階段…"
   },
   "input": {
     "placeholder": "輸入 / 叫用指令，@ 選取檔案，或向 {{provider}} 提問...",

@@ -1,224 +1,340 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, stat, utimes, writeFile } from 'node:fs/promises';
-import os from 'node:os';
-import path from 'node:path';
 import test from 'node:test';
 
 import { CodexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
+import { AppError } from '@/shared/index.js';
+import type { CodexRpcClient } from '@/shared/index.js';
 
-const config = `model_provider="alpha"
-[model_providers.alpha]
-name="Alpha service"
-base_url="https://alpha.example/v1/"
-env_key="ALPHA_TOKEN"
-http_headers={"X-Client"="cloudcli"}
-env_http_headers={"X-Workspace"="WORKSPACE"}
-query_params={"api-version"="preview"}
-[model_providers.beta]
-name="Beta service"
-base_url="https://beta.example/v1"
-experimental_bearer_token="beta-secret"
-`;
+type Call = { method: string; params?: Record<string, any> };
 
-test('only extra config entries enable the picker; metadata never contains endpoint secrets', async (t) => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-directory-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const service = new CodexModelProviderService({ home });
-  assert.deepEqual(await service.list(), { defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] });
-  await writeFile(path.join(home, 'config.toml'), config);
-  assert.deepEqual(await service.list(), { defaultProvider: 'alpha', hasCustomProviders: true,
-    providers: [{ id: 'openai', name: 'OpenAI' }, { id: 'alpha', name: 'Alpha service' }, { id: 'beta', name: 'Beta service' }] });
-  const serialized = JSON.stringify(await service.list());
-  assert.equal(serialized.includes('secret'), false);
-  assert.equal(serialized.includes('https://'), false);
+/**
+ * A scripted RPC client: the service talks only to app-server, so these tests
+ * inject the protocol instead of reading config.toml or fetching an endpoint.
+ */
+function scriptedClient(handler: (method: string, params: Record<string, any>) => unknown) {
+  const calls: Call[] = [];
+  const request: CodexRpcClient['request'] = async (method, params) => {
+    calls.push({ method, params: params as Call['params'] });
+    return handler(method, params as Record<string, any>) as any;
+  };
+  const client: CodexRpcClient = {
+    request,
+    onNotification: () => () => {},
+    onRequest: () => () => {},
+    onExit: () => () => {},
+  };
+  return { client, calls };
+}
+
+/** Builds the rejection the transport surfaces for a native `error` frame. */
+const rejected = (message: string, data?: unknown): AppError => new AppError(message, {
+  code: 'CODEX_APP_SERVER_REJECTED', statusCode: 502, details: { rpcCode: -32600, rpcData: data },
 });
 
-test('the default provider edit preserves comments, CRLF and unrelated model_provider keys', async (t) => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-default-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const configPath = path.join(home, 'config.toml');
-  const original = [
-    '# keep this comment',
-    'model = "gpt-5"',
-    '"model_provider" = "beta"   # stay inline',
-    'notes = """',
-    'model_provider = "fake-inside-a-string"',
-    '"""',
-    '',
-    '[model_providers.alpha]',
-    'name = "Alpha service"',
-    'base_url = "https://alpha.example/v1"',
-    '',
-    '[model_providers.beta]',
-    'name = "Beta service"',
-    'base_url = "https://beta.example/v1"',
-    '',
-    '[profiles.fast]',
-    'model_provider = "beta"',
-    '',
-  ].join('\r\n');
-  await writeFile(configPath, original);
-  const service = new CodexModelProviderService({ home });
+const openaiSummary = { id: 'openai', name: 'OpenAI', canEdit: false, baseUrl: null, settings: { type: 'openai' } };
+const gatewaySummary = {
+  id: 'alpha', name: 'Alpha service', canEdit: true, baseUrl: 'https://alpha.example/v1',
+  settings: { type: 'customGateway', auth: { mode: 'environmentVariable', envKey: 'ALPHA_TOKEN' } },
+};
 
-  const changed = await service.setDefault('alpha');
-  assert.equal(changed.defaultProvider, 'alpha');
-  assert.deepEqual(changed.providers.map((provider) => provider.id), ['openai', 'alpha', 'beta']);
-  const withAlpha = original.replace('"model_provider" = "beta"', '"model_provider" = "alpha"');
-  assert.equal(await readFile(configPath, 'utf8'), withAlpha);
-
-  // Saving the value already present does not touch the file.
-  const before = await stat(configPath);
-  await service.setDefault('alpha');
-  assert.equal((await stat(configPath)).mtimeMs, before.mtimeMs);
-
-  // OpenAI removes only the root statement, keeping the multiline decoys and
-  // the profiles.*.model_provider assignment byte-identical.
-  await service.setDefault('openai');
-  const withoutRoot = withAlpha.replace('"model_provider" = "alpha"   # stay inline\r\n', '');
-  assert.equal(await readFile(configPath, 'utf8'), withoutRoot);
-  assert.ok(withoutRoot.includes('model_provider = "fake-inside-a-string"'));
-  assert.ok(withoutRoot.includes('[profiles.fast]\r\nmodel_provider = "beta"\r\n'));
-
-  // A new assignment is inserted before the first table header, still CRLF.
-  const directory = await service.setDefault('beta');
-  assert.equal(directory.defaultProvider, 'beta');
-  const expected = withoutRoot.replace('[model_providers.alpha]', 'model_provider = "beta"\r\n[model_providers.alpha]');
-  assert.equal(await readFile(configPath, 'utf8'), expected);
-  assert.equal(/[^\r]\n/.test(await readFile(configPath, 'utf8')), false);
+/** One `modelProvider/list` result; callers override individual fields. */
+const nativeDirectory = (overrides: Record<string, unknown> = {}) => ({
+  defaultProviderId: 'openai', canChangeDefault: true, data: [openaiSummary, gatewaySummary], ...overrides,
 });
 
-test('an unknown default service fails without creating or rewriting config', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-default-unknown-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
-  const home = path.join(root, 'codex-home');
-  const service = new CodexModelProviderService({ home, environment: {} });
-
-  await assert.rejects(service.setDefault('missing'), { code: 'CODEX_MODEL_PROVIDER_NOT_FOUND' });
-  await assert.rejects(stat(path.join(home, 'config.toml')), { code: 'ENOENT' });
-  await assert.rejects(stat(home), { code: 'ENOENT' }, 'selecting an unknown service creates no home directory');
-
-  assert.deepEqual(await service.setDefault('openai'), {
-    defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }],
-  });
-  await assert.rejects(stat(path.join(home, 'config.toml')), { code: 'ENOENT' }, 'OpenAI needs no config.toml');
-
-  await writeFile(path.join(root, 'config.toml'), 'model_provider = [');
-  const invalid = new CodexModelProviderService({ home: root, environment: {} });
-  await assert.rejects(invalid.setDefault('openai'), { code: 'CODEX_CONFIG_INVALID' });
-  assert.equal(await readFile(path.join(root, 'config.toml'), 'utf8'), 'model_provider = [');
+const nativeModel = (id: string, overrides: Record<string, unknown> = {}) => ({
+  id, model: id, displayName: id.toUpperCase(), description: `${id} description`,
+  supportedReasoningEfforts: [{ reasoningEffort: 'low' }, { reasoningEffort: 'high', description: 'Deep reasoning' }],
+  defaultReasoningEffort: 'low', hidden: false, isDefault: false, ...overrides,
 });
 
-test('an explicit root openai default is removed and ordinary values still skip unchanged writes', async (t) => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-openai-default-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const configPath = path.join(home, 'config.toml');
-  const original = [
-    '# keep',
-    'model_provider = "openai" # remove this statement',
-    'model = "gpt-5"',
-    '',
-    '[profiles.fast]',
-    'model_provider = "openai"',
-    '',
-  ].join('\n');
-  await writeFile(configPath, original);
-  const service = new CodexModelProviderService({ home, environment: {} });
-
-  const directory = await service.setDefault('openai');
-  assert.equal(directory.defaultProvider, 'openai');
-  const expected = original.replace('model_provider = "openai" # remove this statement\n', '');
-  assert.equal(await readFile(configPath, 'utf8'), expected);
-  assert.ok(expected.includes('[profiles.fast]\nmodel_provider = "openai"'));
-
-  const pinned = new Date('2020-01-02T03:04:05.000Z');
-  await utimes(configPath, pinned, pinned);
-  const before = await stat(configPath);
-  await service.setDefault('openai');
-  assert.equal((await stat(configPath)).mtimeMs, before.mtimeMs);
-});
-
-test('catalog requests use each service authentication and cache successes for exactly sixty seconds', async (t) => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-models-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  await writeFile(path.join(home, 'config.toml'), config);
-  let now = 10_000;
-  const calls: Array<{ url: string; headers: Headers }> = [];
-  const service = new CodexModelProviderService({ home, now: () => now,
-    environment: { ALPHA_TOKEN: 'alpha-secret', WORKSPACE: 'team-a' },
-    fetch: async (url, options) => {
-      calls.push({ url: String(url), headers: new Headers(options?.headers) });
-      return Response.json({ data: [{ id: 'shared-model' }, { id: 'alpha-only' }, { id: 'shared-model' }] });
-    },
-  });
-  assert.deepEqual(await service.models('alpha'), { modelProvider: 'alpha', models: ['shared-model', 'alpha-only'], expiresAt: 70_000 });
-  now = 69_999;
-  await service.models('alpha');
-  assert.equal(calls.length, 1);
-  await service.models('beta');
-  assert.equal(calls.length, 2);
-  assert.equal(calls[0].url, 'https://alpha.example/v1/models?api-version=preview');
-  assert.equal(calls[0].headers.get('Authorization'), 'Bearer alpha-secret');
-  assert.equal(calls[0].headers.get('X-Workspace'), 'team-a');
-  assert.equal(calls[1].headers.get('Authorization'), 'Bearer beta-secret');
-  assert.equal(calls[1].headers.has('X-Workspace'), false);
-  now = 70_000;
-  await service.models('alpha');
-  assert.equal(calls.length, 3);
-  await writeFile(path.join(home, 'config.toml'), config.replace('alpha.example', 'replacement.example'));
-  await service.models('alpha');
-  assert.equal(calls.length, 4, 'a changed endpoint cannot reuse the previous endpoint’s cache');
-  assert.match(calls[3].url, /replacement\.example/);
-});
-
-test('missing providers and credentials fail before HTTP; rejected and malformed responses never become catalogs', async (t) => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-provider-errors-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  await writeFile(path.join(home, 'config.toml'), config);
-  let calls = 0;
-  let response = () => new Response('do not expose beta-secret', { status: 401 });
-  const service = new CodexModelProviderService({ home, environment: {}, fetch: async () => { calls++; return response(); } });
-  await assert.rejects(service.models('missing'), { code: 'CODEX_MODEL_PROVIDER_NOT_FOUND' });
-  await assert.rejects(service.models('alpha'), { code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED' });
-  assert.equal(calls, 0);
-  await assert.rejects(service.models('beta'), (error: Error) => error.message.includes('401') && !error.message.includes('beta-secret'));
-  response = () => Response.json({ data: [{ name: 'no id' }] });
-  await assert.rejects(service.models('beta'), { code: 'CODEX_MODEL_CATALOG_INVALID' });
-  response = () => Response.json({ data: [{ id: 'working-model' }] });
-  assert.deepEqual((await service.models('beta')).models, ['working-model']);
-  assert.equal(calls, 3);
-  await writeFile(path.join(home, 'config.toml'), 'model_providers = [');
-  await assert.rejects(service.list(), { code: 'CODEX_CONFIG_INVALID' });
-  await writeFile(path.join(home, 'config.toml'), config.replace('beta-secret', 'private-secret\\ninvalid-header'));
-  await assert.rejects(service.models('beta'), (error: Error & { code?: string }) =>
-    error.code === 'CODEX_CONFIG_INVALID' && !error.message.includes('private-secret'));
-});
-
-test('OpenAI model discovery follows the saved login and isolates account caches', async (t) => {
-  const home = await mkdtemp(path.join(os.tmpdir(), 'codex-native-catalog-'));
-  t.after(() => rm(home, { recursive: true, force: true }));
-  const auth = (account: string) => writeFile(path.join(home, 'auth.json'), JSON.stringify({
-    auth_mode: 'chatgpt', tokens: { access_token: 'test-oauth-token', account_id: account },
+test('list() returns the credential-free native directory as the shared DTO', async () => {
+  const bedrock = {
+    id: 'amazon-bedrock', name: 'Amazon Bedrock', canEdit: true, baseUrl: null,
+    settings: { type: 'bedrock', region: 'us-east-1', profile: null },
+  };
+  const gcp = {
+    id: 'gcp', name: 'Google Cloud', canEdit: true, baseUrl: 'https://gcp.example/v1',
+    settings: { type: 'gcp', location: null, projectId: 'project-a', credentialFile: '/keys/gcp.json' },
+  };
+  const { client, calls } = scriptedClient(() => nativeDirectory({
+    defaultProviderId: 'alpha', data: [openaiSummary, gatewaySummary, bedrock, gcp],
   }));
-  await auth('account-a');
-  const calls: Array<{ url: string; headers: Headers }> = [];
-  const service = new CodexModelProviderService({ home, environment: { OPENAI_API_KEY: 'unrelated-env-key', IGNORED_TOKEN: 'ignored-token' }, fetch: async (url, options) => {
-    calls.push({ url: String(url), headers: new Headers(options?.headers) });
-    if (String(url).startsWith('https://proxy.example')) return Response.json({ data: [{ id: 'proxy-model' }] });
-    return Response.json({ models: [{ slug: 'native-model', visibility: 'list' }, { slug: 'hidden-model', visibility: 'hide' }] });
-  } });
-  assert.deepEqual((await service.models('openai')).models, ['native-model']);
-  assert.match(calls[0].url, /^https:\/\/chatgpt\.com\/backend-api\/codex\/models\?client_version=/);
-  assert.equal(calls[0].headers.get('Authorization'), 'Bearer test-oauth-token');
-  assert.equal(calls[0].headers.get('ChatGPT-Account-Id'), 'account-a');
-  await service.models('openai');
-  assert.equal(calls.length, 1);
-  await auth('account-b');
-  await service.models('openai');
-  assert.equal(calls.length, 2);
-  await writeFile(path.join(home, 'config.toml'), '[model_providers.proxy]\nbase_url="https://proxy.example/v1"\nrequires_openai_auth=true\nenv_key="IGNORED_TOKEN"');
-  assert.deepEqual((await service.models('proxy')).models, ['proxy-model']);
-  assert.equal(calls[2].headers.get('Authorization'), 'Bearer test-oauth-token', 'explicit OpenAI auth ignores the provider env_key');
-  await writeFile(path.join(home, 'auth.json'), JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'saved-api-key', tokens: { access_token: 'stale-token' } }));
-  await service.models('proxy');
-  assert.equal(calls[3].headers.get('Authorization'), 'Bearer saved-api-key');
+  const service = new CodexModelProviderService(client);
+
+  assert.deepEqual(await service.list(), {
+    defaultProvider: 'alpha',
+    hasCustomProviders: true,
+    canChangeDefault: true,
+    providers: [
+      { id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: false, settings: { type: 'openai' } },
+      {
+        id: 'alpha', name: 'Alpha service', baseUrl: 'https://alpha.example/v1', canEdit: true,
+        settings: { type: 'customGateway', auth: { mode: 'environmentVariable', envKey: 'ALPHA_TOKEN' } },
+      },
+      {
+        id: 'amazon-bedrock', name: 'Amazon Bedrock', baseUrl: null, canEdit: true,
+        settings: { type: 'bedrock', region: 'us-east-1', profile: null },
+      },
+      {
+        id: 'gcp', name: 'Google Cloud', baseUrl: 'https://gcp.example/v1', canEdit: true,
+        settings: { type: 'gcp', location: null, projectId: 'project-a', credentialFile: '/keys/gcp.json' },
+      },
+    ],
+  });
+  assert.deepEqual(calls, [{ method: 'modelProvider/list', params: {} }]);
+});
+
+test('list() reports only the built-in service and refuses an unknown native service kind', async () => {
+  const onlyBuiltIn = scriptedClient(() => nativeDirectory({ data: [openaiSummary] }));
+  assert.deepEqual(await new CodexModelProviderService(onlyBuiltIn.client).list(), {
+    defaultProvider: 'openai', hasCustomProviders: false, canChangeDefault: true,
+    providers: [{ id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: false, settings: { type: 'openai' } }],
+  });
+
+  const unknownKind = scriptedClient(() => nativeDirectory({ data: [{ ...gatewaySummary, settings: { type: 'mystery' } }] }));
+  await assert.rejects(new CodexModelProviderService(unknownKind.client).list(), {
+    code: 'CODEX_MODEL_PROVIDERS_INVALID', statusCode: 502,
+  });
+
+  const unreadable = scriptedClient(() => nativeDirectory({ data: undefined }));
+  await assert.rejects(new CodexModelProviderService(unreadable.client).list(), {
+    code: 'CODEX_MODEL_PROVIDERS_INVALID', statusCode: 502,
+  });
+});
+
+test('models() aggregates every native page and keeps hidden rows out of the picker list', async () => {
+  const pages: Record<string, unknown> = {
+    '': { data: [nativeModel('shared'), nativeModel('reviewer', { hidden: true })], nextCursor: 'page-2' },
+    'page-2': { data: [nativeModel('second', { isDefault: true })], nextCursor: null },
+  };
+  const { client, calls } = scriptedClient((method, params) => {
+    assert.equal(method, 'model/list');
+    return pages[String(params.cursor ?? '')];
+  });
+
+  assert.deepEqual(await new CodexModelProviderService(client).models('alpha'), {
+    modelProvider: 'alpha',
+    models: ['shared', 'second'],
+    items: [
+      {
+        value: 'shared', label: 'SHARED', description: 'shared description',
+        effort: { default: 'low', values: [{ value: 'low' }, { value: 'high', description: 'Deep reasoning' }] },
+        isDefault: false, hidden: false,
+      },
+      {
+        value: 'reviewer', label: 'REVIEWER', description: 'reviewer description',
+        effort: { default: 'low', values: [{ value: 'low' }, { value: 'high', description: 'Deep reasoning' }] },
+        isDefault: false, hidden: true,
+      },
+      {
+        value: 'second', label: 'SECOND', description: 'second description',
+        effort: { default: 'low', values: [{ value: 'low' }, { value: 'high', description: 'Deep reasoning' }] },
+        isDefault: true, hidden: false,
+      },
+    ],
+  });
+  assert.deepEqual(calls, [
+    { method: 'model/list', params: { modelProvider: 'alpha', includeHidden: true } },
+    { method: 'model/list', params: { modelProvider: 'alpha', includeHidden: true, cursor: 'page-2' } },
+  ]);
+});
+
+test('models() surfaces native provider and network failures without inventing a catalog', async () => {
+  const notConfigured = scriptedClient(() => {
+    throw rejected('This chat uses model provider “alpha”, which is no longer configured.', {
+      type: 'modelProviderNotConfigured', modelProvider: 'alpha',
+    });
+  });
+  await assert.rejects(new CodexModelProviderService(notConfigured.client).models('alpha'), {
+    code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
+  });
+
+  const unknownRejection = scriptedClient(() => { throw rejected('Codex could not read this catalog.'); });
+  await assert.rejects(new CodexModelProviderService(unknownRejection.client).models('alpha'), {
+    code: 'CODEX_MODEL_CATALOG_FAILED', statusCode: 502, message: 'Codex could not read this catalog.',
+  });
+
+  const network = new Error('socket hang up');
+  const offline = scriptedClient(() => { throw network; });
+  await assert.rejects(new CodexModelProviderService(offline.client).models('alpha'), (error: unknown) => error === network);
+});
+
+test('setDefault() verifies the service, writes only model_provider and returns the effective directory', async () => {
+  let directoryReads = 0;
+  const { client, calls } = scriptedClient((method) => {
+    if (method === 'modelProvider/list') {
+      directoryReads += 1;
+      return nativeDirectory({ defaultProviderId: directoryReads === 1 ? 'openai' : 'alpha' });
+    }
+    assert.equal(method, 'config/value/write');
+    return { status: 'ok', version: 'sha256:1', filePath: '/home/u/.codex/config.toml', overriddenMetadata: null };
+  });
+  const service = new CodexModelProviderService(client);
+
+  const saved = await service.setDefault('alpha');
+  assert.equal(saved.defaultProvider, 'alpha');
+  assert.deepEqual(calls, [
+    { method: 'modelProvider/list', params: {} },
+    { method: 'config/value/write', params: { keyPath: 'model_provider', value: 'alpha', mergeStrategy: 'replace' } },
+    { method: 'modelProvider/list', params: {} },
+  ]);
+});
+
+test('setDefault() rejects a missing service, a locked default and a skipped redundant write', async () => {
+  const missing = scriptedClient(() => nativeDirectory());
+  await assert.rejects(new CodexModelProviderService(missing.client).setDefault('missing'), {
+    code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
+  });
+  assert.deepEqual(missing.calls.map((call) => call.method), ['modelProvider/list']);
+
+  const locked = scriptedClient(() => nativeDirectory({ canChangeDefault: false }));
+  await assert.rejects(new CodexModelProviderService(locked.client).setDefault('alpha'), {
+    code: 'CODEX_MODEL_PROVIDER_DEFAULT_READONLY', statusCode: 409,
+  });
+  assert.deepEqual(locked.calls.map((call) => call.method), ['modelProvider/list']);
+
+  const unchanged = scriptedClient(() => nativeDirectory({ defaultProviderId: 'alpha' }));
+  assert.equal((await new CodexModelProviderService(unchanged.client).setDefault('alpha')).defaultProvider, 'alpha');
+  assert.deepEqual(unchanged.calls.map((call) => call.method), ['modelProvider/list']);
+});
+
+test('setDefault() reports a write that a managed layer overrides as written but not in effect', async () => {
+  const { client, calls } = scriptedClient((method) => {
+    if (method === 'modelProvider/list') return nativeDirectory({ defaultProviderId: 'openai' });
+    return {
+      status: 'okOverridden',
+      version: 'sha256:1',
+      filePath: '/home/u/.codex/config.toml',
+      overriddenMetadata: {
+        effectiveValue: 'openai',
+        message: 'Managed by the workspace administrator.',
+        overridingLayer: { name: { type: 'mdm', domain: 'com.example', key: 'codex' }, version: 'sha256:2' },
+      },
+    };
+  });
+  await assert.rejects(new CodexModelProviderService(client).setDefault('alpha'), (error: any) => {
+    assert.equal(error.code, 'CODEX_MODEL_PROVIDER_DEFAULT_OVERRIDDEN');
+    assert.equal(error.statusCode, 409);
+    assert.match(error.message, /wrote model_provider = "alpha" to config\.toml, but it is not in effect/);
+    assert.match(error.message, /effective default is "openai"/);
+    assert.match(error.message, /mdm configuration layer/);
+    assert.match(error.message, /Managed by the workspace administrator\./);
+    return true;
+  });
+  // The directory is re-read so the reported effective default is real.
+  assert.deepEqual(calls.map((call) => call.method), ['modelProvider/list', 'config/value/write', 'modelProvider/list']);
+});
+
+test('create() forwards only an identity-less custom gateway and returns the native summary', async () => {
+  const { client, calls } = scriptedClient((method) => {
+    assert.equal(method, 'modelProvider/config/write');
+    return { provider: { ...gatewaySummary, id: 'allocated-id' } };
+  });
+  const service = new CodexModelProviderService(client);
+
+  assert.deepEqual(await service.create({ type: 'customGateway', name: 'Alpha service',
+    baseUrl: 'https://alpha.example/v1', envKey: 'ALPHA_TOKEN' }), {
+    id: 'allocated-id', name: 'Alpha service', baseUrl: 'https://alpha.example/v1', canEdit: true,
+    settings: { type: 'customGateway', auth: { mode: 'environmentVariable', envKey: 'ALPHA_TOKEN' } },
+  });
+  assert.deepEqual(calls, [{
+    method: 'modelProvider/config/write',
+    params: { settings: {
+      type: 'customGateway', providerId: null, name: 'Alpha service',
+      baseUrl: 'https://alpha.example/v1', envKey: 'ALPHA_TOKEN',
+    } },
+  }]);
+
+  const withId = scriptedClient(() => ({}));
+  await assert.rejects(new CodexModelProviderService(withId.client).create({
+    type: 'customGateway', providerId: 'chosen-id', name: 'Alpha',
+  }), { code: 'CODEX_MODEL_PROVIDER_CREATE_UNSUPPORTED', statusCode: 400 });
+  assert.deepEqual(withId.calls, []);
+  await assert.rejects(new CodexModelProviderService(withId.client).create({
+    type: 'bedrock', providerId: 'amazon-bedrock', region: 'us-east-1',
+  }), { code: 'CODEX_MODEL_PROVIDER_CREATE_UNSUPPORTED', statusCode: 400 });
+});
+
+test('create() reports native field validation with the app-server explanation', async () => {
+  const { client } = scriptedClient(() => {
+    throw rejected('Enter an HTTP(S) base URL without credentials, a query, or a fragment.', {
+      config_write_error_code: 'configValidationError',
+    });
+  });
+  await assert.rejects(new CodexModelProviderService(client).create({
+    type: 'customGateway', name: 'Alpha', baseUrl: 'not-a-url',
+  }), {
+    code: 'CODEX_MODEL_PROVIDER_INVALID',
+    statusCode: 400,
+    message: 'Enter an HTTP(S) base URL without credentials, a query, or a fragment.',
+  });
+});
+
+test('update() authorizes by the path id and rechecks native editability before writing', async () => {
+  const mismatch = scriptedClient(() => { throw new Error('must not be called'); });
+  await assert.rejects(new CodexModelProviderService(mismatch.client).update('alpha', {
+    type: 'customGateway', providerId: 'beta', name: 'Renamed',
+  }), { code: 'CODEX_MODEL_PROVIDER_ID_MISMATCH', statusCode: 400 });
+  assert.deepEqual(mismatch.calls, []);
+
+  const missing = scriptedClient(() => nativeDirectory());
+  await assert.rejects(new CodexModelProviderService(missing.client).update('missing', {
+    type: 'customGateway', name: 'Renamed',
+  }), { code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404 });
+  assert.deepEqual(missing.calls.map((call) => call.method), ['modelProvider/list']);
+
+  const readOnly = scriptedClient(() => nativeDirectory());
+  await assert.rejects(new CodexModelProviderService(readOnly.client).update('openai', {
+    type: 'customGateway', name: 'Renamed',
+  }), { code: 'CODEX_MODEL_PROVIDER_READONLY', statusCode: 409 });
+  assert.deepEqual(readOnly.calls.map((call) => call.method), ['modelProvider/list']);
+});
+
+test('update() writes with the path id as identity and maps config-write rejections', async () => {
+  const { client, calls } = scriptedClient((method, params) => {
+    if (method === 'modelProvider/list') return nativeDirectory();
+    assert.deepEqual(params, { settings: { type: 'customGateway', providerId: 'alpha', name: 'Renamed' } });
+    return { provider: { ...gatewaySummary, name: 'Renamed' } };
+  });
+  assert.equal((await new CodexModelProviderService(client).update('alpha', {
+    type: 'customGateway', name: 'Renamed',
+  })).name, 'Renamed');
+  assert.deepEqual(calls.map((call) => call.method), ['modelProvider/list', 'modelProvider/config/write']);
+
+  const layerReadOnly = scriptedClient((method) => {
+    if (method === 'modelProvider/list') return nativeDirectory();
+    throw rejected('The user layer is read-only.', { config_write_error_code: 'configLayerReadonly' });
+  });
+  await assert.rejects(new CodexModelProviderService(layerReadOnly.client).update('alpha', {
+    type: 'customGateway', name: 'Renamed',
+  }), { code: 'CODEX_MODEL_PROVIDER_READONLY', statusCode: 409 });
+
+  const requirement = scriptedClient((method) => {
+    if (method === 'modelProvider/list') return nativeDirectory();
+    throw rejected('Requirements forbid this.', { config_write_error_code: 'RequirementReadonly' });
+  });
+  await assert.rejects(new CodexModelProviderService(requirement.client).update('alpha', {
+    type: 'customGateway', name: 'Renamed',
+  }), { code: 'CODEX_MODEL_PROVIDER_READONLY', statusCode: 409 });
+
+  const conflict = scriptedClient((method) => {
+    if (method === 'modelProvider/list') return nativeDirectory();
+    throw rejected('The file changed.', { config_write_error_code: 'configVersionConflict' });
+  });
+  await assert.rejects(new CodexModelProviderService(conflict.client).update('alpha', {
+    type: 'customGateway', name: 'Renamed',
+  }), { code: 'CODEX_MODEL_PROVIDER_VERSION_CONFLICT', statusCode: 409 });
+
+  const unknown = scriptedClient((method) => {
+    if (method === 'modelProvider/list') return nativeDirectory();
+    throw rejected('Codex refused this provider for another reason.', { config_write_error_code: 'somethingNew' });
+  });
+  await assert.rejects(new CodexModelProviderService(unknown.client).update('alpha', {
+    type: 'customGateway', name: 'Renamed',
+  }), {
+    code: 'CODEX_MODEL_PROVIDER_WRITE_REJECTED',
+    statusCode: 502,
+    message: 'Codex refused this provider for another reason.',
+  });
 });

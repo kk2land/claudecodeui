@@ -13,6 +13,7 @@ import { appendFilesInputTag, normalizeAttachmentDescriptors, isImageAttachmentD
 import { AppError, createCompleteMessage, createNormalizedMessage, isCodexGoalEnabled } from '@/shared/index.js';
 import type {
   AnyRecord,
+  CodexApprovedPlan,
   CodexComposerPredictionReason,
   CodexControlAction,
   CodexGoal,
@@ -154,6 +155,34 @@ function buildInput(command: string, attachments: unknown): AnyRecord[] {
     { type: 'text', text: text.trim() ? text : 'Please analyze the attached file(s).', text_elements: [] },
     ...files.filter(isImageAttachmentDescriptor).map((file) => ({ type: 'localImage', path: file.path })),
   ];
+}
+
+/**
+ * Whether a native rejection means the running CLI build does not implement the
+ * method at all (JSON-RPC "method not found"), so the handoff is reported as an
+ * unsupported feature instead of a failed plan.
+ */
+function isUnknownMethodError(error: unknown): boolean {
+  if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED') return false;
+  const details = error.details as { rpcCode?: unknown } | undefined;
+  return details?.rpcCode === -32601 || /unknown method|method not found/i.test(error.message);
+}
+
+/**
+ * Whether a CLI build implements the experimental approved-plan handoff.
+ *
+ * `thread/prepareApprovedPlan` first shipped in stable 0.169.1, so older and
+ * unknown/pre-release identities report unsupported. This only gates whether the
+ * composer offers the handoff: an actual prepare is still decided by the native
+ * runtime, which reports its own explicit error instead of simulating support.
+ */
+function supportsPlanHandoff(version: string | null): boolean {
+  if (!version) return false;
+  const match = /^(\d+)\.(\d+)\.(\d+)$/.exec(version.trim());
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  if (major !== 0) return major > 0;
+  return minor > 169 || (minor === 169 && patch >= 1);
 }
 
 /**
@@ -376,16 +405,19 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   getState(sessionId: string): CodexSessionState {
     const session = this.sessions.get(sessionId);
     const predictionSupported = this.predictionSupported();
+    // Read from the CLI identity already negotiated by `initialize`, so an
+    // unloaded session reports capability without starting a process.
+    const planHandoffSupported = this.planHandoffSupported();
     const settings = this.settings.get(sessionId);
-    if (session) return { ...session.state, ...settings, diagnostics: this.client.statusForThread?.(session.threadId) ?? this.client.status, predictionSupported,
+    if (session) return { ...session.state, ...settings, diagnostics: this.client.statusForThread?.(session.threadId) ?? this.client.status, predictionSupported, planHandoffSupported,
       ...(session.modelProvider && session.model ? { activeModelSelection: { modelProvider: session.modelProvider, model: session.model } } : {}),
       goal: session.state.goal ? { ...session.state.goal, threadId: session.id } : null, questions: [...session.state.questions], ...(session.state.prediction ? { prediction: { ...session.state.prediction } } : {}) };
     const failure = this.failures.get(sessionId);
     const nativeRoute = this.nativeRoutes.get(sessionId);
     // The failure snapshot names the exited process; pool status may belong to another service.
-    if (failure) return { ...failure.state, ...settings, predictionSupported,
+    if (failure) return { ...failure.state, ...settings, predictionSupported, planHandoffSupported,
       ...(nativeRoute ? { activeModelSelection: nativeRoute } : {}) };
-    return { ...settings, diagnostics: this.client.status, predictionSupported, phase: 'idle', turnId: null, goal: null, questions: [],
+    return { ...settings, diagnostics: this.client.status, predictionSupported, planHandoffSupported, phase: 'idle', turnId: null, goal: null, questions: [],
       ...(nativeRoute ? { activeModelSelection: nativeRoute } : {}) };
   }
 
@@ -410,6 +442,9 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   private persistedOptions(options: AnyRecord): AnyRecord {
     const persisted = { ...options };
     delete persisted.onInputAccepted;
+    // An approved plan belongs to the one turn it starts; the loaded session
+    // must never replay it into a later goal or Worker turn.
+    delete persisted.approvedPlan;
     return persisted;
   }
 
@@ -601,6 +636,62 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     });
   }
 
+  /**
+   * Converts the composer's approved plan into the prompt of this turn.
+   *
+   * `thread/prepareApprovedPlan` (already enabled by the `experimentalApi`
+   * initialize capability) creates no turn: it only translates the exact
+   * markdown the user approved into the prompt `turn/start` must submit. A
+   * build that does not implement the method, or an empty conversion, fails
+   * loudly instead of falling back to sending the raw markdown.
+   */
+  private async prepareApprovedPlan(session: NativeSession, plan: CodexApprovedPlan): Promise<string> {
+    let result: AnyRecord | undefined;
+    try {
+      result = await this.client.request('thread/prepareApprovedPlan', {
+        threadId: session.threadId,
+        markdown: plan.markdown,
+      }) as AnyRecord | undefined;
+    } catch (error) {
+      if (isUnknownMethodError(error)) {
+        throw new AppError('This Codex CLI build does not support native plan handoff. Update the bundled CLI and try again.', {
+          code: 'CODEX_PLAN_HANDOFF_UNSUPPORTED', statusCode: 501,
+        });
+      }
+      throw error;
+    }
+    const prompt = typeof result?.prompt === 'string' ? result.prompt : '';
+    if (!prompt.trim()) {
+      throw new AppError('Codex did not return a prompt for the approved plan. No message was sent.', {
+        code: 'CODEX_PLAN_HANDOFF_FAILED', statusCode: 502,
+      });
+    }
+    return prompt;
+  }
+
+  /**
+   * Ends a run whose approved plan never became a prompt.
+   *
+   * No native turn exists at this point, so there is nothing to interrupt or
+   * reconcile: the run reports the provider's own error and its terminal frame
+   * directly, which also releases the gateway's run slot.
+   */
+  private failApprovedPlan(session: NativeSession, writer: ProviderRuntimeWriter, error: unknown): void {
+    const message = error instanceof Error ? error.message : String(error);
+    session.state.phase = 'failed';
+    session.state.error = message;
+    this.publish(session);
+    writer.send(createNormalizedMessage({ provider: 'codex', sessionId: session.id, kind: 'error', content: message }));
+    writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId: session.id, exitCode: 1 }), success: false, turnId: null });
+    notifyRunFailed({
+      userId: writer.userId ?? null,
+      provider: 'codex',
+      sessionId: session.options.sessionId ?? session.id,
+      sessionName: session.options.sessionSummary ?? null,
+      error: error instanceof Error ? error : new Error(message),
+    });
+  }
+
   private newTurn(session: NativeSession, writer: ProviderRuntimeWriter, id: string | null, composerPredictions = false, workerBatchId?: string): NativeTurn {
     let finish!: () => void;
     const done = new Promise<void>((resolve) => { finish = resolve; });
@@ -694,6 +785,26 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
       return;
     }
+    // An approved plan becomes the prompt of this thread's first native turn,
+    // so the runtime order is thread/start -> thread/prepareApprovedPlan ->
+    // turn/start. A refusal here leaves zero native turns; the target thread
+    // stays as it was started, and a retry from the source is a new target.
+    const approvedPlan = options.approvedPlan as CodexApprovedPlan | undefined;
+    let turnCommand = command;
+    if (approvedPlan) {
+      try {
+        turnCommand = await this.prepareApprovedPlan(session, approvedPlan);
+      } catch (error) {
+        this.failApprovedPlan(session, writer, error);
+        return;
+      }
+      // The existing Stop fence applies after this await too: a Stop that landed
+      // while prepare was in flight ends the run before any turn exists.
+      if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) {
+        writer.send({ ...createCompleteMessage({ provider: 'codex', sessionId, exitCode: 0, aborted: true }), stopping: session.state.phase !== 'idle' });
+        return;
+      }
+    }
     // A Worker wake-up consults its trusted final gate immediately before the
     // native turn exists. A user message that arrived after the Worker batch was
     // claimed defers this turn normally: no native turn is created, so there is
@@ -728,7 +839,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       // can arrive while turn/start is still awaiting its reply, and they must
       // find this identity, while a build failure keeps the existing cleanup.
       const clientUserMessageId: string = options.clientMessageId ?? randomUUID();
-      const input = buildInput(command, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
+      // The prepared plan prompt is both what the native turn receives and what
+      // `submittedInput` records, so the native user echo correlates even when it
+      // carries no client id.
+      const input = buildInput(turnCommand, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
       turn.submittedInput = { clientId: clientUserMessageId, input };
       // Queue dispatch keeps its receipt reserved until input can actually be
       // delivered. A failed provider resume must leave that message queued.
@@ -1098,6 +1212,10 @@ export class CodexAppServerRuntime implements IProviderRuntime {
    */
   private predictionSupported(): boolean {
     return supportsComposerPredictions(this.readCliVersion());
+  }
+
+  private planHandoffSupported(): boolean {
+    return supportsPlanHandoff(this.readCliVersion());
   }
 
   private onNotification(frame: CodexRpcFrame): void {

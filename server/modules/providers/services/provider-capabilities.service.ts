@@ -29,7 +29,9 @@ type ProviderCapabilities = {
    * model or installed CLI is eligible. The per-session snapshot's
    * `predictionSupported` is the real gate the composer consumes.
    */
-  nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean; predictions: boolean };
+  nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean; predictions: boolean;
+    /** This adapter implements the approved-plan handoff; the real CLI can still refuse it explicitly. */
+    planHandoff: boolean };
   /** Application transport/process controls, independent of provider-native plan or steer support. */
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /**
@@ -147,7 +149,8 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsFiles: true,
     supportsAbort: true,
     supportsPermissionRequests: true,
-    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true, predictions: true },
+    nativeControls: { runtime: 'app-server', steer: true, plan: true, goal: false, userInput: true, predictions: true,
+      planHandoff: true },
     supportsTokenUsage: true,
     supportsEffort: true,
     effortLevels: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],

@@ -74,7 +74,10 @@ test('a new magpie conversation sends and resumes independently of the OpenAI de
     get: (id: string): SessionRuntimeSettings => saved.get(id) ?? { runtime: 'app-server', mode: 'default', queueHeld: false },
     update: (id: string, patch: Partial<SessionRuntimeSettings>) => { saved.set(id, { ...settings.get(id), ...patch }); return settings.get(id); },
   };
-  const modelProviders = new CodexModelProviderService({ home: root, environment: {} });
+  // The service reads the same isolated app-server the runtime uses, never the
+  // machine's real Codex home or the production singleton.
+  const initialTransport = createTransport();
+  const modelProviders = new CodexModelProviderService(initialTransport);
   const createRuntime = (transport: CodexAppServerConnections) => new CodexAppServerRuntime(transport, settings, 10_000,
     () => {}, async () => [], 30_000, { modelProviders });
   const bindings = new Map<string, string>();
@@ -91,7 +94,7 @@ test('a new magpie conversation sends and resumes independently of the OpenAI de
   const options = (id: string) => ({ sessionId: id, cwd: root, model: 'gpt-5.4', permissionMode: 'default' });
   const originalGoals = process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
   process.env.CLOUDCLI_CODEX_GOAL_ENABLED = 'false';
-  let runtime = createRuntime(createTransport());
+  let runtime = createRuntime(initialTransport);
   t.after(async () => {
     await Promise.all(transports.map((transport) => transport.close()));
     await runtime.close();
@@ -180,7 +183,7 @@ test('pinned Codex preserves model services across switching, forking, and indep
   // The fork client waits for `thread/closed` on this transport; forward the
   // isolated process's notifications so that confirmation is observed here too.
   t.mock.method(codexAppServerTransport, 'onNotification', (listener: Parameters<typeof transport.onNotification>[0]) => transport.onNotification(listener));
-  const modelProviders = new CodexModelProviderService({ home: root, environment: {} });
+  const modelProviders = new CodexModelProviderService(transport);
   // The fork adapter validates its target against this same isolated config.
   t.mock.method(codexModelProviderService, 'models', (modelProvider: string) => modelProviders.models(modelProvider));
   const runtime = new CodexAppServerRuntime(transport, sessionRuntimeDb, 10_000, () => {}, async () => [], 30_000,

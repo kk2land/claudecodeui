@@ -25,6 +25,13 @@ const harness = vi.hoisted(() => ({
   hasModelSelection: true,
   selectedModel: 'openai/gpt-5.6-sol' as string | null,
   effortOptions: [{ value: 'low' }, { value: 'high' }],
+  // A loaded native catalog is authoritative; null keeps the static fallback.
+  nativeCatalogLoaded: true,
+  nativeEffortValues: null as Array<{ value: string }> | null,
+  nativeEffortDefault: 'high' as string | undefined,
+  composerInput: '',
+  composerStateArgs: null as { currentProviderEffort?: string; currentProviderModel?: string } | null,
+  schedule: vi.fn(async (_args: { content: string; scheduledFor: Date; options: Record<string, unknown> }) => null),
   selectCodexModel: vi.fn(async (_provider: string, _model: string) => {}),
   selectProviderModel: vi.fn(async (_provider: LLMProvider, _model: string, _sessionId?: string | null) => {}),
   selectProviderEffort: vi.fn(async () => {}),
@@ -35,7 +42,7 @@ const harness = vi.hoisted(() => ({
   useProviderRuntimeControls: vi.fn((_args: unknown) => ({ available: false })),
   useScheduledMessages: vi.fn((_sessionId: string | null, _subscribe?: unknown) => ({
     scheduledMessages: [],
-    schedule: async () => null,
+    schedule: harness.schedule,
     cancel: async () => false,
   })),
 }));
@@ -74,7 +81,13 @@ vi.mock('@/modules/chat/hooks/useCodexModelProviders', () => ({
   useCodexModelProviders: () => ({ available: harness.provider === 'codex' && harness.servicesAvailable, model: harness.selectedModel ?? '',
     selection: harness.provider === 'codex' && harness.hasModelSelection ? { modelProvider: 'gateway', model: harness.selectedModel } : undefined,
     modelProvider: 'gateway', select: harness.selectCodexModel,
-    modelOptions: [{ value: 'openai/gpt-5.6-sol', label: 'openai/gpt-5.6-sol' }] }),
+    modelOptions: harness.nativeCatalogLoaded ? [{
+      value: 'openai/gpt-5.6-sol',
+      label: 'openai/gpt-5.6-sol',
+      ...(harness.nativeEffortValues
+        ? { effort: { default: harness.nativeEffortDefault, values: harness.nativeEffortValues } }
+        : {}),
+    }] : null }),
 }));
 vi.mock('@/modules/chat/hooks/useChatSessionState', () => ({
   useChatSessionState: () => ({
@@ -86,8 +99,12 @@ vi.mock('@/modules/chat/hooks/useChatSessionState', () => ({
 }));
 vi.mock('@/modules/chat/hooks/useChatRealtimeHandlers', () => ({ useChatRealtimeHandlers: () => {} }));
 vi.mock('@/modules/chat/hooks/useChatComposerState', () => ({
-  useChatComposerState: () => ({ input: '', setInput: () => {}, textareaRef: { current: null } }),
+  useChatComposerState: (args: { currentProviderEffort?: string; currentProviderModel?: string }) => {
+    harness.composerStateArgs = args;
+    return { input: harness.composerInput, setInput: () => {}, textareaRef: { current: null } };
+  },
 }));
+vi.mock('@/shared/hooks/useProviderCapabilities', () => ({ useProviderCapabilities: () => ({}) }));
 vi.mock('@/modules/chat/hooks/useSessionStore', () => ({ useSessionStore: () => ({}) }));
 vi.mock('@/modules/chat/transcript/ChatMessagesPane', () => ({ default: () => null }));
 vi.mock('@/modules/chat/composer/ChatComposer', () => ({ default: harness.composer }));
@@ -106,6 +123,11 @@ beforeEach(() => {
   harness.hasModelSelection = true;
   harness.selectedModel = 'openai/gpt-5.6-sol';
   harness.effortOptions = [{ value: 'low' }, { value: 'high' }];
+  harness.nativeCatalogLoaded = true;
+  harness.nativeEffortValues = null;
+  harness.nativeEffortDefault = 'high';
+  harness.composerInput = '';
+  harness.composerStateArgs = null;
   vi.clearAllMocks();
 });
 
@@ -162,8 +184,9 @@ test('forwards the Chat tab active state to DSH runtime controls', () => {
   assert.equal(args.chatActive, true);
 });
 
-test('a service model without catalog metadata retains Codex reasoning choices and saves the chosen effort', async () => {
+test('a native model that declares reasoning choices shows them and saves the chosen effort', async () => {
   harness.provider = 'codex';
+  harness.nativeEffortValues = [{ value: 'low' }, { value: 'high' }];
   render(<ChatInterface isActive selectedProject={project} selectedSession={{ ...session, provider: 'codex' }} ws={null} sendMessage={() => {}} />);
   const props = harness.composer.mock.calls.at(-1)![0];
   assert.equal(props.model, 'openai/gpt-5.6-sol');
@@ -171,6 +194,29 @@ test('a service model without catalog metadata retains Codex reasoning choices a
   assert.equal(props.effort, 'high');
   await act(async () => { await props.onSelectEffort('low'); });
   assert.deepEqual(harness.selectProviderEffort.mock.calls, [['codex', 'low', harness.sessionId]]);
+});
+
+test('a native model without effort metadata hides the choices and sends the default effort', async () => {
+  harness.provider = 'codex';
+  harness.composerInput = 'schedule this turn';
+  render(<ChatInterface isActive selectedProject={project} selectedSession={{ ...session, provider: 'codex' }} ws={null} sendMessage={() => {}} />);
+  const props = harness.composer.mock.calls.at(-1)![0];
+  assert.deepEqual(props.availableEffortOptions, []);
+  assert.equal(props.effort, 'default');
+  // The ordinary send path receives the same default, not the static 'high'.
+  assert.equal(harness.composerStateArgs?.currentProviderEffort, 'default');
+
+  await act(async () => { await props.onScheduleMessage(new Date('2030-01-01T00:00:00Z')); });
+  assert.equal(harness.schedule.mock.calls[0][0].options.effort, 'default');
+});
+
+test('an unloaded native catalog may keep the static reasoning choices', () => {
+  harness.provider = 'codex';
+  harness.nativeCatalogLoaded = false;
+  render(<ChatInterface isActive selectedProject={project} selectedSession={{ ...session, provider: 'codex' }} ws={null} sendMessage={() => {}} />);
+  const props = harness.composer.mock.calls.at(-1)![0];
+  assert.deepEqual(props.availableEffortOptions, [{ value: 'low' }, { value: 'high' }]);
+  assert.equal(props.effort, 'high');
 });
 
 test('an empty service model hides reasoning choices until a model is selected', () => {

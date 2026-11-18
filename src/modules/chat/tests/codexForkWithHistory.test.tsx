@@ -10,8 +10,12 @@ import type { CodexBranchForkResult, CodexControls, CodexModelProviderControls, 
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const models = [{ value: 'shared-model', label: 'Shared model' }, { value: 'gateway-model', label: 'Gateway model' }];
-const directory = { defaultProvider: 'openai', hasCustomProviders: true,
-  providers: [{ id: 'openai', name: 'OpenAI' }, { id: 'gateway', name: 'Gateway' }] };
+const directory = { defaultProvider: 'openai', hasCustomProviders: true, canChangeDefault: true,
+  providers: [
+    { id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', canEdit: false, settings: { type: 'openai' as const } },
+    { id: 'gateway', name: 'Gateway', baseUrl: 'https://gateway.example.com/v1', canEdit: true,
+      settings: { type: 'customGateway' as const, auth: { mode: 'none' as const } } },
+  ] };
 const response = (data: unknown, status = 200) => Promise.resolve(new Response(JSON.stringify({ success: status < 400, data }), { status }));
 
 const NATIVE_IDLE: CodexSessionState = { runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [] };
@@ -318,7 +322,10 @@ test('the hook returns a fork rejection with its code and does not navigate', as
 
 test('a previewed service catalog is available without replacing the saved selection options', async () => {
   vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
-  const load = vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response({ models: ['gateway-model'] }));
+  const load = vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation((id: string) => response({
+    modelProvider: id, models: ['gateway-model'],
+    items: [{ value: 'gateway-model', label: 'Gateway model', isDefault: true, hidden: false }],
+  }));
   const view = renderHook(() => useCodexModelProviders({ enabled: true, controls: nativeControls(),
     model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
   await waitFor(() => expect(view.result.current.available).toBe(true));

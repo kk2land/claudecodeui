@@ -12,8 +12,13 @@ import type { CodexControls, CodexModelProviderControls } from '@/shared/types';
 afterEach(() => { cleanup(); vi.restoreAllMocks(); });
 
 const models = [{ value: 'shared-model', label: 'Shared model' }, { value: 'alpha-only', label: 'Alpha model' }];
-const directory = { defaultProvider: 'alpha', hasCustomProviders: true,
-  providers: [{ id: 'alpha', name: 'Alpha service' }, { id: 'beta', name: 'Beta service' }] };
+const directory = { defaultProvider: 'alpha', hasCustomProviders: true, canChangeDefault: true,
+  providers: [
+    { id: 'alpha', name: 'Alpha service', baseUrl: 'https://alpha.example.com/v1', canEdit: true,
+      settings: { type: 'customGateway' as const, auth: { mode: 'none' as const } } },
+    { id: 'beta', name: 'Beta service', baseUrl: 'https://beta.example.com/v1', canEdit: true,
+      settings: { type: 'customGateway' as const, auth: { mode: 'none' as const } } },
+  ] };
 const response = (data: unknown) => Promise.resolve(new Response(JSON.stringify({ success: true, data })));
 
 function controller(patch: Partial<CodexModelProviderControls> = {}): CodexModelProviderControls {
@@ -27,6 +32,9 @@ const nativeControls: CodexControls = {
   state: { runtime: 'app-server', mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [] },
   pending: false, error: null, delivery: null, control: vi.fn(), steer: vi.fn(),
 };
+
+const catalog = (modelProvider: string, ids: string[]) => ({ modelProvider, models: ids,
+  items: ids.map((id) => ({ value: id, label: id, isDefault: id === ids[0], hidden: false })) });
 
 function openSettings(controls: CodexModelProviderControls) {
   const view = render(<CodexControlPanel controls={nativeControls} modelProviders={controls} onExecutePlan={() => {}} />);
@@ -130,16 +138,18 @@ test('mobile service selection is inside the portalled Codex settings panel', ()
   host.remove();
 });
 
-test('directory discovery is disabled outside native Codex and an unextended config never fetches models', async () => {
+test('directory discovery is disabled outside native Codex while a default OpenAI-only install still loads its native models', async () => {
   const read = vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response({ ...directory, hasCustomProviders: false }));
-  const load = vi.spyOn(api.providers, 'codexModelProviderModels');
+  const load = vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => response(catalog('alpha', ['shared-model'])));
   const controls: CodexControls = { state: null, pending: false, error: null, delivery: null, control: vi.fn(), steer: vi.fn() };
   const view = renderHook(({ enabled }) => useCodexModelProviders({ enabled, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }), { initialProps: { enabled: false } });
   expect(read).not.toHaveBeenCalled();
   view.rerender({ enabled: true });
   await waitFor(() => expect(read).toHaveBeenCalledTimes(1));
   expect(view.result.current.available).toBe(false);
-  expect(load).not.toHaveBeenCalled();
+  // Extra services are hidden, but the built-in service still has a native catalog.
+  await waitFor(() => expect(load).toHaveBeenCalledWith('alpha'));
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
 });
 
 test('reopened sessions use their saved choice and service-specific model list instead of a global default', async () => {
@@ -238,4 +248,148 @@ test('a saved session selection still wins after the session changes and the dir
   await waitFor(() => expect(read).toHaveBeenCalledTimes(2));
   expect(view.result.current.modelProvider).toBe('beta');
   expect(view.result.current.model).toBe('beta-only');
+});
+
+test('native catalog metadata stays per service: the same model id keeps its own label and effort on each service', async () => {
+  vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation((id: string) => response({
+    modelProvider: id,
+    models: ['shared-model'],
+    items: [id === 'alpha'
+      ? { value: 'shared-model', label: 'Shared on Alpha', description: 'Alpha reasoning', effort: { default: 'high', values: [{ value: 'low' }, { value: 'high' }] }, isDefault: true, hidden: false }
+      : { value: 'shared-model', label: 'Shared on Beta', effort: { values: [] }, isDefault: true, hidden: false }],
+  }));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
+
+  // The active service renders its own native metadata, not the shared catalog's.
+  expect(view.result.current.modelOptions?.[0]).toEqual({
+    value: 'shared-model', label: 'Shared on Alpha', description: 'Alpha reasoning',
+    effort: { default: 'high', values: [{ value: 'low' }, { value: 'high' }] },
+  });
+
+  await act(async () => { await view.result.current.loadModels('beta'); });
+  const beta = view.result.current.modelOptionsFor('beta');
+  expect(beta?.[0]?.label).toBe('Shared on Beta');
+  // A reported, empty effort list means this service has no levels; known models must not supply any.
+  expect(beta?.[0]?.effort).toEqual({ values: [] });
+  expect(view.result.current.modelOptions?.[0]?.label).toBe('Shared on Alpha');
+});
+
+test('an unloaded service answers null while a loaded service with no models answers an empty list', async () => {
+  vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation((id: string) => response(catalog(id, [])));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
+
+  await waitFor(() => expect(view.result.current.modelOptions).toEqual([]));
+  expect(view.result.current.modelOptionsFor('beta')).toBeNull();
+});
+
+test('a change announcement re-reads the edited service even when its id stayed the same', async () => {
+  const read = vi.spyOn(api.providers, 'codexModelProviders')
+    .mockImplementationOnce(() => response(directory))
+    .mockImplementation(() => response({ ...directory, providers: directory.providers.map((provider) => (
+      provider.id === 'alpha' ? { ...provider, name: 'Alpha renamed' } : provider)) }));
+  const load = vi.spyOn(api.providers, 'codexModelProviderModels')
+    .mockImplementationOnce(() => response(catalog('alpha', ['shared-model'])))
+    .mockImplementation(() => response(catalog('alpha', ['edited-model'])));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
+
+  act(() => { window.dispatchEvent(new Event(CODEX_MODEL_PROVIDERS_CHANGED_EVENT)); });
+
+  // An edited endpoint behind an unchanged id must not leave the old catalog in place.
+  await waitFor(() => expect(view.result.current.modelOptions?.[0]?.value).toBe('edited-model'));
+  expect(load).toHaveBeenCalledTimes(2);
+  expect(load).toHaveBeenLastCalledWith('alpha');
+  expect(read).toHaveBeenCalledTimes(2);
+});
+
+test('a failed catalog reload keeps the confirmed service and model and reports its reason', async () => {
+  vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation(() => Promise.resolve(new Response(
+    JSON.stringify({ success: false, error: { message: 'Catalog offline' } }), { status: 502 })));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
+
+  await waitFor(() => expect(view.result.current.error).toBe('Catalog offline'));
+  expect(view.result.current.modelProvider).toBe('alpha');
+  expect(view.result.current.modelOptions).toBeNull();
+  await act(async () => { await expect(view.result.current.loadModels('alpha')).rejects.toThrow(); });
+});
+
+test('a catalog is not exposed once the composer leaves native Codex', async () => {
+  vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation((id: string) => response(catalog(id, ['shared-model'])));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(
+    ({ enabled }) => useCodexModelProviders({ enabled, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }),
+    { initialProps: { enabled: true } },
+  );
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
+
+  // Switching to Claude (or off native Codex) must not leave Codex models and
+  // effort levels available to the shared composer.
+  view.rerender({ enabled: false });
+
+  await waitFor(() => expect(view.result.current.modelOptions).toBeNull());
+  expect(view.result.current.modelOptionsFor('alpha')).toBeNull();
+  expect(view.result.current.available).toBe(false);
+});
+
+test('a failed directory reload keeps the confirmed service and models and reports the reason', async () => {
+  const read = vi.spyOn(api.providers, 'codexModelProviders')
+    .mockImplementationOnce(() => response(directory))
+    .mockImplementation(() => Promise.resolve(new Response(
+      JSON.stringify({ success: false, error: { message: 'Directory offline' } }), { status: 500 })));
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation((id: string) => response(catalog(id, ['shared-model'])));
+  const controls: CodexControls = { ...nativeControls, state: null };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'shared-model', knownModels: models, onSessionForked: () => {} }));
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(1));
+
+  act(() => { window.dispatchEvent(new Event(CODEX_MODEL_PROVIDERS_CHANGED_EVENT)); });
+
+  await waitFor(() => expect(view.result.current.error).toBe('Directory offline'));
+  // The last confirmed directory survives, so the selected service and its models stay usable.
+  expect(view.result.current.modelProvider).toBe('alpha');
+  expect(view.result.current.modelOptionsFor('alpha')).toHaveLength(1);
+  expect(read).toHaveBeenCalledTimes(2);
+});
+
+test('a saved model the service now hides keeps its native label and effort without exposing other hidden models', async () => {
+  vi.spyOn(api.providers, 'codexModelProviders').mockImplementation(() => response(directory));
+  const hidden = (value: string, label: string) => ({
+    value, label, description: `${label} description`,
+    effort: { default: 'medium', values: [{ value: 'medium' }, { value: 'high' }] },
+    isDefault: false, hidden: true,
+  });
+  const visible = { value: 'new-model', label: 'New model', effort: { values: [] }, isDefault: true, hidden: false };
+  vi.spyOn(api.providers, 'codexModelProviderModels').mockImplementation((id: string) => response({
+    modelProvider: id,
+    // `models` is the visible picker; a retired saved model only exists in `items`.
+    models: ['new-model'],
+    items: id === 'alpha'
+      ? [visible, hidden('retired', 'Retired model'), hidden('other-hidden', 'Other hidden')]
+      : [visible, hidden('retired', 'Retired model')],
+  }));
+  const controls: CodexControls = { ...nativeControls, state: { ...nativeControls.state!,
+    modelSelection: { modelProvider: 'alpha', model: 'retired' }, activeModelSelection: { modelProvider: 'alpha', model: 'retired' } } };
+  const view = renderHook(() => useCodexModelProviders({ enabled: true, controls, model: 'global-model', knownModels: models, onSessionForked: () => {} }));
+
+  await waitFor(() => expect(view.result.current.modelOptions).toHaveLength(2));
+  const options = view.result.current.modelOptions ?? [];
+  expect(options.find((option) => option.value === 'retired')).toEqual({
+    value: 'retired', label: 'Retired model', description: 'Retired model description',
+    effort: { default: 'medium', values: [{ value: 'medium' }, { value: 'high' }] },
+  });
+  // The visible catalog is untouched and no other hidden row is offered.
+  expect(options.map((option) => option.value)).toEqual(['new-model', 'retired']);
+  expect(view.result.current.model).toBe('retired');
+
+  // Another service's preview never gains its hidden rows.
+  await act(async () => { await view.result.current.loadModels('beta'); });
+  expect(view.result.current.modelOptionsFor('beta')?.map((option) => option.value)).toEqual(['new-model']);
 });

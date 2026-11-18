@@ -163,7 +163,7 @@ test('an explicit fork target overrides the source service and is persisted for 
   // The target must exist in the provider's own catalog; the fixture models
   // exactly that config so the real adapter path is exercised.
   t.mock.method(codexModelProviderService, 'models', async (modelProvider: string) => ({
-    modelProvider, models: ['gateway/new-model'], expiresAt: Date.now() + 60_000,
+    modelProvider, models: ['gateway/new-model'], items: [],
   }));
   const calls: Array<{ method: string; params: unknown }> = [];
   t.mock.method(codexAppServerTransport, 'request', async (method: string, params: unknown) => {
@@ -238,7 +238,7 @@ test('a fork target whose service is not configured is refused before any native
 test('a fork target model outside the selected service catalog is refused before any native fork', async (t) => {
   const { sourceSettings } = await seedCodexSource();
   t.mock.method(codexModelProviderService, 'models', async (modelProvider: string) => ({
-    modelProvider, models: ['gateway/other-model'], expiresAt: Date.now() + 60_000,
+    modelProvider, models: ['gateway/other-model'], items: [],
   }));
   const request = t.mock.method(codexAppServerTransport, 'request', async () => ({ thread: { id: 'native-fork' } }));
   await assert.rejects(sessionsService.forkSessionById('source', {

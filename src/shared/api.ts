@@ -6,7 +6,7 @@ import {
 import { IS_PLATFORM } from '@/shared/utils';
 import { RESIDENT_TASKS_PLUGIN } from '@/shared/constants';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
-import type { ProviderRuntimeAction, TodoDraftMeta } from '@/shared/types';
+import type { CodexModelProviderPatch, ProviderRuntimeAction, TodoDraftMeta } from '@/shared/types';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -452,6 +452,12 @@ export const api = {
     codexRateLimits: () => get('/api/providers/codex/rate-limits'),
     refreshCodexRateLimits: () => post('/api/providers/codex/rate-limits/refresh'),
     codexModelProviders: () => get('/api/providers/codex/model-providers'),
+    // Provider writes forward app-server's `{ settings }` write params; the
+    // server allocates a custom-gateway id when `providerId` is omitted or null.
+    createCodexModelProvider: (settings: CodexModelProviderPatch) =>
+      post('/api/providers/codex/model-providers', { settings }),
+    updateCodexModelProvider: (modelProvider: string, settings: CodexModelProviderPatch) =>
+      patch(`/api/providers/codex/model-providers/${encodeURIComponent(modelProvider)}`, { settings }),
     setCodexDefaultModelProvider: (modelProvider: string) =>
       put('/api/providers/codex/model-providers/default', { modelProvider }),
     codexModelProviderModels: (modelProvider: string) =>

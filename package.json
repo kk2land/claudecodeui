@@ -190,7 +190,7 @@
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/rest": "^22.0.0",
     "@openai/codex": "0.166.0",
-    "@openai/codex-app-server-compat": "npm:@openai/codex-sdk@0.169.0",
+    "@openai/codex-app-server-compat": "npm:@openai/codex-sdk@0.169.1",
     "@openai/codex-sdk": "^0.166.0",
     "@opencode-ai/sdk": "^1.19.5",
     "@replit/codemirror-minimap": "^0.5.2",

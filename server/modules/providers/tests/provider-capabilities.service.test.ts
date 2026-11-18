@@ -43,6 +43,7 @@ test('provider visibility normalizes environment entries without removing capabi
       ['codex', 'cursor', 'opencode']);
     assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').hiddenFromModelPicker, true);
     assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.plan, true);
+    assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.planHandoff, true);
     assert.equal(providerCapabilitiesService.getProviderCapabilities('claude').hiddenFromModelPicker, false);
 
     for (const value of [undefined, '', ' , \n ', 'unknown']) {

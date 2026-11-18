@@ -67,9 +67,9 @@ function harness(
     list: async () => {
       const defaultProvider = overrides.defaultProvider?.() ?? 'openai';
       directoryReads.push(defaultProvider);
-      return { defaultProvider, hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] };
+      return { defaultProvider, hasCustomProviders: false, canChangeDefault: true, providers: [{ id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: true, settings: { type: 'openai' as const } }] };
     },
-    models: async (modelProvider) => ({ modelProvider, models: ['test-model', 'second-model'], expiresAt: Date.now() + 60_000 }),
+    models: async (modelProvider) => ({ modelProvider, models: ['test-model', 'second-model'], items: [] }),
   } });
   const events: AnyRecord[] = [];
   let writerNumber = 1;

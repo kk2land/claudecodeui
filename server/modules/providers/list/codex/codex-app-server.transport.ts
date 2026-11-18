@@ -340,8 +340,11 @@ export class CodexAppServerTransport implements CodexRpcClient {
     this.pending.delete(frame.id);
     clearTimeout(entry.timer);
     if (frame.error) {
+      // `data` carries app-server's structured rejection reason (config write
+      // errors, model-provider errors); consumers map it to their own errors.
       entry.reject(new AppError(frame.error.message, {
-        code: 'CODEX_APP_SERVER_REJECTED', statusCode: 502, details: { rpcCode: frame.error.code },
+        code: 'CODEX_APP_SERVER_REJECTED', statusCode: 502,
+        details: { rpcCode: frame.error.code, rpcData: frame.error.data },
       }));
     } else {
       entry.resolve(frame.result);

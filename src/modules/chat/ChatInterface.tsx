@@ -6,9 +6,12 @@ import { useTasksSettings } from '@/modules/task-master';
 import { usePaletteOpsRegister } from '@/modules/command-palette';
 import { useWebSocket } from '@/shared/context/WebSocketContext';
 import PermissionContext from '@/modules/chat/context/PermissionContext';
+import PlanHandoffContext from '@/modules/chat/context/PlanHandoffContext';
 import { MarkdownWorkspaceContext } from '@/modules/chat/context/MarkdownWorkspaceContext';
 import { TranscriptSessionContext } from '@/modules/chat/context/TranscriptSessionContext';
 import { api } from '@/shared/api';
+import { DEFAULT_EFFORT_VALUE } from '@/shared/constants';
+import { useProviderCapabilities } from '@/shared/hooks/useProviderCapabilities';
 import type {
   ChatMessage,
   LLMProvider,
@@ -23,6 +26,9 @@ import { useChatSessionState } from '@/modules/chat/hooks/useChatSessionState';
 import { useChatRealtimeHandlers } from '@/modules/chat/hooks/useChatRealtimeHandlers';
 import { useCodexControls } from '@/modules/chat/hooks/useCodexControls';
 import { useCodexModelProviders } from '@/modules/chat/hooks/useCodexModelProviders';
+import { usePlanHandoff } from '@/modules/chat/hooks/usePlanHandoff';
+import { getToolConfig } from '@/modules/chat/tools/configs/toolConfigs';
+import { parseToolPayload } from '@/modules/chat/utils/messageTransforms';
 import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { ProjectTodoDialog, useProjectTodos } from '@/modules/todos';
@@ -79,6 +85,7 @@ function ChatInterface({
 }: ChatInterfaceProps) {
   const { tasksEnabled, isTaskMasterInstalled } = useTasksSettings();
   const { subscribe, isConnected } = useWebSocket();
+  const providerCapabilities = useProviderCapabilities();
   const { t } = useTranslation('chat');
   const processingSessions = useProcessingSessions();
   const projectTodos = useProjectTodos({
@@ -236,10 +243,36 @@ function ChatInterface({
     onSessionForked: handleSessionForked,
   });
   const composerModel = codexModelProviders.selection ? codexModelProviders.model : currentProviderModel;
-  const composerModelOptions = codexModelProviders.available ? codexModelProviders.modelOptions ?? [] : currentProviderModelOptions;
-  // Service catalogs contain ids only; retain the existing reasoning metadata
-  // and Codex fallback choices instead of interpreting missing metadata as no support.
-  const composerEffortOptions = composerModel ? currentProviderEffortOptions : [];
+  // A loaded native catalog is authoritative, including an empty list and a
+  // model with no reasoning choices; only an unanswered catalog may keep the
+  // static provider metadata. `available` describes the settings card, not
+  // whether the default OpenAI service has a catalog. A stale catalog from a
+  // previous Codex view must never describe another provider or an SDK thread.
+  const codexCatalogActive = provider === 'codex' && codexControls.state?.runtime !== 'sdk';
+  const nativeModelOptions = codexCatalogActive ? codexModelProviders.modelOptions : null;
+  const nativeModelOption = nativeModelOptions?.find((option) => option.value === composerModel) ?? null;
+  const composerModelOptions = nativeModelOptions ?? currentProviderModelOptions;
+  const composerEffortOptions = nativeModelOptions
+    ? nativeModelOption?.effort?.values ?? []
+    : composerModel ? currentProviderEffortOptions : [];
+  // The shared controller may still hold the previous model's effort; the
+  // composer, sends and plan handoff use the native model's own choices.
+  const effortForNativeModel = (
+    options: typeof nativeModelOptions,
+    model: string,
+    requested: string,
+  ): string => {
+    if (!options) return requested;
+    const option = options.find((candidate) => candidate.value === model);
+    const values = option?.effort?.values ?? [];
+    if (values.length === 0) return DEFAULT_EFFORT_VALUE;
+    if (values.some((value) => value.value === requested)) return requested;
+    const nativeDefault = option?.effort?.default;
+    return nativeDefault && values.some((value) => value.value === nativeDefault)
+      ? nativeDefault
+      : DEFAULT_EFFORT_VALUE;
+  };
+  const composerEffort = effortForNativeModel(nativeModelOptions, composerModel, currentProviderEffort);
   const composerSessionId = selectedSession?.id || currentSessionId;
   const { available: codexModelProvidersAvailable, selection: codexModelSelection, appliedSelection: codexAppliedSelection,
     select: selectCodexModel, modelProvider: codexModelProvider } = codexModelProviders;
@@ -255,6 +288,81 @@ function ChatInterface({
     queueMicrotask(() => { if (active) syncSessionModel('codex', composerSessionId, confirmedCodexModel); });
     return () => { active = false; };
   }, [composerSessionId, confirmedCodexModel, currentProviderModel, syncSessionModel]);
+
+  // Native plan handoff needs the provider's advertised control, the real
+  // app-server runtime, and a CLI whose actual version supports the method; an
+  // old or unknown CLI keeps the entry hidden. A saved target for another
+  // service is a branch value, so the native route wins; without one the
+  // confirmed applied selection is still a real answer.
+  // A disconnected socket would allocate a target it could never send to, so
+  // the handoff is only offered while this client can reach the server.
+  const planHandoffEnabled = provider === 'codex'
+    && codexControls.state?.runtime === 'app-server'
+    && codexControls.state.planHandoffSupported === true
+    && providerCapabilities.codex?.nativeControls?.planHandoff === true
+    && isConnected;
+  const planHandoffRoute = codexModelProviders.activeSelection ?? codexModelProviders.appliedSelection;
+  const planHandoffModel = planHandoffRoute?.model?.trim();
+  // The target turn must run the route the source thread actually uses; a
+  // same-service model that is still pending is not that route, and its
+  // reasoning choices do not apply to a model the new session will not run.
+  const planHandoffSendModel = planHandoffModel ?? composerModel;
+  const planHandoffSendEffort = planHandoffModel === composerModel
+    ? composerEffort
+    : effortForNativeModel(nativeModelOptions, planHandoffSendModel, currentProviderEffort);
+  const planHandoff = usePlanHandoff({
+    enabled: planHandoffEnabled && Boolean(selectedProject),
+    project: selectedProject,
+    sendMessage,
+    onSessionEstablished: handleSessionEstablished,
+    onSessionProcessing,
+    content: t('codex.implementPrompt'),
+    model: planHandoffSendModel,
+    effort: planHandoffSendEffort,
+    permissionMode,
+    resolvePermissionModeForProvider,
+    ...(planHandoffRoute && planHandoffModel
+      ? { modelSelection: { modelProvider: planHandoffRoute.modelProvider, model: planHandoffModel } }
+      : {}),
+  });
+  // Only the newest plan in the open conversation may be implemented: the scan
+  // stops at the last context clear, and an incomplete, failed or empty newest
+  // plan means there is no plan rather than an older approved one. The exact
+  // card markup is reused so the toolbar sends what the card shows.
+  const latestPlan = useMemo<{ sourceSessionId: string | null; markdown: string } | null>(() => {
+    if (!planHandoffEnabled || !selectedProject || isProcessing || isLoadingSessionMessages
+      || codexControls.state?.mode !== 'plan') {
+      return null;
+    }
+    const sourceSessionId = selectedSession?.id || currentSessionId || null;
+    for (let index = chatMessages.length - 1; index >= 0; index -= 1) {
+      const message = chatMessages[index];
+      if (message.contextCleared) return null;
+      if (message.toolName !== 'ExitPlanMode' && message.toolName !== 'exit_plan_mode') continue;
+      // The newest plan is the only candidate; older rows are history.
+      const result = message.toolResult;
+      const failed = !result || result.isError === true
+        || message.toolStatus === 'failed' || message.toolStatus === 'in_progress';
+      if (failed || message.isStreaming) return null;
+      const content = getToolConfig(message.toolName).input
+        .getContentProps?.(parseToolPayload(message.toolInput))?.content;
+      return typeof content === 'string' && content.trim().length > 0
+        ? { sourceSessionId, markdown: content }
+        : null;
+    }
+    return null;
+  }, [planHandoffEnabled, selectedProject, isProcessing, isLoadingSessionMessages,
+    codexControls.state?.mode, selectedSession?.id, currentSessionId, chatMessages]);
+  const planHandoffContextValue = useMemo(
+    () => planHandoff.enabled
+      ? {
+          implementInNewSession: planHandoff.implementInNewSession,
+          pending: planHandoff.pending,
+          latestPlan,
+        }
+      : null,
+    [planHandoff.enabled, planHandoff.implementInNewSession, planHandoff.pending, latestPlan],
+  );
 
   /**
    * Clears the open session's context: the conversation stays on screen, with
@@ -374,7 +482,7 @@ function ChatInterface({
     permissionMode,
     cyclePermissionMode,
     currentProviderModel: composerModel,
-    currentProviderEffort,
+    currentProviderEffort: composerEffort,
     isLoading: isProcessing,
     codexControls: provider === 'codex' ? codexControls : undefined,
     // Native predictions exist only for the app-server runtime that advertises
@@ -520,12 +628,12 @@ function ChatInterface({
     const scheduled = await scheduleMessage({
       content,
       scheduledFor,
-      options: { model: composerModel, effort: currentProviderEffort, permissionMode },
+      options: { model: composerModel, effort: composerEffort, permissionMode },
     });
     if (scheduled) {
       setInput('');
     }
-  }, [currentProviderEffort, composerModel, input, permissionMode, scheduleMessage, setInput]);
+  }, [composerEffort, composerModel, input, permissionMode, scheduleMessage, setInput]);
 
   const permissionContextValue = useMemo(() => ({
     pendingPermissionRequests,
@@ -598,6 +706,7 @@ function ChatInterface({
 
   return (
     <PermissionContext.Provider value={permissionContextValue}>
+      <PlanHandoffContext.Provider value={planHandoffContextValue}>
       <div className="flex h-full min-h-0 flex-col">
         <MarkdownWorkspaceContext.Provider value={markdownWorkspaceValue}>
           <TranscriptSessionContext.Provider value={transcriptSessionValue}>
@@ -694,13 +803,13 @@ function ChatInterface({
           availablePermissionModes={availablePermissionModes}
           onSelectPermissionMode={selectPermissionMode}
           providerLabel={selectedProviderLabel}
-          effort={currentProviderEffort}
+          effort={composerEffort}
           availableEffortOptions={composerEffortOptions}
           onSelectEffort={handleSelectComposerEffort}
           model={composerModel}
           availableModelOptions={composerModelOptions}
           onSelectModel={handleSelectComposerModel}
-          modelsLoading={providerModelsLoading || codexModelProviders.available && codexModelProviders.loading}
+          modelsLoading={providerModelsLoading || codexModelProviders.loading}
           tokenBudget={tokenBudget}
           onShowTokenUsage={showCostModal}
           onClearContext={supportsContextClearing && (currentSessionId || selectedSession?.id) ? handleClearContextClick : undefined}
@@ -779,6 +888,7 @@ function ChatInterface({
         />}
         </div>
       </div>
+      </PlanHandoffContext.Provider>
 
       {selectedProject && (
         <ProjectTodoDialog

@@ -55,8 +55,8 @@ function harness() {
   };
   const runtime = new CodexAppServerRuntime(rpc, settingsDb, 100, () => {}, async () => [], 30_000, {
     modelProviders: {
-      list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] }),
-      models: async (provider: string) => ({ modelProvider: provider, models: ['test-model'], expiresAt: Date.now() + 60_000 }),
+      list: async () => ({ defaultProvider: 'openai', hasCustomProviders: false, canChangeDefault: true, providers: [{ id: 'openai', name: 'OpenAI', baseUrl: null, canEdit: true, settings: { type: 'openai' as const } }] }),
+      models: async (provider: string) => ({ modelProvider: provider, models: ['test-model'], items: [] }),
     },
   });
   const events: AnyRecord[] = [];

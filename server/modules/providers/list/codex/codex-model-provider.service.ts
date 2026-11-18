@@ -1,229 +1,344 @@
-import { execFile } from 'node:child_process';
-import { createHash } from 'node:crypto';
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
-import { createRequire } from 'node:module';
-import os from 'node:os';
-import path from 'node:path';
-import { promisify } from 'node:util';
-
-import TOML from '@iarna/toml';
-
+import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
+import type {
+  CodexModelCatalog,
+  CodexModelProviderPatch,
+  CodexModelProviderSettings,
+  CodexModelProviderSummary,
+  CodexModelProviders,
+  CodexRpcClient,
+  ProviderModelOption,
+} from '@/shared/index.js';
 import { AppError, readObjectRecord, readOptionalString } from '@/shared/index.js';
 
-import { rewriteCodexDefaultModelProvider } from './codex-skills-config-editor.js';
+/** Catalog row as the picker renders it: native metadata plus Codex's own marks. */
+type CodexModelCatalogItem = ProviderModelOption & { isDefault: boolean; hidden: boolean };
 
-type ProviderConfig = {
-  name?: string;
-  base_url?: string;
-  env_key?: string;
-  experimental_bearer_token?: string;
-  requires_openai_auth?: boolean;
-  http_headers?: Record<string, string>;
-  env_http_headers?: Record<string, string>;
-  query_params?: Record<string, string>;
-  auth?: { command: string; args?: string[]; cwd?: string; timeout_ms?: number };
+/**
+ * One config-write rejection reason app-server reports in `error.data`. The
+ * published protocol schemas omit this error payload, so the mapping accepts the
+ * observed serde spelling (`configValidationError`) as well as the protocol's
+ * Rust variant name, and only for reasons this service can explain.
+ */
+type ConfigWriteErrorMapping = { code: string; statusCode: number; message: string };
+
+const CONFIG_WRITE_ERROR_MAPPINGS: Record<string, ConfigWriteErrorMapping> = {
+  validationerror: {
+    code: 'CODEX_MODEL_PROVIDER_INVALID',
+    statusCode: 400,
+    message: 'Codex rejected this model provider configuration.',
+  },
+  pathnotfound: {
+    code: 'CODEX_MODEL_PROVIDER_NOT_FOUND',
+    statusCode: 404,
+    message: 'This model provider is no longer configured in Codex.',
+  },
+  versionconflict: {
+    code: 'CODEX_MODEL_PROVIDER_VERSION_CONFLICT',
+    statusCode: 409,
+    message: 'Codex config.toml changed while saving this model provider. Reload and try again.',
+  },
+  layerreadonly: {
+    code: 'CODEX_MODEL_PROVIDER_READONLY',
+    statusCode: 409,
+    message: 'The Codex configuration layer that defines this model provider is read-only.',
+  },
+  requirementreadonly: {
+    code: 'CODEX_MODEL_PROVIDER_READONLY',
+    statusCode: 409,
+    message: 'Codex requirements make this model provider read-only.',
+  },
 };
 
-/** Public directory metadata excludes endpoint credentials. */
-type CodexModelProviders = {
-  defaultProvider: string;
-  hasCustomProviders: boolean;
-  providers: Array<{ id: string; name: string }>;
-};
+/**
+ * Normalizes one `config_write_error_code` value: serde emits
+ * `configValidationError`, the protocol enum is `ConfigValidationError`, so the
+ * leading `config` prefix and case are not part of the identity.
+ */
+const configWriteErrorKey = (value: string): string => value.toLowerCase().replace(/^config/, '');
 
-/** Parsed service model ids and the expiration of their one-minute HTTP cache. */
-type CodexModelCatalog = { modelProvider: string; models: string[]; expiresAt: number };
+/** Reads a nullable string, keeping an explicit `null` apart from an absent field. */
+const readNullableString = (value: unknown): string | null => readOptionalString(value) ?? null;
 
-/** Providers routes and the native runtime share configured services and their minute-long model cache. */
-export class CodexModelProviderService {
-  private readonly cache = new Map<string, { signature: string; catalog: CodexModelCatalog }>();
-  private readonly environment: NodeJS.ProcessEnv;
-  private readonly home: string;
-  private readonly fetchModels: typeof fetch;
-  private readonly now: () => number;
+const invalidDirectory = (message: string): AppError => new AppError(message, {
+  code: 'CODEX_MODEL_PROVIDERS_INVALID', statusCode: 502,
+});
 
-  constructor(options: { home?: string; environment?: NodeJS.ProcessEnv; fetch?: typeof fetch; now?: () => number } = {}) {
-    this.environment = options.environment ?? process.env;
-    this.home = options.home ?? path.resolve(this.environment.CODEX_HOME?.trim() || path.join(os.homedir(), '.codex'));
-    this.fetchModels = options.fetch ?? fetch;
-    this.now = options.now ?? Date.now;
-  }
+const invalidCatalog = (message: string): AppError => new AppError(message, {
+  code: 'CODEX_MODEL_CATALOG_INVALID', statusCode: 502,
+});
 
-  private async readConfigText(): Promise<string> {
-    try { return await readFile(path.join(this.home, 'config.toml'), 'utf8'); }
-    catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-    return '';
-  }
-
-  private parseConfig(raw: string): { providers: Map<string, ProviderConfig>; defaultProvider: string } {
-    let config: Record<string, unknown>;
-    try { config = TOML.parse(raw) as Record<string, unknown>; }
-    catch { throw new AppError('Could not parse Codex config.toml.', { code: 'CODEX_CONFIG_INVALID', statusCode: 400 }); }
-    const custom = readObjectRecord(config.model_providers) ?? {};
-    const providers = new Map<string, ProviderConfig>([['openai', {
-      name: 'OpenAI', requires_openai_auth: true,
-      base_url: readOptionalString(config.openai_base_url) || this.environment.OPENAI_BASE_URL || 'https://api.openai.com/v1',
-    }]]);
-    for (const [id, value] of Object.entries(custom)) {
-      if (id === 'openai') continue; // Codex reserves the built-in provider id.
-      const provider = readObjectRecord(value);
-      if (!provider) throw new AppError(`Invalid Codex model provider: ${id}.`, { code: 'CODEX_CONFIG_INVALID', statusCode: 400 });
-      providers.set(id, provider as ProviderConfig);
+/** Maps app-server's credential-free `ProviderSettings` union onto the safe DTO. */
+function normalizeSettings(value: unknown, providerId: string): CodexModelProviderSettings {
+  const settings = readObjectRecord(value);
+  switch (settings?.type) {
+    case 'openai':
+      return { type: 'openai' };
+    case 'customGateway': {
+      const auth = readObjectRecord(settings.auth);
+      const envKey = readOptionalString(auth?.envKey);
+      if (auth?.mode === 'none') return { type: 'customGateway', auth: { mode: 'none' } };
+      if (auth?.mode === 'environmentVariable' && envKey) {
+        return { type: 'customGateway', auth: { mode: 'environmentVariable', envKey } };
+      }
+      if (auth?.mode === 'externallyConfigured') {
+        return { type: 'customGateway', auth: { mode: 'externallyConfigured', envKey: envKey ?? null } };
+      }
+      break;
     }
-    return { providers, defaultProvider: readOptionalString(config.model_provider) || 'openai' };
+    case 'bedrock':
+      return {
+        type: 'bedrock',
+        region: readNullableString(settings.region),
+        profile: readNullableString(settings.profile),
+      };
+    case 'gcp':
+      return {
+        type: 'gcp',
+        location: readNullableString(settings.location),
+        projectId: readNullableString(settings.projectId),
+        credentialFile: readNullableString(settings.credentialFile),
+      };
+    default:
+      break;
+  }
+  // An unknown service kind cannot be described honestly, so the directory fails
+  // instead of mislabeling the provider or hiding it from the user.
+  throw invalidDirectory(`Codex reported unsupported settings for model provider "${providerId}".`);
+}
+
+/** Normalizes one `ModelProviderSummary`, dropping anything the DTO does not name. */
+function normalizeProviderSummary(value: unknown): CodexModelProviderSummary {
+  const summary = readObjectRecord(value);
+  const id = readOptionalString(summary?.id);
+  if (!summary || !id) throw invalidDirectory('Codex returned a model provider without an id.');
+  return {
+    id,
+    name: readOptionalString(summary.name) ?? id,
+    baseUrl: readNullableString(summary.baseUrl),
+    canEdit: summary.canEdit === true,
+    settings: normalizeSettings(summary.settings, id),
+  };
+}
+
+/** Normalizes one `modelProvider/list` response into the safe directory DTO. */
+function normalizeDirectory(value: unknown): CodexModelProviders {
+  const result = readObjectRecord(value);
+  const defaultProvider = readOptionalString(result?.defaultProviderId);
+  if (!result || !defaultProvider || !Array.isArray(result.data)) {
+    throw invalidDirectory('Codex returned an unreadable model provider directory.');
+  }
+  const providers = result.data.map(normalizeProviderSummary);
+  return {
+    defaultProvider,
+    // app-server's list response carries no such flag; the safe settings tell
+    // whether anything beyond Codex's built-in service is configured.
+    hasCustomProviders: providers.some((provider) => provider.settings.type !== 'openai'),
+    canChangeDefault: result.canChangeDefault === true,
+    providers,
+  };
+}
+
+/** Normalizes one native `Model` into the catalog row the picker renders. */
+function normalizeModelItem(value: unknown): CodexModelCatalogItem {
+  const model = readObjectRecord(value);
+  // `model` is the slug a turn submits; `id` is only its catalog identity.
+  const id = readOptionalString(model?.model);
+  if (!model || !id) throw invalidCatalog('Codex returned a model without an id.');
+  const efforts = Array.isArray(model.supportedReasoningEfforts) ? model.supportedReasoningEfforts : [];
+  const description = readOptionalString(model.description);
+  const defaultEffort = readOptionalString(model.defaultReasoningEffort);
+  return {
+    value: id,
+    label: readOptionalString(model.displayName) ?? id,
+    ...(description ? { description } : {}),
+    effort: {
+      ...(defaultEffort ? { default: defaultEffort } : {}),
+      values: efforts.map((entry) => {
+        const option = readObjectRecord(entry);
+        const effort = readOptionalString(option?.reasoningEffort);
+        if (!effort) throw invalidCatalog(`Codex returned an unreadable reasoning effort for model "${id}".`);
+        const description = readOptionalString(option?.description);
+        return description ? { value: effort, description } : { value: effort };
+      }),
+    },
+    isDefault: model.isDefault === true,
+    hidden: model.hidden === true,
+  };
+}
+
+/**
+ * Model-provider directory, default-service selection and model catalogs for
+ * Codex, all read and written through the native app-server protocol.
+ *
+ * This service owns no configuration file parsing and no inference requests:
+ * `modelProvider/list`, `model/list`, `modelProvider/config/write` and
+ * `config/value/write` run on the shared transport, so app-server's own
+ * layering, validation, readonly rules and catalog cache stay authoritative.
+ * Only credential-free data is normalized into the shared DTOs.
+ *
+ * Consumers: the providers routes (GET/PUT/POST/PATCH model providers, GET
+ * models) and the native runtime/fork adapters that resolve a thread's default
+ * service and validate a model selection. Reading this directory starts the
+ * app-server when it is not running; nothing is cached here.
+ */
+export class CodexModelProviderService {
+  constructor(private readonly client: CodexRpcClient = codexAppServerTransport) {}
+
+  /**
+   * Sends one RPC and maps app-server's config-write rejections onto AppErrors
+   * with an actionable status. Transport failures (stopped, timeout, missing
+   * launcher) and network/endpoint failures reach the caller unchanged so they
+   * stay visible instead of being flattened into a config error.
+   */
+  private async request<T>(method: string, params?: unknown): Promise<T> {
+    try {
+      return await this.client.request<T>(method, params);
+    } catch (error) {
+      if (!(error instanceof AppError) || error.code !== 'CODEX_APP_SERVER_REJECTED') throw error;
+      throw this.mapRejection(method, error);
+    }
   }
 
-  private async readConfig() {
-    return this.parseConfig(await this.readConfigText());
+  private mapRejection(method: string, error: AppError): AppError {
+    const data = readObjectRecord((error.details as { rpcData?: unknown } | undefined)?.rpcData);
+    const writeErrorCode = readOptionalString(data?.config_write_error_code);
+    const mapping = writeErrorCode ? CONFIG_WRITE_ERROR_MAPPINGS[configWriteErrorKey(writeErrorCode)] : undefined;
+    if (mapping) {
+      const message = writeErrorCode && configWriteErrorKey(writeErrorCode) === 'validationerror' ? error.message : mapping.message;
+      return new AppError(message, { code: mapping.code, statusCode: mapping.statusCode });
+    }
+    if (data?.type === 'modelProviderMismatch' || data?.type === 'modelProviderPolicyConflict') {
+      return new AppError(error.message, { code: 'CODEX_MODEL_PROVIDER_CONFLICT', statusCode: 409 });
+    }
+    if (data?.type === 'modelProviderNotConfigured' || (method === 'model/list' && data?.modelProvider)) {
+      // `model/list` names the provider when its configuration disappeared
+      // between the directory read and the catalog request.
+      return new AppError('This model provider is no longer configured in Codex.', {
+        code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
+      });
+    }
+    // An unrecognized rejection keeps its native message and names the operation
+    // that failed, rather than pretending it was a write or losing the cause.
+    const fallbackCode = method === 'model/list'
+      ? 'CODEX_MODEL_CATALOG_FAILED'
+      : method === 'modelProvider/list' ? 'CODEX_MODEL_PROVIDERS_FAILED' : 'CODEX_MODEL_PROVIDER_WRITE_REJECTED';
+    return new AppError(error.message, { code: fallbackCode, statusCode: 502 });
   }
 
-  /** Builds the credential-free directory returned to routes and the picker. */
-  private directory(providers: Map<string, ProviderConfig>, defaultProvider: string): CodexModelProviders {
-    return {
-      defaultProvider,
-      hasCustomProviders: providers.size > 1,
-      providers: [...providers].map(([id, config]) => ({ id, name: config.name || id })),
-    };
-  }
-
-  /** Only labels and ids leave this service; opening the picker never starts app-server. */
+  /** Reads the credential-free directory; the runtime also uses it for the global default. */
   async list(): Promise<CodexModelProviders> {
-    const { providers, defaultProvider } = await this.readConfig();
-    return this.directory(providers, defaultProvider);
+    return normalizeDirectory(await this.request('modelProvider/list', {}));
   }
 
   /**
-   * Persists the default service for new Codex threads without reserializing
-   * config.toml. Routes and the native runtime share this service; the runtime
-   * re-reads `defaultProvider` per new thread, so saving never starts or
-   * restarts app-server. Missing config.toml means the built-in OpenAI default.
+   * Saves the default service for new Codex threads and returns the directory
+   * that is now in effect.
+   *
+   * The provider must exist before the write: app-server accepts an unknown id
+   * in `config/value/write` and would leave a config.toml that cannot be read.
+   * A write that a managed layer overrides is reported as a conflict naming the
+   * value actually in effect, because the file was written but did not apply.
    */
   async setDefault(modelProvider: string): Promise<CodexModelProviders> {
-    const raw = await this.readConfigText();
-    const { providers, defaultProvider } = this.parseConfig(raw);
-    if (!providers.has(modelProvider)) throw new AppError('This model provider is no longer configured in Codex.', {
-      code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
-    });
-    // An explicit `model_provider = "openai"` still needs the rewrite to remove
-    // the redundant key; other unchanged defaults need no file write.
-    if (modelProvider !== 'openai' && defaultProvider === modelProvider) return this.directory(providers, defaultProvider);
+    const before = await this.list();
+    if (!before.providers.some((provider) => provider.id === modelProvider)) {
+      throw new AppError('This model provider is no longer configured in Codex.', {
+        code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
+      });
+    }
+    if (!before.canChangeDefault) {
+      throw new AppError('Codex configuration does not allow changing the default model provider.', {
+        code: 'CODEX_MODEL_PROVIDER_DEFAULT_READONLY', statusCode: 409,
+      });
+    }
+    if (before.defaultProvider === modelProvider) return before;
 
-    const { raw: next, changed } = rewriteCodexDefaultModelProvider(raw, modelProvider);
-    if (!changed) return this.directory(providers, defaultProvider);
-    await mkdir(this.home, { recursive: true });
-    await writeFile(path.join(this.home, 'config.toml'), next, 'utf8');
-    return this.directory(providers, modelProvider);
+    const result = await this.request<Record<string, unknown>>('config/value/write', {
+      keyPath: 'model_provider',
+      value: modelProvider,
+      mergeStrategy: 'replace',
+    });
+    if (result?.status === 'okOverridden') {
+      const effective = await this.list();
+      const overriding = readObjectRecord(result.overriddenMetadata);
+      const layer = readOptionalString(readObjectRecord(overriding?.overridingLayer?.name)?.type);
+      const reason = readOptionalString(overriding?.message);
+      throw new AppError(
+        `Codex wrote model_provider = "${modelProvider}" to config.toml, but it is not in effect: `
+        + `the effective default is "${effective.defaultProvider}"`
+        + `${layer ? ` from the ${layer} configuration layer` : ' from a higher-priority configuration layer'}`
+        + `${reason ? ` (${reason})` : ''}.`,
+        { code: 'CODEX_MODEL_PROVIDER_DEFAULT_OVERRIDDEN', statusCode: 409 },
+      );
+    }
+    return this.list();
   }
 
-  /** Reads an OpenAI-compatible /models endpoint using the selected service's own authentication. */
+  /**
+   * Reads one provider's complete model catalog across app-server pages.
+   *
+   * `includeHidden` is requested so hidden rows keep their metadata for a saved
+   * selection, but `models` only names picker-visible rows: hidden models never
+   * surface as ordinary menu entries. app-server caches the underlying catalog,
+   * so this service adds no cache of its own.
+   */
   async models(modelProvider: string): Promise<CodexModelCatalog> {
-    const { providers } = await this.readConfig();
-    const config = providers.get(modelProvider);
-    if (!config) throw new AppError('This model provider is no longer configured in Codex.', {
-      code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
-    });
-    if (!config.base_url) throw new AppError('This model provider has no base_url for its models endpoint.', {
-      code: 'CODEX_MODEL_CATALOG_UNAVAILABLE', statusCode: 400,
-    });
-    let url: URL;
-    try { url = new URL(config.base_url); }
-    catch { throw new AppError('The model provider has an invalid base_url.', { code: 'CODEX_CONFIG_INVALID', statusCode: 400 }); }
-    let nativeOpenAICatalog = false;
-    if (!['http:', 'https:'].includes(url.protocol)) throw new AppError('The model provider needs an HTTP or HTTPS base_url.', {
-      code: 'CODEX_CONFIG_INVALID', statusCode: 400,
-    });
-    url.pathname = `${url.pathname.replace(/\/+$/, '')}/models`;
-    for (const [key, value] of Object.entries(config.query_params ?? {})) url.searchParams.set(key, value);
+    const items: CodexModelCatalogItem[] = [];
+    let cursor: string | null = null;
+    for (;;) {
+      const params: Record<string, unknown> = { modelProvider, includeHidden: true };
+      if (cursor) params.cursor = cursor;
+      const page = await this.request<Record<string, unknown>>('model/list', params);
+      if (!page || !Array.isArray(page.data)) throw invalidCatalog('Codex returned an unreadable model catalog.');
+      items.push(...page.data.map(normalizeModelItem));
+      cursor = readOptionalString(page.nextCursor) ?? null;
+      if (!cursor) break;
+    }
+    const visible = new Set<string>();
+    for (const item of items) if (!item.hidden) visible.add(item.value);
+    return { modelProvider, models: [...visible], items };
+  }
 
-    const headers = new Headers();
-    const setHeader = (name: string, value: string) => {
-      try { headers.set(name, value); }
-      catch {
-        // Headers errors can quote their value, which may be a credential.
-        throw new AppError('The model provider has an invalid HTTP header.', { code: 'CODEX_CONFIG_INVALID', statusCode: 400 });
-      }
-    };
-    // TOML tables carry parser symbols; only configured string keys are HTTP headers.
-    for (const [key, value] of Object.entries(config.http_headers ?? {})) setHeader(key, value);
-    for (const [key, variable] of Object.entries(config.env_http_headers ?? {})) {
-      const value = this.environment[variable];
-      if (!value) throw new AppError(`The model provider requires environment variable ${variable}.`, {
-        code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED', statusCode: 400,
-      });
-      setHeader(key, value);
-    }
-    let token = config.experimental_bearer_token;
-    if (config.auth) {
-      try {
-        const result = await promisify(execFile)(config.auth.command, config.auth.args ?? [], {
-          env: this.environment, cwd: config.auth.cwd, timeout: config.auth.timeout_ms ?? 5000, maxBuffer: 64 * 1024,
-        });
-        token = result.stdout.trim();
-      } catch {
-        throw new AppError('The model provider authentication command failed.', {
-          code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED', statusCode: 400,
-        });
-      }
-      if (!token) throw new AppError('The model provider authentication command returned no token.', {
-        code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED', statusCode: 400,
-      });
-    } else if (config.env_key && !config.requires_openai_auth) {
-      token = this.environment[config.env_key];
-      if (!token) throw new AppError(`The model provider requires environment variable ${config.env_key}.`, {
-        code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED', statusCode: 400,
-      });
-    } else if (config.requires_openai_auth) {
-      // As in Codex, requires_openai_auth takes precedence over env_key.
-      // The saved login mode wins over unrelated API keys in the environment.
-      let raw = '{}';
-      try { raw = await readFile(path.join(this.home, 'auth.json'), 'utf8'); }
-      catch (error) { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
-      let auth: { auth_mode?: string; OPENAI_API_KEY?: string; tokens?: { access_token?: string; account_id?: string } };
-      try { auth = JSON.parse(raw) as typeof auth; }
-      catch { throw new AppError('Could not read Codex authentication.', { code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED', statusCode: 400 }); }
-      if (!['apikey', 'api_key'].includes(auth.auth_mode ?? '') && auth.tokens?.access_token) {
-        token = auth.tokens.access_token;
-        if (auth.tokens.account_id) setHeader('ChatGPT-Account-Id', auth.tokens.account_id);
-        // The built-in ChatGPT service exposes Codex's native catalog. A
-        // configured proxy explicitly opting into OpenAI auth keeps /models.
-        if (modelProvider === 'openai' && url.origin === 'https://api.openai.com' && url.pathname === '/v1/models') {
-          url = new URL('https://chatgpt.com/backend-api/codex/models');
-          const version = (createRequire(import.meta.url)('@openai/codex/package.json') as { version: string }).version;
-          url.searchParams.set('client_version', version);
-          nativeOpenAICatalog = true;
-        }
-      } else token = auth.OPENAI_API_KEY || this.environment.OPENAI_API_KEY;
-      if (!token) throw new AppError('No file-backed Codex login or OpenAI API key is available to read this service’s models.', {
-        code: 'CODEX_MODEL_PROVIDER_AUTH_REQUIRED', statusCode: 400,
+  /** Creates a custom gateway. Only a caller-chosen built-in service has a patch id. */
+  async create(settings: CodexModelProviderPatch): Promise<CodexModelProviderSummary> {
+    if (settings.type !== 'customGateway' || settings.providerId) {
+      throw new AppError('New Codex model providers must be custom gateways without a provider id.', {
+        code: 'CODEX_MODEL_PROVIDER_CREATE_UNSUPPORTED', statusCode: 400,
       });
     }
-    if (token && !headers.has('Authorization')) setHeader('Authorization', `Bearer ${token}`);
-    const signature = createHash('sha256').update(JSON.stringify([url.toString(), [...headers]])).digest('hex');
-    const cached = this.cache.get(modelProvider);
-    if (cached?.signature === signature && cached.catalog.expiresAt > this.now()) return cached.catalog;
-    let response: Response;
-    try { response = await this.fetchModels(url, { headers, signal: AbortSignal.timeout(10_000), redirect: 'error' }); }
-    catch { throw new AppError('Could not reach this model provider’s models endpoint.', { code: 'CODEX_MODEL_CATALOG_FAILED', statusCode: 502 }); }
-    if (!response.ok) throw new AppError(`The model provider’s models endpoint returned HTTP ${response.status}.`, {
-      code: 'CODEX_MODEL_CATALOG_FAILED', statusCode: 502,
+    const result = await this.request<Record<string, unknown>>('modelProvider/config/write', {
+      settings: { ...settings, providerId: null },
     });
-    let body: unknown;
-    try { body = await response.json(); }
-    catch { throw new AppError('The models endpoint did not return JSON.', { code: 'CODEX_MODEL_CATALOG_INVALID', statusCode: 502 }); }
-    const data = readObjectRecord(body)?.[nativeOpenAICatalog ? 'models' : 'data'];
-    const idField = nativeOpenAICatalog ? 'slug' : 'id';
-    if (!Array.isArray(data) || data.some((entry) => !readOptionalString(readObjectRecord(entry)?.[idField]))) {
-      throw new AppError('The models endpoint must return an OpenAI-compatible data array with model ids.', {
-        code: 'CODEX_MODEL_CATALOG_INVALID', statusCode: 502,
+    return normalizeProviderSummary(readObjectRecord(result)?.provider);
+  }
+
+  /**
+   * Patches one provider. The route id is the only identity this service accepts,
+   * so a payload that names a different provider is rejected before any write.
+   */
+  async update(modelProvider: string, settings: CodexModelProviderPatch): Promise<CodexModelProviderSummary> {
+    if (settings.providerId != null && settings.providerId !== modelProvider) {
+      throw new AppError('The provider id in the body must match the id in the path.', {
+        code: 'CODEX_MODEL_PROVIDER_ID_MISMATCH', statusCode: 400,
       });
     }
-    const models = [...new Set(data.filter((entry) => !nativeOpenAICatalog || !entry.visibility || entry.visibility === 'list')
-      .map((entry: Record<string, string>) => entry[idField].trim()))];
-    const catalog = { modelProvider, models, expiresAt: this.now() + 60_000 };
-    this.cache.set(modelProvider, { signature, catalog });
-    return catalog;
+    const existing = (await this.list()).providers.find((provider) => provider.id === modelProvider);
+    if (!existing) {
+      throw new AppError('This model provider is no longer configured in Codex.', {
+        code: 'CODEX_MODEL_PROVIDER_NOT_FOUND', statusCode: 404,
+      });
+    }
+    if (!existing.canEdit) {
+      throw new AppError('The active Codex configuration does not allow editing this model provider.', {
+        code: 'CODEX_MODEL_PROVIDER_READONLY', statusCode: 409,
+      });
+    }
+    const result = await this.request<Record<string, unknown>>('modelProvider/config/write', {
+      settings: { ...settings, providerId: modelProvider },
+    });
+    return normalizeProviderSummary(readObjectRecord(result)?.provider);
   }
 }
 
-/** Codex routes and runtime controls share one cache without sharing session selections. */
+/** Providers routes and the native runtime share this RPC-backed service. */
 export const codexModelProviderService = new CodexModelProviderService();

@@ -1776,6 +1776,23 @@ async function getCodexSessionMessages(sessionId: string): Promise<CodexHistoryR
       const callId = readNonEmptyString(payload.call_id) ?? '';
       const rawOutput = extractCodexToolOutput(payload.output);
 
+      // The approved-plan handoff records its converted prompt as an
+      // `agent`-namespaced `proposed_plan` output that carries no call id (it is
+      // native context, not a tool call's result). Rendering it as the same plan
+      // card as an assistant `<proposed_plan>` reply keeps the full markdown, and
+      // the output's own id is what the row and its empty paired result share.
+      if (!callId && payload.namespace === 'agent' && payload.name === 'proposed_plan' && itemId) {
+        messages.push({
+          type: 'tool_use',
+          timestamp,
+          toolName: 'ExitPlanMode',
+          toolInput: JSON.stringify({ plan: rawOutput }),
+          toolCallId: itemId,
+        });
+        messages.push({ type: 'tool_result', timestamp, toolCallId: itemId, output: '' });
+        continue;
+      }
+
       // A wait / stdin poll delivers the tail of an earlier command's output.
       const continuedCallId = waitCallToExecCall.get(callId);
       if (continuedCallId) {

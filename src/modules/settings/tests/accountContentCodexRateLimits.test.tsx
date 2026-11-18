@@ -42,7 +42,14 @@ vi.mock('@/shared/api', async (importOriginal) => ({
       // so the only alert under test is the quota refresh failure.
       codexModelProviders: () => Promise.resolve(new Response(JSON.stringify({
         success: true,
-        data: { defaultProvider: 'openai', hasCustomProviders: false, providers: [{ id: 'openai', name: 'OpenAI' }] },
+        data: {
+          defaultProvider: 'openai',
+          hasCustomProviders: false,
+          canChangeDefault: true,
+          providers: [{
+            id: 'openai', name: 'OpenAI', baseUrl: 'https://api.openai.com/v1', canEdit: false, settings: { type: 'openai' },
+          }],
+        },
       }), { status: 200 })),
     },
   },
