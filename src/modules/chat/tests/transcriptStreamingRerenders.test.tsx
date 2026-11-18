@@ -6,7 +6,7 @@ import { test, vi } from 'vitest';
 
 import ChatMessagesPane from '@/modules/chat/transcript/ChatMessagesPane';
 import { UiPreferencesProvider } from '@/shared/context/UiPreferencesContext';
-import type { ChatMessage } from '@/shared/types';
+import type { ChatMessage, LLMProvider } from '@/shared/types';
 
 /**
  * A provider run flushes roughly ten times a second, and every flush re-renders
@@ -72,7 +72,7 @@ const stable = {
   onGrantToolPermission: () => ({ success: true }),
 };
 
-function paneProps(chatMessages: ChatMessage[]) {
+function paneProps(chatMessages: ChatMessage[], provider: LLMProvider = 'claude') {
   return {
     ...stable,
     onWheel: noop,
@@ -80,7 +80,7 @@ function paneProps(chatMessages: ChatMessage[]) {
     isLoadingSessionMessages: false,
     chatMessages,
     currentSessionId: 'session-1',
-    provider: 'claude',
+    provider,
     setProvider: noop,
     setProviderModel: noop,
     providerModelsLoading: false,
@@ -108,9 +108,9 @@ function paneProps(chatMessages: ChatMessage[]) {
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const pane = (chatMessages: ChatMessage[]) => (
+const pane = (chatMessages: ChatMessage[], provider: LLMProvider = 'claude') => (
   <UiPreferencesProvider>
-    <ChatMessagesPane {...(paneProps(chatMessages) as any)} />
+    <ChatMessagesPane {...(paneProps(chatMessages, provider) as any)} />
   </UiPreferencesProvider>
 );
 /* eslint-enable @typescript-eslint/no-explicit-any */
@@ -213,4 +213,154 @@ test('Worker MCP calls are hidden while failures, other MCP tools and commands s
   assert.ok(text.includes('VISIBLE_EXEC'), 'a normal exec tool stays visible');
   assert.ok(text.includes('worker_get (filesystem)'), 'another MCP server\'s same-named tool stays visible');
   assert.ok(text.includes('/VISIBLE_OTHER_MCP'), 'its row keeps the input summary of an unfiltered MCP call');
+});
+
+/**
+ * Codex reaches the Worker MCP server through its `exec` script tool, so the
+ * pane has to recognize a script whose only effects are those calls and still
+ * keep every row it cannot confirm.
+ */
+const execRow = (
+  script: string,
+  result: ChatMessage['toolResult'] = null,
+  extra: Partial<ChatMessage> = {},
+): ChatMessage => ({
+  type: 'assistant',
+  content: '',
+  timestamp: '2026-01-01T00:21:00.000Z',
+  isToolUse: true,
+  toolName: 'exec',
+  toolInput: script,
+  toolResult: result,
+  ...extra,
+});
+
+const completedScript = (output = '') =>
+  `Script completed\nWall time: 0.2 seconds\nOutput:\n${output}`;
+
+const workerCall = (tool: string, args: Record<string, string>) =>
+  `tools.mcp__cloudcli_workers__${tool}(${JSON.stringify(args)})`;
+
+/** An assistant row between tool calls keeps same-named exec rows out of a group. */
+const noteRow = (content: string): ChatMessage => ({
+  type: 'assistant',
+  content,
+  timestamp: '2026-01-01T00:21:00.000Z',
+});
+
+/** A real Worker run record, as the Worker MCP tools return it inside their text content. */
+const runRecord = (workerId: string, status = 'completed'): string =>
+  JSON.stringify({ workerId, runId: `${workerId}-run`, status, cwd: '/repo' });
+
+test('Codex exec rows that only make successful Worker calls are hidden', { timeout: 30_000 }, () => {
+  const rows: ChatMessage[] = [
+    noteRow('Delegated the work.'),
+    execRow(
+      `const status = await ${workerCall('worker_get', { workerId: 'HIDDEN_EXEC_SINGLE' })};\nconsole.log(status);`,
+      { content: completedScript(runRecord('HIDDEN_EXEC_SINGLE')) },
+    ),
+    noteRow('Started a batch.'),
+    execRow(
+      `const results = await Promise.all([
+  ${workerCall('worker_get', { workerId: 'HIDDEN_EXEC_BATCH_1' })},
+  ${workerCall('worker_get', { workerId: 'HIDDEN_EXEC_BATCH_2' })},
+]);
+text(JSON.stringify(results));`,
+      {
+        content: completedScript(`[${runRecord('HIDDEN_EXEC_BATCH_1')},${runRecord('HIDDEN_EXEC_BATCH_2', 'running')}]`),
+      },
+    ),
+    noteRow('Checked a Worker payload.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'HIDDEN_EXEC_TEXT_JSON' })};`,
+      { content: completedScript(`[{"type":"text","text":${JSON.stringify(runRecord('HIDDEN_EXEC_TEXT_JSON'))}}]`) },
+    ),
+    noteRow('Then read a file.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_MIXED' })};\nawait tools.mcp__filesystem__read_file({ path: '/tmp/x' });`,
+      { content: completedScript(runRecord('VISIBLE_EXEC_MIXED')) },
+    ),
+    noteRow('Retried.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_FAILED' })};`,
+      { content: 'Script failed in 0.2s\nWall time: 0.2 seconds\nOutput:\n' },
+    ),
+    noteRow('Checked again.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_ISERROR' })};`,
+      { content: completedScript(), isError: true },
+    ),
+    noteRow('Polled.'),
+    execRow(`await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_PENDING' })};`),
+    noteRow('Printed.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_PLAINTEXT' })};`,
+      { content: completedScript('Worker w1 is running') },
+    ),
+    noteRow('Read a Worker message.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_TEXT_CONTENT' })};`,
+      { content: completedScript('[{"type":"text","text":"Error: worker exited before starting"}]') },
+    ),
+    noteRow('Printed a status object.'),
+    execRow(
+      `await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_MESSAGE_ONLY' })};\ntext(JSON.stringify({ message: 'worker not found' }));`,
+      { content: completedScript('{"message":"worker not found"}') },
+    ),
+    noteRow('Printed mixed output.'),
+    execRow(
+      `const r = await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_MIXED_OUTPUT' })};\ntext(JSON.stringify(r));\nconsole.log('worker done');`,
+      { content: completedScript(`${runRecord('VISIBLE_EXEC_MIXED_OUTPUT')}\nworker done`) },
+    ),
+    noteRow('Defined an unused helper.'),
+    execRow(
+      `function unused() { return ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_DEFERRED' })}; }\ntext(JSON.stringify({ saved: 1 }));`,
+      { content: completedScript('{"saved":1}') },
+    ),
+    noteRow('Used a shell.'),
+    execRow(`await tools.shell_command({ command: 'echo VISIBLE_EXEC_OTHER' });`, {
+      content: completedScript('{"status":"ok"}'),
+    }),
+    // A direct Worker card keeps its old behaviour in the same transcript.
+    callRow(workerTool('worker_get'), { id: 'HIDDEN_WORKER_DIRECT' }, {
+      toolStatus: 'completed',
+      toolResult: { content: 'worker snapshot' },
+    }),
+    callRow(workerTool('worker_wait'), { id: 'VISIBLE_WORKER_DIRECT_FAILED' }, {
+      toolStatus: 'failed',
+    }),
+  ];
+
+  const view = render(pane(rows, 'codex'));
+  const text = view.container.textContent || '';
+
+  assert.ok(text.includes('Delegated the work.'), 'the surrounding transcript keeps its body text');
+  assert.ok(!text.includes('HIDDEN_EXEC_SINGLE'), `a single Worker-only script must not render; got ${JSON.stringify(text)}`);
+  assert.ok(!text.includes('HIDDEN_EXEC_BATCH_1'), 'a Worker-only Promise.all batch must not render');
+  assert.ok(!text.includes('HIDDEN_EXEC_TEXT_JSON'), 'structured MCP text content stays hidden too');
+  assert.ok(!text.includes('HIDDEN_WORKER_DIRECT'), 'a successful direct Worker call stays filtered too');
+
+  assert.ok(text.includes('VISIBLE_EXEC_MIXED'), 'a script mixing another MCP server stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_FAILED'), 'a failed script envelope stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_ISERROR'), 'a script whose result errored stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_PENDING'), 'a script still awaiting its result stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_PLAINTEXT'), 'unrecognized plain-text output stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_TEXT_CONTENT'), 'a plain-text error inside MCP text content stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_MESSAGE_ONLY'), 'an unrelated object printed after the call stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_MIXED_OUTPUT'), 'a Worker record printed with other text stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_DEFERRED'), 'a Worker call in an unused function stays visible');
+  assert.ok(text.includes('VISIBLE_EXEC_OTHER'), 'a non-Worker exec script stays visible');
+  assert.ok(text.includes('VISIBLE_WORKER_DIRECT_FAILED'), 'a failed direct Worker call stays visible');
+});
+
+test('exec filtering applies only to Codex transcripts', { timeout: 30_000 }, () => {
+  const rows = [
+    noteRow('Delegated the work on another provider.'),
+    execRow(`await ${workerCall('worker_get', { workerId: 'VISIBLE_EXEC_CLAUDE' })};`, {
+      content: completedScript(runRecord('VISIBLE_EXEC_CLAUDE')),
+    }),
+  ];
+
+  const text = render(pane(rows, 'claude')).container.textContent || '';
+  assert.ok(text.includes('VISIBLE_EXEC_CLAUDE'), 'another provider\'s exec row keeps its card');
 });

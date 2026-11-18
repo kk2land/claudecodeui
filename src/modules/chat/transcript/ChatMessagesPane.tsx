@@ -11,6 +11,7 @@ import type { BackgroundTaskSummary,
   ProviderModelsDefinition } from '@/shared/types';
 import { getIntrinsicMessageKey } from '@/modules/chat/utils/messageKeys';
 import { groupConsecutiveTools, isToolGroupItem } from '@/modules/chat/utils/toolGrouping';
+import { shouldHideWorkerExec } from '@/modules/chat/utils/workerExecVisibility';
 import { useLazyRowObserver } from '@/modules/chat/hooks/useLazyRowObserver';
 import LazyMessageRow from '@/modules/chat/transcript/LazyMessageRow';
 import MessageComponent from '@/modules/chat/transcript/MessageComponent';
@@ -161,16 +162,27 @@ function ChatMessagesPane({
   const lazyRows = useLazyRowObserver(scrollContainerRef);
   const groupedVisibleMessages = useMemo(
     // Worker calls are protocol bookkeeping, so only a failure keeps its card.
+    // Codex reaches the same Worker tools through its `exec` script tool, so a
+    // script whose only effects are those calls is filtered by the same rule.
     // Dropping them before grouping also keeps a filtered run from collapsing
     // into a group row of its own.
     () => groupConsecutiveTools(
-      visibleMessages.filter((message) => !(message.isToolUse
-        && (message.toolName || '').startsWith(WORKER_MCP_TOOL_PREFIX)
-        && message.toolResult?.isError !== true
-        && message.toolStatus !== 'failed')),
+      visibleMessages.filter((message) => {
+        if (!message.isToolUse) {
+          return true;
+        }
+        const failureKeepsCard = message.toolResult?.isError === true || message.toolStatus === 'failed';
+        if ((message.toolName || '').startsWith(WORKER_MCP_TOOL_PREFIX)) {
+          return failureKeepsCard;
+        }
+        if (provider === 'codex' && shouldHideWorkerExec(message)) {
+          return false;
+        }
+        return true;
+      }),
       Boolean(showThinking),
     ),
-    [visibleMessages, showThinking],
+    [provider, visibleMessages, showThinking],
   );
 
   // Stable, deterministic keys for the messages rendered this pass.
