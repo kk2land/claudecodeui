@@ -144,3 +144,73 @@ test('a stream tick re-renders the growing row, not the collapsed tool groups ab
     `only the streaming row may re-render per flush; got ${JSON.stringify(perFlush)}`,
   );
 });
+
+/** A Worker run reports progress through the `cloudcli_workers` MCP server. */
+const workerTool = (tool: string) => `mcp__cloudcli_workers__${tool}`;
+
+const callRow = (toolName: string, input: unknown, extra: Partial<ChatMessage> = {}): ChatMessage => ({
+  type: 'assistant',
+  content: '',
+  timestamp: '2026-01-01T00:20:00.000Z',
+  isToolUse: true,
+  toolName,
+  toolInput: JSON.stringify(input),
+  ...extra,
+});
+
+test('Worker MCP calls are hidden while failures, other MCP tools and commands stay', { timeout: 30_000 }, () => {
+  const rows: ChatMessage[] = [
+    {
+      type: 'assistant',
+      content: 'Delegated the work to a Worker.',
+      timestamp: '2026-01-01T00:19:59.000Z',
+    },
+    // Three identical in-flight calls would collapse into one tool group if the
+    // filter ran after grouping instead of before it.
+    callRow(workerTool('worker_context'), { view: 'compact' }, { toolStatus: 'in_progress' }),
+    callRow(workerTool('worker_context'), { view: 'compact' }, { toolStatus: 'in_progress' }),
+    callRow(workerTool('worker_context'), { view: 'compact' }, { toolStatus: 'in_progress' }),
+    callRow(workerTool('worker_get'), { id: 'worker-1' }, {
+      toolStatus: 'completed',
+      toolResult: { content: 'worker snapshot' },
+    }),
+    callRow(workerTool('worker_start'), { prompt: 'VISIBLE_WORKER_ISERROR' }, {
+      toolStatus: 'failed',
+      toolResult: { content: 'worker start failed', isError: true },
+    }),
+    // A status-only failure keeps its card too, before any result is attached.
+    callRow(workerTool('worker_wait'), { id: 'VISIBLE_WORKER_STATUS_FAILED' }, { toolStatus: 'failed' }),
+    callRow('sleep', { text: 'VISIBLE_SLEEP' }),
+    callRow('exec', { command: 'echo VISIBLE_EXEC' }),
+    // Another MCP server exposing a tool of the same name must stay: only the
+    // `cloudcli_workers` prefix is filtered.
+    callRow('mcp__filesystem__worker_get', { path: '/VISIBLE_OTHER_MCP' }, {
+      toolResult: { content: 'files' },
+    }),
+  ];
+
+  const view = render(pane(rows));
+  const text = view.container.textContent || '';
+
+  assert.ok(text.includes('Delegated the work to a Worker.'), 'the surrounding transcript keeps its body text');
+  assert.ok(!text.includes('worker_context'), `Worker context calls must not render; got ${JSON.stringify(text)}`);
+  assert.ok(!text.includes('worker_get (cloudcli_workers)'), 'the successful Worker call must not render');
+  assert.equal(
+    (text.match(/\(cloudcli_workers\)/g) ?? []).length,
+    2,
+    'only the two failed Worker calls keep their MCP label',
+  );
+  assert.equal(
+    view.container.querySelectorAll('.chat-message.tool > button[aria-expanded]').length,
+    0,
+    'hidden Worker calls must not leave a collapsed tool group behind',
+  );
+
+  assert.ok(text.includes('VISIBLE_WORKER_ISERROR'), 'a Worker call whose result is an error stays visible');
+  assert.ok(text.includes('VISIBLE_WORKER_STATUS_FAILED'), 'a Worker call with a failed status stays visible');
+  assert.ok(text.includes('sleep'), 'a normal sleep tool stays visible');
+  assert.ok(text.includes('VISIBLE_SLEEP'), 'the sleep tool\'s own row keeps its input summary');
+  assert.ok(text.includes('VISIBLE_EXEC'), 'a normal exec tool stays visible');
+  assert.ok(text.includes('worker_get (filesystem)'), 'another MCP server\'s same-named tool stays visible');
+  assert.ok(text.includes('/VISIBLE_OTHER_MCP'), 'its row keeps the input summary of an unfiltered MCP call');
+});

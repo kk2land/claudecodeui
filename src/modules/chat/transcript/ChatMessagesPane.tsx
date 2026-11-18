@@ -27,6 +27,9 @@ import { BackgroundTasksStrip } from '@/modules/chat/transcript/BackgroundTasksS
  */
 const INITIAL_MOUNTED_TAIL_ROWS = 30;
 
+/** The MCP server name the Worker host registers for both Codex and DSH. */
+const WORKER_MCP_TOOL_PREFIX = 'mcp__cloudcli_workers__';
+
 type ChatMessagesPaneProps = {
   scrollContainerRef: RefObject<HTMLDivElement>;
   onWheel: () => void;
@@ -157,7 +160,16 @@ function ChatMessagesPane({
   const { t } = useTranslation('chat');
   const lazyRows = useLazyRowObserver(scrollContainerRef);
   const groupedVisibleMessages = useMemo(
-    () => groupConsecutiveTools(visibleMessages, Boolean(showThinking)),
+    // Worker calls are protocol bookkeeping, so only a failure keeps its card.
+    // Dropping them before grouping also keeps a filtered run from collapsing
+    // into a group row of its own.
+    () => groupConsecutiveTools(
+      visibleMessages.filter((message) => !(message.isToolUse
+        && (message.toolName || '').startsWith(WORKER_MCP_TOOL_PREFIX)
+        && message.toolResult?.isError !== true
+        && message.toolStatus !== 'failed')),
+      Boolean(showThinking),
+    ),
     [visibleMessages, showThinking],
   );
 
