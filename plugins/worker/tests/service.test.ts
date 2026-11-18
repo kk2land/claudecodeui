@@ -28,10 +28,10 @@ test("starts, records, logs, and deduplicates one DSH run", async (t) => {
   const worker = await waitStatus(service, started.worker.id, ["completed"]);
   assert.equal(worker.latestRun?.status, "completed");
   assert.equal(worker.latestRun?.nativeSessionId, "session-fixture-1");
-  assert.equal(worker.latestRun?.timeoutSeconds, 300);
+  assert.equal(worker.latestRun?.timeoutSeconds, 600);
   assert.equal(
     worker.latestRun?.progress.hardTimeoutAt,
-    new Date(Date.parse(worker.latestRun!.startedAt!) + 300_000).toISOString(),
+    new Date(Date.parse(worker.latestRun!.startedAt!) + 600_000).toISOString(),
   );
   assert.ok(worker.latestRun?.nativeSessionFile?.endsWith("session.v4.jsonl.zstd"));
   assert.match(worker.latestRun?.finalText ?? "", /fixture answer/);
@@ -357,7 +357,18 @@ test("an early step reminder keeps timed reviews active while a tool is silent",
   const started = await service.start("owner-1", startInput());
   await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
     (log) => (log.match(/"phase":"step_end"/g) ?? []).length === 20);
-  t.mock.timers.tick(1000);
+  // The guardian appends the event log before the parent consumes the same lines over IPC, and
+  // step counting for reminders happens in the parent. Fire the one-second review interval until
+  // a reminder exists instead of assuming the parent already consumed all 20 step_end lines; the
+  // injected clock stays fixed, so extra interval fires cannot make a timed review due early.
+  await waitFor(
+    () => {
+      t.mock.timers.tick(1000);
+      return service.notifications().length;
+    },
+    (count) => count >= 1,
+  );
+  assert.equal(service.notifications().length, 1, "a due step budget produces exactly one reminder");
   const first = service.notifications()[0]!;
   service.ack("owner-1", [first.id]);
 

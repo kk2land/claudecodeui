@@ -195,7 +195,7 @@ for (const legacyTimeout of [undefined, null, 90]) {
     const settings = store.settings();
     assert.deepEqual(
       settings.configs.map((config) => config.hardTimeoutSeconds),
-      [legacyTimeout ?? 300, 600, null],
+      [legacyTimeout ?? 600, 600, null],
     );
     const persisted = rawSettings(data);
     assert.equal("hardTimeoutSeconds" in persisted, false);
@@ -344,7 +344,7 @@ test("a store without a settings row persists defaults and backfills legacy work
     enabled: true,
     roles: [],
     concurrency: 3,
-    hardTimeoutSeconds: 300,
+    hardTimeoutSeconds: 600,
     model: null,
     effort: null,
   }]);

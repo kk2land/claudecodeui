@@ -769,7 +769,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
         enabled: true,
         roles: [],
         concurrency: 3,
-        hardTimeoutSeconds: 300,
+        hardTimeoutSeconds: 600,
         model: null,
         effort: null,
       },
@@ -1534,7 +1534,14 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
       () => Boolean(findButton(mounted.container, "原始事件")),
       "日志标签",
     );
-    // The conversation tab owns the run's first drain; raw pages are an explicit request.
+    // The conversation tab owns the run's first drain: its first page plus the page that
+    // reaches terminal EOF here. Wait for that drain to finish so its reads cannot be
+    // counted as raw-tab requests; the snapshot itself races the mounted effects.
+    await waitFor(
+      () =>
+        mounted.calls.filter((call) => call.path.includes("/logs?")).length === 2,
+      "对话首屏日志",
+    );
     findButton(mounted.container, "原始事件")!.click();
     const before = mounted.calls.length;
     await waitFor(
@@ -1632,6 +1639,29 @@ async function openDetail(mounted: Mounted, label = "查看 任务一") {
     "任务详情",
   );
 }
+
+test("DOM: task and run info cards start collapsed and stay independent of progress and logs", async () => {
+  const mounted = await mountPlugin();
+  try {
+    await openDetail(mounted);
+    const info = mounted.container.querySelector(
+      ".worker-detail-info",
+    ) as HTMLDetailsElement | null;
+    assert.ok(info);
+    const summary = info.querySelector("summary")!;
+    assert.equal(info.open, false);
+    assert.ok(textOf(summary).includes("任务与本次运行"));
+    assert.ok(textOf(mounted.container).includes("进度与预算"));
+    assert.ok(textOf(mounted.container).includes("运行记录"));
+    summary.click();
+    await waitFor(() => info.open, "展开任务信息");
+    assert.ok(textOf(info).includes("Worker 配置"));
+    summary.click();
+    await waitFor(() => !info.open, "收起任务信息");
+  } finally {
+    mounted.unmount();
+  }
+});
 
 test("DOM: Codex usage shows cache fields, a real zero and this-run scope", async () => {
   const codexUsage = run({
@@ -1801,7 +1831,7 @@ test("DOM: each config edits its timeout, validates it, and copies it on duplica
     await typeInto(second, "");
     (byLabel(mounted.container, "新增 Codex 配置") as HTMLButtonElement).click();
     await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 硬超时（秒）")), "新增默认超时");
-    assert.equal((byLabel(mounted.container, "配置 4 硬超时（秒）") as HTMLInputElement).value, "300");
+    assert.equal((byLabel(mounted.container, "配置 4 硬超时（秒）") as HTMLInputElement).value, "600");
     (byLabel(mounted.container, "配置 1 复制") as HTMLButtonElement).click();
     await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 硬超时（秒）")), "复制超时配置");
     assert.equal((byLabel(mounted.container, "配置 5 硬超时（秒）") as HTMLInputElement).value, "600");
@@ -1809,7 +1839,7 @@ test("DOM: each config edits its timeout, validates it, and copies it on duplica
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存各配置超时");
     const body = callsTo(mounted, "/settings")[0]!.body as { configs: Array<{ hardTimeoutSeconds: number | null }> };
-    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 300, 300, 600]);
+    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 300, 600, 600]);
   } finally {
     mounted.unmount();
   }

@@ -153,7 +153,7 @@ export class WorkerStore {
         record.configs = record.configs.map((config) => ({
           ...config,
           hardTimeoutSeconds: config.hardTimeoutSeconds === undefined
-            ? hardTimeoutSeconds ?? 300
+            ? hardTimeoutSeconds ?? 600
             : config.hardTimeoutSeconds,
         }));
         this.saveSettings(record);

@@ -159,13 +159,13 @@ test("config timeouts apply independently to starts and resumes with per-run ove
   assert.equal(resumeOverride.run.timeoutSeconds, 90);
 });
 
-test("config timeout defaults to 300 and rejects invalid values atomically", (t) => {
+test("config timeout defaults to 600 and rejects invalid values atomically", (t) => {
   const root = temporaryRoot("worker-configs-timeout-validation-");
   const { service } = createService(t, root);
   const config = dsh();
   delete (config as Partial<WorkerConfig>).hardTimeoutSeconds;
   const saved = service.updateSettings({ configs: [config], defaultConfigId: config.id });
-  assert.equal(saved.configs[0]!.hardTimeoutSeconds, 300);
+  assert.equal(saved.configs[0]!.hardTimeoutSeconds, 600);
   for (const hardTimeoutSeconds of [0, -1, 1.5, "300", Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(
       () => service.updateSettings({

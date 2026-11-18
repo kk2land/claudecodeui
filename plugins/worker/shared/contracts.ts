@@ -453,7 +453,7 @@ export type WorkerConfig = {
   enabled: boolean;
   roles: WorkerTaskRole[];
   concurrency: number;
-  /** Default hard timeout for each run, initially 300 seconds; null disables it. */
+  /** Default hard timeout for each run, initially 600 seconds; null disables it. */
   hardTimeoutSeconds: number | null;
   model: string | null;
   effort: string | null;
@@ -512,7 +512,7 @@ export type WorkerCodexSettings = {
  *
  * Concurrency applies per `(parentSessionId, projectId, configId)` key. The first soft reminder
  * defaults to 600 seconds / 20 steps, followed by timed reviews every `softReminderSeconds`.
- * Each config defaults to a 300-second hard timeout; explicit per-run timeouts override it.
+ * Each config defaults to a 600-second hard timeout; explicit per-run timeouts override it.
  *
  * A config's `enabled` gates both newly accepted starts and newly accepted resumes; a run that
  * was already accepted, including queued work, is unchanged. `roles` only routes the config of a
@@ -553,7 +553,7 @@ export type WorkerSettings = {
  * Canonical `PUT /settings` input. `configs` is replaced as a whole and validated atomically
  * before anything is persisted: ids are unique, `defaultConfigId` references an enabled config,
  * and an existing config keeps its `type` while referenced. Reminder values stay server-owned.
- * An omitted config timeout defaults to 300 seconds; null disables it.
+ * An omitted config timeout defaults to 600 seconds; null disables it.
  * An omitted `retentionDays` keeps the stored value.
  */
 export type WorkerSettingsUpdate = {

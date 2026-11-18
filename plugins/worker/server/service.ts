@@ -485,7 +485,7 @@ export class WorkerService {
       roles: [...(entry.roles as WorkerConfig["roles"])],
       concurrency: entry.concurrency as number,
       hardTimeoutSeconds: entry.hardTimeoutSeconds === undefined
-        ? 300
+        ? 600
         : entry.hardTimeoutSeconds as number | null,
       model,
       effort,

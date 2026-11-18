@@ -7,7 +7,7 @@ import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerTaskRole } from "../shared/task-roles.js";
 
 const timeoutSeconds = z.number().int().positive().nullable().optional().describe(
-  "省略时使用所选 Worker 配置的硬超时（默认 300 秒），新建和续接均适用；显式秒数覆盖本轮，null 关闭本轮硬超时",
+  "省略时使用所选 Worker 配置的硬超时（默认 600 秒），新建和续接均适用；显式秒数覆盖本轮，null 关闭本轮硬超时",
 );
 const taskRoleValues = WORKER_TASK_ROLES.map((role) => role.value) as [
   WorkerTaskRole,

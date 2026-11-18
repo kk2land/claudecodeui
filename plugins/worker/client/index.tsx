@@ -4,6 +4,7 @@ import {
   AlertTriangle,
   ArrowLeft,
   Bell,
+  ChevronRight,
   CircleCheck,
   Clock3,
   FileText,
@@ -870,74 +871,87 @@ function DetailView({
           ) : null}
         </div>
       </header>
-      <div className="worker-detail-grid">
-        <section>
-          <h3>任务</h3>
-          <dl>
-            <dt>执行引擎</dt>
-            <dd>{TYPE_LABELS[worker.type]}</dd>
-            <dt>Worker 配置</dt>
-            <dd>{worker.configName || "—"}</dd>
-            <dt>任务角色</dt>
-            <dd>
-              {worker.taskRole
-                ? TASK_ROLE_LABELS[worker.taskRole]
-                : "未指定"}
-            </dd>
-            <dt>模型 / 推理强度</dt>
-            <dd>
-              {run?.model ?? "默认模型"}
-              {run?.provider ? " / " + run.provider : ""}
-              {run?.effort ? " / " + run.effort : ""}
-            </dd>
-            <dt>工作目录</dt>
-            <dd>
-              <code>{worker.cwd}</code>
-            </dd>
-            <dt>工作区</dt>
-            <dd>
-              {worker.workspace.mode} · {worker.workspace.path}
-              {worker.workspace.sourcePath ? "（源 " + worker.workspace.sourcePath + "）" : ""}
-            </dd>
-            <dt>基线 / 分支</dt>
-            <dd>
-              {worker.workspace.baseCommit ?? "—"} / {worker.workspace.branch ?? "—"}
-            </dd>
-            <dt>写入范围</dt>
-            <dd>{worker.writePaths.length ? worker.writePaths.join(", ") : "只读任务"}</dd>
-            <dt>创建时间</dt>
-            <dd>{time(worker.createdAt)}</dd>
-          </dl>
-        </section>
-        <section>
-          <h3>本次运行</h3>
-          <dl>
-            <dt>运行 ID</dt>
-            <dd>
-              <code>{run?.id ?? "—"}</code>
-            </dd>
-            <dt>原生会话 ID</dt>
-            <dd>
-              <code>{run?.nativeSessionId ?? "尚未确认"}</code>
-            </dd>
-            <dt>原生会话文件</dt>
-            <dd>
-              <code>{run?.nativeSessionFile ?? "尚未确认"}</code>
-            </dd>
-            <dt>HOME / 会话目录</dt>
-            <dd>
-              <code>{run ? run.home : "—"}</code> /{" "}
-              <code>{run ? run.sessionsRoot : "—"}</code>
-            </dd>
-            <dt>Token 用量</dt>
-            <dd>{formatTokens(run?.usage ?? null, worker.type)}</dd>
-            <dt>退出码</dt>
-            <dd>{run?.exitCode ?? "—"}</dd>
-            <dt>执行与验收</dt>
-            <dd>执行成功不等于验收；请检查实际 diff 与测试结果。</dd>
-          </dl>
-        </section>
-      </div>
+      <details className="worker-detail-info">
+        <summary>
+          <span className="worker-detail-info-title">任务与本次运行</span>
+          <span className="worker-detail-info-overview">
+            <span>{TYPE_LABELS[worker.type]}</span>
+            <span>{worker.configName || "未指定配置"}</span>
+            <span>
+              {worker.taskRole ? TASK_ROLE_LABELS[worker.taskRole] : "未指定角色"}
+            </span>
+          </span>
+          <ChevronRight size={16} className="worker-type-chevron" aria-hidden="true" />
+        </summary>
+        <div className="worker-detail-grid">
+          <section>
+            <h3>任务</h3>
+            <dl>
+              <dt>执行引擎</dt>
+              <dd>{TYPE_LABELS[worker.type]}</dd>
+              <dt>Worker 配置</dt>
+              <dd>{worker.configName || "—"}</dd>
+              <dt>任务角色</dt>
+              <dd>
+                {worker.taskRole
+                  ? TASK_ROLE_LABELS[worker.taskRole]
+                  : "未指定"}
+              </dd>
+              <dt>模型 / 推理强度</dt>
+              <dd>
+                {run?.model ?? "默认模型"}
+                {run?.provider ? " / " + run.provider : ""}
+                {run?.effort ? " / " + run.effort : ""}
+              </dd>
+              <dt>工作目录</dt>
+              <dd>
+                <code>{worker.cwd}</code>
+              </dd>
+              <dt>工作区</dt>
+              <dd>
+                {worker.workspace.mode} · {worker.workspace.path}
+                {worker.workspace.sourcePath ? "（源 " + worker.workspace.sourcePath + "）" : ""}
+              </dd>
+              <dt>基线 / 分支</dt>
+              <dd>
+                {worker.workspace.baseCommit ?? "—"} / {worker.workspace.branch ?? "—"}
+              </dd>
+              <dt>写入范围</dt>
+              <dd>{worker.writePaths.length ? worker.writePaths.join(", ") : "只读任务"}</dd>
+              <dt>创建时间</dt>
+              <dd>{time(worker.createdAt)}</dd>
+            </dl>
+          </section>
+          <section>
+            <h3>本次运行</h3>
+            <dl>
+              <dt>运行 ID</dt>
+              <dd>
+                <code>{run?.id ?? "—"}</code>
+              </dd>
+              <dt>原生会话 ID</dt>
+              <dd>
+                <code>{run?.nativeSessionId ?? "尚未确认"}</code>
+              </dd>
+              <dt>原生会话文件</dt>
+              <dd>
+                <code>{run?.nativeSessionFile ?? "尚未确认"}</code>
+              </dd>
+              <dt>HOME / 会话目录</dt>
+              <dd>
+                <code>{run ? run.home : "—"}</code> /{" "}
+                <code>{run ? run.sessionsRoot : "—"}</code>
+              </dd>
+              <dt>Token 用量</dt>
+              <dd>{formatTokens(run?.usage ?? null, worker.type)}</dd>
+              <dt>退出码</dt>
+              <dd>{run?.exitCode ?? "—"}</dd>
+              <dt>执行与验收</dt>
+              <dd>执行成功不等于验收；请检查实际 diff 与测试结果。</dd>
+            </dl>
+          </section>
+        </div>
+      </details>
       {run ? (
         <section className="worker-progress">
           <h3>进度与预算</h3>

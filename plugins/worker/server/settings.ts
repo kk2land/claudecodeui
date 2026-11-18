@@ -121,7 +121,7 @@ export function defaultSettingsRecord(): WorkerSettingsRecord {
       enabled: true,
       roles: [],
       concurrency: DEFAULT_CONCURRENCY,
-      hardTimeoutSeconds: 300,
+      hardTimeoutSeconds: 600,
       model: null,
       effort: null,
     }],
@@ -189,7 +189,7 @@ export function migrateLegacySettings(
         typeof enabled[type] === "boolean" ? (enabled[type] as boolean) : true,
       roles: roleList(roles[type], []),
       concurrency: positiveInteger(concurrency[type], DEFAULT_CONCURRENCY),
-      hardTimeoutSeconds: positiveInteger(stored.hardTimeoutSeconds, 300),
+      hardTimeoutSeconds: positiveInteger(stored.hardTimeoutSeconds, 600),
       model: defaultEntry(defaults[type]).model,
       effort: defaultEntry(defaults[type]).effort,
     };

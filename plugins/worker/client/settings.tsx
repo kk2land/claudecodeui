@@ -155,7 +155,7 @@ function blankConfig(type: WorkerType, name: string, id: string): WorkerConfig {
     enabled: true,
     roles: [],
     concurrency: 3,
-    hardTimeoutSeconds: 300,
+    hardTimeoutSeconds: 600,
     model: null,
     effort: null,
     ...(type === "codex"
@@ -920,7 +920,7 @@ export function SettingsView({
                       hardTimeoutSeconds: event.target.value === "" ? null : Number(event.target.value),
                     })}
                   />
-                  <small>默认 300 秒；到时终止本轮运行，留空表示不限时。</small>
+                  <small>默认 600 秒；到时终止本轮运行，留空表示不限时。</small>
                 </label>
                 </div>
                 <label className="worker-checkbox worker-form-wide">
@@ -1159,7 +1159,7 @@ export function SettingsView({
             没有匹配时使用默认配置。
             模型或 reasoning 留空表示沿用执行器现有配置；未知或目录外已保存的值会显示为“当前已保存”，
             普通保存不会清掉它们。软提醒默认 {settings.softReminderSeconds} 秒 /{" "}
-            {settings.softReminderSteps} 步。硬超时按各配置设置，默认 300 秒，新建和续接均适用；
+            {settings.softReminderSteps} 步。硬超时按各配置设置，默认 600 秒，新建和续接均适用；
             单次任务显式指定的超时优先，修改配置不影响已接受的运行。
           </p>
           {validationMessage ? (
