@@ -64,6 +64,7 @@ import type {
 } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
+import type { WorkerTaskRole } from "../shared/task-roles.js";
 
 const STATUSES: WorkerStatus[] = [
   "queued",
@@ -78,6 +79,32 @@ const STATUSES: WorkerStatus[] = [
 ];
 const OCCUPYING: WorkerStatus[] = ["starting", "running", "stopping", "unknown"];
 const ACTIVE_REFERENCES: WorkerStatus[] = ["queued", ...OCCUPYING];
+
+/**
+ * Short built-in guidance prepended to a new role worker's prompt. Each entry states the role's
+ * responsibility and the evidence it must report; the parent session already owns planning and
+ * design, so the guidance never restates a task plan. A start without a role and every resume
+ * keep the caller's prompt exactly as supplied.
+ */
+const TASK_ROLE_PROMPTS: Record<WorkerTaskRole, string> = {
+  development:
+    "角色：开发。职责：实现改动并自测。证据：改动文件、关键行、测试命令和结果。",
+  testing:
+    "角色：测试。职责：编写并运行验证。覆盖验收条件。证据：测试命令、结果和覆盖项。",
+  ui_design:
+    "角色：UI 设计。职责：完成界面布局、视觉样式和交互设计。证据：改动文件、界面位置和验证方式。",
+  plan_research:
+    "角色：方案调研。职责：调研现状和可选方案。比较取舍。证据：事实来源、选项对比和建议。",
+  plan_review:
+    "角色：方案审核。职责：只读审核主代理已有的整体方案。证据：问题位置、原因和可执行建议。",
+  code_review:
+    "角色：代码审核。职责：审查已完成代码和测试。先报高风险问题。证据：文件和行号、风险及依据。",
+};
+
+/** Shared closing line for every role prompt so acceptance evidence stays uniform. */
+const TASK_ROLE_REPORT =
+  "回报首句给结论或需主代理决定的具体问题。随后只给最少可核验证据。";
+
 const TERMINAL: WorkerStatus[] = [
   "completed",
   "failed",
@@ -719,7 +746,14 @@ export class WorkerService {
       "start",
       fingerprint,
     );
-    this.prompts.set(runId, input.prompt);
+    this.prompts.set(
+      runId,
+      // Computed only after the replay check above, so an accepted request always launches with
+      // the role guidance while its original prompt remains the replay identity.
+      input.taskRole
+        ? `${TASK_ROLE_PROMPTS[input.taskRole]}\n${TASK_ROLE_REPORT}\n\n${input.prompt}`
+        : input.prompt,
+    );
     this.pendingAdmissions.add(runId);
     try {
       const workspace = await this.workspace.resolve(

@@ -139,9 +139,12 @@ export type WorkerStartInput = {
    */
   type?: WorkerType;
   /**
-   * Requested task role; one of `WORKER_TASK_ROLES`. A role only narrows which enabled config an
+   * Requested task role; one of `WORKER_TASK_ROLES`. A role narrows which enabled config an
    * omitted `configId`/`type` selects, taking the first match in `configs` order, so it applies to
-   * new workers only: a resume keeps the worker's recorded config and type.
+   * new workers only. A new role worker also gets the role's short built-in responsibility and
+   * reporting guidance prepended to its launched prompt; the caller's prompt stays intact inside
+   * that text and remains the replay identity. A start without a role and every resume launch the
+   * prompt exactly as supplied, so a resume never repeats role guidance.
    */
   taskRole?: WorkerTaskRole;
   prompt: string;
@@ -388,7 +391,10 @@ export type WorkerRecord = {
   /** Snapshot of the config's name at creation, kept for display after later renames. */
   configName: string;
   taskName: string;
-  /** Task role recorded at creation; absent on workers created before roles existed. */
+  /**
+   * Task role recorded at creation; absent on workers created before roles existed. Its short
+   * built-in prompt guidance is applied only when the worker is created, never on resume.
+   */
   taskRole?: WorkerTaskRole;
   ownerId: string;
   parentSessionId: string;

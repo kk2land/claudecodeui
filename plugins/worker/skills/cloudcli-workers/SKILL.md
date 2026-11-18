@@ -19,7 +19,8 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 - 决定委派后先调用一次 `worker_context`，同轮复用，范围变化或恢复上下文时刷新。仅看活动状态可传 `view: "compact"`。派发前确需并发、配置（`settings.configs`/`defaultConfigId`、兼容投影 `settings.enabled`/`roles`）、核对既有 Worker 的 `writePaths`，或恢复未掌握全文的计划时省略 `view` 读全量，并核对计划与实际状态。
 - 范围明确且可一次验收的任务用单 Worker 和一条计划记录。各线工作量足、读写隔离且共享契约明确时，按可独立验收的交付物拆线并行（如不同 provider 或组件）。强耦合或拆分协调成本更高时用单 Worker。共享接口指定唯一负责人，分工覆盖共享契约、串行步骤和收尾。
 - 每个父会话与项目维护完整 Markdown 计划，记录目标、方案规模及审核依据、任务与依赖、cwd/基线/读写范围、验收条件、worker/run 标识、进度与证据、产物位置。用 `worker_plan_save({ content })` 整段替换保存，仅在调整、派发、验收、阻塞或返工时保存。保存只记录，不触发执行或验收。计划模式只形成方案，保存和派发都遵守当前会话模式与授权，仅启动已就绪任务。Worker 内要有任务所需工具与环境。新目标追加，完成项保留简短结论与证据。
-- 依赖须经主代理验收，且产物已进入下游 cwd 或 `baseRef` 才放行，并记录交接依据。独立 worktree 不自动同步，MCP 排队没有 `dependsOn`。
+- 依赖须经主代理验收，且产物已进入下游 cwd 或 `baseRef` 才放行。验收时记录产物路径、确切 commit/baseRef（或已确认的下游 cwd 版本）与验证结果，确认下游可读后再派发。交接为每项依赖写清简短产物引用，可多项。独立 worktree 不自动同步，MCP 排队没有 `dependsOn`。
+- 并行任务出现需用户决定的事项时，在计划的可选“待决定”短节记录问题、建议和受影响 Worker/Run；合并向用户提问，答案只用于续接相关原 Worker，独立任务照常推进。模板与示例见 [计划记录与交接模板](references/workflows.md)。
 
 ## 方案审核
 
@@ -29,8 +30,8 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 
 ## 派发与续接
 
-- 先保存计划再派发，接受后回填 worker/run 标识。交接写清目标、范围与基线、验收、停止条件，以及本次任务的全局执行限制。已有事实直接提供，不要求 Worker 重查。模板已给出具体写法，需要时读 [计划记录与交接模板](references/workflows.md)。交接要求回包首句给结论或需主代理决定的具体问题；逐角色证据见模板，有答案续接原 Worker，长详情按需读取。
-- 每次启动/续接用新 `requestId`，仅同一操作和载荷重试时复用。不重复派发同一目标。新建任务按主要交付物标注单一 `taskRole`，`writePaths` 相对 cwd，只读为 `[]`。
+- 先保存计划再派发，接受后回填 worker/run 标识。交接写清目标、范围与基线、验收、停止条件，以及本次任务的全局执行限制。已有事实直接提供，不要求 Worker 重查。模板已给出具体写法，需要时读 [计划记录与交接模板](references/workflows.md)。逐角色证据见模板；有答案续接原 Worker，长详情按需读取。
+- 每次启动/续接用新 `requestId`，仅同一操作和载荷重试时复用。不重复派发同一目标。新建任务按主要交付物标注单一 `taskRole`。带角色的新建使用内置职责和回报规则，交接不必重复。省略角色时可在交接中显式要求首句结论。`writePaths` 相对 cwd，只读为 `[]`。
 - `worker_start` 显式选 `workspace.mode`。`existing` 写入不重叠，`worktree` 隔离并可指定 `baseRef`。脏源默认拒绝，仅已授权、确认不依赖未提交改动且记录基线后用 `allowDirtySource: true`。
 - `worker_resume` 用原 workerId、cwd、home 和原生会话，不传 `taskRole`，模型/effort 沿用原 run 除非用户指定覆盖。只读任务不能续接为写入任务。其余范围或契约变化由主代理决定。续接只交接变化的部分。
 - 配置只在用户明确选择时传入，省略时按已启用配置路由。`type` 只是引擎过滤条件，不能替代配置。角色含义或配置选择有疑问时读 [角色与配置路由](references/routing.md)。

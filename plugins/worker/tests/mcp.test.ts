@@ -692,7 +692,7 @@ test("compact start and resume receipts replay the accepted run across views", a
   }));
   t.after(() => client.close());
 
-  const payload = startInput({ requestId: "view-replay-start" });
+  const payload = startInput({ requestId: "view-replay-start", taskRole: "testing" });
   const receipt = text(
     await client.callTool({
       name: "worker_start",

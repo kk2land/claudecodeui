@@ -47,6 +47,55 @@ test("input returns the prompt each run was launched with", async (t) => {
   });
 });
 
+test("role start persists the built-in role prompt and resume uses only the new input", async (t) => {
+  const root = temporaryRoot("worker-input-role-");
+  const { service, data } = createService(t, root);
+  const started = await service.start(
+    "owner-1",
+    startInput({
+      taskRole: "code_review",
+      prompt: "审查改动",
+      requestId: "role-input",
+    }),
+  );
+  const worker = await waitStatus(service, started.worker.id, ["completed"]);
+  const runId = worker.latestRun!.id;
+  const launched = service.input(worker.id, { runId }).prompt ?? "";
+  assert.match(launched, /^角色：代码审核。/);
+  assert.ok(launched.endsWith("\n\n审查改动"));
+  assert.equal(
+    fs.readFileSync(
+      path.join(data, "logs", worker.id, runId, "prompt.md"),
+      "utf8",
+    ),
+    launched,
+  );
+  const spec = JSON.parse(
+    fs.readFileSync(
+      path.join(data, "logs", worker.id, runId, "spec.json"),
+      "utf8",
+    ),
+  ) as { prompt: string };
+  assert.equal(spec.prompt, launched);
+
+  const resumed = await service.resume("owner-1", {
+    workerId: worker.id,
+    prompt: "继续审查",
+    requestId: "role-input-resume",
+  });
+  await waitStatus(service, worker.id, ["completed"]);
+  assert.deepEqual(service.input(worker.id, { runId: resumed.run.id }), {
+    prompt: "继续审查",
+  });
+  assert.equal(
+    fs.readFileSync(
+      path.join(data, "logs", worker.id, resumed.run.id, "prompt.md"),
+      "utf8",
+    ),
+    "继续审查",
+  );
+});
+
 test("input is null when no prompt record survives", async (t) => {
   const root = temporaryRoot("worker-input-missing-");
   const { service, data } = createService(t, root);

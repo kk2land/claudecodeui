@@ -36,7 +36,7 @@ const startShape = {
   taskRole: z
     .enum(taskRoleValues)
     .optional()
-    .describe("按主要交付物选一个任务角色，仅用于新建时的配置路由"),
+    .describe("按主要交付物选一个角色；用于配置路由，并在新建时前置内置职责与回报要求"),
   prompt: z.string(),
   workspace: z.object({
     mode: z.enum(["worktree", "existing"]),
