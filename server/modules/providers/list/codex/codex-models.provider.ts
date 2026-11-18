@@ -24,6 +24,38 @@ export const CODEX_PREDEFINED_MODELS: ProviderModelsDefinition = {
   // one of the bundled catalog's exact slugs, which codex-models.test.ts checks.
   OPTIONS: [
     {
+      value: 'gpt-6.2-sol',
+      label: 'GPT-6.2 Sol',
+      description: 'Fast, go-to model for coding and everyday work.',
+      effort: {
+        default: 'low',
+        values: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+          { value: 'max' },
+          { value: 'ultra' },
+        ],
+      },
+    },
+    {
+      value: 'gpt-6.2-astra',
+      label: 'GPT-6.2 Astra',
+      description: 'Designed for complex coding and professional work.',
+      effort: {
+        default: 'low',
+        values: [
+          { value: 'low' },
+          { value: 'medium' },
+          { value: 'high' },
+          { value: 'xhigh' },
+          { value: 'max' },
+          { value: 'ultra' },
+        ],
+      },
+    },
+    {
       value: 'gpt-6-astra',
       label: 'GPT-6 Astra',
       description: 'Our most capable model for complex, demanding work.',

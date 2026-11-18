@@ -56,22 +56,26 @@ test('lists GPT-6 Sol and GPT-6 Luna with the effort levels the Codex CLI accept
   );
 });
 
-test('lists GPT-6.1 Sol and GPT-6.1 Terra with the effort levels the Codex CLI accepts', () => {
-  const sol = findCodexModel('gpt-6.1-sol');
-  assert.equal(sol?.label, 'GPT-6.1 Sol');
-  assert.equal(sol?.effort?.default, 'low');
-  assert.deepEqual(
-    sol?.effort?.values.map((effort) => effort.value),
-    ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  );
+test('lists each GPT-6.1 and GPT-6.2 model once with the effort levels the Codex CLI accepts', () => {
+  const expectedModels = {
+    'gpt-6.1-sol': 'GPT-6.1 Sol',
+    'gpt-6.1-terra': 'GPT-6.1 Terra',
+    'gpt-6.2-sol': 'GPT-6.2 Sol',
+    'gpt-6.2-astra': 'GPT-6.2 Astra',
+  };
 
-  const terra = findCodexModel('gpt-6.1-terra');
-  assert.equal(terra?.label, 'GPT-6.1 Terra');
-  assert.equal(terra?.effort?.default, 'low');
-  assert.deepEqual(
-    terra?.effort?.values.map((effort) => effort.value),
-    ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-  );
+  for (const [value, label] of Object.entries(expectedModels)) {
+    const matches = CODEX_PREDEFINED_MODELS.OPTIONS.filter((option) => option.value === value);
+    assert.equal(matches.length, 1, value);
+    const [model] = matches;
+    assert.equal(model.label, label);
+    assert.equal(model.effort?.default, 'low', value);
+    assert.deepEqual(
+      model.effort?.values.map((effort) => effort.value),
+      ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
+      value,
+    );
+  }
 });
 
 test('lists only models the bundled Codex CLI has metadata for', async () => {

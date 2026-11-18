@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { CODEX_PREDEFINED_MODELS } from '@/modules/providers/list/codex/codex-models.provider.js';
 import { createProviderModelsService } from '@/modules/providers/services/provider-models.service.js';
 import type {
   CustomProviderModelInput,
@@ -167,6 +168,27 @@ test('provider catalogs merge source-controlled defaults with custom persistence
     isCustom: false,
   });
   assert.deepEqual(catalog.rows.get('codex'), undefined);
+});
+
+test('preserves one custom Codex option per model ID shared with the built-in catalog', async () => {
+  const { service, catalog } = createTestService({ models: () => CODEX_PREDEFINED_MODELS });
+  const modelIds = ['gpt-6.1-sol', 'gpt-6.1-terra', 'gpt-6.2-sol', 'gpt-6.2-astra'];
+  const existingModels = modelIds.map((id) => catalog.createCustomProviderModel('codex', {
+    id,
+    model: `Custom ${id}`,
+    effort: { default: 'high', values: ['high'] },
+  }));
+
+  const { OPTIONS } = await service.getProviderModels('codex');
+  for (const { modelId, model, recordId } of existingModels) {
+    assert.deepEqual(OPTIONS.filter((option) => option.value === modelId), [{
+      value: modelId,
+      label: model,
+      recordId,
+      isCustom: true,
+      effort: { default: 'high', values: [{ value: 'high' }] },
+    }]);
+  }
 });
 
 test('the custom-models-only flag is off by default and leaves the merged catalog unchanged', async () => {
