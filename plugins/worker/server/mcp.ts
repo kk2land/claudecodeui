@@ -1,14 +1,24 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import type { WorkerService } from "./service.js";
-import type { WorkerOwner, WorkerStartInput } from "./shared/index.js";
+import type {
+  WorkerNotification,
+  WorkerOwner,
+  WorkerRecord,
+  WorkerRun,
+  WorkerStartInput,
+} from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerTaskRole } from "../shared/task-roles.js";
 
 const timeoutSeconds = z.number().int().positive().nullable().optional().describe(
-  "省略时使用所选 Worker 配置的硬超时（默认 600 秒），新建和续接均适用；显式秒数覆盖本轮，null 关闭本轮硬超时",
+  "省略时用所选配置的硬超时；显式秒数覆盖本轮，null 关闭本轮硬超时",
 );
+const viewField = z
+  .enum(["compact"])
+  .optional()
+  .describe('省略返回完整形状；"compact" 只返回定位与验收所需字段');
 const taskRoleValues = WORKER_TASK_ROLES.map((role) => role.value) as [
   WorkerTaskRole,
   ...WorkerTaskRole[],
@@ -21,16 +31,12 @@ const startShape = {
   configId: z
     .string()
     .optional()
-    .describe(
-      "指定 worker 配置 id（稳定标识）；必须存在且启用。省略时按已启用配置路由：先按 type 过滤，再由 taskRole 取列表中第一个匹配配置；无角色匹配或未提供 taskRole 时优先默认配置，否则取列表首项",
-    ),
+    .describe("指定配置 id，须存在且启用；省略时按已启用配置路由"),
   type: z.enum(["dsh", "pi", "codex"]).optional(),
   taskRole: z
     .enum(taskRoleValues)
     .optional()
-    .describe(
-      "任务角色：testing 测试、development 开发、ui_design UI设计、plan_research 方案调研、plan_review 方案审核、code_review 代码审核。仅用于新建任务的配置路由，在已启用配置中取第一个接受该角色的配置（按设置列表顺序）；无匹配时按 type 约束或默认配置回退。UI设计仅负责界面、视觉和交互；方案调研提供事实、选项与建议，方案决策由主会话负责",
-    ),
+    .describe("按主要交付物选一个任务角色，仅用于新建时的配置路由"),
   prompt: z.string(),
   workspace: z.object({
     mode: z.enum(["worktree", "existing"]),
@@ -44,6 +50,7 @@ const startShape = {
   effort: z.string().optional(),
   timeoutSeconds,
   requestId: z.string(),
+  view: viewField,
 };
 
 function result(value: unknown) {
@@ -57,6 +64,50 @@ function failure(error: unknown) {
   return {
     content: [{ type: "text" as const, text: message }],
     isError: true,
+  };
+}
+
+//----------------- MCP VIEW PROJECTION ----------------
+
+/**
+ * Locating projection reused by compact context active workers and compact list workers. The
+ * current run only locates the worker; history, final text, error, and usage need the omitted
+ * `view` request.
+ */
+function compactWorker(worker: WorkerRecord) {
+  const run = worker.latestRun;
+  return {
+    id: worker.id,
+    taskName: worker.taskName,
+    cwd: worker.cwd,
+    latestRun: run ? { id: run.id, status: run.status } : null,
+  };
+}
+
+/**
+ * Compact outbox view. Delivered notifications are already consumed by the parent session, so
+ * they are dropped; held, pending, and unknown deliveries stay visible with their owner scope.
+ */
+function compactNotifications(notifications: WorkerNotification[]) {
+  return notifications
+    .filter((item) => item.delivery !== "delivered")
+    .map((item) => ({
+      id: item.id,
+      workerId: item.workerId,
+      runId: item.runId,
+      status: item.status,
+      delivery: item.delivery,
+      summary: item.summary,
+    }));
+}
+
+/** Compact start/resume receipt: these ids belong to the run the service actually accepted. */
+function compactReceipt(worker: WorkerRecord, run: WorkerRun) {
+  return {
+    workerId: worker.id,
+    runId: run.id,
+    status: run.status,
+    cwd: worker.cwd,
   };
 }
 
@@ -74,12 +125,19 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_context",
     {
-      description: "获取当前父会话的 owner、已保存计划、配置与并发设置、活动任务与待确认通知摘要；配置暴露 id/name/type/roles/model/effort 与 Codex 服务，不暴露凭据。计划须结合实际 Worker 状态核对，派发后由运行提醒或终态通知唤醒后检查进展或验收",
-      inputSchema: {},
+      description: "获取 owner、计划、配置与并发设置、活动任务与待确认通知；配置不含凭据。计划须结合实际 Worker 状态核对，派发后由提醒或终态唤醒再检查进展或验收",
+      inputSchema: { view: viewField },
     },
-    async () => {
+    async ({ view }) => {
       try {
-        return result(service.context(ownerId));
+        const context = service.context(ownerId);
+        if (view !== "compact") return result(context);
+        return result({
+          owner: context.owner,
+          plan: context.plan ? { updatedAt: context.plan.updatedAt } : null,
+          activeWorkers: context.activeWorkers.map(compactWorker),
+          notifications: compactNotifications(context.notifications),
+        });
       } catch (error) {
         return failure(error);
       }
@@ -89,14 +147,16 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_plan_save",
     {
-      description: "保存当前父会话与项目的完整 Markdown 计划，替换原内容；记录任务、依赖、Worker/Run 关联和验收进度，仅更新记录，不派发任务或自动验收",
+      description: "保存当前父会话与项目的完整 Markdown 计划并替换原内容，记录任务、依赖、Worker/Run 关联与验收进度；只记录，不派发任务或自动验收",
       inputSchema: {
         content: z.string().refine((content) => content.trim().length > 0, "计划内容不能为空"),
+        view: viewField,
       },
     },
-    async ({ content }) => {
+    async ({ content, view }) => {
       try {
-        return result(service.savePlan(ownerId, content));
+        const plan = service.savePlan(ownerId, content);
+        return result(view === "compact" ? { updatedAt: plan.updatedAt } : plan);
       } catch (error) {
         return failure(error);
       }
@@ -121,23 +181,30 @@ export function createWorkerMcpServer(
             "unknown",
           ])
           .optional(),
+        view: viewField,
       },
     },
-    async ({ status }) => {
+    async ({ status, view }) => {
       try {
         const snapshot = service.state({
           projectId: owner.projectId,
           parentSessionId: owner.parentSessionId,
         });
-        return result({
-          workers: snapshot.workers.filter(
-            (worker) =>
-              worker.parentSessionId === owner.parentSessionId &&
-              worker.projectId === owner.projectId &&
-              (!status || worker.latestRun?.status === status),
-          ),
-          notifications: service.notificationsForScope(ownerId),
-        });
+        const workers = snapshot.workers.filter(
+          (worker) =>
+            worker.parentSessionId === owner.parentSessionId &&
+            worker.projectId === owner.projectId &&
+            (!status || worker.latestRun?.status === status),
+        );
+        const notifications = service.notificationsForScope(ownerId);
+        return result(
+          view === "compact"
+            ? {
+                workers: workers.map(compactWorker),
+                notifications: compactNotifications(notifications),
+              }
+            : { workers, notifications },
+        );
       } catch (error) {
         return failure(error);
       }
@@ -147,12 +214,15 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "异步启动一个 DSH、Pi 或 Codex 子任务；优先使用显式 configId（须存在且启用），省略时按已启用配置顺序路由：角色取首个匹配配置，无匹配时回退默认配置，显式 type 必须与配置一致。UI设计角色只负责界面、视觉和交互，方案调研提供事实、选项与建议，技术方案与架构由主会话产出，方案审核只审核已有方案。必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行预算提醒和终态通过 Worker outbox 自动通知父会话；正常下一步是交还父回合或处理独立工作，不要轮询保活",
+      description: "异步启动一个 DSH、Pi 或 Codex 子任务，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行提醒与终态通过 Worker outbox 自动通知父会话，不要轮询保活",
       inputSchema: startShape,
     },
-    async (input) => {
+    async ({ view, ...input }) => {
       try {
-        return result(await service.start(ownerId, input as WorkerStartInput));
+        const accepted = await service.start(ownerId, input as WorkerStartInput);
+        return result(
+          view === "compact" ? compactReceipt(accepted.worker, accepted.run) : accepted,
+        );
       } catch (error) {
         return failure(error);
       }
@@ -171,11 +241,15 @@ export function createWorkerMcpServer(
         effort: z.string().optional(),
         timeoutSeconds,
         requestId: z.string(),
+        view: viewField,
       },
     },
-    async (input) => {
+    async ({ view, ...input }) => {
       try {
-        return result(await service.resume(ownerId, input));
+        const accepted = await service.resume(ownerId, input);
+        return result(
+          view === "compact" ? compactReceipt(accepted.worker, accepted.run) : accepted,
+        );
       } catch (error) {
         return failure(error);
       }
@@ -185,15 +259,18 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_get",
     {
-      description: "读取一个 worker 及其全部运行记录与待确认通知；收到运行提醒先核对当前 run 与实际进展，收到终态检查 diff 与测试证据，不要反复轮询",
-      inputSchema: { workerId: z.string() },
+      description: "读取一个 worker 及其运行记录与待确认通知；收到运行提醒先核对当前 run 与实际进展，收到终态检查 diff 与测试证据，不要反复轮询",
+      inputSchema: { workerId: z.string(), view: viewField },
     },
-    async ({ workerId }) => {
+    async ({ workerId, view }) => {
       try {
-        return result({
-          ...service.get(workerId, ownerId),
-          notifications: service.notificationsForWorker(workerId, ownerId),
-        });
+        const detail = service.get(workerId, ownerId);
+        const notifications = service.notificationsForWorker(workerId, ownerId);
+        return result(
+          view === "compact"
+            ? { worker: detail.worker, notifications: compactNotifications(notifications) }
+            : { ...detail, notifications },
+        );
       } catch (error) {
         return failure(error);
       }

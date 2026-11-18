@@ -1663,7 +1663,9 @@ export class WorkerService {
     return { worker, runs: this.store.runs(worker.id) };
   }
 
-  context(ownerId: string): Record<string, unknown> {
+  // The inferred return type stays the single description of this shape: the MCP boundary
+  // projects it without declaring a second public contract.
+  context(ownerId: string) {
     const owner = this.requireOwner(ownerId);
     const snapshot = this.state({
       projectId: owner.projectId,

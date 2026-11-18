@@ -339,15 +339,14 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
         })),
       };
       const hasReminders = notifications.some((notification) => notification.status === 'running');
+      // Keep only the boundary and the reminder's decision rules here. Detailed
+      // handover and repeated-testing guidance lives in the worker skill.
       const content = [
         `Automatic Worker ${hasReminders ? 'progress reminder / execution result' : 'execution result'} (batch ${source.batchId}).`,
         'This is not user acceptance. Review the result before continuing.',
         ...(hasReminders ? [
-          'A running status is a soft-budget reminder, not a failure or a cancellation request. Read worker_get for the current run before acting; it may have finished since this reminder.',
-          'Compare deliverables, diff and verification evidence with the previous checkpoint; use worker_logs only as needed. Running status, more steps or a live process alone are not progress. If there is new useful output, let it continue until the next automatic reminder without polling.',
-          'If a test failure already reproduces on the unchanged baseline, keep that evidence and finish the remaining deliverables instead of repeating full test suites.',
-          'If it is looping, repeating checks or pursuing the wrong direction, cancel only that worker with worker_cancel (pause: false). Confirm cancellation before worker_resume with the same workerId and a revised prompt describing the concrete issue, preserved changes, next deliverable and stopping condition.',
-          'Do not resume an unknown or still-active run, bypass a user Stop, or repeatedly retry the same prompt without new evidence.',
+          'A running status is a soft reminder. Read worker_get for the current run, compare deliverables, diff and verification evidence, and wait for the next notification while there is useful progress.',
+          'For deviation or a persistent stall cancel only that worker with worker_cancel (pause: false) and confirm the stop before resuming. A user Stop needs an explicit continuation, and an unknown run needs verification that it stopped before worker_recover.',
         ] : []),
         '',
         ...source.results.map((result) => [

@@ -11,10 +11,13 @@ import type { WorkerService } from "../server/service.js";
 import type { WorkerNotification, WorkerPlan, WorkerRecord, WorkerRun } from "../shared/contracts.js";
 import { createService, startInput, temporaryRoot, waitFor } from "./helpers.js";
 
-function text(result: unknown): unknown {
+function raw(result: unknown): string {
   const content = (result as { content?: { type: string; text?: string }[] }).content;
-  const value = content?.find((item) => item.type === "text")?.text ?? "";
-  return JSON.parse(value);
+  return content?.find((item) => item.type === "text")?.text ?? "";
+}
+
+function text(result: unknown): unknown {
+  return JSON.parse(raw(result));
 }
 
 async function mcpServer(
@@ -99,6 +102,8 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       "worker_wait",
     ],
   );
+  const toolsJson = JSON.stringify(tools);
+  t.diagnostic(`tools/list json: ${Buffer.byteLength(toolsJson, "utf8")}B`);
   const codexEnvSecret = "{{SECRET_xk2p9vqa}}";
   const codexArgSecret = "{{SECRET_hs8m4trc}}";
   const codex = {
@@ -374,4 +379,366 @@ for (const type of ["dsh", "pi", "codex"] as const) test(`MCP corrects a slow ${
   assert.equal(finished.run.progress.softReminderSentAt, null, "a new run has its own soft budget");
   assert.match(fs.readFileSync(path.join(data, "logs", started.worker.id, resumed.run.id, "prompt.md"), "utf8"), /Preserve the existing edits/);
   assert.deepEqual(service.notifications().map((item) => item.status), ["running", "cancelled", "completed"]);
+});
+
+test("compact view is opt-in, scoped, and keeps only the current run", async (t) => {
+  const { service, project } = createService(t, temporaryRoot("worker-mcp-view-"), {
+    TEST_SCENARIO: "sleep",
+    TEST_DELAY_MS: "1500",
+  });
+  const host = await mcpServer(service, "owner-token");
+  t.after(host.close);
+  const client = new Client({ name: "worker-view", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(host.url, {
+    requestInit: { headers: { authorization: "Bearer owner-token" } },
+  }));
+  t.after(() => client.close());
+
+  const content = "# 计划\n\n- W1：实现接口与测试\n- W2：依赖 W1，等待产物交接\n- 验收：目标测试通过并记录证据\n";
+  const savedCompact = text(
+    await client.callTool({ name: "worker_plan_save", arguments: { content, view: "compact" } }),
+  ) as { updatedAt: string };
+  assert.deepEqual(Object.keys(savedCompact), ["updatedAt"]);
+  assert.equal(
+    service.context("owner-1").plan?.content,
+    content,
+    "compact save still stores and validates the whole plan",
+  );
+  const blankPlan = await client.callTool({
+    name: "worker_plan_save",
+    arguments: { content: " \n\t", view: "compact" },
+  });
+  assert.equal(blankPlan.isError, true);
+  assert.equal(service.context("owner-1").plan?.updatedAt, savedCompact.updatedAt);
+  const fullPlan = text(
+    await client.callTool({ name: "worker_plan_save", arguments: { content } }),
+  ) as { content: string; updatedAt: string };
+  assert.equal(fullPlan.content, content, "omitting view keeps the full plan shape");
+
+  const started = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: { ...startInput({ requestId: "view-start" }), view: "compact" },
+    }),
+  ) as { workerId: string; runId: string; status: string; cwd: string };
+  assert.deepEqual(Object.keys(started).sort(), ["cwd", "runId", "status", "workerId"]);
+  assert.equal(started.cwd, project);
+  const accepted = service.get(started.workerId);
+  assert.equal(accepted.worker.latestRun?.id, started.runId);
+  assert.ok(["queued", "starting", "running"].includes(started.status));
+
+  // Compact context while the run is active: no settings/counts, locating worker fields only.
+  const activeContext = text(
+    await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  ) as { activeWorkers: Record<string, unknown>[]; plan: { updatedAt: string }; owner: { id: string } };
+  assert.deepEqual(Object.keys(activeContext).sort(), [
+    "activeWorkers",
+    "notifications",
+    "owner",
+    "plan",
+  ]);
+  assert.equal(activeContext.owner.id, "owner-1");
+  assert.deepEqual(activeContext.plan, { updatedAt: fullPlan.updatedAt });
+  assert.equal(activeContext.activeWorkers.length, 1);
+  assert.deepEqual(Object.keys(activeContext.activeWorkers[0] ?? {}).sort(), [
+    "cwd",
+    "id",
+    "latestRun",
+    "taskName",
+  ]);
+  const activeRun = activeContext.activeWorkers[0]?.latestRun as Record<string, unknown>;
+  assert.deepEqual(Object.keys(activeRun).sort(), ["id", "status"]);
+  assert.equal(activeRun.id, started.runId);
+
+  const waited = text(
+    await client.callTool({
+      name: "worker_wait",
+      arguments: { workerId: started.workerId, timeoutSeconds: 10 },
+    }),
+  ) as { worker: WorkerRecord; run: WorkerRun };
+  assert.equal(waited.run.status, "completed");
+
+  const fullContextRaw = raw(
+    await client.callTool({ name: "worker_context", arguments: {} }),
+  );
+  const fullContext = JSON.parse(fullContextRaw) as {
+    counts: unknown;
+    settings: unknown;
+    plan: WorkerPlan;
+    notifications: WorkerNotification[];
+  };
+  assert.equal(fullContext.plan.content, content);
+  assert.ok(fullContext.settings && fullContext.counts, "omitted view keeps the full context");
+  assert.equal(fullContext.notifications.length, 1);
+  const compactContextRaw = raw(
+    await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  );
+  const compactContext = JSON.parse(compactContextRaw) as {
+    activeWorkers: unknown[];
+    notifications: { id: string; delivery: string }[];
+  };
+  assert.deepEqual(compactContext.activeWorkers, []);
+  assert.deepEqual(
+    compactContext.notifications.map((item) => [item.id, item.delivery]),
+    [[fullContext.notifications[0]?.id, "pending"]],
+  );
+
+  const fullGetRaw = raw(
+    await client.callTool({ name: "worker_get", arguments: { workerId: started.workerId } }),
+  );
+  const fullGet = JSON.parse(fullGetRaw) as {
+    worker: WorkerRecord;
+    runs: WorkerRun[];
+    notifications: WorkerNotification[];
+  };
+  assert.deepEqual(Object.keys(fullGet).sort(), ["notifications", "runs", "worker"]);
+  assert.equal(fullGet.runs.length, 1);
+  assert.match(fullGet.worker.latestRun?.finalText ?? "", /fixture answer/);
+  assert.equal(fullGet.notifications.length, 1);
+
+  const compactGetRaw = raw(
+    await client.callTool({
+      name: "worker_get",
+      arguments: { workerId: started.workerId, view: "compact" },
+    }),
+  );
+  const compactGet = JSON.parse(compactGetRaw) as {
+    worker: WorkerRecord;
+    notifications: { id: string; workerId: string; runId: string; status: string; delivery: string; summary: string }[];
+  };
+  assert.deepEqual(Object.keys(compactGet).sort(), ["notifications", "worker"]);
+  assert.equal("runs" in compactGet, false, "compact get omits the run history");
+  assert.deepEqual(
+    compactGet.worker,
+    fullGet.worker,
+    "compact get carries the same current worker, including its run body",
+  );
+  assert.equal(compactGet.worker.latestRun?.id, started.runId);
+  assert.equal(
+    JSON.stringify(compactGet.worker).match(/fixture answer/g)?.length,
+    1,
+    "the terminal text is carried once, in the current run only",
+  );
+  assert.deepEqual(Object.keys(compactGet.notifications[0] ?? {}).sort(), [
+    "delivery",
+    "id",
+    "runId",
+    "status",
+    "summary",
+    "workerId",
+  ]);
+  const terminal = compactGet.notifications[0]!;
+  assert.equal(terminal.workerId, started.workerId);
+  assert.equal(terminal.runId, waited.run.id);
+  assert.equal(terminal.delivery, "pending");
+
+  const fullListRaw = raw(
+    await client.callTool({ name: "worker_list", arguments: { status: "completed" } }),
+  );
+  const fullList = JSON.parse(fullListRaw) as { workers: WorkerRecord[]; notifications: unknown[] };
+  assert.deepEqual(fullList.workers.map((worker) => worker.id), [started.workerId]);
+  assert.equal(typeof fullList.workers[0]?.latestRun?.finalText, "string");
+  assert.equal(fullList.notifications.length, 1);
+  const compactListRaw = raw(
+    await client.callTool({
+      name: "worker_list",
+      arguments: { status: "completed", view: "compact" },
+    }),
+  );
+  const compactList = JSON.parse(compactListRaw) as { workers: Record<string, unknown>[] };
+  assert.deepEqual(Object.keys(compactList.workers[0] ?? {}).sort(), [
+    "cwd",
+    "id",
+    "latestRun",
+    "taskName",
+  ]);
+  assert.equal(compactList.workers[0]?.taskName, fullList.workers[0]?.taskName);
+  assert.deepEqual(
+    compactList.workers[0]?.latestRun,
+    { id: waited.run.id, status: "completed" },
+    "compact list workers carry only run locators",
+  );
+  assert.equal(
+    JSON.stringify(compactList.workers).includes("fixture answer"),
+    false,
+    "compact list workers carry no terminal text",
+  );
+  assert.deepEqual(
+    (
+      text(
+        await client.callTool({
+          name: "worker_list",
+          arguments: { status: "failed", view: "compact" },
+        }),
+      ) as { workers: unknown[] }
+    ).workers,
+    [],
+    "compact list keeps the status filter",
+  );
+
+  // Delivered notifications are consumed; a host Stop/unknown settlement stays visible.
+  await client.callTool({ name: "worker_ack", arguments: { eventIds: [terminal.id] } });
+  const afterAck = text(
+    await client.callTool({
+      name: "worker_get",
+      arguments: { workerId: started.workerId, view: "compact" },
+    }),
+  ) as { notifications: unknown[] };
+  assert.deepEqual(afterAck.notifications, []);
+  const listAfterAck = text(
+    await client.callTool({ name: "worker_list", arguments: { view: "compact" } }),
+  ) as { notifications: unknown[]; workers: unknown[] };
+  assert.deepEqual(listAfterAck.notifications, [], "compact list drops delivered notifications");
+  assert.equal(listAfterAck.workers.length, 1);
+  const contextAfterAck = text(
+    await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  ) as { notifications: unknown[] };
+  assert.deepEqual(contextAfterAck.notifications, [], "compact context drops delivered notifications");
+  const afterAckFull = text(
+    await client.callTool({ name: "worker_get", arguments: { workerId: started.workerId } }),
+  ) as { notifications: WorkerNotification[] };
+  assert.deepEqual(
+    afterAckFull.notifications.map((item) => [item.id, item.delivery]),
+    [[terminal.id, "delivered"]],
+    "omitting view still returns delivered notifications",
+  );
+  service.retryNotifications([terminal.id]);
+  service.claimNotifications("owner-1", [terminal.id], "view-stop-batch");
+  service.settleNotifications("view-stop-batch", "unknown");
+  const stopped = text(
+    await client.callTool({
+      name: "worker_get",
+      arguments: { workerId: started.workerId, view: "compact" },
+    }),
+  ) as { notifications: { id: string; delivery: string; workerId: string; runId: string }[] };
+  assert.deepEqual(
+    stopped.notifications.map((item) => [item.id, item.delivery, item.workerId, item.runId]),
+    [[terminal.id, "unknown", started.workerId, waited.run.id]],
+  );
+
+  t.diagnostic(
+    `view fixture: dsh run complete, 1 worker, plan ${Buffer.byteLength(content, "utf8")}B, session session-fixture-1`,
+  );
+  for (const [name, full, compact] of [
+    ["context", fullContextRaw, compactContextRaw],
+    ["list", fullListRaw, compactListRaw],
+    ["get", fullGetRaw, compactGetRaw],
+  ] as const) {
+    const fullBytes = Buffer.byteLength(full, "utf8");
+    const compactBytes = Buffer.byteLength(compact, "utf8");
+    t.diagnostic(`view ${name}: full ${fullBytes}B, compact ${compactBytes}B`);
+    assert.ok(compactBytes < fullBytes, `${name} compact view must be smaller`);
+  }
+
+  service.registerOwner(
+    {
+      id: "view-other",
+      parentSessionId: "view-other-parent",
+      projectId: "project-1",
+      projectPath: project,
+      userId: null,
+      appServerInstanceId: "view-other-app",
+      paused: false,
+    },
+    "view-other-token",
+  );
+  const otherClient = new Client({ name: "worker-view-other", version: "1.0.0" });
+  await otherClient.connect(new StreamableHTTPClientTransport(host.url, {
+    requestInit: { headers: { authorization: "Bearer view-other-token" } },
+  }));
+  t.after(() => otherClient.close());
+  const otherContext = text(
+    await otherClient.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  ) as { plan: null; activeWorkers: unknown[]; notifications: unknown[] };
+  assert.equal(otherContext.plan, null);
+  assert.deepEqual(otherContext.activeWorkers, []);
+  assert.deepEqual(otherContext.notifications, []);
+  const otherList = text(
+    await otherClient.callTool({ name: "worker_list", arguments: { view: "compact" } }),
+  ) as unknown;
+  assert.deepEqual(otherList, { workers: [], notifications: [] });
+  const deniedCompact = await otherClient.callTool({
+    name: "worker_get",
+    arguments: { workerId: started.workerId, view: "compact" },
+  });
+  assert.equal(deniedCompact.isError, true, "compact view does not widen ownership");
+});
+
+test("compact start and resume receipts replay the accepted run across views", async (t) => {
+  const { service } = createService(t, temporaryRoot("worker-mcp-view-replay-"));
+  const host = await mcpServer(service, "owner-token");
+  t.after(host.close);
+  const client = new Client({ name: "worker-view-replay", version: "1.0.0" });
+  await client.connect(new StreamableHTTPClientTransport(host.url, {
+    requestInit: { headers: { authorization: "Bearer owner-token" } },
+  }));
+  t.after(() => client.close());
+
+  const payload = startInput({ requestId: "view-replay-start" });
+  const receipt = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: { ...payload, view: "compact" },
+    }),
+  ) as { workerId: string; runId: string; status: string; cwd: string };
+  assert.deepEqual(Object.keys(receipt).sort(), ["cwd", "runId", "status", "workerId"]);
+  const accepted = service.get(receipt.workerId);
+  assert.equal(accepted.worker.latestRun?.id, receipt.runId);
+  assert.ok(["queued", "starting", "running", "completed"].includes(receipt.status));
+  assert.equal(receipt.cwd, accepted.worker.cwd);
+
+  // The same requestId without the view still replays that accepted run instead of conflicting.
+  const replayed = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: { ...payload },
+    }),
+  ) as { worker: WorkerRecord; run: WorkerRun };
+  assert.equal(replayed.worker.id, receipt.workerId);
+  assert.equal(replayed.run.id, receipt.runId);
+  assert.equal(service.get(receipt.workerId).runs.length, 1);
+  const conflict = await client.callTool({
+    name: "worker_start",
+    arguments: { ...payload, prompt: "a different payload", view: "compact" },
+  });
+  assert.equal(conflict.isError, true, "view is not part of the replayed request id");
+  assert.equal(service.get(receipt.workerId).runs.length, 1);
+
+  const finished = text(
+    await client.callTool({
+      name: "worker_wait",
+      arguments: { workerId: receipt.workerId, timeoutSeconds: 10 },
+    }),
+  ) as { run: WorkerRun };
+  assert.equal(finished.run.status, "completed");
+  const feedback = {
+    workerId: receipt.workerId,
+    prompt: "Resume with the same session and return the fixture result.",
+    requestId: "view-replay-resume",
+  };
+  // Repeated reads of the same requestId never spawn a second native invocation.
+  const resumed = text(
+    await client.callTool({ name: "worker_resume", arguments: { ...feedback, view: "compact" } }),
+  ) as { workerId: string; runId: string; status: string; cwd: string };
+  assert.deepEqual(Object.keys(resumed).sort(), ["cwd", "runId", "status", "workerId"]);
+  assert.equal(resumed.workerId, receipt.workerId);
+  assert.notEqual(resumed.runId, receipt.runId);
+  const acceptedResume = service.get(receipt.workerId);
+  assert.equal(acceptedResume.runs.at(-1)?.id, resumed.runId);
+  assert.ok(
+    ["queued", "starting", "running", "completed"].includes(resumed.status),
+  );
+  assert.equal(resumed.cwd, acceptedResume.worker.cwd);
+  const replayedResume = text(
+    await client.callTool({ name: "worker_resume", arguments: { ...feedback } }),
+  ) as { worker: WorkerRecord; run: WorkerRun };
+  assert.equal(replayedResume.worker.id, resumed.workerId);
+  assert.equal(replayedResume.run.id, resumed.runId);
+  assert.equal(service.get(receipt.workerId).runs.length, 2);
+  const resumeConflict = await client.callTool({
+    name: "worker_resume",
+    arguments: { ...feedback, prompt: "a different resume", view: "compact" },
+  });
+  assert.equal(resumeConflict.isError, true);
+  assert.equal(service.get(receipt.workerId).runs.length, 2);
 });

@@ -37,7 +37,7 @@ trap 'exit 1' HUP INT TERM
 
 {
   printf '%s\n' "$worker_start_marker"
-  printf '开始任务时，请先阅读并遵循 `%s` 中的技能禁用规则与 CloudCLI Worker 使用说明（含计划阶段的分工要求）。\n' "$worker_doc"
+  printf '开始任务时，请先阅读并遵循 `%s` 中的技能禁用、分流与回退规则。通过入口检查后加载 `cloudcli-workers` 技能。\n' "$worker_doc"
   printf '%s\n' "$worker_end_marker"
 } > "$worker_block_file"
 

@@ -590,7 +590,7 @@ test('two simultaneous results are merged into one wake turn with batch metadata
   assert.deepEqual(source.results.map((result) => result.workerId), ['worker-1', 'worker-2']);
   const content = String(h.wakeCalls[0].content);
   assert.match(content, /Automatic Worker execution result \(batch batch-1\)/);
-  assert.match(content, /Review the result before continuing/);
+  assert.match(content, /This is not user acceptance\./);
   for (const result of source.results) {
     assert.match(content, new RegExp(`Worker: ${result.workerId}`));
   }
@@ -625,10 +625,14 @@ for (const provider of ['codex', 'dsh'] as const) {
       batchId: 'batch-1', results: [{ workerId: 'worker-1', runId: 'run-1', status: 'running', summary: 'Task soft budget reached (600s elapsed).' }],
     });
     const content = String(h.wakeCalls[0].content);
-    assert.match(content, /progress reminder/);
-    assert.match(content, /Read worker_get for the current run/);
-    assert.match(content, /Confirm cancellation before worker_resume/);
-    assert.match(content, /same workerId and a revised prompt/);
+    assert.match(content, /Automatic Worker progress reminder \/ execution result \(batch batch-1\)/);
+    assert.match(content, /worker_get for the current run/);
+    assert.match(content, /deliverables, diff and verification/);
+    assert.match(content, /useful progress/);
+    assert.match(content, /worker_cancel \(pause: false\)/);
+    assert.match(content, /confirm the stop before resuming/);
+    assert.match(content, /explicit continuation/);
+    assert.match(content, /worker_recover/);
     assert.equal(h.settlements.at(-1)?.delivery, 'delivered');
     h.emitNotification(notification({ id: 'notification-2', status: 'running', summary: 'Task soft budget reached (1200s elapsed).' }));
     h.fireTimers();
