@@ -8,7 +8,7 @@ import {
 } from '@/modules/database/index.js';
 import type { ResidentBindingRecord } from '@/modules/database/index.js';
 import { chatRunRegistry, onChatRunCompleted, onChatRunStarted } from '@/modules/websocket/index.js';
-import type { ResidentContinueAdmission } from '@/modules/websocket/index.js';
+import type { ChatRunSnapshot, ResidentContinueAdmission } from '@/modules/websocket/index.js';
 import { AppError } from '@/shared/utils.js';
 import type {
   LLMProvider,
@@ -166,7 +166,8 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
     } = {},
   ): ResidentBindingRecord {
     const executionId = options.executionId ?? record.executionId;
-    const run = chatRunRegistry.getSnapshot(record.sessionId);
+    const latestRun = chatRunRegistry.getSnapshot(record.sessionId);
+    const run = latestRun?.dispatch.origin === 'control' ? null : latestRun;
     const failed = options.failed ?? Boolean(run?.hadError || run?.success === false);
     // A provider that reported an unsuccessful terminal is a failure even when
     // no earlier `error` event arrived; an aborted run stays a silent stop.
@@ -217,18 +218,8 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
    * dispatch snapshot aligned with the real turn; a new admission clears the
    * stop cause but never the unprocessed latest terminal.
    */
-  function trackRunStarted(run: {
-    sessionId: string;
-    executionId: string;
-    dispatch: {
-      origin: 'foreground' | 'resident' | 'detached';
-      permissionMode: string | null;
-      sandboxMode: string | null;
-      model: string | null;
-      effort: string | null;
-      runtimeMode: string | null;
-    };
-  }): void {
+  function trackRunStarted(run: ChatRunSnapshot & { sessionId: string }): void {
+    if (run.dispatch.origin === 'control') return;
     const record = residentBindingsDb.getBySessionId(run.sessionId);
     if (!record) return;
     // Every real run in the bound session is tracked, whoever asked for it: the
@@ -336,14 +327,14 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
     if (!session.provider_session_id) {
       throw new AppError('The session has no native id yet.', { code: 'session_unavailable', statusCode: 409 });
     }
-    if (!hasActiveRun(sessionId, provider)) {
+    const run = chatRunRegistry.getSnapshot(sessionId);
+    if ((run?.status === 'running' && run.dispatch.origin === 'control') || !hasActiveRun(sessionId, provider)) {
       throw new AppError('Only a running session can become resident.', {
         code: 'not_running',
         statusCode: 409,
       });
     }
 
-    const run = chatRunRegistry.getSnapshot(sessionId);
     const project = session.project_path ? projectsDb.getProjectPath(session.project_path) : null;
     const settings = provider === 'codex' ? sessionRuntimeDb.get(sessionId) : null;
     const record = residentBindingsDb.insert({
@@ -538,7 +529,8 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
     if (!record) return;
     if (record.status !== 'running' && record.status !== 'stopping') return;
     if (chatRunRegistry.isProcessing(sessionId)) return;
-    const run = chatRunRegistry.getSnapshot(sessionId);
+    const latestRun = chatRunRegistry.getSnapshot(sessionId);
+    const run = latestRun?.dispatch.origin === 'control' ? null : latestRun;
     // A foreground stop (chat.abort) is a deliberate user action even though it
     // reaches the host only as a terminal complete: report it silently. A
     // provider terminal that failed (`success: false`, non-zero exit or an
@@ -616,7 +608,7 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       });
       unsubscribeRunCompleted = onChatRunCompleted((sessionId, snapshot) => {
         try {
-          if (suspended) return;
+          if (suspended || snapshot.dispatch.origin === 'control') return;
           const current = residentBindingsDb.getBySessionId(sessionId);
           if (!current || (current.status !== 'running' && current.status !== 'stopping')) return;
           // An abort confirmed by the provider is a finished episode even when a

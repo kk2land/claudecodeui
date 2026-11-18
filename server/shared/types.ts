@@ -1054,6 +1054,7 @@ export type CodexSessionState = {
 export type CodexControlAction =
   | { action: 'state' }
   | { action: 'stop-app-server' }
+  | { action: 'compact' }
   | { action: 'mode'; mode: CodexCollaborationMode }
   | { action: 'runtime'; runtime: CodexRuntimeMode }
   | { action: 'model-provider'; modelProvider: string; model: string | null }
@@ -2296,7 +2297,8 @@ export type ProviderRuntimeGateway = SideQuestionRuntime & {
  * runtime and can distinguish a resident-admitted turn from a foreground one.
  */
 export type ChatRunDispatch = {
-  origin: 'foreground' | 'resident' | 'detached';
+  /** A native control such as compaction takes the session slot without starting a resumable prompt run. */
+  origin: 'foreground' | 'resident' | 'detached' | 'control';
   permissionMode: string | null;
   sandboxMode: string | null;
   model: string | null;

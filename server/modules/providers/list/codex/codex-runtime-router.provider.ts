@@ -120,6 +120,12 @@ export function createCodexRuntimeRouter(overrides: Partial<RouterDependencies> 
         if (action.action === 'goal' && action.operation === 'get') return { ...current, ...settings.get(sessionId) };
         throw new AppError('This action requires the Codex app-server runtime.', { code: 'UNSUPPORTED_RUNTIME_CONTROL', statusCode: 409 });
       }
+      if (action.action === 'compact') {
+        const version = stopVersion;
+        const state = await native.control(sessionId, action, options, writer, context);
+        if (version === stopVersion) processStopped = false;
+        return state;
+      }
       if (action.action === 'goal' && ['set', 'resume'].includes(action.operation)) processStopped = false;
       return native.control(sessionId, action, options, writer, context);
     },

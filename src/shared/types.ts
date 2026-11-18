@@ -2495,6 +2495,7 @@ export type CodexSessionState = {
 export type CodexControlAction =
   | { action: 'state' }
   | { action: 'stop-app-server' }
+  | { action: 'compact' }
   | { action: 'mode'; mode: ('default' | 'plan') }
   | { action: 'runtime'; runtime: ('app-server' | 'sdk') }
   | { action: 'model-provider'; modelProvider: string; model: string | null }

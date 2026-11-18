@@ -45,7 +45,7 @@ type ControlResult = {
 /** Validates control input before any native RPC or durable queue mutation. */
 function parseControl(raw: AnyRecord): CodexControlAction {
   switch (raw.action) {
-    case 'state': case 'stop-app-server': return { action: raw.action };
+    case 'state': case 'stop-app-server': case 'compact': return { action: raw.action };
     case 'mode':
       if (raw.mode === 'default' || raw.mode === 'plan') return { action: 'mode', mode: raw.mode };
       break;
@@ -80,6 +80,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
   const requestId = typeof input.requestId === 'string' ? input.requestId : '';
   const numericUserId = Number(userId);
   const response = { kind: 'control_result' as const, sessionId, requestId };
+  let compactionRun: ReturnType<typeof chatRunRegistry.startRun> = null;
   let steering = false;
   // Todo sources of the steered queue entry, consumed only after the native
   // steer RPC succeeds; an unknown/rejected outcome keeps them pending.
@@ -138,8 +139,17 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
           });
         }
       }
-      const run = chatRunRegistry.getRun(sessionId) ?? chatRunRegistry.startRun({ appSessionId: sessionId, provider: 'codex',
-        providerSessionId: session.provider_session_id, connection, userId, passive: true })!;
+      const runInput = { appSessionId: sessionId, provider: 'codex' as const,
+        providerSessionId: session.provider_session_id, connection, userId };
+      const run = action.action === 'compact'
+        ? chatRunRegistry.startRun({ ...runInput, dispatch: {
+          origin: 'control', permissionMode: null, sandboxMode: null, model: null, effort: null, runtimeMode: 'app-server',
+        } })
+        : chatRunRegistry.getRun(sessionId) ?? chatRunRegistry.startRun({ ...runInput, passive: true });
+      if (!run) throw new AppError('Wait for the current turn to finish before compacting.', { code: 'RUN_IN_PROGRESS', statusCode: 409 });
+      // Reserve the turn before native resume so another sender cannot start
+      // a prompt while the app-server is loading this thread.
+      if (action.action === 'compact') compactionRun = run;
       run.writer.updateWebSocket(connection);
       const options = { ...(input.options ?? {}), sessionId, cwd: session.project_path, projectPath: session.project_path };
       await runtime.control('codex', sessionId, action, options, run.writer);
@@ -152,6 +162,9 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
       codexState: runtime.getState?.('codex', sessionId) };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    if (compactionRun) {
+      chatRunRegistry.completeRunIfCurrent(compactionRun, { exitCode: 1 });
+    }
     // Only an explicit RPC rejection proves non-delivery; disconnects and timeouts remain held.
     const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL', 'CODEX_MODEL_REQUIRED'].includes(error.code));
     const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;

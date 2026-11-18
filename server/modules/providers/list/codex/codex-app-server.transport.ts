@@ -292,10 +292,11 @@ export class CodexAppServerTransport implements CodexRpcClient {
     if (!child) return Promise.reject(new Error('Codex app-server is disconnected.'));
     const id = ++this.nextId;
     return new Promise((resolve, reject) => {
-      // A proxy may hold turn/start for minutes while it waits for a shared
+      // A proxy may hold a turn or compaction start while it waits for a shared
       // concurrency slot and submit interval; acknowledge after that queue
       // instead of declaring the turn unknown at the ordinary RPC deadline.
-      const timeoutMs = this.options.timeoutMs ?? (method === 'turn/start' ? 15 * 60_000 : 30_000);
+      const startsTurn = method === 'turn/start' || method === 'thread/compact/start';
+      const timeoutMs = this.options.timeoutMs ?? (startsTurn ? 15 * 60_000 : 30_000);
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new AppError(`Codex app-server did not confirm ${method}.`, {

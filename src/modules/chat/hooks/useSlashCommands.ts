@@ -14,6 +14,7 @@ type UseSlashCommandsOptions = {
   selectedProject: Project | null;
   provider: LLMProvider;
   goalsEnabled?: boolean;
+  compactEnabled?: boolean;
   input: string;
   setInput: Dispatch<SetStateAction<string>>;
   textareaRef: RefObject<HTMLTextAreaElement>;
@@ -93,6 +94,7 @@ export function useSlashCommands({
   selectedProject,
   provider,
   goalsEnabled = false,
+  compactEnabled = true,
   input,
   setInput,
   textareaRef,
@@ -100,7 +102,6 @@ export function useSlashCommands({
 }: UseSlashCommandsOptions) {
   const { t } = useTranslation('chat');
   const { commands: projectCommands } = useProjectSlashCommands(selectedProject, provider);
-  const [filteredCommands, setFilteredCommands] = useState<SlashCommand[]>([]);
   const [showCommandMenu, setShowCommandMenu] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(-1);
@@ -133,6 +134,7 @@ export function useSlashCommands({
     const parsedHistory = readCommandHistory(selectedProject.projectId);
     const nativeCommands: SlashCommand[] = provider === 'codex' ? [
       { name: '/plan', description: t('codex.planCommand'), type: 'built-in', metadata: { nativeControl: true } },
+      ...(compactEnabled ? [{ name: '/compact', description: t('codex.compactCommand'), type: 'built-in', metadata: { nativeControl: true } }] : []),
       ...(goalsEnabled ? [{ name: '/goal', description: t('codex.goalCommand'), type: 'built-in', metadata: { nativeControl: true } }] : []),
     ] : [];
     // `/todo` is a local application command: it is available as soon as a
@@ -163,17 +165,18 @@ export function useSlashCommands({
       const commandBUsage = parsedHistory[commandB.name] || 0;
       return commandBUsage - commandAUsage;
     });
-  }, [projectCommands, selectedProject, provider, goalsEnabled, t]);
+  }, [projectCommands, selectedProject, provider, goalsEnabled, compactEnabled, t]);
+
+  const filteredCommands = useMemo(
+    () => filterSlashCommands(slashCommands, commandQuery),
+    [slashCommands, commandQuery],
+  );
 
   useEffect(() => {
     if (!showCommandMenu) {
       setSelectedCommandIndex(-1);
     }
   }, [showCommandMenu]);
-
-  useEffect(() => {
-    setFilteredCommands(filterSlashCommands(slashCommands, commandQuery));
-  }, [commandQuery, slashCommands]);
 
   const frequentCommands = useMemo(() => {
     if (!selectedProject || slashCommands.length === 0) {
@@ -287,17 +290,11 @@ export function useSlashCommands({
   );
 
   const handleToggleCommandMenu = useCallback(() => {
-    const isOpening = !showCommandMenu;
-    setShowCommandMenu(isOpening);
+    setShowCommandMenu((open) => !open);
     setCommandQuery('');
     setSelectedCommandIndex(-1);
-
-    if (isOpening) {
-      setFilteredCommands(slashCommands);
-    }
-
     textareaRef.current?.focus();
-  }, [showCommandMenu, slashCommands, textareaRef]);
+  }, [textareaRef]);
 
   const handleCommandInputChange = useCallback(
     (newValue: string, cursorPos: number) => {

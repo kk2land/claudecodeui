@@ -1,4 +1,5 @@
 import { act, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react';
+import type { ChangeEvent } from 'react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 
 import '@/modules/i18n';
@@ -158,6 +159,45 @@ test('/plan alone is a control; /plan task becomes a durable Plan queue entry wh
   expect(h.result.current.queuedDraft?.id).toBeTruthy();
   expect(h.result.current.queuedDraft?.options?.collaborationMode).toBe('plan');
   expect(h.send).not.toHaveBeenCalled();
+});
+
+test('/compact sends the native control for the current conversation and clears the command', async () => {
+  const codex = controls({ phase: 'idle', turnId: null });
+  const h = composer(codex, false);
+  await h.submit('/compact ');
+  expect(codex.control).toHaveBeenCalledExactlyOnceWith({ action: 'compact' });
+  expect(h.result.current.input).toBe('');
+  expect(h.result.current.queuedDraft).toBeNull();
+  expect(h.send).not.toHaveBeenCalled();
+});
+
+test('/compact with arguments keeps the draft and explains how to run the command', async () => {
+  const codex = controls({ phase: 'idle', turnId: null });
+  const h = composer(codex, false);
+  await h.submit('/compact keep the API changes');
+  expect(codex.control).not.toHaveBeenCalled();
+  expect(h.send).not.toHaveBeenCalled();
+  expect(h.result.current.input).toBe('/compact keep the API changes');
+  expect(h.add).toHaveBeenCalledWith(expect.objectContaining({ type: 'error', content: 'Send /compact by itself.' }));
+});
+
+test('a compact admission preserves text typed while it was pending', async () => {
+  const codex = controls({ phase: 'idle', turnId: null });
+  let acknowledge!: () => void;
+  vi.mocked(codex.control).mockImplementation(() => new Promise((resolve) => { acknowledge = resolve; }));
+  const h = composer(codex, false);
+  await act(async () => { h.result.current.setInput('/compact'); });
+  let submission!: Promise<void>;
+  act(() => { submission = h.result.current.handleSubmit({ preventDefault() {} } as never); });
+
+  const textarea = document.createElement('textarea');
+  textarea.value = 'my next prompt';
+  await act(async () => {
+    h.result.current.handleInputChange({ target: textarea } as ChangeEvent<HTMLTextAreaElement>);
+    acknowledge();
+    await submission;
+  });
+  expect(h.result.current.input).toBe('my next prompt');
 });
 
 test('ordinary busy input stays queued and retains its identity across store updates', async () => {

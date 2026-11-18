@@ -778,6 +778,7 @@ export function useChatComposerState({
     selectedProject,
     provider,
     goalsEnabled: codexControls?.goalsEnabled,
+    compactEnabled: codexControls?.state?.runtime !== 'sdk',
     input,
     setInput,
     textareaRef,
@@ -1580,7 +1581,7 @@ export function useChatComposerState({
       // Native controls precede the busy queue branch; pause must never wait behind a turn.
       let planTask = false;
       if (!hasTodoSources && !editingAnchorId && provider === 'codex' && codexControls && !queuedSubmission && !submitOptions?.skipCommandInterception) {
-        const command = /^(\/plan|\/goal)(?:\s+([\s\S]*))?$/.exec(currentInput.trimEnd());
+        const command = /^(\/plan|\/goal|\/compact)(?:\s+([\s\S]*))?$/.exec(currentInput.trimEnd());
         if (command) {
           const argument = command[2]?.trim() ?? '';
           try {
@@ -1591,7 +1592,16 @@ export function useChatComposerState({
               currentInput = argument;
               if (codexControls.state?.goal?.status === 'active') await codexControls.control({ action: 'goal', operation: 'pause' });
             } else {
-              if (command[1] === '/plan') await codexControls.control({ action: 'mode', mode: 'plan' });
+              if (command[1] === '/compact') {
+                if (argument) throw new Error(t('codex.compactUsage'));
+                if (!sessionKey) throw new Error(t('codex.compactNeedsSession'));
+                await codexControls.control({ action: 'compact' });
+                if (submittedScope !== draftScopeRef.current) {
+                  if (readDraftText(sessionKey) === currentInput) writeDraftText(sessionKey, '');
+                  return;
+                }
+                if (inputValueRef.current !== currentInput) return;
+              } else if (command[1] === '/plan') await codexControls.control({ action: 'mode', mode: 'plan' });
               else await codexControls.control({ action: 'goal', operation: !argument ? 'get' : ['pause', 'resume', 'clear'].includes(argument) ? argument as 'pause' | 'resume' | 'clear' : 'set',
                 ...(!['', 'pause', 'resume', 'clear'].includes(argument) ? { objective: argument } : {}) });
               setInput('');

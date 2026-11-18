@@ -60,6 +60,14 @@ test('an app-server session still dispatches to the shared native connection', a
   assert.deepEqual(calls, ['native.run']);
 });
 
+test('compaction is unavailable in an exec-mode Codex session', async () => {
+  const { router, calls } = harness('sdk');
+  await assert.rejects(router.control!('app-session', { action: 'compact' }, {}, writer, context), {
+    code: 'UNSUPPORTED_RUNTIME_CONTROL',
+  });
+  assert.deepEqual(calls, []);
+});
+
 test('abort follows the live exec run, then falls back to the configured runtime adapter when idle', async () => {
   let release: () => void = () => {};
   const calls: string[] = [];

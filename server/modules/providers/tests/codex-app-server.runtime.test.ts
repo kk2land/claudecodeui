@@ -98,6 +98,69 @@ function startTimeoutError() {
   });
 }
 
+test('manual compaction resumes the existing thread and follows its native turn lifecycle', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  h.context.resolveProviderSessionId = () => 'native-thread';
+  let acknowledgeStart!: () => void;
+  h.handlers.set('thread/compact/start', () => new Promise((resolve) => { acknowledgeStart = () => resolve({}); }));
+  const admission = h.control({ action: 'compact' });
+  await eventually(() => Boolean(acknowledgeStart));
+  const state = await Promise.race([admission, new Promise<undefined>((resolve) => setImmediate(resolve, undefined))]);
+  acknowledgeStart();
+  await admission;
+  assert.equal(state?.phase, 'starting', 'CloudCLI acknowledges compaction while the proxy waits to start the native turn');
+  assert.equal(h.calls.some(({ method }) => method === 'thread/resume'), true);
+  assert.deepEqual(h.calls.at(-1), { method: 'thread/compact/start', params: { threadId: 'native-thread' } });
+  assert.equal(h.calls.some(({ method }) => method === 'turn/start' || method === 'thread/start'), false);
+
+  h.event('turn/started', { turn: { id: 'compaction', status: 'inProgress' } });
+  assert.equal(h.runtime.getState('app-session').phase, 'running');
+  await assert.rejects(h.control({ action: 'compact' }), { code: 'RUN_IN_PROGRESS' });
+  h.event('item/completed', { turnId: 'compaction', item: { id: 'summary', type: 'contextCompaction' } });
+  h.finish('compaction');
+  assert.deepEqual(h.events.find(({ id }) => id === 'codex:compaction:summary')?.compact, { phase: 'done' });
+  assert.equal(h.events.filter(({ kind, turnId }) => kind === 'complete' && turnId === 'compaction').length, 1);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
+
+test('manual compaction requires an existing native thread', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  await assert.rejects(h.control({ action: 'compact' }), { code: 'CODEX_COMPACTION_NEEDS_SESSION' });
+  assert.deepEqual(h.calls, []);
+});
+
+test('an unconfirmed compaction stays active until its native turn completes', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  h.context.resolveProviderSessionId = () => 'native-thread';
+  h.handlers.set('thread/compact/start', async () => {
+    throw new AppError('Codex did not confirm compaction.', { code: 'CODEX_APP_SERVER_TIMEOUT' });
+  });
+  await h.control({ action: 'compact' });
+  await eventually(() => h.runtime.getState('app-session').phase === 'stopFailed');
+  assert.equal(h.runtime.isBusy('app-session'), true);
+  h.event('turn/started', { turn: { id: 'compaction', status: 'inProgress' } });
+  h.finish('compaction');
+  assert.equal(h.runtime.isBusy('app-session'), false);
+  assert.equal(h.runtime.getState('app-session').phase, 'idle');
+});
+
+test('a native compaction rejection reports a failure and releases the turn', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  h.context.resolveProviderSessionId = () => 'native-thread';
+  h.handlers.set('thread/compact/start', async () => {
+    throw new AppError('Native compaction rejected.', { code: 'CODEX_APP_SERVER_REJECTED' });
+  });
+  await h.control({ action: 'compact' });
+  await eventually(() => h.runtime.getState('app-session').phase === 'failed');
+  assert.equal(h.runtime.isBusy('app-session'), false);
+  assert.equal(h.events.find(({ kind }) => kind === 'error')?.content, 'Native compaction rejected.');
+  assert.equal(h.events.find(({ kind }) => kind === 'complete')?.success, false);
+});
+
 test('a model service process exit leaves another service turn running', async (t) => {
   const h = harness();
   t.after(() => h.runtime.close());
@@ -1262,6 +1325,39 @@ test('process stop holds idle native sessions too, preventing queued work from r
   assert.equal(h.settings().queueHeld, true);
   assert.equal(h.runtime.getState('app-session').phase, 'idle');
   assert.equal(h.runtime.getState('app-session').error, undefined);
+});
+
+test('a rejected compaction keeps a stopped app-server closed during history polling', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => {} });
+  const control = (sessionId: string, action: Parameters<NonNullable<typeof router.control>>[1]) =>
+    router.control!(sessionId, action, { ...h.options, sessionId }, h.writer, h.context);
+
+  await control('app-session', { action: 'stop-app-server' });
+  await assert.rejects(control('app-session', { action: 'compact' }), { code: 'CODEX_COMPACTION_NEEDS_SESSION' });
+  h.context.resolveProviderSessionId = () => 'native-thread';
+  await control('existing-session', { action: 'goal', operation: 'get' });
+  assert.deepEqual(h.calls, []);
+});
+
+test('stopping app-server during a compaction route lookup cancels the pending resume', async (t) => {
+  const h = harness();
+  t.after(() => h.runtime.close());
+  h.context.resolveProviderSessionId = () => 'native-thread';
+  h.settingsDb.update('app-session', { modelSelection: { modelProvider: 'openai', model: 'test-model' } });
+  let resolveRoute!: (route: AnyRecord) => void;
+  h.handlers.set('thread/read', () => new Promise((resolve) => { resolveRoute = resolve; }));
+  const router = createCodexRuntimeRouter({ native: h.runtime, settings: h.settingsDb, stop: async () => {} });
+  const control = (action: Parameters<NonNullable<typeof router.control>>[1]) =>
+    router.control!('app-session', action, h.options, h.writer, h.context);
+
+  const compacting = assert.rejects(control({ action: 'compact' }), /cancelled by Stop/);
+  await eventually(() => Boolean(resolveRoute));
+  await control({ action: 'stop-app-server' });
+  resolveRoute({ thread: { modelProvider: 'openai', model: 'test-model' } });
+  await compacting;
+  assert.deepEqual(h.calls.map(({ method }) => method), ['thread/read']);
 });
 
 test('process stop blocks other native queues through SIGTERM timeout without blocking SDK or other providers', async () => {

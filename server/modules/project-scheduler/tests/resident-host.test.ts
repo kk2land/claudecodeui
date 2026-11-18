@@ -13,6 +13,7 @@ import {
 } from '@/modules/database/index.js';
 import { sessionsService } from '@/modules/providers/index.js';
 import { chatRunRegistry, startResidentContinueTurn } from '@/modules/websocket/index.js';
+import type { ChatRunDispatch } from '@/modules/websocket/index.js';
 import type {
   ProviderRuntimeGateway,
   ResidentBindingView,
@@ -95,7 +96,7 @@ function createHarness(options: {
 
 /** Admits a real registry run, the way dispatchRun does synchronously. */
 function admitRun(
-  origin: 'foreground' | 'resident' = 'foreground',
+  origin: ChatRunDispatch['origin'] = 'foreground',
   runtimeMode: 'app-server' | 'sdk' = 'app-server',
 ) {
   chatRunRegistry.clearAll();
@@ -313,6 +314,28 @@ test('a foreground turn after a natural end is tracked and classified from the p
     assert.equal(failed.terminal?.status, 'failed');
     assert.equal(failed.terminal?.alert, true);
     assert.match(failed.terminal?.reason ?? '', /exited with code 1/);
+    await harness.host.shutdown();
+  });
+});
+
+test('manual compaction keeps the resident binding and its recovery settings intact', async () => {
+  await withDatabase(async () => {
+    const harness = createHarness();
+    admitRun('control');
+    await assert.rejects(harness.host.handleRequest('adopt', { taskId: 'task-1', sessionId: SESSION }), { code: 'not_running' });
+    admitRun();
+    await harness.host.handleRequest('adopt', { taskId: 'task-1', sessionId: SESSION });
+    chatRunRegistry.completeRun(SESSION, { exitCode: 0 });
+    harness.host.onSessionSettled(SESSION);
+    const stopped = residentBindingsDb.getByTaskId('task-1');
+    assert.equal(stopped?.status, 'stopped');
+
+    admitRun('control');
+    assert.equal(chatRunRegistry.isProcessing(SESSION), true);
+    assert.deepEqual(residentBindingsDb.getByTaskId('task-1'), stopped);
+    chatRunRegistry.completeRun(SESSION, { exitCode: 1 });
+    harness.host.onSessionSettled(SESSION);
+    assert.deepEqual(residentBindingsDb.getByTaskId('task-1'), stopped);
     await harness.host.shutdown();
   });
 });

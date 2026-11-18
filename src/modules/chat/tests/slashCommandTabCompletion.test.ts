@@ -4,7 +4,7 @@ import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, it, vi } from 'vitest';
 import type { KeyboardEvent, RefObject } from 'react';
 
-import type { Project, SlashCommand } from '@/shared/types';
+import type { LLMProvider, Project, SlashCommand } from '@/shared/types';
 
 /**
  * Regression guard for #1185: Tab on a highlighted slash-command suggestion
@@ -129,6 +129,31 @@ it('only lists /goal for Codex after the server enables Goals', async () => {
   await waitFor(() => assert.equal(result.current.slashCommands.some((command) => command.name === '/goal'), true));
   rerender({ goalsEnabled: false });
   assert.equal(result.current.slashCommands.some((command) => command.name === '/goal'), false);
+});
+
+it('groups /compact with /plan only in the Codex app-server menu', () => {
+  const nonCodexMenuRenders: string[][] = [];
+  const { result, rerender } = renderHook(({ provider, compactEnabled }: { provider: LLMProvider; compactEnabled: boolean }) => {
+    const commands = useSlashCommands({
+      selectedProject: project, provider, compactEnabled, input: '', setInput: () => {},
+      textareaRef: { current: null }, onExecuteCommand: () => {},
+    });
+    if (provider !== 'codex') nonCodexMenuRenders.push(commands.filteredCommands.map(({ name }) => name));
+    return commands;
+  }, { initialProps: { provider: 'codex', compactEnabled: true } });
+  const plan = result.current.slashCommands.find((command) => command.name === '/plan');
+  const compact = result.current.slashCommands.find((command) => command.name === '/compact');
+  assert.ok(plan && compact);
+  assert.equal(compact.type, plan.type);
+  assert.equal(compact.namespace, plan.namespace);
+  assert.equal(compact.metadata?.nativeControl, true);
+
+  rerender({ provider: 'codex', compactEnabled: false });
+  assert.equal(result.current.slashCommands.some((command) => command.name === '/compact'), false);
+  rerender({ provider: 'codex', compactEnabled: true });
+  rerender({ provider: 'dsh', compactEnabled: true });
+  assert.ok(nonCodexMenuRenders.length > 0);
+  assert.equal(nonCodexMenuRenders.some((commands) => commands.includes('/compact')), false);
 });
 
 afterEach(() => {

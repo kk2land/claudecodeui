@@ -91,6 +91,35 @@ test('model-provider controls validate and forward the current session selection
   });
 });
 
+test('compact reserves the session until the native turn ends', async () => {
+  await harness(async (h) => {
+    h.send({ action: 'compact' });
+    await settle();
+    assert.deepEqual(h.calls[0].action, { action: 'compact' });
+    assert.equal(h.frames.at(-1)?.ok, true);
+    assert.equal(chatRunRegistry.isProcessing(h.sessionId), true);
+    assert.equal(chatRunRegistry.getSnapshot(h.sessionId)?.dispatch.origin, 'control');
+
+    h.send({ action: 'compact' }, 'second-compaction');
+    await settle();
+    assert.equal(h.frames.at(-1)?.code, 'RUN_IN_PROGRESS');
+    assert.equal(h.calls.length, 1);
+
+    chatRunRegistry.completeRun(h.sessionId, { exitCode: 0 });
+    assert.equal(chatRunRegistry.isProcessing(h.sessionId), false);
+  });
+});
+
+test('a rejected compact request releases its reserved session', async () => {
+  await harness(async (h) => {
+    h.runtime.control = async () => { throw new AppError('No native thread.', { code: 'CODEX_COMPACTION_NEEDS_SESSION' }); };
+    h.send({ action: 'compact' });
+    await settle();
+    assert.equal(h.frames.at(-1)?.code, 'CODEX_COMPACTION_NEEDS_SESSION');
+    assert.equal(chatRunRegistry.isProcessing(h.sessionId), false);
+  });
+});
+
 for (const blocker of ['running', 'background', 'queued'] as const) {
   test(`service switching is rejected with ${blocker} work even when the client bypasses disabled controls`, async () => {
     await harness(async (h) => {

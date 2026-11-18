@@ -210,7 +210,7 @@ test('an expanded body that is exactly "help" is sent as the message, not opened
   assert.deepEqual(chatSends().map((message) => message.content), ['help']);
 });
 
-for (const expandedBody of ['/plan review the change', '/goal pause']) {
+for (const expandedBody of ['/plan review the change', '/goal pause', '/compact']) {
   test(`a Codex custom command sends ${JSON.stringify(expandedBody)} as text without invoking native controls`, async () => {
     expandedContent = expandedBody;
     const codex: CodexControls = {
@@ -219,8 +219,8 @@ for (const expandedBody of ['/plan review the change', '/goal pause']) {
       control: vi.fn(), steer: vi.fn(),
     };
     const { view, chatSends } = renderComposer('codex', codex);
-    // Two project commands, `/plan`, `/goal` and the locally injected `/todo`.
-    await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 5));
+    // Two project commands, three native controls and the locally injected `/todo`.
+    await waitFor(() => assert.equal(view.result.current.slashCommandsCount, 6));
     await act(async () => { view.result.current.setInput('/echo hi'); });
     await act(async () => { await view.result.current.handleSubmit({ preventDefault() {} } as never); });
     await waitFor(() => assert.equal(chatSends().length, 1));

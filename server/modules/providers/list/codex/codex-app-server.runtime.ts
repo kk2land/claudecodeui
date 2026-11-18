@@ -36,7 +36,7 @@ type NativeTurn = {
   id: string | null;
   writer: ProviderRuntimeWriter;
   /**
-   * The in-flight `turn/start` RPC only, present until its ack or rejection.
+   * The in-flight turn or compaction start RPC, present until its ack or rejection.
    * Stop awaits it to distinguish "not acknowledged yet" from "result unknown";
    * it must never hold the longer `turn.done` wait of the whole run.
    */
@@ -1328,13 +1328,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
           } catch (error) { pauseError = error; }
         }
         // An unacknowledged start has no native id to interrupt yet. Wait for
-        // the RPC to settle or the turn to end natively before reconciling;
-        // run() alone turns a rejection into a terminal or uncertain outcome.
+        // the RPC to settle or the turn to end natively before reconciling.
+        // The starter classifies a rejected RPC as terminal or uncertain.
         const startingTurn = session.turn;
         if (startingTurn && !startingTurn.terminal && !startingTurn.id && startingTurn.starting) {
           await bounded(Promise.race([startingTurn.starting.catch(() => undefined), startingTurn.done]));
         }
-        // Retrying an uncertain turn/start recovers its id before interrupting it.
+        // Retrying an uncertain start recovers its id before interrupting it.
         const pendingTurn = session.turn;
         if (session.threadId && pendingTurn && !pendingTurn.terminal && !pendingTurn.id && !session.setup) {
           const result = await request('thread/read', { threadId: session.threadId, includeTurns: true });
@@ -1417,12 +1417,12 @@ export class CodexAppServerRuntime implements IProviderRuntime {
   }
 
   async control(sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter, context: ProviderRuntimeContext): Promise<CodexSessionState> {
-    if (action.action !== 'goal' && action.action !== 'mode' && action.action !== 'model-provider') return this.applyControl(sessionId, action, options, writer, context);
+    if (action.action !== 'goal' && action.action !== 'mode' && action.action !== 'model-provider' && action.action !== 'compact') return this.applyControl(sessionId, action, options, writer, context);
     const version = this.stopVersions.get(sessionId) ?? 0;
     const previous = this.controls.get(sessionId);
     const operation = (async () => {
       await previous?.catch(() => {});
-      if (version !== (this.stopVersions.get(sessionId) ?? 0) && (action.action === 'mode' || action.action === 'goal' && ['set', 'resume'].includes(action.operation))) {
+      if (version !== (this.stopVersions.get(sessionId) ?? 0) && (action.action === 'mode' || action.action === 'compact' || action.action === 'goal' && ['set', 'resume'].includes(action.operation))) {
         throw new Error('This control was cancelled by Stop.');
       }
       return this.applyControl(sessionId, action, options, writer, context, version);
@@ -1552,6 +1552,43 @@ export class CodexAppServerRuntime implements IProviderRuntime {
         if (action.mode === 'plan') this.clearPrediction(existing);
         this.publish(existing);
       }
+      return this.getState(sessionId);
+    }
+    if (action.action === 'compact') {
+      const threadId = context.resolveProviderSessionId(sessionId);
+      if (!threadId) throw new AppError('Send a message in this Codex conversation before compacting it.', { code: 'CODEX_COMPACTION_NEEDS_SESSION', statusCode: 409 });
+      if (selected?.model === null) throw new AppError('Choose a model before compacting the context.', { code: 'CODEX_MODEL_REQUIRED', statusCode: 409 });
+      if (this.hasNativeWork(sessionId)) throw new AppError('Wait for the current Codex work to finish before compacting.', { code: 'RUN_IN_PROGRESS', statusCode: 409 });
+
+      await this.assertSelectionMatchesNative(sessionId, threadId, selected);
+      if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0)) throw new Error('This compaction was cancelled by Stop.');
+      const session = await this.ensure(sessionId, options, writer, context, selected);
+      this.assertLiveSession(session);
+      if (stopVersion !== (this.stopVersions.get(sessionId) ?? 0) || session.stopRequested && session.state.phase !== 'idle') {
+        throw new Error('Wait for Codex to confirm it has stopped.');
+      }
+      session.stopRequested = false;
+      this.syncKeepalive();
+      const turn = this.newTurn(session, writer, null);
+      this.publish(session);
+      // Confirm admission to the composer while the proxy waits for a slot.
+      // The run writer reports native progress and any subsequent failure.
+      turn.starting = this.client.request('thread/compact/start', { threadId: session.threadId });
+      void Promise.race([turn.starting, turn.done])
+        .catch((error: unknown) => {
+          if (turn.terminal) return;
+          if (error instanceof AppError && error.code === 'CODEX_APP_SERVER_TIMEOUT') {
+            if (!turn.id) {
+              // A native notification may still confirm the request.
+              session.state.phase = 'stopFailed';
+              session.state.error = error.message;
+              this.publish(session);
+            }
+            return;
+          }
+          this.complete(session, 'failed', error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => { turn.starting = null; });
       return this.getState(sessionId);
     }
     if (action.operation === 'get' && !context.resolveProviderSessionId(sessionId) && !this.sessions.has(sessionId)) return this.getState(sessionId);
