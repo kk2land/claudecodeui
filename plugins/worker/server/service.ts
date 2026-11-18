@@ -1759,6 +1759,7 @@ export class WorkerService {
       query.cursor,
       query.limit,
       TERMINAL.includes(run.status),
+      query.tail === true,
     );
   }
 
@@ -2438,8 +2439,19 @@ export class WorkerService {
       this.store.saveRun(run);
       const worker = this.store.worker(run.workerId)!;
       const elapsed = run.startedAt === null ? 0 : Math.floor((this.now() - Date.parse(run.startedAt)) / 1000);
+      // Live phase/tool locate the current step without waiting for a throttled progress save.
+      const phase = handle.progress.phase?.slice(0, 40);
+      const tool = handle.progress.currentTool?.slice(0, 40);
+      const since = run.progress.lastEventAt === null
+        ? null
+        : Math.floor((this.now() - Date.parse(run.progress.lastEventAt)) / 1000);
       this.notify(worker, run, "running", this.owners.get(worker.ownerId)?.owner.paused === true,
-        `${worker.taskName}: soft budget reached (${elapsed}s elapsed, ${run.progress.steps ?? "unknown"} steps; thresholds ${settings.softReminderSeconds}s / ${settings.softReminderSteps} steps). Check actual progress before deciding whether to intervene.`);
+        `${worker.taskName}: soft budget reached (${elapsed}s elapsed`
+        + (steps === null ? "" : `, ${steps} steps`)
+        + (phase ? `, phase ${phase}` : "")
+        + (tool ? `, tool ${tool}` : "")
+        + (since === null ? "" : `, last event ${since}s ago`)
+        + ")");
       // The reminder wakes an idle parent for review; it never cancels the run.
       this.emitChanged(run.workerId);
     }

@@ -280,21 +280,25 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_logs",
     {
-      description: "分页读取一次运行的原始事件或 stderr",
+      description: "分页读取一次运行的原始事件或 stderr；无 cursor 时可传 tail 读末尾小窗口，用返回的 nextCursor 继续",
       inputSchema: {
         workerId: z.string(),
         runId: z.string().optional(),
         stream: z.enum(["events", "stderr"]).optional(),
         cursor: z.string().optional(),
         limit: z.number().int().positive().max(262144).optional(),
+        tail: z
+          .boolean()
+          .optional()
+          .describe("无 cursor 时从末尾读取小窗口；省略时从头读取，cursor 优先"),
       },
     },
-    async ({ workerId, runId, stream, cursor, limit }) => {
+    async ({ workerId, runId, stream, cursor, limit, tail }) => {
       try {
         return result(
           service.logs(
             workerId,
-            { runId, stream: stream ?? "events", cursor, limit },
+            { runId, stream: stream ?? "events", cursor, limit, tail },
             ownerId,
           ),
         );

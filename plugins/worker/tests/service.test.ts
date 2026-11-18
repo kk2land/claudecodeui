@@ -327,8 +327,16 @@ for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget ded
   assert.equal(reminder.delivery, "pending");
   assert.equal(reminder.workerId, started.worker.id);
   assert.equal(reminder.runId, started.run.id);
-  assert.match(reminder.summary, /soft budget reached/);
-  assert.match(reminder.summary, /thresholds 600s \/ 20 steps/);
+  assert.match(reminder.summary, /soft budget reached \(\d+s elapsed(?:, \d+ steps)?, phase \w+/);
+  assert.match(reminder.summary, /last event \d+s ago\)$/);
+  // A silent tool keeps its name; a fast step run may already be final without one.
+  if (trigger === "elapsed") {
+    assert.doesNotMatch(reminder.summary, / steps/);
+    assert.match(reminder.summary, /, tool read,/);
+  } else {
+    assert.match(reminder.summary, /, \d+ steps,/);
+  }
+  assert.doesNotMatch(reminder.summary, /thresholds|Check actual progress|\n/);
   if (trigger === "steps")
     assert.ok((service.get(started.worker.id).worker.latestRun?.progress.steps ?? 0) >= 20);
   assert.equal(service.state().counts.total.running, 1, "a reminder still occupies its execution slot");

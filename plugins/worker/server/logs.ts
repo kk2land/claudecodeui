@@ -4,6 +4,7 @@ import type { StreamName, WorkerLogPage } from "./shared/index.js";
 
 const MAX_BYTES = 24 * 1024 * 1024;
 const PAGE_BYTES = 64 * 1024;
+const TAIL_BYTES = 4 * 1024;
 
 /** Appends raw output to a bounded run log; a marker records the first truncation. */
 export function appendLog(
@@ -24,7 +25,9 @@ export function appendLog(
 
 /**
  * Reads one UTF-8-safe page from a run log. Cursors are byte offsets, so a caller can page
- * incrementally while the run is still writing.
+ * incrementally while the run is still writing. Without a cursor, `tail` starts at the last
+ * bounded window (4 KiB by default) instead of the beginning, skipping any leading partial
+ * character so the page still decodes cleanly.
  */
 export function readLogPage(
   directory: string,
@@ -32,28 +35,35 @@ export function readLogPage(
   cursor: string | undefined,
   limit: number | undefined,
   done: boolean,
+  tail = false,
 ): WorkerLogPage {
-  const start = cursor === undefined ? 0 : Number(cursor);
-  if (!Number.isSafeInteger(start) || start < 0)
+  const fromTail = tail && cursor === undefined;
+  const start = cursor === undefined ? null : Number(cursor);
+  if (start !== null && (!Number.isSafeInteger(start) || start < 0))
     throw Object.assign(new Error("无效日志游标"), { code: "INVALID_CURSOR" });
   const size = Number.isSafeInteger(limit)
     ? Math.max(1, Math.min(PAGE_BYTES * 4, limit!))
-    : PAGE_BYTES;
+    : fromTail
+      ? TAIL_BYTES
+      : PAGE_BYTES;
   const file = path.join(directory, stream + ".log");
   if (!fs.existsSync(file))
     return { text: "", nextCursor: done ? null : "0", done };
   const descriptor = fs.openSync(file, "r");
   try {
     const length = fs.fstatSync(descriptor).size;
-    const from = Math.min(start, length);
+    const from = Math.min(start ?? (fromTail ? Math.max(0, length - size) : 0), length);
     // Read a small lookahead so a limit that lands inside a multibyte character can still
     // include that complete character and advance the cursor.
     const buffer = Buffer.alloc(Math.min(size + 4, length - from));
     const count = fs.readSync(descriptor, buffer, 0, buffer.length, from);
+    // A tail window can start inside a character; drop its continuation bytes.
+    let begin = 0;
+    if (fromTail) while (begin < count && (buffer[begin]! & 0xc0) === 0x80) begin++;
     let end = Math.min(count, size);
     // If the page boundary splits a UTF-8 sequence, extend to the end of that character.
     while (end < count && (buffer[end]! & 0xc0) === 0x80) end++;
-    const text = buffer.subarray(0, end).toString("utf8");
+    const text = buffer.subarray(begin, end).toString("utf8");
     const next = from + end;
     return {
       text,

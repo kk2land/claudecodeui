@@ -732,12 +732,17 @@ export type WorkerLogPage = {
 /** Raw output stream exposed by `GET /workers/:workerId/logs`. */
 export type WorkerLogStream = "events" | "stderr";
 
-/** Query parameters for one log page; cursors are opaque plugin-issued strings. */
+/**
+ * Query parameters for one log page; cursors are opaque plugin-issued strings. Without a cursor a
+ * page starts at the beginning; `tail` instead reads a bounded window from the end (4 KiB unless
+ * `limit` overrides it) so a running log can be followed with the returned cursor.
+ */
 export type WorkerLogQuery = {
   runId?: string;
   stream: WorkerLogStream;
   cursor?: string;
   limit?: number;
+  tail?: boolean;
 };
 
 /** Query parameters for `GET /state`. Both filters are optional and may be combined. */

@@ -460,7 +460,8 @@ worker 记录。原生会话、分支和工作目录不会被自动删除；记�
 
 插件数据位于宿主分配的插件数据目录（通常为 `CLOUDCLI_PLUGIN_DATA_DIR`，按宿主数据库路径隔离），包含
 运行记录、计划、outbox 与实例会话目录 `sessions/dsh`、`sessions/pi`。日志与结果可能含敏感内容，只能通过
-受保护的 UI REST 与 MCP 读取；计划仅通过所属父会话的 MCP 读取与保存。MCP token 不进入 CLI 环境，
+受保护的 UI REST 与 MCP 读取；`worker_logs` 可传 `tail: true`：无 cursor 时从末尾读取默认 4 KiB 小窗口，
+显式 cursor 优先，运行中继续读时用返回的 `nextCursor`。计划仅通过所属父会话的 MCP 读取与保存。MCP token 不进入 CLI 环境，
 host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自动改写用户全局配置与认证
 数据；安装脚本仅在用户主动运行时维护上述引用块。执行器按既有方式读取配置和认证，Worker 原生会话使用独立存储。
 

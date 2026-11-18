@@ -246,6 +246,24 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   assert.match(logs.text, /session/);
   assert.equal(logs.done, true);
 
+  const tailed = text(
+    await client.callTool({
+      name: "worker_logs",
+      arguments: { workerId: started.worker.id, tail: true, limit: 8 },
+    }),
+  ) as { text: string; nextCursor: string | null; done: boolean };
+  assert.ok(logs.text.endsWith(tailed.text), "tail returns the end of the raw log");
+  assert.equal(tailed.nextCursor, null);
+  assert.equal(tailed.done, true);
+  const fromHead = text(
+    await client.callTool({
+      name: "worker_logs",
+      arguments: { workerId: started.worker.id, cursor: "0", tail: true, limit: 8 },
+    }),
+  ) as { text: string };
+  assert.ok(logs.text.startsWith(fromHead.text), "an explicit cursor wins over tail");
+  assert.notEqual(fromHead.text, tailed.text);
+
   const { type: _defaultOmittedType, ...defaultOmitted } = startInput({
     requestId: "mcp-default-start",
     taskName: "mcp default task",

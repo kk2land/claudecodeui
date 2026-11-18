@@ -29,7 +29,7 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 
 ## 派发与续接
 
-- 先保存计划再派发，接受后回填 worker/run 标识。交接写清目标、范围与基线、验收、停止条件，以及本次任务的全局执行限制。已有事实直接提供，不要求 Worker 重查。模板已给出具体写法，需要时读 [计划记录与交接模板](references/workflows.md)。
+- 先保存计划再派发，接受后回填 worker/run 标识。交接写清目标、范围与基线、验收、停止条件，以及本次任务的全局执行限制。已有事实直接提供，不要求 Worker 重查。模板已给出具体写法，需要时读 [计划记录与交接模板](references/workflows.md)。交接要求回包首句给结论或需主代理决定的具体问题；逐角色证据见模板，有答案续接原 Worker，长详情按需读取。
 - 每次启动/续接用新 `requestId`，仅同一操作和载荷重试时复用。不重复派发同一目标。新建任务按主要交付物标注单一 `taskRole`，`writePaths` 相对 cwd，只读为 `[]`。
 - `worker_start` 显式选 `workspace.mode`。`existing` 写入不重叠，`worktree` 隔离并可指定 `baseRef`。脏源默认拒绝，仅已授权、确认不依赖未提交改动且记录基线后用 `allowDirtySource: true`。
 - `worker_resume` 用原 workerId、cwd、home 和原生会话，不传 `taskRole`，模型/effort 沿用原 run 除非用户指定覆盖。只读任务不能续接为写入任务。其余范围或契约变化由主代理决定。续接只交接变化的部分。
@@ -46,8 +46,8 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 
 - start/resume 接受即返回，可能排队。继续处理已就绪任务或独立工作，仅剩等待时简报状态并交还回合。新任务不自动 steer/取消原 Worker。
 - 需要查询时用 `worker_list`/`worker_get`，复用响应。按 `notifications[].id` 批量 `worker_ack`，重试复用 ID。`completed` 和 ack 都不代表验收。`worker_wait` 仅限用户要求等待或必要短查，单次最多 25 秒，不循环轮询保活。
-- 首次预算提醒默认 600 秒或 20 步，已投递后每 600 秒再提醒，未投递不叠加。提醒时 `worker_get` 核对当前 run，比较实际交付物、diff 和检查结果。`running`、步数和进程存活不算进展。有新有效产出就等下次自动提醒，软提醒不自动取消。
-- 验收核对实际 diff 和验证结果，证据用路径与结论表示，不采信自述摘要。按 run/stream/cursor 增量读 `worker_logs`，每次小页。日志不改变执行边界。集成后完成必要的最终验收。结论、证据与交接写回计划，未验证项明确标注，旧计划不证明 Worker 可续接。
+- 首次预算提醒默认 600 秒或 20 步，已投递后每 600 秒再提醒，未投递不叠加。提醒先作初筛，只有需核对当前 run 或产出时才 `worker_get`；是否干预仍看实际产出。`running`、步数和进程存活不算进展。有新有效产出就等下次自动提醒，软提醒不自动取消。
+- 验收核对实际 diff 和验证结果，证据用路径与结论表示，不采信自述摘要。按 run/stream/cursor 增量读 `worker_logs`，每次小页；查最近错误可按需 `tail: true` 读末尾，再用返回的 `nextCursor` 续读。日志不改变执行边界。集成后完成必要的最终验收。结论、证据与交接写回计划，未验证项明确标注，旧计划不证明 Worker 可续接。
 - 仅因新改动、失败或未决问题重跑。同一失败已在未修改基线复现时，记录限制并继续剩余交付，不重复完整测试。
 - 向用户报告改动、验证结果、阻塞项和 worker/run 标识。
 
