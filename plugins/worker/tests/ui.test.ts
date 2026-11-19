@@ -62,6 +62,45 @@ after(async () => {
   if (tempDirectory) await rm(tempDirectory, { recursive: true, force: true });
 });
 
+/**
+ * jsdom has no layout and no `ResizeObserver`; the plugin's content-resize hook is provided by a
+ * fake that a test flushes after it changes the simulated scroll metrics.
+ */
+class FakeResizeObserver {
+  private static all = new Set<FakeResizeObserver>();
+  constructor(private callback: () => void) {
+    FakeResizeObserver.all.add(this);
+  }
+  observe() {}
+  disconnect() {
+    FakeResizeObserver.all.delete(this);
+  }
+  static flush() {
+    for (const observer of [...FakeResizeObserver.all]) observer.callback();
+  }
+  static get count() {
+    return FakeResizeObserver.all.size;
+  }
+}
+
+/** Replaces scroll metrics so a test can act out layout changes jsdom cannot compute. */
+function stubScrollMetrics(box: HTMLElement) {
+  const metrics = { scrollTop: 0, scrollHeight: 0, clientHeight: 0 };
+  for (const name of ["scrollHeight", "clientHeight"] as const)
+    Object.defineProperty(box, name, {
+      configurable: true,
+      get: () => metrics[name],
+    });
+  Object.defineProperty(box, "scrollTop", {
+    configurable: true,
+    get: () => metrics.scrollTop,
+    set: (next: number) => {
+      metrics.scrollTop = Math.max(0, Math.min(next, Math.max(0, metrics.scrollHeight - metrics.clientHeight)));
+    },
+  });
+  return metrics;
+}
+
 /** Installs browser globals React expects before the bundle is imported. */
 function installDom() {
   const dom = new JSDOM(
@@ -86,10 +125,14 @@ function installDom() {
     "KeyboardEvent",
     "SubmitEvent",
     "getComputedStyle",
+    "MutationObserver",
+    "ResizeObserver",
     "requestAnimationFrame",
     "cancelAnimationFrame",
   ])
     globals[name] = (dom.window as unknown as Record<string, unknown>)[name];
+  // jsdom provides no ResizeObserver; the fake lets a test flush the plugin's layout hook.
+  globals.ResizeObserver = FakeResizeObserver;
   globals.IS_REACT_ACT_ENVIRONMENT = true;
   return dom;
 }
@@ -2689,6 +2732,386 @@ test("DOM: the conversation drains every page and retries an empty running page"
       "an empty running page keeps the cursor and retries",
     );
     assert.ok(!logCalls.some((call) => call.path.includes("stream=stderr")));
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: the conversation reads its last page first and prepends earlier pages in log order", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+  });
+  const record = worker({ latestRun: completed });
+  const requests: string[] = [];
+  const mounted = await mountPlugin({
+    conversation: true,
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (pathAndQuery.includes("before=900"))
+        return {
+          // The earlier page ends its own turn, so it stays a row of its own after the rebuild.
+          text: jsonl([
+            { type: "text", text: "更早一段" },
+            { type: "status", phase: "turn_end" },
+          ]),
+          prevCursor: null,
+          nextCursor: "900",
+          done: true,
+        };
+      return {
+        text: jsonl([{ type: "text", text: "尾页答复" }]),
+        prevCursor: "900",
+        nextCursor: null,
+        done: true,
+      };
+    },
+    input: () => ({ prompt: "请执行任务" }),
+    detail: () => ({ worker: record, runs: [completed] }),
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("尾页答复"),
+      "尾页对话",
+    );
+    // Opening a run reads only the end of its log: one tail page, no history request.
+    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    assert.ok(requests[0]!.includes("tail=true"), requests[0]);
+    assert.equal(requests[0]!.includes("cursor="), false);
+    assert.equal(requests[0]!.includes("before="), false);
+    // The run's first prompt belongs to the log start, which is not loaded yet.
+    assert.equal(textOf(mounted.container).includes("请执行任务"), false);
+    const box = byLabel(mounted.container, "对话内容")!;
+    const view = mounted.dom.window as unknown as {
+      Event: new (type: string) => Event;
+    };
+    // The first placement and a downward or motionless scroll never read history.
+    box.dispatchEvent(new view.Event("scroll"));
+    box.dispatchEvent(new view.Event("scroll"));
+    await delay(60);
+    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    // A real upward move to the top does. jsdom has no layout, so the offset is simulated.
+    const metrics = stubScrollMetrics(box);
+    metrics.clientHeight = 300;
+    metrics.scrollHeight = 2000;
+    metrics.scrollTop = 400;
+    box.dispatchEvent(new view.Event("scroll"));
+    metrics.scrollTop = 0;
+    box.dispatchEvent(new view.Event("scroll"));
+    await waitFor(
+      () => textOf(mounted.container).includes("更早一段"),
+      "更早内容",
+    );
+    assert.equal(requests.filter((path) => path.includes("before=900")).length, 1);
+    await waitFor(
+      () => textOf(mounted.container).includes("请执行任务"),
+      "日志开头的提示词",
+    );
+    const rows = mounted.views[0]!.messages.map((row) => String(row.text));
+    assert.deepEqual(rows, ["请执行任务", "更早一段", "尾页答复"]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a short tail page pages back only on an upward wheel at the top", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+  });
+  const record = worker({ latestRun: completed });
+  const requests: string[] = [];
+  const mounted = await mountPlugin({
+    conversation: true,
+    detail: () => ({ worker: record, runs: [completed] }),
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (!pathAndQuery.includes("before="))
+        return {
+          text: jsonl([{ type: "text", text: "唯一尾页" }]),
+          prevCursor: "40",
+          nextCursor: null,
+          done: true,
+        };
+      return {
+        text: jsonl([
+          { type: "text", text: "开头一段" },
+          { type: "status", phase: "turn_end" },
+        ]),
+        // Another page stays available, so a spurious scroll would request a second one.
+        prevCursor: "10",
+        nextCursor: "40",
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("唯一尾页"),
+      "短尾页",
+    );
+    // A tail page that fits the panel is not extended by itself.
+    await delay(80);
+    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    const box = byLabel(mounted.container, "对话内容")!;
+    const view = mounted.dom.window as unknown as {
+      WheelEvent: new (type: string, init: { deltaY: number }) => Event;
+    };
+    // A downward wheel at the top requests nothing; an upward one asks for the page above.
+    box.dispatchEvent(new view.WheelEvent("wheel", { deltaY: 120 }));
+    await delay(60);
+    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    box.dispatchEvent(new view.WheelEvent("wheel", { deltaY: -120 }));
+    await waitFor(
+      () => textOf(mounted.container).includes("开头一段"),
+      "主动翻页",
+    );
+    assert.ok(requests[1]!.includes("before=40"), requests[1]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: an earlier page from a short tail replaces the followed bottom with its own start", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+  });
+  const record = worker({ latestRun: completed });
+  const requests: string[] = [];
+  const mounted = await mountPlugin({
+    detail: () => ({ worker: record, runs: [completed] }),
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (!pathAndQuery.includes("before="))
+        return {
+          text: jsonl([{ type: "text", text: "唯一尾页" }]),
+          prevCursor: "40",
+          nextCursor: null,
+          done: true,
+        };
+      return {
+        text: jsonl([
+          { type: "text", text: "开头一段" },
+          { type: "status", phase: "turn_end" },
+        ]),
+        // Another page stays available, so a spurious scroll would request a second one.
+        prevCursor: "10",
+        nextCursor: "40",
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("唯一尾页"),
+      "短尾页",
+    );
+    const box = byLabel(mounted.container, "对话内容")!;
+    // The tail page fits the panel: there is no scroll range to keep.
+    const metrics = stubScrollMetrics(box);
+    metrics.clientHeight = 300;
+    metrics.scrollHeight = 200;
+    const view = mounted.dom.window as unknown as {
+      WheelEvent: new (type: string, init: { deltaY: number }) => Event;
+    };
+    box.dispatchEvent(new view.WheelEvent("wheel", { deltaY: -120 }));
+    await waitFor(
+      () => textOf(mounted.container).includes("开头一段"),
+      "上滚加载到更早内容",
+    );
+    assert.ok(requests[1]!.includes("before=40"), requests[1]);
+    // The host keeps following the newest row while the rows are drawn; the earlier page must
+    // still open at its own first row.
+    metrics.scrollHeight = 900;
+    metrics.scrollTop = 600;
+    const scrollEvents = mounted.dom.window as unknown as { Event: new (type: string) => Event };
+    box.dispatchEvent(new scrollEvents.Event("scroll"));
+    FakeResizeObserver.flush();
+    assert.equal(metrics.scrollTop, 0, "短尾页翻页后应停在新增内容的开头");
+    // The browser then delivers the scroll of that compensation; it is not a reader move.
+    box.dispatchEvent(new scrollEvents.Event("scroll"));
+    await delay(120);
+    assert.equal(
+      requests.filter((path) => path.includes("before=")).length,
+      1,
+      JSON.stringify(requests),
+    );
+    // That hold ended with the first overflowing page.
+    metrics.scrollTop = 500;
+    FakeResizeObserver.flush();
+    assert.equal(metrics.scrollTop, 500);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a bottom position clamped by a growing viewport is not an upward scroll", async () => {
+  const mounted = await mountPlugin({
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      return {
+        text: jsonl([{ type: "text", text: "尾页" }]),
+        prevCursor: "40",
+        nextCursor: null,
+        done: true,
+      };
+    },
+  });
+  const requests: string[] = [];
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => textOf(mounted.container).includes("尾页"), "尾页");
+    const box = byLabel(mounted.container, "对话内容")!;
+    const metrics = stubScrollMetrics(box);
+    const view = mounted.dom.window as unknown as { Event: new (type: string) => Event };
+    // 440px of text in a 400px viewport: the bottom is 40px.
+    metrics.scrollHeight = 440;
+    metrics.clientHeight = 400;
+    metrics.scrollTop = 40;
+    box.dispatchEvent(new view.Event("scroll"));
+    await delay(60);
+    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    // A viewport grown to 420px leaves a 20px maximum, so the browser clamps the offset.
+    metrics.clientHeight = 420;
+    metrics.scrollTop = 20;
+    box.dispatchEvent(new view.Event("scroll"));
+    await delay(80);
+    assert.deepEqual(requests.length, 1, "夹紧到新的底部不算上滚，不应请求历史");
+    // A real upward scroll still pages.
+    metrics.scrollTop = 0;
+    box.dispatchEvent(new view.Event("scroll"));
+    await waitFor(
+      () => requests.length === 2,
+      "真实上滚请求历史",
+    );
+    assert.ok(requests[1]!.includes("before=40"), requests[1]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: selecting another record opens its conversation tail instead of the last log tab", async () => {
+  const older = run({
+    id: "run-1",
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+    model: "old-model",
+  });
+  const latest = run({
+    id: "run-2",
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+    model: "new-model",
+  });
+  const record = worker({ latestRun: older });
+  const requests: string[] = [];
+  const mounted = await mountPlugin({
+    conversation: true,
+    detail: () => ({ worker: record, runs: [older, latest] }),
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      return {
+        text: jsonl([
+          {
+            type: "final",
+            text: pathAndQuery.includes("runId=run-2") ? "run2 尾页" : "run1 尾页",
+          },
+        ]),
+        prevCursor: null,
+        nextCursor: null,
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(() => textOf(mounted.container).includes("run1 尾页"), "首个运行");
+    findButton(mounted.container, "原始事件")!.click();
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "原始事件日志")),
+      "原始事件",
+    );
+    findButton(mounted.container, "new-model")!.click();
+    await waitFor(
+      () =>
+        findButton(mounted.container, "对话")!.getAttribute("aria-pressed") ===
+        "true",
+      "默认回到对话标签",
+    );
+    await waitFor(() => textOf(mounted.container).includes("run2 尾页"), "新运行对话");
+    const reopened = requests
+      .slice(requests.findIndex((path) => path.includes("runId=run-2")))
+      .find((path) => path.includes("runId=run-2"))!;
+    assert.ok(reopened.includes("tail=true"), reopened);
+    assert.equal(reopened.includes("stream=stderr"), false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: clicking the selected record again returns to its conversation end", async () => {
+  const completed = run({
+    status: "completed",
+    finishedAt: new Date().toISOString(),
+    exitCode: 0,
+  });
+  const record = worker({ latestRun: completed });
+  const requests: string[] = [];
+  let tails = 0;
+  const mounted = await mountPlugin({
+    conversation: true,
+    detail: () => ({ worker: record, runs: [completed] }),
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (pathAndQuery.includes("tail=true")) tails += 1;
+      return {
+        text: jsonl([{ type: "text", text: "尾页第 " + tails + " 次读取" }]),
+        prevCursor: null,
+        nextCursor: null,
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
+    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("尾页第 1 次读取"),
+      "首次对话",
+    );
+    findButton(mounted.container, "原始事件")!.click();
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "原始事件日志")),
+      "原始事件",
+    );
+    // The already selected record is reopened: the console returns to its conversation tail.
+    findButton(mounted.container, "deepseek-v4")!.click();
+    await waitFor(
+      () =>
+        findButton(mounted.container, "对话")!.getAttribute("aria-pressed") ===
+        "true",
+      "回到对话标签",
+    );
+    await waitFor(
+      () => textOf(mounted.container).includes("尾页第 2 次读取"),
+      "重新读取尾页",
+    );
+    const last = requests.at(-1)!;
+    assert.ok(last.includes("tail=true"), last);
   } finally {
     mounted.unmount();
   }

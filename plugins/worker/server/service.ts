@@ -1787,14 +1787,13 @@ export class WorkerService {
       : this.store.latestRun(worker.id);
     if (!run || run.workerId !== worker.id)
       throw new WorkerFailure("RUN_NOT_FOUND", "运行记录不存在");
-    return readLogPage(
-      this.runDirectory(worker.id, run.id),
-      query.stream,
-      query.cursor,
-      query.limit,
-      TERMINAL.includes(run.status),
-      query.tail === true,
-    );
+    return readLogPage(this.runDirectory(worker.id, run.id), query.stream, {
+      cursor: query.cursor,
+      before: query.before,
+      limit: query.limit,
+      done: TERMINAL.includes(run.status),
+      tail: query.tail === true,
+    });
   }
 
   /**

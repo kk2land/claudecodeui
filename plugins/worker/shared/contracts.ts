@@ -728,9 +728,14 @@ export type WorkerStateSnapshot = {
   notifications: WorkerNotification[];
 };
 
-/** One page of raw run output. `nextCursor` is null when no further page exists. */
+/**
+ * One page of raw run output. `prevCursor` is the byte offset this page starts at and is null when
+ * the page starts at the log start, so a reader can walk backwards page by page. `nextCursor` is
+ * the offset to continue from and is null when no further page exists.
+ */
 export type WorkerLogPage = {
   text: string;
+  prevCursor: string | null;
   nextCursor: string | null;
   done: boolean;
 };
@@ -741,12 +746,15 @@ export type WorkerLogStream = "events" | "stderr";
 /**
  * Query parameters for one log page; cursors are opaque plugin-issued strings. Without a cursor a
  * page starts at the beginning; `tail` instead reads a bounded window from the end (4 KiB unless
- * `limit` overrides it) so a running log can be followed with the returned cursor.
+ * `limit` overrides it) so a running log can be followed with the returned cursor. `before` reads
+ * one page ending exactly at that offset instead, which is how a reader pages backwards from a
+ * tail window; the returned `prevCursor` is the next `before`.
  */
 export type WorkerLogQuery = {
   runId?: string;
   stream: WorkerLogStream;
   cursor?: string;
+  before?: string;
   limit?: number;
   tail?: boolean;
 };

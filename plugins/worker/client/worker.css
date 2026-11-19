@@ -26,6 +26,14 @@
   min-height: 100%;
   box-sizing: border-box;
 }
+/* The detail view fills the workspace tab: its fixed header blocks stay on top and the run layout
+   takes the remaining height, so the records list and the console end at the usable bottom. */
+.worker-plugin[data-view="detail"] {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 100%;
+}
 .worker-plugin[data-theme="dark"] {
   --worker-bg: #17191d;
   --worker-soft: #202329;
@@ -341,6 +349,7 @@
   padding-left: 0 !important;
   border: 0 !important;
   background: transparent !important;
+  align-self: flex-start;
 }
 .worker-detail-info {
   margin-bottom: 14px;
@@ -438,12 +447,15 @@
   grid-template-columns: 230px minmax(0, 1fr);
   gap: 14px;
   margin-top: 14px;
+  flex: 1 1 auto;
+  /* A short viewport keeps a usable pair of panes and scrolls the rest of the detail instead. */
+  min-height: 360px;
 }
 .worker-runs {
   border: 1px solid var(--worker-border);
   border-radius: 8px;
   padding: 12px;
-  max-height: 480px;
+  min-height: 0;
   overflow: auto;
 }
 .worker-runs h3 {
@@ -486,9 +498,9 @@
 }
 .worker-log {
   flex: 1;
+  min-height: 0;
   margin: 0;
   padding: 12px;
-  max-height: 420px;
   overflow: auto;
   background: var(--worker-bg);
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
@@ -505,7 +517,8 @@
   flex-direction: column;
   gap: 8px;
   padding: 10px 12px;
-  min-height: 260px;
+  flex: 1;
+  min-height: 0;
   background: var(--worker-bg);
 }
 .worker-conv > .worker-muted {
@@ -513,20 +526,24 @@
 }
 .worker-conv-host {
   /* The wrapper is the only scrolling container for a host-rendered conversation; the host
-     view fills it and must not add a second scroller. */
-  height: 320px;
+     view fills it and must not add a second scroller. The pager restores the offset itself after
+     prepending older rows, so the browser must not apply its own anchoring correction too. */
+  flex: 1;
+  min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
 }
 .worker-conv-fallback {
   position: relative;
   display: flex;
   flex: 1;
-  min-height: 260px;
+  min-height: 0;
 }
 .worker-conv-scroll {
   flex: 1;
-  max-height: 420px;
+  min-height: 0;
   overflow: auto;
+  overflow-anchor: none;
 }
 .worker-conv-list {
   display: flex;
@@ -1031,9 +1048,12 @@
   }
   .worker-run-layout {
     grid-template-columns: 1fr;
+    /* Stacked panes share the available height: the records list stays bounded and the console
+       takes the rest, each scrolling on its own. */
+    grid-template-rows: minmax(0, 180px) minmax(280px, 1fr);
   }
   .worker-runs {
-    max-height: 220px;
+    min-height: 0;
   }
   .worker-table {
     display: block;

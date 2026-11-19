@@ -89,8 +89,11 @@ app.get(
       stream: req.query.stream === "stderr" ? "stderr" : "events",
       cursor:
         typeof req.query.cursor === "string" ? req.query.cursor : undefined,
+      before:
+        typeof req.query.before === "string" ? req.query.before : undefined,
       limit:
         typeof req.query.limit === "string" ? Number(req.query.limit) : undefined,
+      tail: req.query.tail === "true",
     }),
   ),
 );

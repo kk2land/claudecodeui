@@ -93,11 +93,16 @@ export function workerApi(host: WorkerHost) {
       runId: string | null,
       stream: WorkerLogStream,
       cursor: string | null,
-      limit = 64 * 1024,
+      options: { limit?: number; tail?: boolean; before?: string } = {},
     ) => {
-      const params = new URLSearchParams({ stream, limit: String(limit) });
+      const params = new URLSearchParams({
+        stream,
+        limit: String(options.limit ?? 64 * 1024),
+      });
       if (runId) params.set("runId", runId);
       if (cursor) params.set("cursor", cursor);
+      if (options.before) params.set("before", options.before);
+      if (options.tail) params.set("tail", "true");
       return request<WorkerLogPage>(
         "GET",
         "/workers/" +
