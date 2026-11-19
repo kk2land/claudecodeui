@@ -28,6 +28,7 @@ function panelHarness(options: {
   mode?: 'default' | 'plan';
   latestPlan?: PlanHandoffLatestPlan | null;
   pending?: boolean;
+  handedOffTargetSessionId?: string | null;
   implementInNewSession?: () => Promise<void>;
 } = {}) {
   const implementInNewSession = options.implementInNewSession ?? vi.fn(async () => {});
@@ -45,6 +46,7 @@ function panelHarness(options: {
     latestPlan: options.latestPlan === undefined
       ? { sourceSessionId: 'source-session', markdown: '# Plan' }
       : options.latestPlan,
+    handedOffTargetSessionId: options.handedOffTargetSessionId ?? null,
   };
   const view = render(
     <PlanHandoffContext.Provider value={context}>
@@ -98,6 +100,20 @@ test('a pending handoff disables the entry with the existing pending wording', (
   assert.equal((button as HTMLButtonElement).disabled, true);
 });
 
+test('a plan that already has a target is offered as opening that session', async () => {
+  const { implementInNewSession } = panelHarness({ handedOffTargetSessionId: 'target-session' });
+
+  const button = screen.getByRole('button', { name: 'Open session' });
+  assert.equal(button.getAttribute('title'), 'Open the session already implementing this plan');
+  // The misleading new-session wording is gone once the target exists.
+  assert.equal(screen.queryByRole('button', { name: 'New session' }), null);
+
+  // The hook owns navigation; the toolbar still routes the click through it.
+  fireEvent.click(button);
+  await act(async () => { await Promise.resolve(); });
+  assert.equal((implementInNewSession as ReturnType<typeof vi.fn>).mock.calls.length, 1);
+});
+
 test('a creation failure stays beside the toolbar for its own plan and a retry is possible', async () => {
   const implementInNewSession = vi.fn(async () => { throw new Error('gateway unavailable'); });
   const first = { sourceSessionId: 'source-session', markdown: '# First plan' };
@@ -144,6 +160,7 @@ test('the plan card keeps only its permission footer and offers no new-session e
         implementInNewSession: vi.fn(async () => {}),
         pending: false,
         latestPlan: { sourceSessionId: 'source-session', markdown: '# Plan' },
+        handedOffTargetSessionId: null,
       }}>
         <PlanDisplay title="Plan" content="## Step 1" toolName="ExitPlanMode" />
       </PlanHandoffContext.Provider>
@@ -168,6 +185,7 @@ test('the hook creates one target, sends once to the returned id and carries the
     sendMessage,
     onSessionEstablished,
     onSessionProcessing,
+    sourceSessionId: 'source-session',
     content: 'Implement the plan.',
     model: 'gpt-native',
     effort: 'medium',
@@ -206,7 +224,7 @@ test('a second click while creation is in flight does not allocate another sessi
   apiMocks.createSession.mockReturnValue(new Promise((resolve) => { resolveCreate = resolve; }));
   const sendMessage = vi.fn();
   const { result } = renderHook(() => usePlanHandoff({
-    enabled: true, project, sendMessage, onSessionEstablished: vi.fn(),
+    enabled: true, project, sendMessage, onSessionEstablished: vi.fn(), sourceSessionId: 'source-session',
     content: 'Implement the plan.', model: 'm', effort: 'default', permissionMode: 'default',
     resolvePermissionModeForProvider: (_provider, mode) => mode as 'default',
   }));
@@ -233,7 +251,7 @@ test('creation failure dispatches nothing and carries no plan selection', async 
   const sendMessage = vi.fn();
   const onSessionEstablished = vi.fn();
   const { result } = renderHook(() => usePlanHandoff({
-    enabled: true, project, sendMessage, onSessionEstablished,
+    enabled: true, project, sendMessage, onSessionEstablished, sourceSessionId: 'source-session',
     content: 'Implement the plan.', model: 'm', effort: 'default', permissionMode: 'default',
     resolvePermissionModeForProvider: (_provider, mode) => mode as 'default',
   }));
@@ -244,4 +262,78 @@ test('creation failure dispatches nothing and carries no plan selection', async 
   );
   assert.equal(sendMessage.mock.calls.length, 0);
   assert.equal(onSessionEstablished.mock.calls.length, 0);
+});
+
+test('a successfully handed-off plan is reopened instead of created again, while a revision or another source still creates', async () => {
+  const markdown = '## Plan\n\n1. Keep every word';
+  const revised = `${markdown}\n2. Then this`;
+  const sendMessage = vi.fn();
+  const onSessionEstablished = vi.fn();
+  const onSessionProcessing = vi.fn();
+  const onOpenSession = vi.fn();
+  apiMocks.createSession.mockResolvedValue(createResponse('target-three'));
+  apiMocks.createSession
+    .mockResolvedValueOnce(createResponse('target-one'))
+    .mockResolvedValueOnce(createResponse('target-two'));
+
+  const { result, rerender } = renderHook(({ sourceSessionId }: { sourceSessionId: string }) => usePlanHandoff({
+    enabled: true, project, sendMessage, onSessionEstablished, onSessionProcessing, onOpenSession,
+    sourceSessionId, content: 'Implement the plan.', model: 'm', effort: 'default', permissionMode: 'default',
+    resolvePermissionModeForProvider: (_provider, mode) => mode as 'default',
+  }), { initialProps: { sourceSessionId: 'source-a' } });
+
+  await act(async () => { await result.current.implementInNewSession({ markdown }); });
+  assert.equal(apiMocks.createSession.mock.calls.length, 1);
+  assert.equal(result.current.handedOffSessionIdFor({ markdown }), 'target-one');
+
+  // The same source and the identical body only navigate: no second target, no
+  // establishment, no processing mark and no second send.
+  await act(async () => { await result.current.implementInNewSession({ markdown }); });
+  assert.deepEqual(onOpenSession.mock.calls, [['target-one']]);
+  assert.equal(apiMocks.createSession.mock.calls.length, 1);
+  assert.equal(sendMessage.mock.calls.length, 1);
+  assert.equal(onSessionEstablished.mock.calls.length, 1);
+  assert.equal(onSessionProcessing.mock.calls.length, 1);
+  assert.equal(result.current.handedOffSessionIdFor({ markdown: revised }), null);
+
+  // A revised plan body is a first handoff of its own.
+  await act(async () => { await result.current.implementInNewSession({ markdown: revised }); });
+  assert.equal(apiMocks.createSession.mock.calls.length, 2);
+  assert.equal(sendMessage.mock.calls.length, 2);
+  assert.equal(onSessionEstablished.mock.calls.at(-1)?.[0], 'target-two');
+
+  // Identical text from another source session must not reuse the first target.
+  rerender({ sourceSessionId: 'source-b' });
+  assert.equal(result.current.handedOffSessionIdFor({ markdown }), null);
+  await act(async () => { await result.current.implementInNewSession({ markdown }); });
+  assert.equal(apiMocks.createSession.mock.calls.length, 3);
+  assert.equal(sendMessage.mock.calls.length, 3);
+  assert.equal(onOpenSession.mock.calls.length, 1);
+});
+
+test('a failed handoff records no target, so the next click still creates one', async () => {
+  apiMocks.createSession.mockResolvedValueOnce({
+    ok: false, status: 500, json: async () => ({ error: { message: 'gateway unavailable' } }),
+  });
+  apiMocks.createSession.mockResolvedValueOnce(createResponse('target-after-retry'));
+  const sendMessage = vi.fn();
+  const onOpenSession = vi.fn();
+  const { result } = renderHook(() => usePlanHandoff({
+    enabled: true, project, sendMessage, onSessionEstablished: vi.fn(), onOpenSession,
+    sourceSessionId: 'source-session',
+    content: 'Implement the plan.', model: 'm', effort: 'default', permissionMode: 'default',
+    resolvePermissionModeForProvider: (_provider, mode) => mode as 'default',
+  }));
+
+  await assert.rejects(
+    () => result.current.implementInNewSession({ markdown: '# Plan' }),
+    /gateway unavailable/,
+  );
+  assert.equal(result.current.handedOffSessionIdFor({ markdown: '# Plan' }), null);
+
+  await act(async () => { await result.current.implementInNewSession({ markdown: '# Plan' }); });
+  assert.equal(apiMocks.createSession.mock.calls.length, 2);
+  assert.equal(sendMessage.mock.calls.length, 1);
+  assert.equal(result.current.handedOffSessionIdFor({ markdown: '# Plan' }), 'target-after-retry');
+  assert.equal(onOpenSession.mock.calls.length, 0);
 });

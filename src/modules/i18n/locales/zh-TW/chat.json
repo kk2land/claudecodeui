@@ -171,7 +171,9 @@
     "workersActive": "本工作階段有活動 Worker",
     "implementInNewSession": "新工作階段執行",
     "implementInNewSessionTooltip": "在新工作階段實作完整計畫",
-    "implementInNewSessionPending": "正在建立新工作階段…"
+    "implementInNewSessionPending": "正在建立新工作階段…",
+    "openHandedOffSession": "開啟執行工作階段",
+    "openHandedOffSessionTooltip": "開啟已執行此計畫的工作階段"
   },
   "input": {
     "placeholder": "輸入 / 叫用指令，@ 選取檔案，或向 {{provider}} 提問...",

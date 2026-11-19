@@ -316,6 +316,10 @@ function ChatInterface({
     sendMessage,
     onSessionEstablished: handleSessionEstablished,
     onSessionProcessing,
+    // The plan on screen belongs to this open transcript; with its exact body it
+    // identifies a handoff this page already completed.
+    sourceSessionId: composerSessionId || null,
+    onOpenSession: onNavigateToSession,
     content: t('codex.implementPrompt'),
     model: planHandoffSendModel,
     effort: planHandoffSendEffort,
@@ -353,15 +357,22 @@ function ChatInterface({
     return null;
   }, [planHandoffEnabled, selectedProject, isProcessing, isLoadingSessionMessages,
     codexControls.state?.mode, selectedSession?.id, currentSessionId, chatMessages]);
+  // A plan this page already handed off has one target; the toolbar relabels
+  // its entry to reopen that session instead of creating another.
+  const planHandoffTargetSessionId = latestPlan
+    ? planHandoff.handedOffSessionIdFor(latestPlan)
+    : null;
   const planHandoffContextValue = useMemo(
     () => planHandoff.enabled
       ? {
           implementInNewSession: planHandoff.implementInNewSession,
           pending: planHandoff.pending,
           latestPlan,
+          handedOffTargetSessionId: planHandoffTargetSessionId,
         }
       : null,
-    [planHandoff.enabled, planHandoff.implementInNewSession, planHandoff.pending, latestPlan],
+    [planHandoff.enabled, planHandoff.implementInNewSession, planHandoff.pending,
+      latestPlan, planHandoffTargetSessionId],
   );
 
   /**

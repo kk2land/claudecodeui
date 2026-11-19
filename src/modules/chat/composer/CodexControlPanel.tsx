@@ -71,6 +71,9 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
   // ChatInterface publishes a plan only when the tool, mode, transcript load and
   // connection all allow a native handoff; the toolbar only decides to show it.
   const latestPlan = planHandoff?.latestPlan ?? null;
+  // A plan this page already handed off has a target; the entry opens it rather
+  // than creating, processing or sending a duplicate.
+  const handedOffTargetSessionId = latestPlan ? planHandoff?.handedOffTargetSessionId ?? null : null;
   // A creation failure is remembered with the exact plan it tried, so switching
   // session or producing another plan never carries a stale error along.
   const [handoffFailure, setHandoffFailure] = useState<{ scope: string; message: string } | null>(null);
@@ -113,9 +116,12 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
             {state?.mode === 'plan' && <button type="button" className={button} disabled={pending || busy}
               onClick={() => void controls.control({ action: 'mode', mode: 'default' }).then(onExecutePlan).catch(() => {})}>{t('codex.executePlan')}</button>}
             {state?.mode === 'plan' && latestPlan && <button type="button" className={button}
-              disabled={planHandoff?.pending === true} title={t('codex.implementInNewSessionTooltip')}
+              disabled={planHandoff?.pending === true}
+              title={t(handedOffTargetSessionId ? 'codex.openHandedOffSessionTooltip' : 'codex.implementInNewSessionTooltip')}
               onClick={() => void handleImplementLatestPlan()}>
-              {planHandoff?.pending ? t('codex.implementInNewSessionPending') : t('codex.implementInNewSession')}
+              {handedOffTargetSessionId
+                ? t('codex.openHandedOffSession')
+                : planHandoff?.pending ? t('codex.implementInNewSessionPending') : t('codex.implementInNewSession')}
             </button>}
             {handoffFailureMessage && <span role="alert" className="text-xs text-destructive">{handoffFailureMessage}</span>}
             {settingsContainer === undefined && <>

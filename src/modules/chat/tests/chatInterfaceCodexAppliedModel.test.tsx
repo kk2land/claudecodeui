@@ -180,8 +180,9 @@ const { default: ChatInterface } = await import('@/modules/chat/ChatInterface');
 const project: Project = { projectId: 'p1', displayName: 'repo', fullPath: '/work/repo', path: '/work/repo' };
 const session: ProjectSession = { id: 'source-session', provider: 'codex' };
 
-function renderChat() {
-  return render(<ChatInterface isActive selectedProject={project} selectedSession={session} ws={null} sendMessage={harness.sendMessage} />);
+function renderChat(overrides: { onNavigateToSession?: (sessionId: string) => void } = {}) {
+  return render(<ChatInterface isActive selectedProject={project} selectedSession={session} ws={null}
+    sendMessage={harness.sendMessage} onNavigateToSession={overrides.onNavigateToSession} />);
 }
 
 function createdSessionResponse(sessionId = 'target-session', sessionName = 'Plan') {
@@ -525,4 +526,52 @@ test('a context clear ends the plan scope so an earlier plan is never handed off
   renderChat();
   await act(async () => { await Promise.resolve(); });
   assert.equal(harness.planHandoff?.latestPlan, null);
+});
+
+test('the same plan after leaving to the target and back only navigates to the target it already created', async () => {
+  const markdown = '## Plan\n\nDo the work';
+  const targetSession: ProjectSession = { id: 'target-session', provider: 'codex' };
+  const sourcePlan = () => [planRow({ toolInput: JSON.stringify({ plan: markdown }) })];
+  harness.mode = 'plan';
+  harness.chatMessages = sourcePlan();
+  harness.createSession.mockResolvedValue(createdSessionResponse('target-session', 'Plan'));
+  // Same route, so switching sessions must not remount ChatInterface or its handoff record.
+  const onNavigateToSession = vi.fn();
+  const chatTree = (selected: ProjectSession) => (
+    <ChatInterface isActive selectedProject={project} selectedSession={selected} ws={null}
+      sendMessage={harness.sendMessage} onNavigateToSession={onNavigateToSession} />
+  );
+  const view = render(chatTree(session));
+  await act(async () => { await Promise.resolve(); });
+
+  await act(async () => { await harness.planHandoff!.implementInNewSession({ markdown }); });
+  assert.equal(harness.createSession.mock.calls.length, 1);
+  assert.equal(harness.sendMessage.mock.calls.length, 1);
+  // The establishment itself navigates once through the existing callback.
+  assert.deepEqual(onNavigateToSession.mock.calls, [['target-session']]);
+  assert.equal(harness.planHandoff?.handedOffTargetSessionId, 'target-session');
+
+  // Really open the target: it is no longer in plan mode and knows no plan of its own.
+  harness.mode = 'default';
+  harness.chatMessages = [];
+  view.rerender(chatTree(targetSession));
+  await act(async () => { await Promise.resolve(); });
+  // The target neither publishes a plan nor owns the source handoff record.
+  const onTarget = harness.planHandoff;
+  assert.equal(onTarget?.latestPlan, null);
+  assert.equal(onTarget?.handedOffTargetSessionId, null);
+
+  // Back on the source with the very same plan: the handoff is re-identified.
+  harness.mode = 'plan';
+  harness.chatMessages = sourcePlan();
+  view.rerender(chatTree(session));
+  await act(async () => { await Promise.resolve(); });
+  const backOnSource = harness.planHandoff;
+  assert.equal(backOnSource?.latestPlan?.markdown, markdown);
+  assert.equal(backOnSource?.handedOffTargetSessionId, 'target-session');
+
+  await act(async () => { await harness.planHandoff!.implementInNewSession({ markdown }); });
+  assert.equal(harness.createSession.mock.calls.length, 1);
+  assert.equal(harness.sendMessage.mock.calls.length, 1);
+  assert.deepEqual(onNavigateToSession.mock.calls, [['target-session'], ['target-session']]);
 });

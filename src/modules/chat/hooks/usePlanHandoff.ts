@@ -18,6 +18,18 @@ type PlanHandoffArgs = {
   project: Project | null;
   sendMessage(message: unknown): void;
   onSessionEstablished(sessionId: string, context: SessionEstablishedContext): void;
+  /**
+   * Application session whose transcript produced the plan. Together with the
+   * exact plan body it identifies a completed handoff, so a repeat click can
+   * reopen the existing target instead of allocating another session.
+   */
+  sourceSessionId: string | null;
+  /**
+   * Navigates to a target that already runs this plan. The hook only remembers
+   * a completed handoff while this callback exists, because a remembered target
+   * must be reachable rather than silently swallowed.
+   */
+  onOpenSession?(sessionId: string): void;
   onSessionProcessing?(sessionId: string, activity: { statusText: string | null; canInterrupt: boolean }): void;
   /** Prompt the new session starts with; the approved plan itself travels in `approvedPlan`. */
   content: string;
@@ -44,6 +56,14 @@ const readFailureMessage = (body: CreateSessionBody | null, status: number): str
 };
 
 /**
+ * Identity of one handoff attempt: the source session plus the plan body exactly
+ * as shown. A revised plan or another source session is a different key, so it
+ * still starts its own target; identical text from the same session is reused.
+ */
+const planHandoffKey = (sourceSessionId: string | null, markdown: string): string =>
+  `${sourceSessionId ?? ''}\u0000${markdown}`;
+
+/**
  * Used by chat's ChatInterface to implement an approved plan in a brand-new
  * Codex session.
  *
@@ -52,6 +72,11 @@ const readFailureMessage = (body: CreateSessionBody | null, status: number): str
  * session gateway and receives exactly one explicit `chat.send`. The target's
  * native user echo is what appears in its transcript, and a refused send is
  * reported on the target by the existing realtime protocol-error path.
+ *
+ * A handoff is remembered only after its target received that one send, and
+ * only for this page: clicking the same plan again navigates to that target
+ * through `onOpenSession` instead of creating, processing or sending anything
+ * twice. Nothing is persisted and no other tab or session history is involved.
  */
 export function usePlanHandoff({
   enabled,
@@ -59,6 +84,8 @@ export function usePlanHandoff({
   sendMessage,
   onSessionEstablished,
   onSessionProcessing,
+  sourceSessionId,
+  onOpenSession,
   content,
   model,
   effort,
@@ -70,9 +97,20 @@ export function usePlanHandoff({
   const [pending, setPending] = useState(false);
   // Guards against two clicks in the same tick, before the state update renders.
   const inFlightRef = useRef(false);
+  // Completed handoffs of this page, keyed by source session and exact plan body,
+  // holding the target to reopen. State rather than a ref so the toolbar can
+  // relabel its entry once a plan has a target; it is never persisted.
+  const [handedOffPlans, setHandedOffPlans] = useState<ReadonlyMap<string, string>>(() => new Map());
 
   const implementInNewSession = useCallback(async ({ markdown }: { markdown: string }) => {
     if (!enabled || inFlightRef.current) return;
+    // A plan that already reached a target only needs navigation: no second
+    // target, establishment, processing mark or `chat.send`.
+    const handedOffTarget = handedOffPlans.get(planHandoffKey(sourceSessionId, markdown));
+    if (handedOffTarget) {
+      onOpenSession?.(handedOffTarget);
+      return;
+    }
     const projectPath = project?.fullPath || project?.path || '';
     if (!project || !projectPath) throw new Error('Choose a project before implementing the plan.');
 
@@ -123,6 +161,11 @@ export function usePlanHandoff({
           },
         },
       });
+      // Recorded after the send, so a failed creation or dispatch stays retryable.
+      if (onOpenSession) {
+        const key = planHandoffKey(sourceSessionId, markdown);
+        setHandedOffPlans((plans) => new Map(plans).set(key, targetSessionId));
+      }
     } finally {
       inFlightRef.current = false;
       setPending(false);
@@ -131,15 +174,25 @@ export function usePlanHandoff({
     content,
     effort,
     enabled,
+    handedOffPlans,
     model,
     modelSelection,
+    onOpenSession,
     onSessionEstablished,
     onSessionProcessing,
     permissionMode,
     project,
     resolvePermissionModeForProvider,
     sendMessage,
+    sourceSessionId,
   ]);
 
-  return { enabled, pending, implementInNewSession };
+  /** Target already running a plan with this body for the current source, or null. */
+  const handedOffSessionIdFor = useCallback(
+    ({ markdown }: { markdown: string }): string | null =>
+      handedOffPlans.get(planHandoffKey(sourceSessionId, markdown)) ?? null,
+    [handedOffPlans, sourceSessionId],
+  );
+
+  return { enabled, pending, implementInNewSession, handedOffSessionIdFor };
 }

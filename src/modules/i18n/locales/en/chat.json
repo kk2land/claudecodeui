@@ -243,6 +243,8 @@
     "implementInNewSession": "New session",
     "implementInNewSessionTooltip": "Implement the complete plan in a new session",
     "implementInNewSessionPending": "Starting new session…",
+    "openHandedOffSession": "Open session",
+    "openHandedOffSessionTooltip": "Open the session already implementing this plan",
     "stopping": "Stopping…",
     "stopFailed": "Stop not confirmed — retry Stop",
     "resumeQueue": "Resume queue",

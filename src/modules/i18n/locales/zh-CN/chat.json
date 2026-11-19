@@ -210,6 +210,8 @@
     "implementInNewSession": "新会话执行",
     "implementInNewSessionTooltip": "在新会话实施完整计划",
     "implementInNewSessionPending": "正在创建新会话…",
+    "openHandedOffSession": "打开执行会话",
+    "openHandedOffSessionTooltip": "打开已执行此计划的会话",
     "stopping": "正在停止…",
     "stopFailed": "尚未确认停止，请再次点击停止",
     "resumeQueue": "恢复排队",
