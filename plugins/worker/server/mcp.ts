@@ -311,7 +311,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_wait",
     {
-      description: "等待 worker 进入终态，最多 25 秒；仅供用户明确要求等待或必要的短检查，不要循环调用以维持父回合 Processing",
+      description: "等待 Worker 进入终态，最长 25 秒。只在用户明确要求当前回合同步等待时调用一次。",
       inputSchema: {
         workerId: z.string(),
         timeoutSeconds: z.number().int().positive().max(25).optional(),

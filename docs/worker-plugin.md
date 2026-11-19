@@ -82,8 +82,8 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 权限。`worker_start`/`worker_resume` 是异步派发：接受请求（包括进入排队）后立即返回，Worker 在后台继续，
 父会话可以接收新的用户提示词。父会话只剩等待 Worker 时，应报告「已派发/后台进行」并结束当前派发回合、
 交还输入权，不要用重复 `worker_list`/`worker_get`/`worker_wait` 让回合保持 Processing，也不要把已派发
-说成验收完成；运行预算提醒与终态由 outbox 自动通知，届时再检查实际进展或验收。`worker_wait` 仍保留给用户明确要求
-等待或必要的短检查；`worker_cancel` 取消，`worker_resume` 用原 worker 继续并保留 cwd、home 与原生会话
+说成验收完成。运行预算提醒与终态由 outbox 自动通知，届时再检查实际进展或验收。`worker_wait` 只在用户明确要求
+当前回合同步等待时调用一次，最长 25 秒。`worker_cancel` 取消，`worker_resume` 用原 worker 继续并保留 cwd、home 与原生会话
 身份，但创建新的 runId，可显式覆盖模型/effort。
 
 查询或验收时，按需用 `worker_list` 定位、`worker_get` 读取目标结果；已有响应足够就复用，通知 ID 批量
