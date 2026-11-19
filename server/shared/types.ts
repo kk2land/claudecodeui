@@ -2571,7 +2571,7 @@ export type SessionDraftRecord = {
   text: string;
   /** Head of the queue, retained for single-message compatibility. */
   queuedMessage: unknown | null;
-  /** The pending FIFO queue, oldest first (never more than MAX_QUEUED_MESSAGES). */
+  /** The pending queue in send order (never more than MAX_QUEUED_MESSAGES). */
   queuedMessages: unknown[];
   /** Todo sources and attachments saved with this draft; null when the draft has none. */
   meta: TodoDraftMeta | null;

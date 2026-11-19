@@ -451,6 +451,7 @@ function ChatInterface({
     resolveBackgroundSendPrompt,
     queuedDrafts,
     queuedDraft,
+    moveQueuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,
     pendingSteers,
@@ -843,6 +844,7 @@ function ChatInterface({
           queuedDraft={queuedDraft}
           backgroundSendPrompt={backgroundSendPrompt}
           onResolveBackgroundSendPrompt={resolveBackgroundSendPrompt}
+          onMoveQueuedDraft={moveQueuedDraft}
           onEditQueuedDraft={editQueuedDraft}
           onDeleteQueuedDraft={deleteQueuedDraft}
           onSendMenuChoice={handleSendMenuChoice}

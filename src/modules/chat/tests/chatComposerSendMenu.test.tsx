@@ -108,6 +108,22 @@ test('idle: the plain send button, and no send menu', () => {
   assert.ok(!hasMenuTrigger(), 'no menu while nothing runs');
 });
 
+test('queue move buttons name their position and disable movement past the ends', () => {
+  const move = vi.fn();
+  render(<UiPreferencesProvider><ChatComposer {...props({
+    queuedDrafts: [{ id: 'first', content: 'First', attachments: [] }, { content: 'Last', attachments: [] }],
+    onMoveQueuedDraft: move,
+  })} /></UiPreferencesProvider>);
+
+  const firstUp = screen.getByRole<HTMLButtonElement>('button', { name: 'Move queued message 1 up' });
+  const lastDown = screen.getByRole<HTMLButtonElement>('button', { name: 'Move queued message 2 down' });
+  assert.equal(firstUp.disabled, true);
+  assert.equal(lastDown.disabled, true);
+  fireEvent.click(screen.getByRole('button', { name: 'Move queued message 1 down' }));
+  fireEvent.click(screen.getByRole('button', { name: 'Move queued message 2 up' }));
+  assert.deepEqual(move.mock.calls, [[1, 'first', 0], [-1, undefined, 1]]);
+});
+
 test('turn running, composer empty: the green submit button is Stop, one tap aborts, and no menu opens', () => {
   const onAbortSession = vi.fn();
   render(<UiPreferencesProvider><ChatComposer {...props({ isLoading: true, onAbortSession, input: '', hasInput: false, attachedFiles: [] })} /></UiPreferencesProvider>);

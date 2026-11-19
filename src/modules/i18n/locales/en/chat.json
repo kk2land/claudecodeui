@@ -338,6 +338,8 @@
       "waitingBehind": "Waiting behind the queued message above",
       "position": "{{position}} of {{total}}",
       "positionHint": "Queue position",
+      "moveUp": "Move queued message {{position}} up",
+      "moveDown": "Move queued message {{position}} down",
       "edit": "Edit queued message",
       "delete": "Delete queued message",
       "append": "Add to queued message",

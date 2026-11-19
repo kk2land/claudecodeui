@@ -317,7 +317,7 @@ test('a refused receipt restores its text, uploaded attachments and todo ids', a
 });
 
 test('a full queue keeps the draft, its text and its todo source', async () => {
-  for (let index = 0; index < 3; index += 1) {
+  for (let index = 0; index < 5; index += 1) {
     writeQueuedMessage(SESSION.id, { id: `ticket-${index}`, content: `queued ${index}`, attachments: [] });
   }
   writeDraftMeta(SESSION.id, META);
@@ -330,7 +330,7 @@ test('a full queue keeps the draft, its text and its todo source', async () => {
   assert.equal(view.result.current.input, 'cannot queue');
   assert.deepEqual(view.result.current.todoSourceIds, ['todo-1']);
   assert.equal((errors[0] as { type: string }).type, 'error');
-  assert.equal(readQueuedMessages(SESSION.id).length, 3);
+  assert.equal(readQueuedMessages(SESSION.id).length, 5);
 });
 
 test('re-dispatching a queued entry never inherits the draft being edited', async () => {

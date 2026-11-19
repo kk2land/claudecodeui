@@ -1,5 +1,5 @@
 import { useTranslation } from 'react-i18next';
-import { PencilIcon, XIcon, CornerDownRight, MoreHorizontal, Loader2 } from 'lucide-react';
+import { ArrowDownIcon, ArrowUpIcon, PencilIcon, XIcon, CornerDownRight, MoreHorizontal, Loader2 } from 'lucide-react';
 
 import type { CodexControls } from '@/shared/types';
 
@@ -10,17 +10,18 @@ type QueuedMessageCardProps = {
   attachmentCount?: number;
   /** Only the queue head is dispatched or steered next. */
   isHead?: boolean;
-  /** 1-based position in the FIFO queue, for the position badge. */
+  /** 1-based position in the send order, for the position badge. */
   position?: number;
-  /** Total queued entries, so the badge can read "1 of 3". */
+  /** Total queued entries, for the position badge and movement controls. */
   total?: number;
+  onMove?: (direction: -1 | 1) => void;
   onEdit: () => void;
   onDelete: () => void;
 };
 
 /**
  * Rendered by chat's ChatComposer to show one message queued for a busy
- * session, in FIFO order, with edit and delete actions before it is auto-sent.
+ * session, with move, edit and delete actions before it is auto-sent.
  * Native steer is offered only for the head, because only the head is the turn
  * the provider would take next.
  */
@@ -32,6 +33,7 @@ export default function QueuedMessageCard({
   isHead = true,
   position = 1,
   total = 1,
+  onMove,
   onEdit,
   onDelete,
 }: QueuedMessageCardProps) {
@@ -49,7 +51,7 @@ export default function QueuedMessageCard({
         <span className="mt-1.5 h-1.5 w-1.5 shrink-0 rounded-full bg-primary/60" aria-hidden />
 
         <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-1.5 text-[11px] font-medium uppercase tracking-wide text-primary/70">
+          <div className="flex flex-wrap items-center gap-x-1.5 text-[11px] font-medium uppercase tracking-wide text-primary/70">
             <span>{t('input.queue.label', { defaultValue: 'Queued' })}</span>
             {total > 1 && (
               <span className="normal-case text-muted-foreground/60" title={t('input.queue.positionHint', { defaultValue: 'Queue position' })}>
@@ -77,6 +79,24 @@ export default function QueuedMessageCard({
         </div>
 
         <div className="flex shrink-0 items-center gap-0.5">
+          {onMove && ([-1, 1] as const).map((direction) => {
+            const up = direction === -1;
+            const Icon = up ? ArrowUpIcon : ArrowDownIcon;
+            const label = t(up ? 'input.queue.moveUp' : 'input.queue.moveDown', { position });
+            return (
+              <button
+                key={direction}
+                type="button"
+                onClick={() => onMove(direction)}
+                disabled={locked || (up ? position === 1 : position === total)}
+                aria-label={label}
+                title={label}
+                className="inline-flex size-8 items-center justify-center rounded-md text-muted-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring enabled:hover:bg-accent enabled:hover:text-foreground disabled:opacity-40"
+              >
+                <Icon className="h-3.5 w-3.5" aria-hidden />
+              </button>
+            );
+          })}
           {!showSteer && <button
             type="button"
             onClick={onEdit}

@@ -26,7 +26,7 @@ type SavedDraft = {
   text?: string;
   /** Legacy single-slot value; used only when `queuedMessages` is omitted. */
   queuedMessage?: unknown | null;
-  /** The whole pending queue, oldest first. Preferred by every current caller. */
+  /** The whole pending queue in send order. Preferred by every current caller. */
   queuedMessages?: unknown[];
   /**
    * Tickets the browser actually saw in this snapshot, including ones it
@@ -45,12 +45,10 @@ type SavedDraft = {
 /**
  * Merges a browser snapshot that carries the tickets it actually saw.
  *
- * Existing ticket-bearing entries the browser knew about are replaced by the
- * snapshot entry or removed when absent. Entries it did not know about stay in
- * their server FIFO positions, and new snapshot entries are appended after
- * them. Legacy entries without a ticket keep the old positional replacement:
- * the Nth snapshot entry without an id replaces or deletes the Nth existing one,
- * so hydrating and editing legacy data cannot duplicate it.
+ * The snapshot gives the send order. If the server has unseen tickets, keep
+ * those in their stored positions among the surviving entries and append new
+ * entries after them. Match legacy entries by position within the unticketed
+ * entries so saving one never duplicates it.
  */
 function mergeKnownQueuedMessages(
   existingQueue: unknown[],
@@ -58,58 +56,43 @@ function mergeKnownQueuedMessages(
   knownIds: string[],
 ): unknown[] {
   const known = new Set(knownIds);
-  const snapshotById = new Map<string, unknown>();
-  const snapshotWithoutId: unknown[] = [];
+  const existingIds = new Set(existingQueue.map(queuedMessageId));
+  const legacySlots = existingQueue.filter((message) => !queuedMessageId(message)).length;
+  const snapshotIds = new Set<string>();
+  const ordered: unknown[] = [];
+  const replacements: unknown[] = [];
+  const additions: unknown[] = [];
+  let legacyReplacements = 0;
   for (const message of snapshot) {
     const id = queuedMessageId(message);
-    if (id) snapshotById.set(id, message);
-    else snapshotWithoutId.push(message);
+    if (id && snapshotIds.has(id)) continue;
+    if (id) {
+      snapshotIds.add(id);
+      known.add(id);
+    }
+    ordered.push(message);
+    if (id ? existingIds.has(id) : legacyReplacements < legacySlots) {
+      replacements.push(message);
+      if (!id) legacyReplacements += 1;
+    } else {
+      additions.push(message);
+    }
   }
 
   const merged: unknown[] = [];
-  const seen = new Set<string>();
-  let idlessIndex = 0;
+  let nextReplacement = 0;
+  let keptUnseen = false;
   for (const message of existingQueue) {
     const id = queuedMessageId(message);
-    if (!id) {
-      const replacement = snapshotWithoutId[idlessIndex];
-      idlessIndex += 1;
-      if (replacement !== undefined) merged.push(replacement);
-      continue;
-    }
-    if (known.has(id)) {
-      const replacement = snapshotById.get(id);
-      if (replacement !== undefined) {
-        merged.push(replacement);
-        seen.add(id);
-      }
-      continue;
-    }
-    if (snapshotById.has(id)) {
-      merged.push(snapshotById.get(id));
-      seen.add(id);
-      continue;
-    }
-    merged.push(message);
-    seen.add(id);
-  }
-
-  let snapshotIdlessIndex = 0;
-  for (const message of snapshot) {
-    const id = queuedMessageId(message);
-    if (!id) {
-      if (snapshotIdlessIndex < idlessIndex) {
-        snapshotIdlessIndex += 1;
-        continue;
-      }
+    if (id ? snapshotIds.delete(id) : legacyReplacements > 0) {
+      merged.push(replacements[nextReplacement++]);
+      if (!id) legacyReplacements -= 1;
+    } else if (id && !known.has(id)) {
       merged.push(message);
-      continue;
+      keptUnseen = true;
     }
-    if (seen.has(id)) continue;
-    merged.push(message);
-    seen.add(id);
   }
-  return merged;
+  return keptUnseen ? [...merged, ...additions] : ordered;
 }
 
 /** The durable ticket of a stored entry, when it has one. */
@@ -459,11 +442,13 @@ export const sessionDraftsDb = {
     const db = getConnection();
     const existing = db.prepare('SELECT queued_message, draft_meta, queue_status FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
       .get(userId, scope) as { queued_message: string | null; draft_meta: string | null; queue_status: string } | undefined;
+    const knownIds = draft.knownQueuedMessageIds;
+    const existingQueue = knownIds ? readQueuedMessages(existing?.queued_message ?? null) : [];
     const snapshot = draft.queuedMessages ?? (draft.queuedMessage == null ? [] : [draft.queuedMessage]);
     // A legacy snapshot is still the whole queue. A ticket-aware snapshot only
     // replaces/removes what the browser saw, preserving server-side additions.
-    let queuedMessages = draft.knownQueuedMessageIds
-      ? mergeKnownQueuedMessages(readQueuedMessages(existing?.queued_message ?? null), snapshot, draft.knownQueuedMessageIds)
+    let queuedMessages = knownIds
+      ? mergeKnownQueuedMessages(existingQueue, snapshot, knownIds)
       : snapshot;
     if (queuedMessages.length > MAX_QUEUED_MESSAGES) {
       throw new AppError(`At most ${MAX_QUEUED_MESSAGES} messages can be queued for one chat.`, {
@@ -499,6 +484,14 @@ export const sessionDraftsDb = {
     if (existing && ['steering', 'unknown'].includes(existing.queue_status) && serialized !== existing.queued_message) {
       throw new AppError('The queued message is awaiting steering confirmation.', { code: 'QUEUE_BUSY', statusCode: 409 });
     }
+    // Reordering or normalizing the same pending entries must keep a rejected steer held.
+    // Legacy entries without tickets occupy unticketed slots in both snapshots.
+    let preserveHold = false;
+    if (knownIds && existing?.queue_status === 'held' && existingQueue.length === queuedMessages.length) {
+      const previousTickets = existingQueue.map((entry) => queuedMessageId(entry) ?? '').sort();
+      const nextTickets = queuedMessages.map((entry) => queuedMessageId(entry) ?? '').sort();
+      preserveHold = previousTickets.every((ticket, index) => ticket === nextTickets[index]);
+    }
 
     const text = draft.text ?? '';
     // Omitted meta keeps the stored JSON verbatim; null clears it. A draft with
@@ -518,9 +511,9 @@ export const sessionDraftsDb = {
        ON CONFLICT(user_id, draft_scope) DO UPDATE SET
          draft_text = excluded.draft_text,
          draft_meta = excluded.draft_meta,
-         queue_status = CASE WHEN session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_status ELSE 'queued' END,
-         queue_request_id = CASE WHEN session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_request_id ELSE NULL END,
-         queue_error = CASE WHEN session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_error ELSE NULL END,
+         queue_status = CASE WHEN @preserveHold OR session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_status ELSE 'queued' END,
+         queue_request_id = CASE WHEN @preserveHold OR session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_request_id ELSE NULL END,
+         queue_error = CASE WHEN @preserveHold OR session_drafts.queued_message IS excluded.queued_message THEN session_drafts.queue_error ELSE NULL END,
          queued_message = excluded.queued_message,
          updated_at = CURRENT_TIMESTAMP`
     ).run(
@@ -528,7 +521,8 @@ export const sessionDraftsDb = {
       scope,
       text,
       serialized,
-      draftMeta
+      draftMeta,
+      { preserveHold: Number(preserveHold) },
     );
   },
 

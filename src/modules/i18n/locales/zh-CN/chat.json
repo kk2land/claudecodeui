@@ -305,6 +305,8 @@
       "waitingBehind": "等待上方排队消息发送后再发送",
       "position": "第 {{position}} 条，共 {{total}} 条",
       "positionHint": "队列位置",
+      "moveUp": "上移第 {{position}} 条排队消息",
+      "moveDown": "下移第 {{position}} 条排队消息",
       "edit": "编辑排队消息",
       "delete": "删除排队消息",
       "append": "添加到排队消息",

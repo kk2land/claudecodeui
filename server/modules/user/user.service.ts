@@ -13,7 +13,7 @@ type DraftRecord = {
   text: string;
   /** Head of the queue, mirrored for single-message compatibility. */
   queuedMessage: unknown | null;
-  /** The whole pending queue, oldest first. */
+  /** The whole pending queue in send order. */
   queuedMessages: unknown[];
   /** Todo sources and their attachments saved beside the draft, or null. */
   meta: TodoDraftMeta | null;

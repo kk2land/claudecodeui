@@ -212,8 +212,7 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
 
   const steer = useCallback(async () => {
     if (!sessionId) return;
-    // Only the queue head may be steered: it is the oldest pending turn, and
-    // promoting a later entry would reorder what the user queued.
+    // Only the queue head may be steered, respecting the user's send order.
     const message = readQueuedMessage(sessionId);
     const state = snapshots[sessionId];
     if (!message || !state?.turnId) return;

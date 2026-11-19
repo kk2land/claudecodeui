@@ -229,22 +229,22 @@ test('a queue that fills during the upload refuses without duplicating the kept 
   const { view } = renderComposer(SESSION_A, undefined, { isLoading: true });
   const fileA = new File(['a'], 'a.txt');
   await act(async () => {
-    for (const id of ['queued-1', 'queued-2']) {
+    for (const id of ['queued-1', 'queued-2', 'queued-3', 'queued-4']) {
       writeQueuedMessage('session-a', { id, content: id, attachments: [] });
     }
-    view.result.current.setInput('a fourth message');
+    view.result.current.setInput('a sixth message');
     view.result.current.setAttachedFiles([fileA]);
   });
   await act(async () => { void submit(view); });
-  // Another update fills the third slot while this message's upload is pending.
+  // Another update fills the fifth slot while this message's upload is pending.
   await act(async () => {
-    writeQueuedMessage('session-a', { id: 'queued-3', content: 'queued-3', attachments: [] });
+    writeQueuedMessage('session-a', { id: 'queued-5', content: 'queued-5', attachments: [] });
   });
   await release(pendingUploads, { attachments: [{ path: '/store/asset-a.txt', name: 'asset-a.txt' }] });
 
-  assert.deepEqual(readQueuedMessages('session-a').map((message) => message.id), ['queued-1', 'queued-2', 'queued-3'],
+  assert.deepEqual(readQueuedMessages('session-a').map((message) => message.id), ['queued-1', 'queued-2', 'queued-3', 'queued-4', 'queued-5'],
     'the refused message never joins the full queue');
-  assert.equal(view.result.current.input, 'a fourth message', 'the refused message keeps its text');
+  assert.equal(view.result.current.input, 'a sixth message', 'the refused message keeps its text');
   assert.deepEqual(view.result.current.attachedFiles, [fileA], 'the file it already had stays exactly once');
 });
 
@@ -254,7 +254,7 @@ test('a queue refused for a full queue keeps its text and files to retry', async
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   const { view } = renderComposer(SESSION_A, undefined, { isLoading: true });
   await act(async () => {
-    for (const id of ['full-1', 'full-2', 'full-3']) {
+    for (const id of ['full-1', 'full-2', 'full-3', 'full-4', 'full-5']) {
       writeQueuedMessage('session-a', { id, content: id, attachments: [] });
     }
   });

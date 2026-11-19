@@ -171,10 +171,10 @@ test('an idle full user queue rejects the send with an idle codexState', async (
     h.state.phase = 'idle';
     h.state.turnId = null;
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, {
-      queuedMessages: [{ id: 'a', content: 'a' }, { id: 'b', content: 'b' }, { id: 'c', content: 'c' }],
+      queuedMessages: ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, content: id })),
     });
     h.send({
-      type: 'chat.send', content: 'fourth',
+      type: 'chat.send', content: 'sixth',
       options: { clientMessageId: 'client-queue-full' },
     });
     await settle();
@@ -184,7 +184,7 @@ test('an idle full user queue rejects the send with an idle codexState', async (
     assert.equal(frame.code, 'QUEUE_LIMIT_REACHED');
     assert.equal(frame.clientMessageId, 'client-queue-full');
     assert.equal((frame.codexState as AnyRecord).phase, 'idle');
-    assert.equal(queuedDrafts(h.userId).length, 3);
+    assert.equal(queuedDrafts(h.userId).length, 5);
   });
 });
 
@@ -347,27 +347,19 @@ test('a claimed fallback head reserves one slot until accepted', async () => {
     const candidate = sessionDraftsDb.listQueuedMessages()[0];
     assert.equal(sessionDraftsDb.claimQueuedMessage(candidate), true);
 
-    sessionDraftsDb.saveDraft(h.userId, h.sessionId, {
-      queuedMessages: [{ id: 'two', content: 'two' }, { id: 'three', content: 'three' }],
-    });
+    const waiting = ['two', 'three', 'four', 'five'].map((id) => ({ id, content: id }));
+    const fifthSlot = [...waiting, { id: 'six', content: 'six' }];
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { queuedMessages: waiting });
     assert.throws(
       () => sessionDraftsDb.saveDraft(h.userId, h.sessionId, {
-        queuedMessages: [
-          { id: 'two', content: 'two' }, { id: 'three', content: 'three' },
-          { id: 'four', content: 'four' },
-        ],
+        queuedMessages: fifthSlot,
       }),
       (error: Error & { code?: string }) => error.code === 'QUEUE_LIMIT_REACHED',
     );
 
     sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
-    sessionDraftsDb.saveDraft(h.userId, h.sessionId, {
-      queuedMessages: [
-        { id: 'two', content: 'two' }, { id: 'three', content: 'three' },
-        { id: 'four', content: 'four' },
-      ],
-    });
-    assert.equal(queuedDrafts(h.userId).length, 3);
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { queuedMessages: fifthSlot });
+    assert.deepEqual(queuedDrafts(h.userId), fifthSlot);
   });
 });
 

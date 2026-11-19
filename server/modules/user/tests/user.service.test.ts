@@ -137,7 +137,7 @@ test('saveDraft without a queue writes only text and preserves the stored FIFO',
   assert.deepEqual(saved, []);
 });
 
-test('saveDraft accepts a whole FIFO queue and rejects a fourth entry', () => {
+test('saveDraft accepts a five-entry queue and rejects a sixth', () => {
   const saved: unknown[][] = [];
   const service = createUserService(createDependencies({
     drafts: {
@@ -147,14 +147,14 @@ test('saveDraft accepts a whole FIFO queue and rejects a fourth entry', () => {
       deleteDraft: () => undefined,
     },
   }));
-  const queue = ['one', 'two', 'three'].map((content) => ({ content }));
+  const queue = ['one', 'two', 'three', 'four', 'five'].map((content) => ({ content }));
 
   service.saveDraft(5, 'session-1', { scope: 'session-1', queuedMessages: queue });
   assert.deepEqual(saved, [[5, 'session-1', { text: '', queuedMessages: queue }]]);
 
   assert.throws(
     () => service.saveDraft(5, 'session-1', {
-      queuedMessages: [...queue, { content: 'four' }],
+      queuedMessages: [...queue, { content: 'six' }],
     }),
     (error: Error & { code?: string }) => error.code === 'QUEUE_LIMIT_REACHED',
   );

@@ -1619,11 +1619,11 @@ export function unifiedDiffToTexts(unifiedDiff: string): { oldText: string; newT
 /**
  * Maximum number of pending turns one chat scope may queue.
  *
- * Shared by the draft route (which rejects a fourth entry instead of silently
- * dropping it) and the repository (which refuses a write that would exceed it).
+ * Shared by the draft route and the repository, which reject writes that
+ * would exceed the cap.
  * Keep the frontend's `MAX_QUEUED_MESSAGES` value in sync.
  */
-export const MAX_QUEUED_MESSAGES = 3;
+export const MAX_QUEUED_MESSAGES = 5;
 
 /**
  * Normalizes a stored `queued_message` value into an ordered queue.

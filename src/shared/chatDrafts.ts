@@ -38,7 +38,7 @@ type DraftRecord = {
    * draft has no todo sources; a cleared draft drops the field entirely.
    */
   meta?: TodoDraftMeta;
-  /** The pending FIFO queue, oldest first. Empty when nothing is queued. */
+  /** The pending queue in send order. Empty when nothing is queued. */
   queuedMessages: StoredQueuedMessage[];
   queuedDelivery?: QueuedDelivery;
 };
@@ -692,7 +692,7 @@ export function migrateDraftScope(fromScope: string, toScope: string): void {
 }
 
 /**
- * The whole pending queue for a scope, oldest first.
+ * The whole pending queue for a scope in send order.
  *
  * Entries are normalized on every read so payloads stored by older clients
  * (legacy `images`, missing `content`) are safe to render and send.
@@ -732,7 +732,7 @@ export function writeQueuedMessage(scope: string, message: StoredQueuedMessage):
 
 /**
  * Replaces the whole pending queue, used by the composer to reconcile its
- * rendered list (edits and deletions included) with the durable store. The tail
+ * rendered list (including moves, edits and deletions) with the durable store. The tail
  * is never inferred: the caller passes every entry it still wants queued.
  */
 export function writeQueuedMessages(scope: string, messages: StoredQueuedMessage[]): void {

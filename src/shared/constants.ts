@@ -89,7 +89,7 @@ export const BROWSER_USE_FEATURE_ENABLED = false;
  * and the server validates the same cap. Keep this in sync with the backend's
  * `MAX_QUEUED_MESSAGES`.
  */
-export const MAX_QUEUED_MESSAGES = 3;
+export const MAX_QUEUED_MESSAGES = 5;
 
 // ---------------------------
 

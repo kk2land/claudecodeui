@@ -505,8 +505,7 @@ export function useChatComposerState({
   });
 
   // Every message waiting behind the in-flight turn for the open session, in
-  // FIFO order. The server dispatches the head only, so the list (not a single
-  // slot) is what the cards, edits and deletes operate on.
+  // send order. The server dispatches the head and the composer edits the list.
   const [queuedDrafts, setQueuedDrafts] = useState<QueuedDraft[]>(() => {
     if (typeof window === 'undefined' || !sessionKey) {
       return [];
@@ -1653,8 +1652,7 @@ export function useChatComposerState({
           return;
         }
 
-        // Check the cap before uploading: a rejected fourth message must not
-        // touch the files or clear the composer.
+        // Refuse a full queue before uploading so the composer keeps the draft and files.
         if (sessionKey && readQueuedMessages(sessionKey).length >= MAX_QUEUED_MESSAGES) {
           addMessage({ type: 'error', content: queueFullMessage, timestamp: new Date() });
           return;
@@ -2106,6 +2104,17 @@ export function useChatComposerState({
       document.removeEventListener('visibilitychange', refreshWhenVisible);
     };
   }, [queuedDrafts.length, sessionKey]);
+
+  /** Saves the new send order through the existing draft store. */
+  const moveQueuedDraft = useCallback((direction: -1 | 1, id: string | undefined, position: number) => {
+    if (!sessionKey || queuedDraftSessionRef.current !== sessionKey) return;
+    const queue = readQueuedMessages(sessionKey);
+    const index = id ? queue.findIndex((draft) => draft.id === id) : position;
+    const nextIndex = index + direction;
+    if (index < 0 || index >= queue.length || nextIndex < 0 || nextIndex >= queue.length) return;
+    [queue[index], queue[nextIndex]] = [queue[nextIndex], queue[index]];
+    writeQueuedMessages(sessionKey, queue);
+  }, [sessionKey]);
 
   /**
    * Loads one queued entry back into the composer and removes exactly that
@@ -2727,6 +2736,7 @@ export function useChatComposerState({
     queuedDrafts,
     // Single-slot compatibility for callers that only need the head.
     queuedDraft,
+    moveQueuedDraft,
     editQueuedDraft,
     deleteQueuedDraft,
     pendingSteers: visiblePendingSteers,

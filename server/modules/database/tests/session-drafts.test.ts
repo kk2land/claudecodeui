@@ -82,6 +82,53 @@ test('a newly appended local ticket lands after an unseen server ticket', async 
   });
 });
 
+test('a reordered snapshot keeps an unseen server ticket in place and moves the legacy entry', async () => {
+  await withDrafts((userId, sessionId) => {
+    const legacy = { content: 'legacy' };
+    const first = { id: 'A', content: 'A' };
+    const last = { id: 'B', content: 'B' };
+    sessionDraftsDb.saveDraft(userId, sessionId, {
+      queuedMessages: [legacy, first, { id: 'unseen', content: 'unseen' }, last],
+    });
+
+    sessionDraftsDb.saveDraft(userId, sessionId, {
+      queuedMessages: [last, legacy, first, { id: 'C', content: 'C' }],
+      knownQueuedMessageIds: ['A', 'B', 'C'],
+    });
+
+    assert.deepEqual(queue(userId).map(({ content }) => content), ['B', 'legacy', 'unseen', 'A', 'C']);
+  });
+});
+
+test('reordering a rejected steer queue keeps it held until explicit resume', async () => {
+  await withDrafts((userId, sessionId) => {
+    const first = { id: 'first', content: 'first turn' };
+    const second = { id: 'second', content: 'second turn' };
+    const legacy = { content: 'legacy turn' };
+    const held = { status: 'held', requestId: 'rejected-steer', error: 'Turn ended' };
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [first, second, legacy] });
+    sessionDraftsDb.beginSteer(userId, sessionId, first.id, held.requestId);
+    sessionDraftsDb.finishSteer(userId, sessionId, held.requestId, 'rejected', held.error);
+
+    const reordered = [second, legacy, first];
+    // The browser can save the same order again with normalized attachments and fields.
+    const normalized = reordered.map((entry) => ({ attachments: [], ...entry }));
+    for (const queuedMessages of [reordered, normalized]) {
+      sessionDraftsDb.saveDraft(userId, sessionId, {
+        queuedMessages,
+        knownQueuedMessageIds: [first.id, second.id],
+      });
+      const [draft] = sessionDraftsDb.getDrafts(userId);
+      assert.deepEqual(draft.queuedMessages, queuedMessages);
+      assert.deepEqual(draft.queuedDelivery, held);
+      assert.deepEqual(sessionDraftsDb.listQueuedMessages(sessionId), []);
+    }
+
+    sessionDraftsDb.resumeQueue(userId, sessionId);
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages(sessionId)[0]?.queuedMessage, normalized[0]);
+  });
+});
+
 test('a ticket the browser has seen can be deleted explicitly', async () => {
   await withDrafts((userId, sessionId) => {
     sessionDraftsDb.saveDraft(userId, sessionId, {

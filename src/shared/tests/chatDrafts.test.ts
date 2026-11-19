@@ -344,23 +344,24 @@ test('sign-out discards a former account’s late draft hydration', async () => 
   } finally { request.mockRestore(); }
 });
 
-test('a queue keeps three messages in FIFO order and rejects a fourth without losing it', async () => {
+test('a queue keeps five messages in FIFO order and rejects a sixth', async () => {
   const store = await loadStore();
+  const prompts = ['one', 'two', 'three', 'four', 'five'];
 
-  for (const content of ['one', 'two', 'three']) {
+  for (const content of prompts) {
     store.writeQueuedMessage('session-a', { id: content, content });
   }
 
-  assert.deepEqual(store.readQueuedMessages('session-a').map(({ content }) => content), ['one', 'two', 'three']);
+  assert.deepEqual(store.readQueuedMessages('session-a').map(({ content }) => content), prompts);
   assert.equal(store.readQueuedMessage('session-a')?.content, 'one', 'the head is the single-slot view');
 
   assert.throws(
-    () => store.writeQueuedMessage('session-a', { id: 'four', content: 'four' }),
+    () => store.writeQueuedMessage('session-a', { id: 'six', content: 'six' }),
     store.QueueLimitError,
   );
   assert.deepEqual(
     store.readQueuedMessages('session-a').map(({ content }) => content),
-    ['one', 'two', 'three'],
+    prompts,
     'the rejected message did not replace or truncate the queue',
   );
 });

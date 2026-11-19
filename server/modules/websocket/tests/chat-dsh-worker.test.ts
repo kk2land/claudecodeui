@@ -200,15 +200,11 @@ test('a repeated DSH clientMessageId returns the same ticket without a second qu
 test('a full DSH queue rejects with a ticket-bearing error and no fabricated codexState', async () => {
   await harness(async (h) => {
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, {
-      queuedMessages: [
-        { id: 'one', content: 'one' },
-        { id: 'two', content: 'two' },
-        { id: 'three', content: 'three' },
-      ],
+      queuedMessages: ['one', 'two', 'three', 'four', 'five'].map((id) => ({ id, content: id })),
     });
     h.send({
       type: 'chat.send',
-      content: 'fourth',
+      content: 'sixth',
       options: { clientMessageId: 'dsh-queue-full' },
     });
     await settle();
@@ -218,7 +214,7 @@ test('a full DSH queue rejects with a ticket-bearing error and no fabricated cod
     assert.equal(frame.code, 'QUEUE_LIMIT_REACHED');
     assert.equal(frame.clientMessageId, 'dsh-queue-full');
     assert.equal('codexState' in frame, false);
-    assert.equal(queuedDrafts(h.userId).length, 3);
+    assert.equal(queuedDrafts(h.userId).length, 5);
   });
 });
 

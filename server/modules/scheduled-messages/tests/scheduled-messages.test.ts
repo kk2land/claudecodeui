@@ -527,35 +527,36 @@ test('follow-ups queued during one turn are all sent, once, in order, as separat
   });
 });
 
-test('a FIFO queue dispatches one entry per pass, in order, and keeps the tail', async () => {
+test('the dispatcher sends the reordered draft one entry at a time and keeps the tail while busy', async () => {
   await withIsolatedDatabase(async (userId) => {
+    const first = { id: 'first', content: 'first turn' };
+    const second = { id: 'second', content: 'second turn' };
+    const legacy = { content: 'legacy turn' };
     sessionDraftsDb.saveDraft(userId, SESSION_ID, {
       text: '',
-      queuedMessages: [
-        { id: 'first', content: 'first turn' },
-        { id: 'second', content: 'second turn' },
-        { id: 'third', content: 'third turn' },
-      ],
+      queuedMessages: [first, second, legacy],
     });
+    const reordered = [legacy, second, first];
+    sessionDraftsDb.saveDraft(userId, SESSION_ID, {
+      queuedMessages: reordered,
+      knownQueuedMessageIds: ['first', 'second'],
+    });
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages, reordered);
 
     const runs: RunCall[] = [];
     const runtime = createRuntime(runs);
 
     assert.equal(await dispatchQueuedMessages(runtime), 1);
-    assert.deepEqual(runs.map(({ command }) => command), ['first turn']);
-    assert.deepEqual(
-      sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages.map((entry) => (entry as { id: string }).id),
-      ['second', 'third'],
-      'only the head leaves the queue',
-    );
+    assert.deepEqual(runs.map(({ command }) => command), ['legacy turn']);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages, [second, first]);
 
     // A pass while a turn is still running must not take the next one.
     assert.equal(await dispatchQueuedMessages(createRuntime([], 'ok', [], () => true)), 0);
 
     assert.equal(await dispatchQueuedMessages(runtime), 1);
-    assert.deepEqual(runs.map(({ command }) => command), ['first turn', 'second turn']);
+    assert.deepEqual(runs.map(({ command }) => command), ['legacy turn', 'second turn']);
     assert.equal(await dispatchQueuedMessages(runtime), 1);
-    assert.deepEqual(runs.map(({ command }) => command), ['first turn', 'second turn', 'third turn']);
+    assert.deepEqual(runs.map(({ command }) => command), ['legacy turn', 'second turn', 'first turn']);
     assert.equal(await dispatchQueuedMessages(runtime), 0);
     assert.equal(sessionDraftsDb.getDrafts(userId).length, 0);
   });
@@ -636,18 +637,15 @@ test('a delayed browser snapshot cannot resurrect the claimed head while it runs
 
 test('restore and a concurrent append together never exceed the cap or drop the tail', async () => {
   await withIsolatedDatabase(async (userId) => {
-    sessionDraftsDb.saveDraft(userId, SESSION_ID, {
-      queuedMessages: [{ id: 'a', content: 'one' }, { id: 'b', content: 'two' }, { id: 'c', content: 'three' }],
-    });
+    const queue = ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, content: id }));
+    sessionDraftsDb.saveDraft(userId, SESSION_ID, { queuedMessages: queue });
     const claimed = sessionDraftsDb.listQueuedMessages();
     assert.equal(sessionDraftsDb.claimQueuedMessage(claimed[0]), true);
 
-    // The claimed turn still reserves its slot: a fourth append is refused.
+    // Until admission, the claim still reserves its slot.
     assert.throws(
       () => sessionDraftsDb.saveDraft(userId, SESSION_ID, {
-        queuedMessages: [
-          { id: 'b', content: 'two' }, { id: 'c', content: 'three' }, { id: 'd', content: 'four' },
-        ],
+        queuedMessages: [...queue.slice(1), { id: 'f', content: 'f' }],
       }),
       (error: Error & { code?: string }) => error.code === 'QUEUE_LIMIT_REACHED',
     );
@@ -655,8 +653,7 @@ test('restore and a concurrent append together never exceed the cap or drop the 
     // Restoring the claim puts the head back in front of the untouched tail.
     sessionDraftsDb.restoreQueuedMessage(claimed[0]);
     const restored = sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages ?? [];
-    assert.deepEqual(restored.map((entry) => (entry as { id: string }).id), ['a', 'b', 'c']);
-    assert.equal(restored.length, 3);
+    assert.deepEqual(restored, queue);
   });
 });
 
@@ -827,22 +824,18 @@ test('a legacy singleton row is adopted as a one-entry FIFO queue', async () => 
   });
 });
 
-test('a fourth queued message is rejected by the repository, never truncated silently', async () => {
+test('a sixth queued message is rejected by the repository, which keeps the first five', async () => {
   await withIsolatedDatabase(async (userId) => {
-    sessionDraftsDb.saveDraft(userId, SESSION_ID, {
-      queuedMessages: [{ id: 'a', content: 'one' }, { id: 'b', content: 'two' }, { id: 'c', content: 'three' }],
-    });
+    const queue = ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, content: id }));
+    sessionDraftsDb.saveDraft(userId, SESSION_ID, { queuedMessages: queue });
 
     assert.throws(
       () => sessionDraftsDb.saveDraft(userId, SESSION_ID, {
-        queuedMessages: [
-          { id: 'a', content: 'one' }, { id: 'b', content: 'two' },
-          { id: 'c', content: 'three' }, { id: 'd', content: 'four' },
-        ],
+        queuedMessages: [...queue, { id: 'f', content: 'f' }],
       }),
       (error: Error & { code?: string }) => error.code === 'QUEUE_LIMIT_REACHED',
     );
-    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages.length, 3);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages, queue);
   });
 });
 
@@ -1039,9 +1032,9 @@ test('scheduling validates its input', async () => {
 });
 
 
-test('a running queued turn frees its slot for three waiting prompts before completion', async () => {
+test('a running queued turn frees its slot for five waiting prompts before completion', async () => {
   await withIsolatedDatabase(async (userId) => {
-    const queue = ['a', 'b', 'c'].map((id) => ({ id, content: id }));
+    const queue = ['a', 'b', 'c', 'd', 'e'].map((id) => ({ id, content: id }));
     sessionDraftsDb.saveDraft(userId, SESSION_ID, { text: '', queuedMessages: queue });
     let finishRun!: () => void;
     let notifyStarted!: () => void;
@@ -1056,10 +1049,10 @@ test('a running queued turn frees its slot for three waiting prompts before comp
     try {
       await started;
       sessionDraftsDb.saveDraft(userId, SESSION_ID, {
-        text: '', queuedMessages: [...queue.slice(1), { id: 'd', content: 'd' }],
+        text: '', queuedMessages: [...queue.slice(1), { id: 'f', content: 'f' }],
       });
       assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages, [
-        ...queue.slice(1), { id: 'd', content: 'd' },
+        ...queue.slice(1), { id: 'f', content: 'f' },
       ]);
     } finally {
       finishRun();

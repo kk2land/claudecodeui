@@ -88,7 +88,7 @@ type ChatComposerProps = {
   onClearInput: () => void;
   onSubmit: (event: FormEvent<HTMLFormElement> | MouseEvent<HTMLButtonElement> | TouchEvent<HTMLButtonElement>) => void;
   isDragActive: boolean;
-  /** The whole pending FIFO queue for the open session, oldest first. */
+  /** The whole pending queue for the open session in send order. */
   queuedDrafts?: QueuedDraft[];
   /** Head of `queuedDrafts`; retained for single-message callers and tests. */
   queuedDraft?: QueuedDraft | null;
@@ -105,6 +105,7 @@ type ChatComposerProps = {
   scheduledMessages: ScheduledMessage[];
   onScheduleMessage: (scheduledFor: Date) => void;
   onCancelScheduledMessage: (id: string) => void;
+  onMoveQueuedDraft?: (direction: -1 | 1, id: string | undefined, position: number) => void;
   /** `id` is preferred; `position` keeps unticketed legacy entries addressable. */
   onEditQueuedDraft: (id?: string, position?: number) => void;
   onDeleteQueuedDraft: (id?: string, position?: number) => void;
@@ -216,6 +217,7 @@ export default function ChatComposer({
   scheduledMessages,
   onScheduleMessage,
   onCancelScheduledMessage,
+  onMoveQueuedDraft,
   onEditQueuedDraft,
   onDeleteQueuedDraft,
   onSendMenuChoice,
@@ -409,7 +411,7 @@ export default function ChatComposer({
     }
   }, [isMobile, mobileCompact, hasDraft, textareaRef, onTextareaResize, onTextareaScrollSync]);
 
-  // Every card renders in FIFO order; `queuedDraft` alone is still honoured so
+  // Every card renders in send order; `queuedDraft` alone is still honoured so
   // single-message callers keep working.
   const pendingDrafts = queuedDrafts ?? (queuedDraft ? [queuedDraft] : []);
   const hasQueuedDraft = pendingDrafts.length > 0;
@@ -420,7 +422,7 @@ export default function ChatComposer({
   const hasTodoSource = todoSourceIds.length > 0;
   // A full queue still routes a submit through the queue action: the hook
   // rejects it visibly and keeps the text. Falling through to `onAbortSession`
-  // would stop the running turn instead of refusing the fourth message.
+  // would stop the running turn instead of refusing the extra message.
   const canQueueDraft = !localTodoCommand && !modelRequired && isLoading
     && Boolean(input.trim() || attachedFiles.length > 0 || storedAttachments.length > 0);
   // A draft turns the main Stop button into Queue; retain the inline Stop in that case.
@@ -647,22 +649,23 @@ export default function ChatComposer({
         </div>
       )}
 
-      {pendingDrafts.map((draft, index) => (
-        <QueuedMessageCard
-          key={draft.id ?? `${index}-${draft.content.slice(0, 24)}`}
-          content={draft.content}
-          attachmentCount={draft.uploadedAttachments?.length ?? draft.attachments.length}
-          controls={codexControls}
-          canSteerMode={draft.options?.collaborationMode !== 'plan'}
-          // Only the head is dispatchable next; later cards are shown in order
-          // with the same edit/delete actions but cannot precede the head.
-          isHead={index === 0}
-          position={index + 1}
-          total={pendingDrafts.length}
-          onEdit={() => onEditQueuedDraft(draft.id, index)}
-          onDelete={() => onDeleteQueuedDraft(draft.id, index)}
-        />
-      ))}
+      <div className={pendingDrafts.length > 1 ? 'mx-auto max-h-[40dvh] max-w-[54.25rem] overflow-y-auto overscroll-contain' : undefined}>
+        {pendingDrafts.map((draft, index) => (
+          <QueuedMessageCard
+            key={draft.id ?? `${index}-${draft.content.slice(0, 24)}`}
+            content={draft.content}
+            attachmentCount={draft.uploadedAttachments?.length ?? draft.attachments.length}
+            controls={codexControls}
+            canSteerMode={draft.options?.collaborationMode !== 'plan'}
+            isHead={index === 0}
+            position={index + 1}
+            total={pendingDrafts.length}
+            onMove={onMoveQueuedDraft && ((direction) => onMoveQueuedDraft(direction, draft.id, index))}
+            onEdit={() => onEditQueuedDraft(draft.id, index)}
+            onDelete={() => onDeleteQueuedDraft(draft.id, index)}
+          />
+        ))}
+      </div>
 
       {/* The question panel replaces the input, but how to answer often depends on
           how much context is left, so the token usage stays reachable below it. */}

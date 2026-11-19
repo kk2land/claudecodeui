@@ -11,13 +11,11 @@ import {
   resetChatDrafts,
   writeQueuedMessage,
 } from '@/shared/chatDrafts';
-import { MAX_QUEUED_MESSAGES } from '@/shared/constants';
 import type { ChatMessage, LLMProvider, PermissionMode, Project, ProjectSession } from '@/shared/types';
 
 /**
- * A busy session accepts up to three pending messages, in the order they were
- * sent. These tests drive the real hook so the queueing branch, the durable
- * store and the per-card edit/delete handlers are exercised together.
+ * A busy session accepts up to five pending messages. These tests drive the
+ * real hook, durable store and per-card handlers together.
  */
 
 const PROJECT: Project = { projectId: 'project-1', displayName: 'Project One', fullPath: '/tmp/project-one' };
@@ -86,21 +84,8 @@ const renderBusyComposer = (session: ProjectSession = { id: 'session-a' }, provi
   return { view, submit, messages };
 };
 
-test('a busy session queues up to three messages and keeps them in FIFO order', async () => {
-  const { view, submit } = renderBusyComposer();
-
-  await submit('first');
-  await submit('second');
-  await submit('third');
-
-  const queue = readQueuedMessages('session-a');
-  assert.deepEqual(queue.map(({ content }) => content), ['first', 'second', 'third']);
-  assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), ['first', 'second', 'third']);
-  assert.equal(view.result.current.queuedDraft?.content, 'first', 'the single-slot view is the head');
-});
-
 test('a queued card without a durable ticket can still be edited by position', async () => {
-  writeQueuedMessage('session-a', { id: 'head', content: 'head' });
+  writeQueuedMessage('session-a', { content: 'head' });
   const { view } = renderBusyComposer();
   // Simulates a legacy entry restored without an id.
   await act(async () => {
@@ -109,15 +94,16 @@ test('a queued card without a durable ticket can still be edited by position', a
   assert.equal(view.result.current.input, 'head');
 });
 
-test('a fourth message is refused visibly and keeps its text and attachments', async () => {
+test('a busy session queues five messages and keeps the refused sixth in the composer', async () => {
   const { view, submit, messages } = renderBusyComposer();
-  await submit('first');
-  await submit('second');
-  await submit('third');
+  const prompts = ['first', 'second', 'third', 'fourth', 'fifth'];
+  for (const prompt of prompts) await submit(prompt);
+  assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), prompts);
+  assert.equal(view.result.current.queuedDraft?.content, 'first');
 
   const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
   await act(async () => {
-    view.result.current.setInput('fourth');
+    view.result.current.setInput('sixth');
     view.result.current.setAttachedFiles([file]);
   });
   const uploadsBefore = vi.mocked(fetch).mock.calls.length;
@@ -127,17 +113,16 @@ test('a fourth message is refused visibly and keeps its text and attachments', a
 
   assert.deepEqual(
     readQueuedMessages('session-a').map(({ content }) => content),
-    ['first', 'second', 'third'],
+    prompts,
     'the queue is unchanged rather than truncated or overwritten',
   );
-  assert.equal(view.result.current.input, 'fourth', 'the refused text stays in the composer');
+  assert.equal(view.result.current.input, 'sixth', 'the refused text stays in the composer');
   assert.equal(view.result.current.attachedFiles[0], file, 'its attachment stays attached');
   assert.equal(vi.mocked(fetch).mock.calls.length, uploadsBefore, 'nothing was uploaded for a refused message');
   assert.ok(
-    messages.some((message) => message.type === 'error' && /queue is full \(3\)/i.test(String(message.content ?? ''))),
+    messages.some((message) => message.type === 'error' && /queue is full \(5\)/i.test(String(message.content ?? ''))),
     'the refusal is explained instead of silently ignored',
   );
-  assert.ok(MAX_QUEUED_MESSAGES === 3);
 });
 
 test('editing one queued card removes only that entry and loads it into the composer', async () => {
@@ -168,14 +153,30 @@ test('deleting one queued card leaves the others in order', async () => {
   assert.deepEqual(readQueuedMessages('session-a').map(({ content }) => content), ['second', 'third']);
 });
 
-test('a reload restores every queued card in order', async () => {
-  writeQueuedMessage('session-a', { id: 'a', content: 'first', attachments: [] });
-  writeQueuedMessage('session-a', { id: 'b', content: 'second', attachments: [] });
-  writeQueuedMessage('session-a', { id: 'c', content: 'third', attachments: [] });
-
+test('moving ticketed and legacy cards saves the new order and restores it on a fresh load', async () => {
+  const { api } = await import('@/shared/api');
+  const save = vi.spyOn(api.user, 'saveDraft');
+  const drafts = vi.spyOn(api.user, 'drafts');
+  const initial = [{ id: 'a', content: 'first' }, { content: 'legacy' }, { id: 'c', content: 'third' }];
+  drafts.mockResolvedValueOnce(Response.json({ drafts: [{ scope: 'session-a', text: '', queuedMessages: initial }] }));
+  await hydrateChatDrafts();
   const { view } = renderBusyComposer();
+  assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), ['first', 'legacy', 'third']);
 
-  assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), ['first', 'second', 'third']);
+  await act(async () => { view.result.current.moveQueuedDraft(-1, undefined, 1); });
+  assert.equal(view.result.current.queuedDraft?.content, 'legacy');
+  await act(async () => { view.result.current.moveQueuedDraft(1, 'a', 1); });
+  const expected = ['legacy', 'third', 'first'];
+  assert.deepEqual(view.result.current.queuedDrafts.map(({ content }) => content), expected);
+  const saved = save.mock.calls.at(-1)?.[1] as { queuedMessages: Array<{ content: string }>; knownQueuedMessageIds: string[] };
+  assert.deepEqual(saved.queuedMessages.map(({ content }) => content), expected);
+  assert.deepEqual(saved.knownQueuedMessageIds, ['a', 'c']);
+
+  view.unmount();
+  resetChatDrafts();
+  drafts.mockResolvedValueOnce(Response.json({ drafts: [{ scope: 'session-a', text: '', queuedMessages: saved.queuedMessages }] }));
+  await hydrateChatDrafts();
+  assert.deepEqual(renderBusyComposer().view.result.current.queuedDrafts.map(({ content }) => content), expected);
 });
 
 test('queues are isolated per session', async () => {
