@@ -45,8 +45,8 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 
 ## 运行与验收
 
-- start/resume 接受即返回，可能排队。继续处理已就绪任务或独立工作，仅剩等待时简报状态并交还回合。新任务不自动 steer/取消原 Worker。
-- 需要查询时用 `worker_list`/`worker_get`，复用响应。按 `notifications[].id` 批量 `worker_ack`，重试复用 ID。`completed` 和 ack 都不代表验收。`worker_wait` 仅限用户要求等待或必要短查，单次最多 25 秒，不循环轮询保活。
+- start/resume 接受即返回，可能排队。接受后继续推进任何未完成的独立工作。只剩等待时发简短状态并立即结束当前回合。Worker 在后台继续，下一次检查由 Worker 通知唤醒，不占住回合。不用原生 `clock.sleep`、shell `sleep`，也不反复 `worker_list`/`worker_get`/`worker_logs` 轮询等结果。新任务不自动 steer/取消原 Worker。
+- 需要查询时用 `worker_list`/`worker_get`，复用响应。按 `notifications[].id` 批量 `worker_ack`，重试复用 ID。`completed` 和 ack 都不代表验收。状态可单次检查，通知到达后的验收照常。`worker_wait` 仅限用户明确要求当前回合同步等待时的单次调用，最长 25 秒，不循环轮询保活。
 - 首次预算提醒默认 600 秒或 20 步，已投递后每 600 秒再提醒，未投递不叠加。提醒先作初筛，只有需核对当前 run 或产出时才 `worker_get`；是否干预仍看实际产出。`running`、步数和进程存活不算进展。有新有效产出就等下次自动提醒，软提醒不自动取消。
 - 验收核对实际 diff 和验证结果，证据用路径与结论表示，不采信自述摘要。按 run/stream/cursor 增量读 `worker_logs`，每次小页；查最近错误可按需 `tail: true` 读末尾，再用返回的 `nextCursor` 续读。日志不改变执行边界。集成后完成必要的最终验收。结论、证据与交接写回计划，未验证项明确标注，旧计划不证明 Worker 可续接。
 - 仅因新改动、失败或未决问题重跑。同一失败已在未修改基线复现时，记录限制并继续剩余交付，不重复完整测试。

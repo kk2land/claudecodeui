@@ -20,6 +20,11 @@
 - 子 Worker 只做本次派发给它的任务，不递归派发、不 commit/merge/push、不清理 worktree。其余限制随每次任务交接写明，不靠子会话自己推断。
 - 已有 Worker 用对应的 MCP 工具管理。
 
+## 仅剩等待时结束回合
+
+- `worker_start` / `worker_resume` 接受后继续推进任何未完成的独立工作。一旦只剩等待，发简短状态并立即结束当前回合。Worker 在后台继续，下一次检查由 Worker 通知唤醒（进度提醒或完成通知）。
+- 不用原生 `clock.sleep`、shell `sleep`，也不反复查 Worker 状态或日志来等结果。`worker_wait` 只在用户明确要求当前回合同步等待时调用一次，最长 25 秒。状态可单次检查，通知到达后的验收照常。
+
 ## 正常流程入口
 
 采用 Worker 后使用当前已启用的 `cloudcli-workers` 技能执行，其源文件为插件内 [`skills/cloudcli-workers/SKILL.md`](skills/cloudcli-workers/SKILL.md)。计划阶段分工、派发与续接、验收与纠偏都在那里，模板和路由按需读取该目录下的 references。不要另找或加载同名副本，本文不重复这些步骤。
