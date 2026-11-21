@@ -10,13 +10,14 @@ import type {
   RefObject,
   TouchEvent,
 } from 'react';
-import { EraserIcon, PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIcon, PlusIcon, SlidersHorizontalIcon, ActivityIcon, MicIcon, ListTodoIcon } from 'lucide-react';
+import { EraserIcon, PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIcon, PlusIcon, SlidersHorizontalIcon, ActivityIcon, MicIcon, ListTodoIcon, AudioLines } from 'lucide-react';
 
 import { getAndroidBridge } from '@/modules/android-bridge';
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
 import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { DEFAULT_EFFORT_VALUE, MAX_QUEUED_MESSAGES, MCP_ELICITATION_TOOL_NAME } from '@/shared/constants';
+import { Button } from '@/shared/ui';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
 import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
 import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, ChatAttachment, CodexControls, CodexModelProviderControls, ComposerPredictionControls, PendingSteer, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
@@ -332,7 +333,8 @@ export default function ChatComposer({
   const nativeVoiceTarget = nativeVoiceSessionId || codexControls?.createVoiceSession;
   const androidBridge = isMobile && voiceState === 'idle' && nativeVoiceTarget ? getAndroidBridge() : null;
   const openVoiceChat = androidBridge?.openVoiceChat;
-  const openNativeVoice = nativeVoiceTarget && typeof openVoiceChat === 'function'
+  const canOpenNativeVoice = !!nativeVoiceTarget && typeof openVoiceChat === 'function';
+  const openNativeVoice = canOpenNativeVoice
     ? async () => {
         try {
           const sessionId = typeof nativeVoiceTarget === 'string' ? nativeVoiceTarget : await nativeVoiceTarget();
@@ -341,7 +343,8 @@ export default function ChatComposer({
           handleVoiceError(error instanceof Error && error.message ? error.message : t('voice.openFailed'));
         }
       }
-    : null;
+    : undefined;
+  const nativeVoicePending = canOpenNativeVoice && !nativeVoiceSessionId && codexControls?.pending === true;
   // Which bottom sheet is open, if any. Kept here because both the collapsed +
   // and the expanded settings entry open them, and the provider panels portal
   // into the settings sheet.
@@ -497,9 +500,22 @@ export default function ChatComposer({
     setMobileSheet('settings');
   };
 
-  // One submit control for desktop and mobile: desktop renders it in the
-  // historical right cluster, the mobile capsule/dock in the same footer slot.
-  const submitButton = (
+  const voiceChatLabel = t('voice.chat');
+  const primaryAction = canOpenNativeVoice && !hasAnyInput && !isLoading && !activity ? (
+    <Button
+      type="button"
+      size="icon"
+      onClick={openNativeVoice}
+      // Keep the textarea focused until the tap lands, as with the + button.
+      onPointerDown={(event) => event.preventDefault()}
+      disabled={nativeVoicePending}
+      aria-label={voiceChatLabel}
+      title={voiceChatLabel}
+      className="h-11 w-11 shrink-0 rounded-full [&_svg]:size-5"
+    >
+      <AudioLines aria-hidden="true" />
+    </Button>
+  ) : (
     <PromptInputSubmit
       onClick={
         localTodoCommand
@@ -1044,7 +1060,7 @@ export default function ChatComposer({
                   onSendMenuChoice?.(choice);
                 }}
               />
-            ) : submitButton}
+            ) : primaryAction}
           </div>
 
           {!hasBlockingCodexQuestion && <div
@@ -1082,11 +1098,11 @@ export default function ChatComposer({
                 label={t('input.attachFiles')}
                 onClick={() => { close(); openAttachmentPicker(); }}
               />
-              {(openNativeVoice || (onVoiceTranscript && voiceAvailable)) && (
+              {(canOpenNativeVoice || (onVoiceTranscript && voiceAvailable)) && (
                 <MobileSheetAction
                   icon={<MicIcon />}
                   label={isRecording ? t('voice.stopRecording') : t('voice.input')}
-                  disabled={Boolean(openNativeVoice && !nativeVoiceSessionId && codexControls?.pending)}
+                  disabled={nativeVoicePending}
                   onClick={() => { close(); void (openNativeVoice ?? voiceToggle)(); }}
                 />
               )}

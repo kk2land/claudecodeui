@@ -301,6 +301,7 @@
     }
   },
   "voice": {
+    "chat": "Voice chat",
     "input": "Voice input",
     "openFailed": "Could not open voice input.",
     "stopRecording": "Stop recording",

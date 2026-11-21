@@ -18,7 +18,7 @@ internal fun JSONObject.string(key: String): String? = (opt(key) as? String)?.ta
 internal fun JSONArray?.objects(): List<JSONObject> =
     if (this == null) emptyList() else List(length()) { optJSONObject(it) }.filterNotNull()
 
-internal data class VoiceChoice(val id: String, val title: String, val project: String? = null)
+internal data class VoiceChoice(val id: String, val title: String?, val project: String? = null)
 
 internal data class RecentVoiceChoices(val choices: List<VoiceChoice>, val nextOffset: Int?) {
     companion object {

@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<!-- The Android shell uses the default language. Voice translations are in voice_strings.xml. -->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="MissingTranslation">
     <string name="app_name">CloudCLI</string>
 
     <string name="site_url_hint">https://cloudcli.example.com</string>
@@ -11,25 +12,6 @@
 
     <string name="action_change_site">Change server</string>
     <string name="action_reload">Reload page</string>
-    <string name="action_voice">Voice chat</string>
-    <string name="voice_end">End voice</string>
-    <string name="voice_open_web">Open web session</string>
-    <string name="voice_open_site">Open CloudCLI</string>
-    <string name="voice_enable_mic">Enable mic</string>
-    <string name="voice_mute_mic">Mute mic</string>
-    <string name="voice_stop_speech">Stop speech</string>
-    <string name="voice_check">Check connection</string>
-    <string name="voice_check_delivery">Check delivery</string>
-    <string name="voice_send">Send</string>
-    <string name="voice_steer">Send to current turn</string>
-    <string name="voice_enqueue">Add to queue</string>
-    <string name="voice_more_sessions">More sessions</string>
-    <string name="voice_draft_hint">Edit or type a message</string>
-    <string name="voice_mic_denied">Microphone access is off. You can type a message or enable access in Android settings.</string>
-    <string name="voice_transcript_you">You</string>
-    <string name="voice_transcript_codex">Codex</string>
-    <string name="voice_transcript_tool_output">Tool output</string>
-
     <string name="share_skipped">Not imported: %1$s</string>
 
     <string name="channel_service_name">Notification connection</string>

@@ -41,6 +41,11 @@ internal class VoiceApi(val origin: String) {
         read = { RecentVoiceChoices.read(it.getJSONObject("data"), offset) }, done = done,
     )
 
+    fun title(id: String, done: (Result<String?>) -> Unit) = request(
+        base.newBuilder().addPathSegments("api/providers/sessions").addPathSegment(id).build(),
+        read = { it.getJSONObject("data").string("summary") }, done = done,
+    )
+
     fun history(id: String, done: (Result<List<VoiceRow>>) -> Unit) = request(
         base.newBuilder().addPathSegments("api/providers/sessions").addPathSegment(id).addPathSegment("messages")
             .addQueryParameter("limit", "100").addQueryParameter("offset", "0").build(),

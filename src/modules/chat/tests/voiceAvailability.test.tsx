@@ -152,12 +152,19 @@ const codexControls = (runtime: CodexSessionState['runtime'], sessionId: string 
   steer: async () => {},
 });
 
-const openMobileActions = (
+const renderMobileComposer = (
   controls: CodexControls | undefined,
   overrides: Partial<ComponentProps<typeof ChatComposer>> = {},
 ) => {
   vi.stubGlobal('innerWidth', 412);
-  render(<ChatComposer {...composerProps()} providerLabel="Codex" codexControls={controls} {...overrides} />, { wrapper });
+  return render(<ChatComposer {...composerProps()} providerLabel="Codex" codexControls={controls} {...overrides} />, { wrapper });
+};
+
+const openMobileActions = (
+  controls: CodexControls | undefined,
+  overrides: Partial<ComponentProps<typeof ChatComposer>> = {},
+) => {
+  renderMobileComposer(controls, overrides);
   fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
   return within(screen.getByRole('dialog', { name: 'Add to message' }));
 };
@@ -221,6 +228,84 @@ test('the composer hides the mic when the voice preference is off', () => {
   const { container } = render(<ChatComposer {...composerProps()} />, { wrapper });
 
   assert.equal(findMicButton(container), null);
+});
+
+test.each([
+  { frame: 'collapsed', isInputFocused: false },
+  { frame: 'focused', isInputFocused: true },
+])('the $frame mobile voice button opens the selected session without submitting', ({ isInputFocused }) => {
+  setVoiceEnabled(false);
+  const openVoiceChat = vi.fn().mockResolvedValue(undefined);
+  stubAndroidBridge(openVoiceChat);
+  const onSubmit = vi.fn();
+  renderMobileComposer(codexControls('app-server', 'selected-codex-session'), { isInputFocused, onSubmit });
+
+  const voiceChat = screen.getByRole('button', { name: 'Voice chat' });
+  assert.equal(fireEvent.pointerDown(voiceChat, { cancelable: true }), false);
+  fireEvent.click(voiceChat);
+
+  assert.deepEqual(openVoiceChat.mock.calls, [['selected-codex-session']]);
+  assert.equal(onSubmit.mock.calls.length, 0);
+  assert.equal(toggleBrowserVoice.mock.calls.length, 0);
+  assert.equal(screen.queryByRole('button', { name: 'Send' }), null);
+});
+
+test('the mobile voice button waits for the new session and is disabled during allocation', async () => {
+  const openVoiceChat = vi.fn().mockResolvedValue(undefined);
+  stubAndroidBridge(openVoiceChat);
+  let finish!: (id: string) => void;
+  const allocation = new Promise<string>((resolve) => { finish = resolve; });
+  const createVoiceSession = vi.fn().mockReturnValue(allocation);
+  const controls = { ...codexControls('app-server', null), createVoiceSession };
+  const onSubmit = vi.fn();
+  const { rerender } = renderMobileComposer(controls, { onSubmit });
+  const voiceChat = screen.getByRole<HTMLButtonElement>('button', { name: 'Voice chat' });
+
+  fireEvent.click(voiceChat);
+  assert.equal(createVoiceSession.mock.calls.length, 1);
+  assert.equal(openVoiceChat.mock.calls.length, 0);
+
+  rerender(<ChatComposer {...composerProps()} providerLabel="Codex" codexControls={{ ...controls, pending: true }} onSubmit={onSubmit} />);
+  assert.equal(voiceChat.disabled, true);
+  fireEvent.click(voiceChat);
+  assert.equal(createVoiceSession.mock.calls.length, 1);
+
+  await act(async () => { finish('allocated-codex-session'); });
+  assert.deepEqual(openVoiceChat.mock.calls, [['allocated-codex-session']]);
+  assert.equal(onSubmit.mock.calls.length, 0);
+});
+
+test.each([
+  { draft: 'text', overrides: { hasInput: true, input: 'Keep this draft' }, action: 'Send' },
+  { draft: 'an attached file', overrides: { attachedFiles: [new File(['text'], 'local.txt')] }, action: 'Send' },
+  { draft: 'a stored attachment', overrides: { storedAttachments: [{ name: 'stored.txt' }] }, action: 'Send' },
+  { draft: 'text during a turn', overrides: { hasInput: true, input: 'Next message', isLoading: true }, action: 'Send options' },
+])('the mobile composer keeps $action with $draft', ({ overrides, action }) => {
+  stubAndroidBridge(vi.fn());
+  renderMobileComposer(codexControls('app-server'), overrides);
+
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
+  assert.equal(screen.getByRole<HTMLButtonElement>('button', { name: action }).disabled, false);
+});
+
+test('an empty mobile composer keeps the one-tap Stop during a turn', () => {
+  stubAndroidBridge(vi.fn());
+  const onAbortSession = vi.fn();
+  renderMobileComposer(codexControls('app-server'), { isLoading: true, onAbortSession });
+
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
+  fireEvent.click(screen.getByRole('button', { name: 'Stop' }));
+  assert.equal(onAbortSession.mock.calls.length, 1);
+});
+
+test('an empty mobile composer keeps Send disabled during background work', () => {
+  stubAndroidBridge(vi.fn());
+  renderMobileComposer(codexControls('app-server'), {
+    activity: { statusText: null, canInterrupt: false, startedAt: 1, background: true },
+  });
+
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
+  assert.equal(screen.getByRole<HTMLButtonElement>('button', { name: 'Send' }).disabled, true);
 });
 
 test('the mobile voice action opens the selected native session with the draft intact', () => {
@@ -307,12 +392,14 @@ test.each([
 ] as const)('mobile voice is hidden with dictation off $reason', ({ method, runtime, sessionId }) => {
   if (method !== undefined) stubAndroidBridge(method);
   const actions = openMobileActions(codexControls(runtime, sessionId));
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
   assert.equal(actions.queryByRole('button', { name: 'Voice input' }), null);
 });
 
 test('mobile voice is hidden for other providers when browser dictation is off', () => {
   stubAndroidBridge(vi.fn());
   const actions = openMobileActions(undefined, { providerLabel: 'Claude' });
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
   assert.equal(actions.queryByRole('button', { name: 'Voice input' }), null);
 });
 
@@ -321,6 +408,7 @@ test('an old bridge keeps browser dictation in eligible new chats without alloca
   stubAndroidBridge();
   const createVoiceSession = vi.fn();
   const actions = openMobileActions({ ...codexControls('app-server', null), createVoiceSession });
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
   fireEvent.click(actions.getByRole('button', { name: 'Voice input' }));
   assert.equal(toggleBrowserVoice.mock.calls.length, 1);
   assert.equal(createVoiceSession.mock.calls.length, 0);
@@ -330,6 +418,7 @@ test.each([
   { scenario: 'with an old bridge', hasNativeVoice: false, runtime: 'app-server', state: 'idle', label: 'Voice input' },
   { scenario: 'in the SDK runtime', hasNativeVoice: true, runtime: 'sdk', state: 'idle', label: 'Voice input' },
   { scenario: 'during browser recording', hasNativeVoice: true, runtime: 'app-server', state: 'recording', label: 'Stop recording' },
+  { scenario: 'during browser transcription', hasNativeVoice: true, runtime: 'app-server', state: 'transcribing', label: 'Voice input' },
 ] as const)('the mobile menu keeps its browser voice action $scenario', ({ hasNativeVoice, runtime, state, label }) => {
   setVoiceEnabled(true);
   browserVoiceState = state;
@@ -337,6 +426,7 @@ test.each([
   stubAndroidBridge(hasNativeVoice ? openVoiceChat : undefined);
   const actions = openMobileActions(codexControls(runtime));
 
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
   fireEvent.click(actions.getByRole('button', { name: label }));
 
   assert.equal(toggleBrowserVoice.mock.calls.length, 1);
@@ -351,6 +441,7 @@ test('the desktop composer still uses browser dictation when Android voice is av
     <ChatComposer {...composerProps()} providerLabel="Codex" codexControls={codexControls('app-server')} />,
     { wrapper },
   );
+  assert.equal(screen.queryByRole('button', { name: 'Voice chat' }), null);
   const micButton = findMicButton(container)?.closest('button');
   assert.ok(micButton);
   fireEvent.click(micButton);
@@ -361,10 +452,10 @@ test('the desktop composer still uses browser dictation when Android voice is av
 test.each([
   { failure: new Error('Voice page unavailable'), message: 'Voice page unavailable' },
   { failure: undefined, message: 'Could not open voice input.' },
-])('the mobile composer displays a native voice launch failure as "$message"', async ({ failure, message }) => {
+])('the mobile voice button displays a launch failure as "$message"', async ({ failure, message }) => {
   stubAndroidBridge(vi.fn().mockRejectedValue(failure));
-  const actions = openMobileActions(codexControls('app-server'));
-  fireEvent.click(actions.getByRole('button', { name: 'Voice input' }));
+  renderMobileComposer(codexControls('app-server'));
+  fireEvent.click(screen.getByRole('button', { name: 'Voice chat' }));
   assert.equal((await screen.findByRole('alert')).textContent, message);
 });
 

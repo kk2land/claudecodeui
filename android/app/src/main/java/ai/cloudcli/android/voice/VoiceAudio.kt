@@ -34,11 +34,16 @@ import com.k2fsa.sherpa.onnx.VadModelConfig
 import java.util.concurrent.Executors
 
 class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseable {
+    enum class Playback { IDLE, PREPARING, PLAYING }
+
     interface Listener {
+        fun onCaptureReady()
         fun onSpeechStart()
         fun onPartialTranscript(text: String)
         fun onFinalTranscript(text: String)
-        fun onAudioError(message: String)
+        fun onCaptureError(message: String)
+        fun onPlaybackChanged()
+        fun onPlaybackError(message: String)
     }
 
     private val app = context.applicationContext
@@ -58,8 +63,11 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
     private var communicationActive = false
     private var previousSpeakerphone = false
     private var playbackGeneration = 0L
+    private var playback = Playback.IDLE
     private val speechQueue = ArrayDeque<String>()
     private var rendering = false
+
+    val playbackState: Playback get() = synchronized(audioLock) { playback }
 
     // Each model is used and released only on its own worker.
     private var vad: Vad? = null
@@ -90,6 +98,7 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
         synchronized(audioLock) {
             if (closed || userSpeaking) return
             speechQueue.addLast(utterance)
+            if (playback == Playback.IDLE) setPlaybackLocked(Playback.PREPARING)
             if (!rendering) {
                 rendering = true
                 outputWorker.execute(::renderSpeechQueue)
@@ -183,6 +192,7 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
                         "Microphone capture did not start"
                     }
                 }
+                postInput(generation, listener::onCaptureReady)
                 recognize(input, detector, asr, generation)
             } finally {
                 synchronized(audioLock) {
@@ -196,7 +206,7 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
                 if (!isListening(generation)) return
                 listening = false
             }
-            postInput(generation) { listener.onAudioError("Voice input failed. ${failure.message.orEmpty()}") }
+            postInput(generation) { listener.onCaptureError(failure.message.orEmpty()) }
         }
     }
 
@@ -288,14 +298,16 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
                 val utterance = speechQueue.removeFirstOrNull()
                 if (utterance == null) {
                     rendering = false
+                    setPlaybackLocked(Playback.IDLE)
                     return
                 }
+                setPlaybackLocked(Playback.PREPARING)
                 utterance to playbackGeneration
             }
             runCatching { renderSpeech(text, generation) }.onFailure { failure ->
                 main.post {
                     if (isPlaybackCurrent(generation)) {
-                        listener.onAudioError("Voice playback failed. ${failure.message.orEmpty()}")
+                        listener.onPlaybackError(failure.message.orEmpty())
                     }
                 }
             }
@@ -354,7 +366,9 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
                     while (offset < samples.size) {
                         val written = synchronized(audioLock) {
                             if (generation != playbackGeneration) return 0
-                            output.write(samples, offset, samples.size - offset, AudioTrack.WRITE_NON_BLOCKING)
+                            output.write(samples, offset, samples.size - offset, AudioTrack.WRITE_NON_BLOCKING).also {
+                                if (it > 0) setPlaybackLocked(Playback.PLAYING)
+                            }
                         }
                         if (written < 0) {
                             writeError = written
@@ -412,6 +426,14 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
         }
         track = null
         updateCommunicationLocked()
+        setPlaybackLocked(Playback.IDLE)
+    }
+
+    private fun setPlaybackLocked(next: Playback) {
+        if (playback == next) return
+        playback = next
+        // The main thread reads the current snapshot, including any cancellation since this post.
+        main.post { if (synchronized(audioLock) { !closed }) listener.onPlaybackChanged() }
     }
 
     @Suppress("DEPRECATION")
