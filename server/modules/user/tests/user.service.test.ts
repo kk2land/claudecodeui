@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
+import { AppError } from '@/shared/index.js';
+
 import { createUserService } from '../user.service.js';
 
 type UserDependencies = Parameters<typeof createUserService>[0];
@@ -188,7 +190,7 @@ test('appendQueuedMessage hands the repository the message and returns what is n
       ...noDrafts,
       appendQueuedMessage: (...args) => {
         appended.push(args);
-        return { queuedMessage: { content: 'A\n\nB', attachments: [] }, appended: true };
+        return { queuedMessage: { ...args[2], id: 'voice-ticket' }, appended: false };
       },
     },
     onQueueChanged: (scope) => changed.push(scope),
@@ -199,19 +201,43 @@ test('appendQueuedMessage hands the repository the message and returns what is n
     options: { model: 'opus' },
     attachments: [{ name: 'b.txt' }],
     stray: 'dropped',
-  });
+  }, true);
 
   assert.deepEqual(appended, [[5, 'session-1', {
     content: 'B',
     options: { model: 'opus' },
     attachments: [{ name: 'b.txt' }],
-  }]]);
+  }, true]]);
   assert.deepEqual(result, {
     success: true,
-    queuedMessage: { content: 'A\n\nB', attachments: [] },
-    appended: true,
+    queuedMessage: {
+      content: 'B',
+      options: { model: 'opus' },
+      attachments: [{ name: 'b.txt' }],
+      id: 'voice-ticket',
+    },
+    appended: false,
   });
   assert.deepEqual(changed, ['session-1'], 'an enqueue asks the dispatcher to try this scope immediately');
+});
+
+test('appendQueuedMessage forwards ifEmpty and skips notifying the dispatcher on a conflict', () => {
+  const conflict = new AppError('A message is waiting.', { code: 'QUEUE_NOT_EMPTY', statusCode: 409 });
+  const service = createUserService(createDependencies({
+    drafts: {
+      ...noDrafts,
+      appendQueuedMessage: (_userId, _scope, _message, ifEmpty) => {
+        assert.equal(ifEmpty, true);
+        throw conflict;
+      },
+    },
+    onQueueChanged: () => assert.fail('A refused append must not notify the dispatcher'),
+  }));
+
+  assert.throws(
+    () => service.appendQueuedMessage(5, 'session-1', { content: 'voice follow-up' }, true),
+    (error) => error === conflict,
+  );
 });
 
 test('appendQueuedMessage refuses a message with nothing to send, or a bad scope', () => {

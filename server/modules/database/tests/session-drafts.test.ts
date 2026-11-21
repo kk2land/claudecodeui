@@ -39,6 +39,65 @@ function ids(userId: number): string[] {
   return queue(userId).map((message) => String(message.id));
 }
 
+test('guarded append succeeds on an empty queue and unguarded appends keep FIFO', async () => {
+  await withDrafts((userId, sessionId) => {
+    sessionDraftsDb.saveDraftText(userId, sessionId, 'draft text');
+    const first = sessionDraftsDb.appendQueuedMessage(userId, sessionId, { content: 'voice', attachments: [] }, true);
+    assert.equal(first.appended, false);
+    assert.ok(first.queuedMessage.id);
+    assert.deepEqual(queue(userId), [first.queuedMessage]);
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages(sessionId)[0]?.queuedMessage, first.queuedMessage);
+
+    const next = { content: 'web', attachments: [] };
+    assert.throws(() => sessionDraftsDb.appendQueuedMessage(userId, sessionId, next, true), { code: 'QUEUE_NOT_EMPTY' });
+    assert.deepEqual(queue(userId), [first.queuedMessage]);
+
+    const second = sessionDraftsDb.appendQueuedMessage(userId, sessionId, next);
+    const third = sessionDraftsDb.appendQueuedMessage(userId, sessionId, next, false);
+    assert.equal(second.appended, true);
+    assert.equal(third.appended, true);
+    assert.deepEqual(queue(userId), [first.queuedMessage, second.queuedMessage, third.queuedMessage]);
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.text, 'draft text');
+  });
+});
+
+test('guarded append leaves a web send and its steer receipt untouched', async () => {
+  await withDrafts((userId, sessionId) => {
+    const web = { content: 'web', attachments: [] };
+    const voice = { content: 'voice', attachments: [] };
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, web, 'web-head');
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, web, 'web-tail');
+
+    assert.throws(() => sessionDraftsDb.appendQueuedMessage(userId, sessionId, voice, true), { code: 'QUEUE_NOT_EMPTY' });
+    sessionDraftsDb.beginSteer(userId, sessionId, 'web-head', 'steer-request');
+    const before = sessionDraftsDb.getDrafts(userId);
+
+    assert.throws(() => sessionDraftsDb.appendQueuedMessage(userId, sessionId, voice, true), { code: 'QUEUE_NOT_EMPTY' });
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId), before);
+    assert.deepEqual(ids(userId), ['web-head', 'web-tail']);
+    assert.deepEqual(sessionDraftsDb.beginSteer(userId, sessionId, 'web-head', 'steer-request'), { status: 'steering', error: null });
+  });
+});
+
+test('guarded append counts a dispatching head until its receipt is accepted', async () => {
+  await withDrafts((userId, sessionId) => {
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, { content: 'web', attachments: [] }, 'web-head');
+    const [head] = sessionDraftsDb.listQueuedMessages(sessionId);
+    assert.equal(sessionDraftsDb.claimQueuedMessage(head), true);
+    assert.deepEqual(queue(userId), []);
+
+    const voice = { content: 'voice', attachments: [] };
+    assert.throws(() => sessionDraftsDb.appendQueuedMessage(userId, sessionId, voice, true), { code: 'QUEUE_NOT_EMPTY' });
+    assert.deepEqual(queue(userId), []);
+
+    sessionDraftsDb.confirmQueuedMessageDispatch(head);
+    const result = sessionDraftsDb.appendQueuedMessage(userId, sessionId, voice, true);
+    assert.equal(result.appended, false);
+    assert.deepEqual(queue(userId), [result.queuedMessage]);
+    assert.equal(sessionDraftsDb.hasSentChatMessage(userId, sessionId, 'web-head'), true);
+  });
+});
+
 test('a ticket-aware PUT replaces a known message and keeps a server-side ticket it did not see', async () => {
   await withDrafts((userId, sessionId) => {
     sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [{ id: 'A', content: 'A' }] });

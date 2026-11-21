@@ -1,5 +1,7 @@
 import express from 'express';
 
+import { AppError } from '@/shared/index.js';
+
 import type { createUserService } from './user.service.js';
 
 type AuthenticatedRequest = express.Request & { user?: { id?: number | string } };
@@ -90,13 +92,15 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
-  // Queueing appends to the scope's queued message on the server, so the merge
-  // is made against what is stored rather than against a page's possibly stale
-  // copy of it.
+  // Append against the stored queue. Automatic steering can require it to be empty.
   router.post('/drafts/queued-message', (req, res, next) => {
     try {
-      const body = req.body as { scope?: unknown; queuedMessage?: unknown };
-      res.json(service.appendQueuedMessage(readUserId(req), body?.scope, body?.queuedMessage));
+      const body = req.body as { scope?: unknown; queuedMessage?: unknown; ifEmpty?: unknown };
+      const ifEmpty = body?.ifEmpty;
+      if (ifEmpty !== undefined && typeof ifEmpty !== 'boolean') {
+        throw new AppError('ifEmpty must be a boolean.', { code: 'INVALID_IF_EMPTY', statusCode: 400 });
+      }
+      res.json(service.appendQueuedMessage(readUserId(req), body?.scope, body?.queuedMessage, ifEmpty));
     } catch (error) {
       next(error);
     }

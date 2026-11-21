@@ -6,15 +6,18 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { closeConnection, initializeDatabase, projectTodosDb, projectsDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { dispatchQueuedMessages } from '@/modules/scheduled-messages/index.js';
 import { handleChatConnection, runDetachedChatTurn } from '@/modules/websocket/services/chat-websocket.service.js';
 import { chatRunRegistry } from '@/modules/websocket/services/chat-run-registry.service.js';
 import { connectedClients } from '@/modules/websocket/services/websocket-state.service.js';
 import type { AnyRecord, CodexSessionState, ProviderRuntimeGateway } from '@/shared/index.js';
 import { AppError } from '@/shared/index.js';
 
+type QueueChange = { sessionId: string; candidates: ReturnType<typeof sessionDraftsDb.listQueuedMessages> };
+
 async function harness(runTest: (h: {
   userId: number; sessionId: string; projectId: string; runtime: ProviderRuntimeGateway; frames: AnyRecord[];
-  socket: EventEmitter; calls: AnyRecord[]; state: CodexSessionState;
+  socket: EventEmitter; calls: AnyRecord[]; state: CodexSessionState; queueChanges: QueueChange[];
   send(control: AnyRecord, requestId?: string): void;
 }) => Promise<void>) {
   const previous = process.env.DATABASE_PATH;
@@ -27,6 +30,7 @@ async function harness(runTest: (h: {
   assert.ok(createdProject.project);
   const projectId = createdProject.project.project_id;
   const frames: AnyRecord[] = []; const calls: AnyRecord[] = [];
+  const queueChanges: QueueChange[] = [];
   const socket = Object.assign(new EventEmitter(), { readyState: 1, send: (text: string) => frames.push(JSON.parse(text)) });
   const state: CodexSessionState = { runtime: 'app-server', mode: 'default', turnId: 't1', phase: 'running', goal: null, questions: [] };
   const runtime: ProviderRuntimeGateway = { hasRuntime: () => true, hasBackgroundWork: () => false,
@@ -35,9 +39,15 @@ async function harness(runTest: (h: {
     getState: () => state, getPendingApprovalsForSession: () => [], resolveToolApproval: () => {}, stopBackgroundTask: async () => false,
     abort: async () => false, run: async (_provider, content, options) => { calls.push({ run: content, options }); },
     control: async (provider, sid, action, options) => { calls.push({ provider, sid, action, options }); return state; } };
-  handleChatConnection(socket as never, { user: { id: userId } } as never, { runtime });
+  handleChatConnection(socket as never, { user: { id: userId } } as never, {
+    runtime,
+    notifyQueueChanged: (changedSessionId) => queueChanges.push({
+      sessionId: changedSessionId,
+      candidates: sessionDraftsDb.listQueuedMessages(changedSessionId),
+    }),
+  });
   const send = (control: AnyRecord, requestId = 'request-1') => socket.emit('message', JSON.stringify({ type: 'chat.control', sessionId, requestId, control }));
-  try { await runTest({ userId, sessionId, projectId, runtime, frames, socket, calls, state, send }); }
+  try { await runTest({ userId, sessionId, projectId, runtime, frames, socket, calls, state, queueChanges, send }); }
   finally {
     connectedClients.clear(); chatRunRegistry.clearAll(); closeConnection();
     if (previous === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previous;
@@ -342,13 +352,16 @@ test('a queue claim that wins first prevents the steer RPC from starting', async
   });
 });
 
-test('uncertain delivery stays held until a native echo proves acceptance, even after a late timeout', async () => {
+test('an opt-in steer timeout stays unknown until a native echo proves acceptance', async () => {
   await harness(async (h) => {
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: queued });
     h.runtime.control = async () => { throw new AppError('No response', { code: 'CODEX_APP_SERVER_TIMEOUT', statusCode: 504 }); };
-    h.send({ action: 'steer', messageId: queued.id, expectedTurnId: 't1' }); await settle();
+    h.send({ action: 'steer', messageId: queued.id, expectedTurnId: 't1', queueIfTurnEnded: true }); await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'unknown');
+    assert.equal(h.frames.at(-1)?.code, 'CODEX_APP_SERVER_TIMEOUT');
     assert.equal(sessionDraftsDb.getDrafts(h.userId)[0].queuedDelivery.status, 'unknown');
     assert.equal(sessionDraftsDb.listQueuedMessages().length, 0);
+    assert.deepEqual(h.queueChanges, []);
     sessionDraftsDb.confirmSteer(h.sessionId, 'request-1');
     sessionDraftsDb.finishSteer(h.userId, h.sessionId, 'request-1', 'unknown', 'late timeout');
     assert.equal(sessionDraftsDb.getDrafts(h.userId)[0].queuedMessage, null);
@@ -360,10 +373,86 @@ test('a rejected steer preserves the message until an explicit queue resume', as
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, { text: '', queuedMessage: queued });
     h.runtime.control = async () => { throw new AppError('Turn ended', { code: 'STALE_TURN', statusCode: 409 }); };
     h.send({ action: 'steer', messageId: queued.id, expectedTurnId: 't1' }); await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'rejected');
+    assert.equal(h.frames.at(-1)?.code, 'STALE_TURN');
     assert.equal(sessionDraftsDb.getDrafts(h.userId)[0].queuedDelivery.status, 'held');
     assert.equal(sessionDraftsDb.listQueuedMessages().length, 0);
+    assert.deepEqual(h.queueChanges, []);
     h.send({ action: 'queue-resume' }, 'resume-1'); await settle();
     assert.equal(sessionDraftsDb.listQueuedMessages().length, 1);
+    assert.deepEqual(h.queueChanges.map(({ sessionId }) => sessionId), [h.sessionId]);
+  });
+});
+
+test('a turn ending after ifEmpty append hands the opted-in steer ticket to the dispatcher', async () => {
+  await harness(async (h) => {
+    h.state.mode = 'plan';
+    const { queuedMessage } = sessionDraftsDb.appendQueuedMessage(h.userId, h.sessionId, {
+      content: 'Guide the plan', options: { clientMessageId: 'voice-message' }, attachments: [],
+    }, true);
+    const [originalHead] = sessionDraftsDb.listQueuedMessages(h.sessionId);
+    h.state.phase = 'idle';
+    h.state.turnId = null;
+    const control = h.runtime.control!;
+    h.runtime.control = async (...args) => {
+      await control(...args);
+      throw new AppError('Turn ended', { code: 'STALE_TURN', statusCode: 409 });
+    };
+
+    const steer = { action: 'steer', messageId: queuedMessage.id, expectedTurnId: 't1', queueIfTurnEnded: true };
+    h.send(steer);
+    await settle();
+    const { ok, code, delivery, error } = h.frames.at(-1)!;
+    assert.deepEqual({ ok, code, delivery, error }, { ok: false, code: 'STALE_TURN', delivery: 'rejected', error: 'Turn ended' });
+    assert.deepEqual(h.queueChanges, [{ sessionId: h.sessionId, candidates: [originalHead] }]);
+    assert.deepEqual(sessionDraftsDb.getDrafts(h.userId)[0].queuedDelivery, { status: 'queued', requestId: null, error: null });
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages(h.sessionId), [originalHead]);
+
+    h.send(steer);
+    await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'rejected');
+    assert.equal(h.frames.at(-1)?.error, 'Turn ended');
+    assert.equal(h.queueChanges.length, 1);
+    assert.deepEqual(h.calls.map(({ action }) => action), [{
+      action: 'steer', expectedTurnId: 't1', requestId: 'request-1', content: queuedMessage.content, attachments: [],
+    }]);
+
+    assert.equal(await dispatchQueuedMessages(h.runtime, { sessionId: h.sessionId }), 1);
+    assert.equal(await dispatchQueuedMessages(h.runtime, { sessionId: h.sessionId }), 0);
+    assert.equal(h.calls[1].run, queuedMessage.content);
+    assert.equal(h.calls[1].options.clientMessageId, 'voice-message');
+  });
+});
+
+test('a user Stop keeps an opted-in stale steer held after the runtime returns to idle', async () => {
+  await harness(async (h) => {
+    sessionDraftsDb.saveDraft(h.userId, h.sessionId, { queuedMessage: queued });
+    let rejectSteer!: (error: Error) => void;
+    h.runtime.control = async () => new Promise((_, reject) => { rejectSteer = reject; });
+    h.runtime.abort = async () => {
+      h.state.phase = 'idle';
+      h.state.turnId = null;
+      return true;
+    };
+    h.send({ action: 'steer', messageId: queued.id, expectedTurnId: 't1', queueIfTurnEnded: true });
+    await settle();
+    assert.equal(sessionDraftsDb.getDrafts(h.userId)[0].queuedDelivery.status, 'steering');
+
+    h.socket.emit('message', JSON.stringify({ type: 'chat.abort', sessionId: h.sessionId, requestId: 'stop' }));
+    await settle();
+    assert.equal(h.frames.at(-1)?.ok, true);
+    assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, true);
+
+    rejectSteer(new AppError('Turn ended', { code: 'STALE_TURN', statusCode: 409 }));
+    await settle();
+    assert.equal(h.frames.at(-1)?.delivery, 'rejected');
+    assert.equal(h.frames.at(-1)?.code, 'STALE_TURN');
+    const draft = sessionDraftsDb.getDrafts(h.userId)[0];
+    assert.equal(draft.queuedDelivery.status, 'held');
+    assert.deepEqual(draft.queuedMessages, [queued]);
+    assert.equal(sessionRuntimeDb.get(h.sessionId).queueHeld, true);
+    assert.equal(sessionDraftsDb.listQueuedMessages(h.sessionId).length, 0);
+    assert.deepEqual(h.queueChanges, []);
   });
 });
 

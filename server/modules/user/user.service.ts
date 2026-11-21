@@ -42,7 +42,7 @@ type UserDependencies = {
       meta?: TodoDraftMeta | null;
     }): void;
     saveDraftText(userId: number, scope: string, text: string, meta?: TodoDraftMeta | null): void;
-    appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage): { queuedMessage: QueuedChatMessage; appended: boolean } | null;
+    appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage, ifEmpty?: boolean): { queuedMessage: QueuedChatMessage; appended: boolean } | null;
     clearQueuedMessage(userId: number, scope: string): void;
     deleteDraft(userId: number, scope: string): void;
   };
@@ -362,12 +362,13 @@ export function createUserService(dependencies: UserDependencies) {
      * Queues a message behind the session's running turn. A message already
      * waiting there is kept and this one is added as a separate FIFO turn.
      * Each follow-up retains its own options and attachments; slash commands
-     * also stay separate so later text cannot become their arguments.
+     * also stay separate so later text cannot become their arguments. The
+     * repository enforces the optional empty-queue precondition atomically.
      */
-    appendQueuedMessage(userId: number, scopeInput: unknown, queuedMessageInput: unknown) {
+    appendQueuedMessage(userId: number, scopeInput: unknown, queuedMessageInput: unknown, ifEmpty?: boolean) {
       const scope = readDraftScope(scopeInput);
       const message = readQueuedMessageInput(queuedMessageInput);
-      const result = dependencies.drafts.appendQueuedMessage(userId, scope, message);
+      const result = dependencies.drafts.appendQueuedMessage(userId, scope, message, ifEmpty);
       if (!result) {
         throw new AppError(
           'A slash command runs as a turn of its own, so it cannot be combined with the queued message. '

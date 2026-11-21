@@ -22,11 +22,7 @@ type ControlDependencies = {
   runtime: ProviderRuntimeGateway;
   connection: RealtimeClientConnection;
   filterAttachments(value: unknown): unknown[];
-  /**
-   * Composition-injected queue-change notice. Resuming a held queue or
-   * recovering an uncertain delivery makes a waiting user turn sendable
-   * immediately instead of waiting for the supplemental poll.
-   */
+  /** Requests a dispatch pass when a control makes a queued turn sendable. */
   notifyQueueChanged?(sessionId: string): void;
 };
 
@@ -82,6 +78,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
   const response = { kind: 'control_result' as const, sessionId, requestId };
   let compactionRun: ReturnType<typeof chatRunRegistry.startRun> = null;
   let steering = false;
+  let queueIfTurnEnded = false;
   // Todo sources of the steered queue entry, consumed only after the native
   // steer RPC succeeds; an unknown/rejected outcome keeps them pending.
   let steeringTodoIds: string[] = [];
@@ -115,6 +112,7 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
             codexState: runtime.getState?.('codex', sessionId) };
         }
         steering = true;
+        queueIfTurnEnded = raw.queueIfTurnEnded === true;
         const message = claim.queuedMessage as AnyRecord;
         const claimedOptions = message.options && typeof message.options === 'object' ? message.options as AnyRecord : {};
         steeringTodoIds = Array.isArray(claimedOptions.todoIds)
@@ -165,13 +163,26 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
     if (compactionRun) {
       chatRunRegistry.completeRunIfCurrent(compactionRun, { exitCode: 1 });
     }
-    // Only an explicit RPC rejection proves non-delivery; disconnects and timeouts remain held.
-    const uncertain = steering && !(error instanceof AppError && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL', 'CODEX_MODEL_REQUIRED'].includes(error.code));
-    const delivery = steering && sessionId ? sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, uncertain ? 'unknown' : 'rejected', message) : undefined;
+    const code = error instanceof AppError ? error.code : undefined;
+    let delivery: ControlResult['delivery'];
+    if (steering && sessionId) {
+      // Only an explicit RPC rejection proves non-delivery. Timeouts and disconnects stay held.
+      const rejected = code !== undefined && ['STALE_TURN', 'CODEX_APP_SERVER_REJECTED', 'UNSUPPORTED_RUNTIME_CONTROL', 'CODEX_MODEL_REQUIRED'].includes(code);
+      // STALE_TURN also covers a user Stop while the steer was in flight.
+      let keepQueuedOnRejection = false;
+      if (queueIfTurnEnded && code === 'STALE_TURN' && !sessionRuntimeDb.get(sessionId).queueHeld) {
+        const state = runtime.getState?.('codex', sessionId);
+        keepQueuedOnRejection = !state?.queueHeld && state?.phase !== 'stopping' && state?.phase !== 'stopFailed';
+      }
+      delivery = sessionDraftsDb.finishSteer(numericUserId, sessionId, requestId, rejected ? 'rejected' : 'unknown', message, {
+        keepQueuedOnRejection,
+      });
+      if (keepQueuedOnRejection && delivery === 'rejected') notifyQueueChanged?.(sessionId);
+    }
     return { ...response, ok: delivery === 'accepted', error: delivery === 'accepted' ? undefined : message, delivery,
       // The UI distinguishes recoverable rejections (fork onto the chosen
       // service) from ordinary control failures by this code.
-      ...(error instanceof AppError ? { code: error.code } : {}),
+      ...(code === undefined ? {} : { code }),
       codexState: sessionId ? runtime.getState?.('codex', sessionId) : undefined };
   }
 }

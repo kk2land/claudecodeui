@@ -4,8 +4,11 @@ import android.Manifest
 import android.app.Activity
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.content.pm.ShortcutInfo
+import android.content.pm.ShortcutManager
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
+import android.graphics.drawable.Icon
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
@@ -25,6 +28,10 @@ import android.widget.ProgressBar
 import android.widget.TextView
 import android.widget.Toast
 import android.window.OnBackInvokedDispatcher
+import ai.cloudcli.android.voice.VoiceActivity
+import ai.cloudcli.android.voice.webSessionId
+import java.lang.ref.WeakReference
+import org.json.JSONObject
 
 /**
  * Single-site shell: a natively configured HTTP(S) origin, a WebView with the injected bridge,
@@ -57,6 +64,8 @@ class MainActivity : Activity(), BridgeHost.Host {
         applyPageTheme(null)
 
         webView = findViewById(R.id.web_view)
+        voiceHost = WeakReference(this)
+        publishVoiceShortcut()
         progress = findViewById(R.id.progress)
         setupPanel = findViewById(R.id.setup_panel)
         siteInput = findViewById(R.id.site_input)
@@ -81,6 +90,7 @@ class MainActivity : Activity(), BridgeHost.Host {
             if (shellAction == SHELL_ACTION_RELOAD) reloadTopLevel()
         }
         importShareIntent(intent, savedInstanceState)
+        if (shellAction == SHELL_ACTION_VOICE) openVoice(preferredSession = null)
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -203,6 +213,10 @@ class MainActivity : Activity(), BridgeHost.Host {
                 reloadTopLevel()
                 return
             }
+            SHELL_ACTION_VOICE -> {
+                openVoice(webSessionId(siteOrigin, webView.url))
+                return
+            }
         }
         val deepLink = deepLinkFrom(intent)
         val origin = siteOrigin ?: AppRuntime.prefs.siteOrigin
@@ -217,6 +231,7 @@ class MainActivity : Activity(), BridgeHost.Host {
         pendingFileChooser = null
         bridgeHost?.destroy()
         bridgeHost = null
+        if (voiceHost.get() === this) voiceHost.clear()
         webView.destroy()
         AppRuntime.listener = null
         super.onDestroy()
@@ -392,6 +407,25 @@ class MainActivity : Activity(), BridgeHost.Host {
 
     // ---------------------------------------------------------------- intents
 
+    private fun publishVoiceShortcut() {
+        val shortcuts = getSystemService(ShortcutManager::class.java)
+        if (shortcuts.dynamicShortcuts.any { it.id == SHELL_ACTION_VOICE }) return
+        // A static shortcut clears the existing task. Keep the live WebView for the warm launch.
+        val shortcut = ShortcutInfo.Builder(this, SHELL_ACTION_VOICE)
+            .setShortLabel(getString(R.string.action_voice))
+            .setIcon(Icon.createWithResource(this, R.mipmap.ic_launcher))
+            .setIntent(Intent(Intent.ACTION_MAIN, null, this, MainActivity::class.java)
+                .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .putExtra(EXTRA_SHELL_ACTION, SHELL_ACTION_VOICE))
+            .build()
+        shortcuts.addDynamicShortcuts(listOf(shortcut))
+    }
+
+    @Suppress("DEPRECATION")
+    private fun openVoice(preferredSession: String?) {
+        startActivityForResult(Intent(this, VoiceActivity::class.java).putExtra(EXTRA_SESSION_ID, preferredSession), REQUEST_VOICE)
+    }
+
     /** Launcher shortcuts replace the removed in-page overflow button (native shell actions). */
     private fun consumeShellAction(intent: Intent?): String? {
         if (intent == null) return null
@@ -519,6 +553,14 @@ class MainActivity : Activity(), BridgeHost.Host {
                 }
                 callback.onReceiveValue(if (uris.isEmpty()) null else uris.toTypedArray())
             }
+            REQUEST_VOICE -> if (resultCode == RESULT_OK && data != null) {
+                val id = data.getStringExtra(EXTRA_SESSION_ID)
+                val origin = siteOrigin
+                if (id != null && origin != null && origin == AppRuntime.prefs.siteOrigin &&
+                    data.getStringExtra(VoiceActivity.EXTRA_ORIGIN) == origin && webSessionId(origin, webView.url) != id) {
+                    loadTopLevel(AppRuntime.deeplinkFor(origin, id))
+                }
+            }
         }
     }
 
@@ -527,10 +569,30 @@ class MainActivity : Activity(), BridgeHost.Host {
         const val EXTRA_SHELL_ACTION = "ai.cloudcli.android.extra.SHELL_ACTION"
         private const val SHELL_ACTION_CHANGE_SITE = "change_site"
         private const val SHELL_ACTION_RELOAD = "reload"
+        private const val SHELL_ACTION_VOICE = "voice"
         private const val REQUEST_PERMISSION = 11
         private const val REQUEST_PICK = 12
         private const val REQUEST_CREATE = 13
         private const val REQUEST_WEB_FILE = 14
+        private const val REQUEST_VOICE = 15
+        private var voiceHost = WeakReference<MainActivity>(null)
+        /** The web composer keeps these choices in same-origin localStorage, including on cold launch. */
+        internal fun readVoicePermissionMode(origin: String, sessionId: String, result: (String?) -> Unit) {
+            val shell = voiceHost.get()
+            if (shell == null || shell.siteOrigin != origin) {
+                result(null)
+                return
+            }
+            shell.webView.evaluateJavascript(
+                """(() => {
+                    if (location.origin !== ${JSONObject.quote(origin)}) return null;
+                    const modes = ['default', 'acceptEdits', 'bypassPermissions'];
+                    return [localStorage.getItem(${JSONObject.quote("permissionMode-$sessionId")}),
+                        localStorage.getItem('permissionMode-last-codex')].find(mode => modes.includes(mode)) || 'default';
+                })()""".trimIndent(),
+            ) { result(shell.parseJsString(it)) }
+        }
+
         private const val STATE_SHARE_IMPORTED = "cloudcli.share.imported"
         private val DEFAULT_PAGE_BACKGROUND = Color.rgb(0xF8, 0xF7, 0xF2)
         private const val THEME_READER_JS =

@@ -1,8 +1,50 @@
 import java.util.Properties
+import javax.inject.Inject
+import org.gradle.process.ExecOperations
+import org.gradle.work.DisableCachingByDefault
 
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+}
+
+@DisableCachingByDefault(because = "The pinned downloads already have a shared local cache")
+abstract class PrepareVoiceAssets : DefaultTask() {
+    @get:InputFile
+    @get:PathSensitive(PathSensitivity.NONE)
+    abstract val script: RegularFileProperty
+
+    @get:Internal
+    abstract val downloadCache: DirectoryProperty
+
+    @get:OutputDirectory
+    abstract val assets: DirectoryProperty
+
+    @get:OutputFile
+    abstract val aar: RegularFileProperty
+
+    @get:Inject
+    abstract val execOperations: ExecOperations
+
+    @TaskAction
+    fun prepare() {
+        val python = if (System.getProperty("os.name").startsWith("Windows")) "python" else "python3"
+        execOperations.exec {
+            commandLine(
+                python,
+                script.get().asFile,
+                downloadCache.get().asFile,
+                assets.get().asFile,
+                aar.get().asFile,
+            )
+        }
+    }
+}
+
+val prepareVoiceAssets = tasks.register<PrepareVoiceAssets>("prepareVoiceAssets") {
+    script.set(layout.projectDirectory.file("prepare-voice-assets.py"))
+    downloadCache.fileValue(gradle.gradleUserHomeDir.resolve("caches/cloudcli-android-voice"))
+    aar.set(layout.buildDirectory.file("voice-libs/sherpa-onnx-2.0.2.aar"))
 }
 
 // Release signing lives outside the repository:
@@ -59,6 +101,15 @@ android {
         buildConfig = true
     }
 
+    androidResources {
+        // AssetManager can map the large model files directly from the APK.
+        noCompress += listOf("onnx", "bin")
+    }
+
+    packaging {
+        jniLibs.useLegacyPackaging = false
+    }
+
     // Release lint vitals are skipped so a release build does not need the lint artifacts;
     // `lintDebug` is the enforced lint gate and is run by scripts/build-android-release.sh.
     lint {
@@ -77,6 +128,10 @@ android {
     }
 }
 
+androidComponents.onVariants { variant ->
+    variant.sources.assets?.addGeneratedSourceDirectory(prepareVoiceAssets, PrepareVoiceAssets::assets)
+}
+
 kotlin {
     compilerOptions {
         jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
@@ -86,6 +141,7 @@ kotlin {
 dependencies {
     implementation("androidx.webkit:webkit:1.12.1")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
+    implementation(files(prepareVoiceAssets.flatMap { it.aar }).builtBy(prepareVoiceAssets))
 
     testImplementation("junit:junit:4.13.2")
     testImplementation("org.json:json:20180813")

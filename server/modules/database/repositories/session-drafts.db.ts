@@ -164,13 +164,19 @@ export const sessionDraftsDb = {
     sessionDraftsDb.deleteEmptyDraft(userId, scope);
   },
 
-  /** User's append endpoint adds an independent FIFO turn, preserving each turn's options and ticket. */
-  appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage): { queuedMessage: QueuedChatMessage; appended: boolean } {
+  /** User's append endpoint adds an independent FIFO turn and can require an empty queue. */
+  appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage, ifEmpty = false) {
     const db = getConnection();
     return db.transaction(() => {
       const existing = db.prepare('SELECT draft_text, queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
         .get(userId, scope) as { draft_text: string; queued_message: string | null } | undefined;
       const queue = readQueuedMessages(existing?.queued_message ?? null);
+      // A dispatching receipt still owns the head until the dispatcher accepts or restores it.
+      if (ifEmpty && (queue.length > 0 || db.prepare(
+        "SELECT 1 FROM queued_steer_receipts WHERE user_id = ? AND session_id = ? AND status = 'dispatching' LIMIT 1",
+      ).get(userId, scope))) {
+        throw new AppError('This chat already has a message waiting to send.', { code: 'QUEUE_NOT_EMPTY', statusCode: 409 });
+      }
       const queuedMessage = { ...message, id: randomUUID() };
       sessionDraftsDb.saveDraft(userId, scope, {
         text: existing?.draft_text ?? '',
@@ -578,10 +584,17 @@ export const sessionDraftsDb = {
   },
 
   /**
-   * Persists the RPC outcome and consumes only the message owned by this
-   * request, leaving every other entry queued in place.
+   * Persists the WebSocket steer outcome, consuming only the accepted ticket.
+   * An opted-in rejection can release the unchanged head in the same transaction.
    */
-  finishSteer(userId: number, scope: string, requestId: string, status: 'accepted' | 'rejected' | 'unknown', error: string | null = null): 'accepted' | 'rejected' | 'unknown' {
+  finishSteer(
+    userId: number,
+    scope: string,
+    requestId: string,
+    status: 'accepted' | 'rejected' | 'unknown',
+    error: string | null = null,
+    options?: { keepQueuedOnRejection: boolean },
+  ): 'accepted' | 'rejected' | 'unknown' {
     const db = getConnection();
     return db.transaction(() => {
       const previous = db.prepare('SELECT status, message_id FROM queued_steer_receipts WHERE request_id = ?')
@@ -589,6 +602,13 @@ export const sessionDraftsDb = {
       if (previous?.status === 'accepted') return 'accepted' as const;
       db.prepare('UPDATE queued_steer_receipts SET status = ?, error = ? WHERE request_id = ? AND user_id = ? AND session_id = ?')
         .run(status, error, requestId, userId, scope);
+      if (status === 'rejected' && options?.keepQueuedOnRejection) {
+        db.prepare(`UPDATE session_drafts SET
+          queue_status = 'queued', queue_request_id = NULL, queue_error = NULL, updated_at = CURRENT_TIMESTAMP
+          WHERE user_id = ? AND draft_scope = ? AND queue_request_id = ?`)
+          .run(userId, scope, requestId);
+        return status;
+      }
       const row = db.prepare('SELECT queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ? AND queue_request_id = ?')
         .get(userId, scope, requestId) as { queued_message: string | null } | undefined;
       const queue = readQueuedMessages(row?.queued_message ?? null);
