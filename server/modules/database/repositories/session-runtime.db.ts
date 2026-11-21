@@ -4,6 +4,10 @@ import type { DshRuntimeSettings } from '@/shared/types.js';
 
 /** Used by Providers and WebSocket/Scheduled Messages to persist mode and queue stop intent. */
 export const sessionRuntimeDb = {
+  /** Providers advertises this deployment default for Codex sessions without saved settings. */
+  getDefaultCodexRuntime(): SessionRuntimeSettings['runtime'] {
+    return process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk' ? 'sdk' : 'app-server';
+  },
   /** DSH uses the existing unconstrained runtime column without changing Codex defaults or modes. */
   getDsh(sessionId: string): DshRuntimeSettings | null {
     const row = getConnection().prepare('SELECT runtime, queue_held FROM session_runtime_settings WHERE session_id = ?')
@@ -24,8 +28,9 @@ export const sessionRuntimeDb = {
       settings.model_provider, sessions.model FROM session_runtime_settings AS settings
       LEFT JOIN sessions ON sessions.session_id = settings.session_id WHERE settings.session_id = ?`)
       .get(sessionId) as { runtime: string; mode: string; queue_held: number; model_provider: string | null; model: string | null } | undefined;
+    const runtime = row ? row.runtime : this.getDefaultCodexRuntime();
     return {
-      runtime: row?.runtime === 'sdk' || (!row && process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk') ? 'sdk' : 'app-server',
+      runtime: runtime === 'sdk' ? 'sdk' : 'app-server',
       mode: row?.mode === 'plan' ? 'plan' : 'default',
       queueHeld: Boolean(row?.queue_held),
       ...(row?.model_provider ? { modelSelection: { modelProvider: row.model_provider, model: row.model } } : {}),
@@ -54,6 +59,6 @@ export const sessionRuntimeDb = {
       FROM sessions LEFT JOIN session_runtime_settings AS settings ON settings.session_id = sessions.session_id
       WHERE sessions.provider = 'codex' AND COALESCE(settings.runtime, ?) = 'app-server'
       ON CONFLICT(session_id) DO UPDATE SET queue_held = 1`)
-      .run(process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk' ? 'sdk' : 'app-server');
+      .run(this.getDefaultCodexRuntime());
   },
 };

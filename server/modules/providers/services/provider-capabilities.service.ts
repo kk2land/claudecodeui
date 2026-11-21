@@ -1,4 +1,5 @@
-import type { LLMProvider } from '@/shared/index.js';
+import { sessionRuntimeDb } from '@/modules/database/index.js';
+import type { LLMProvider, SessionRuntimeSettings } from '@/shared/index.js';
 import { isCodexGoalEnabled, isCodexRateLimitsEnabled } from '@/shared/index.js';
 
 /**
@@ -30,6 +31,8 @@ type ProviderCapabilities = {
    * `predictionSupported` is the real gate the composer consumes.
    */
   nativeControls?: { runtime: 'app-server'; steer: boolean; plan: boolean; goal: boolean; userInput: boolean; predictions: boolean;
+    /** Deployment runtime for a new Codex session. */
+    defaultRuntime?: SessionRuntimeSettings['runtime'];
     /** This adapter implements the approved-plan handoff; the real CLI can still refuse it explicitly. */
     planHandoff: boolean };
   /** Application transport/process controls, independent of provider-native plan or steer support. */
@@ -237,7 +240,11 @@ export const providerCapabilitiesService = {
       ...capabilities,
       hiddenFromModelPicker: hiddenProviders.includes(provider),
       ...(capabilities.nativeControls ? {
-        nativeControls: { ...capabilities.nativeControls, goal: isCodexGoalEnabled() },
+        nativeControls: {
+          ...capabilities.nativeControls,
+          goal: isCodexGoalEnabled(),
+          defaultRuntime: sessionRuntimeDb.getDefaultCodexRuntime(),
+        },
       } : {}),
       // Only Codex exposes a quota card; the deployment flag decides whether the
       // panel offers it, so the frontend never has to branch on the provider id.

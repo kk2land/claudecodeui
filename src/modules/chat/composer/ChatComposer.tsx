@@ -326,16 +326,20 @@ export default function ChatComposer({
   // The mobile layout is gated by the same 640px breakpoint as the composer's
   // sm: utilities, so CSS and the React branches below cannot disagree.
   const { isMobile } = useDeviceSettings({ mobileBreakpoint: 640, trackPWA: false });
-  const nativeVoiceSessionId = isMobile && voiceState === 'idle' && codexControls?.state?.runtime === 'app-server'
+  const nativeVoiceSessionId = codexControls?.state?.runtime === 'app-server'
     ? codexControls.sessionId
     : null;
-  const androidBridge = nativeVoiceSessionId ? getAndroidBridge() : null;
+  const nativeVoiceTarget = nativeVoiceSessionId || codexControls?.createVoiceSession;
+  const androidBridge = isMobile && voiceState === 'idle' && nativeVoiceTarget ? getAndroidBridge() : null;
   const openVoiceChat = androidBridge?.openVoiceChat;
-  const openNativeVoice = nativeVoiceSessionId && typeof openVoiceChat === 'function'
-    ? () => {
-        void openVoiceChat.call(androidBridge, nativeVoiceSessionId).catch((error: unknown) => {
+  const openNativeVoice = nativeVoiceTarget && typeof openVoiceChat === 'function'
+    ? async () => {
+        try {
+          const sessionId = typeof nativeVoiceTarget === 'string' ? nativeVoiceTarget : await nativeVoiceTarget();
+          await openVoiceChat.call(androidBridge, sessionId);
+        } catch (error) {
           handleVoiceError(error instanceof Error && error.message ? error.message : t('voice.openFailed'));
-        });
+        }
       }
     : null;
   // Which bottom sheet is open, if any. Kept here because both the collapsed +
@@ -1082,7 +1086,8 @@ export default function ChatComposer({
                 <MobileSheetAction
                   icon={<MicIcon />}
                   label={isRecording ? t('voice.stopRecording') : t('voice.input')}
-                  onClick={() => { close(); (openNativeVoice ?? voiceToggle)(); }}
+                  disabled={Boolean(openNativeVoice && !nativeVoiceSessionId && codexControls?.pending)}
+                  onClick={() => { close(); void (openNativeVoice ?? voiceToggle)(); }}
                 />
               )}
               <MobileSheetAction

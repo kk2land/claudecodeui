@@ -92,6 +92,24 @@ test('Goals require an explicit environment opt-in in both capability endpoints'
   }
 });
 
+test('both capability endpoints report the new Codex session runtime separately from native controls', () => {
+  const original = process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+  try {
+    for (const [configured, expected] of [[undefined, 'app-server'], ['app-server', 'app-server'], ['sdk', 'sdk']] as const) {
+      if (configured === undefined) delete process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+      else process.env.CLOUDCLI_CODEX_RUNTIME_MODE = configured;
+      const { nativeControls } = providerCapabilitiesService.getProviderCapabilities('codex');
+      assert.equal(nativeControls?.defaultRuntime, expected);
+      assert.equal(nativeControls?.runtime, 'app-server');
+      const codex = providerCapabilitiesService.listAllProviderCapabilities().find((row) => row.provider === 'codex');
+      assert.equal(codex?.nativeControls?.defaultRuntime, expected);
+    }
+  } finally {
+    if (original === undefined) delete process.env.CLOUDCLI_CODEX_RUNTIME_MODE;
+    else process.env.CLOUDCLI_CODEX_RUNTIME_MODE = original;
+  }
+});
+
 test('Codex account rate limits require an explicit environment opt-in', () => {
   const original = process.env.CLOUDCLI_CODEX_RATE_LIMITS_ENABLED;
   try {

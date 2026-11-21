@@ -27,12 +27,12 @@ type Args = {
 /** ChatInterface owns this controller; all native controls wait for a scoped server acknowledgement. */
 export function useCodexControls({ enabled, sessionId, project, chatActive = true, options, sendMessage, onSessionEstablished }: Args): CodexControls {
   const { subscribe } = useWebSocket();
-  const capabilities = useProviderCapabilities();
-  const goalsEnabled = capabilities.codex?.nativeControls?.goal === true;
+  const nativeControls = useProviderCapabilities().codex?.nativeControls;
+  const goalsEnabled = nativeControls?.goal === true;
   // Integration support needs both the adapter's static capability and the real
   // per-session CLI gate; account/model eligibility is still reported by the
   // per-turn prediction snapshot and never assumed here.
-  const predictionsImplemented = capabilities.codex?.nativeControls?.predictions === true;
+  const predictionsImplemented = nativeControls?.predictions === true;
   // Snapshots remain session-scoped so a late response cannot repaint another conversation.
   const [snapshots, setSnapshots] = useState<Record<string, CodexSessionState>>({});
   // A control failure keeps its source so a native idle snapshot can retire only
@@ -249,7 +249,9 @@ export function useCodexControls({ enabled, sessionId, project, chatActive = tru
   // offering a toggle that could never produce a suggestion.
   const predictionsUnsupported = predictionsImplemented && nativeRuntime
     && Boolean(sessionId) && sessionSnapshot?.predictionSupported === false;
-  return { sessionId, goalsEnabled, predictionsSupported, predictionsUnsupported, hasActiveWorkers,
+  const canCreateVoiceSession = enabled && !sessionId && project && nativeControls?.defaultRuntime === 'app-server';
+  return { sessionId, createVoiceSession: canCreateVoiceSession ? ensureSession : undefined,
+    goalsEnabled, predictionsSupported, predictionsUnsupported, hasActiveWorkers,
     canRetryStop: errors[sessionId ?? '']?.processStop === true,
     goalVisible: visibleGoals.has(sessionId ?? ''), state: sessionId ? snapshots[sessionId] ?? null : null, error: errors[sessionId ?? '']?.message ?? null,
     pending: allocating || pendingSessions.has(sessionId ?? ''), delivery, control, steer };

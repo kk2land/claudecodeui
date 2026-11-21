@@ -31,11 +31,12 @@ export type ProviderCapabilityRow = {
   provider: LLMProvider;
   supportsSessionForking?: boolean;
   /**
+   * `defaultRuntime` is the deployment runtime for a new Codex session.
    * `predictions` only says the integration can ask for a native suggestion; it is never an eligibility claim.
    * `planHandoff` only says the adapter has the approved-plan handoff wired experimentally: a refusal from the
    * SDK or the real protocol must still be reported as unsupported rather than assumed to work.
    */
-  nativeControls?: { goal?: boolean; predictions?: boolean; planHandoff?: boolean };
+  nativeControls?: { goal?: boolean; predictions?: boolean; planHandoff?: boolean; defaultRuntime?: CodexSessionState['runtime'] };
   runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /** Whether the server offers this provider's account quota card; absent or false hides it and skips its cache request. */
   accountRateLimits?: boolean;
@@ -2663,6 +2664,8 @@ export type ComposerPredictionControls = {
 /** Chat controls shared between the session hook, composer and native control panel. */
 export type CodexControls = {
   sessionId?: string | null;
+  /** Allocates the selected project's empty app-server session for Android voice. */
+  createVoiceSession?(): Promise<string>;
   /** Server-owned deployment opt-in; missing means Goals are disabled. */
   goalsEnabled?: boolean;
   goalVisible?: boolean;

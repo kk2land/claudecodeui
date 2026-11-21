@@ -144,7 +144,7 @@ const stubAndroidBridge = (openVoiceChat?: unknown) => {
 
 const codexControls = (runtime: CodexSessionState['runtime'], sessionId: string | null = 'selected-session'): CodexControls => ({
   sessionId,
-  state: { runtime, mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [] },
+  state: sessionId ? { runtime, mode: 'default', phase: 'idle', turnId: null, goal: null, questions: [] } : null,
   error: null,
   pending: false,
   delivery: null,
@@ -153,7 +153,7 @@ const codexControls = (runtime: CodexSessionState['runtime'], sessionId: string 
 });
 
 const openMobileActions = (
-  controls: CodexControls,
+  controls: CodexControls | undefined,
   overrides: Partial<ComponentProps<typeof ChatComposer>> = {},
 ) => {
   vi.stubGlobal('innerWidth', 412);
@@ -245,15 +245,85 @@ test('the mobile voice action opens the selected native session with the draft i
   assert.equal(toggleBrowserVoice.mock.calls.length, 0);
 });
 
+test('the mobile voice action waits for a single new session and keeps the unsent draft', async () => {
+  vi.stubGlobal('innerWidth', 412);
+  const openVoiceChat = vi.fn().mockResolvedValue(undefined);
+  stubAndroidBridge(openVoiceChat);
+  let finish!: (id: string) => void;
+  const allocation = new Promise<string>((resolve) => { finish = resolve; });
+  const createVoiceSession = vi.fn().mockReturnValue(allocation);
+  const controls = { ...codexControls('app-server', null), createVoiceSession };
+  const onSubmit = vi.fn();
+  const onClearInput = vi.fn();
+  const input = 'Keep this new chat draft';
+  const props = { ...composerProps(), providerLabel: 'Codex', hasInput: true, input, onSubmit, onClearInput };
+  const { rerender } = render(<ChatComposer {...props} codexControls={controls} />, { wrapper });
+  const actionsButton = screen.getByRole('button', { name: 'Add attachment or action' });
+  fireEvent.click(actionsButton);
+  assert.equal(createVoiceSession.mock.calls.length, 0);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Voice input' }));
+  assert.equal(screen.queryByRole('dialog', { name: 'Add to message' }), null);
+  assert.equal(createVoiceSession.mock.calls.length, 1);
+  assert.equal(openVoiceChat.mock.calls.length, 0);
+
+  rerender(<ChatComposer {...props} codexControls={{ ...controls, pending: true }} />);
+  fireEvent.click(actionsButton);
+  const pendingVoice = screen.getByRole<HTMLButtonElement>('button', { name: 'Voice input' });
+  assert.equal(pendingVoice.disabled, true);
+  fireEvent.click(pendingVoice);
+  assert.equal(createVoiceSession.mock.calls.length, 1);
+
+  await act(async () => { finish('allocated-codex-session'); });
+  assert.deepEqual(openVoiceChat.mock.calls, [['allocated-codex-session']]);
+  assert.equal(screen.getByRole<HTMLTextAreaElement>('textbox', { name: 'Message' }).value, input);
+  assert.equal(onSubmit.mock.calls.length, 0);
+  assert.equal(onClearInput.mock.calls.length, 0);
+  assert.equal(toggleBrowserVoice.mock.calls.length, 0);
+});
+
+test('a blank mobile chat reports a failed allocation and opens voice after retry', async () => {
+  const openVoiceChat = vi.fn().mockResolvedValue(undefined);
+  stubAndroidBridge(openVoiceChat);
+  const createVoiceSession = vi.fn()
+    .mockRejectedValueOnce(new Error('Could not create a Codex session.'))
+    .mockResolvedValueOnce('retried-codex-session');
+  const actions = openMobileActions({ ...codexControls('app-server', null), createVoiceSession });
+  fireEvent.click(actions.getByRole('button', { name: 'Voice input' }));
+
+  assert.equal((await screen.findByRole('alert')).textContent, 'Could not create a Codex session.');
+  assert.equal(openVoiceChat.mock.calls.length, 0);
+
+  fireEvent.click(screen.getByRole('button', { name: 'Add attachment or action' }));
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Voice input' })); });
+  assert.deepEqual(openVoiceChat.mock.calls, [['retried-codex-session']]);
+});
+
 test.each([
   { reason: 'without a bridge', method: undefined, runtime: 'app-server', sessionId: 'selected-session' },
   { reason: 'with a non-callable bridge method', method: true, runtime: 'app-server', sessionId: 'selected-session' },
   { reason: 'for an SDK session', method: () => {}, runtime: 'sdk', sessionId: 'selected-session' },
-  { reason: 'without a session ID', method: () => {}, runtime: 'app-server', sessionId: null },
+  { reason: 'for an SDK-default new chat', method: () => {}, runtime: 'sdk', sessionId: null },
 ] as const)('mobile voice is hidden with dictation off $reason', ({ method, runtime, sessionId }) => {
   if (method !== undefined) stubAndroidBridge(method);
   const actions = openMobileActions(codexControls(runtime, sessionId));
   assert.equal(actions.queryByRole('button', { name: 'Voice input' }), null);
+});
+
+test('mobile voice is hidden for other providers when browser dictation is off', () => {
+  stubAndroidBridge(vi.fn());
+  const actions = openMobileActions(undefined, { providerLabel: 'Claude' });
+  assert.equal(actions.queryByRole('button', { name: 'Voice input' }), null);
+});
+
+test('an old bridge keeps browser dictation in eligible new chats without allocating a session', () => {
+  setVoiceEnabled(true);
+  stubAndroidBridge();
+  const createVoiceSession = vi.fn();
+  const actions = openMobileActions({ ...codexControls('app-server', null), createVoiceSession });
+  fireEvent.click(actions.getByRole('button', { name: 'Voice input' }));
+  assert.equal(toggleBrowserVoice.mock.calls.length, 1);
+  assert.equal(createVoiceSession.mock.calls.length, 0);
 });
 
 test.each([

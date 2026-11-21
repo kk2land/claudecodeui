@@ -8,13 +8,14 @@ import { api } from '@/shared/api';
 import { readDraftMeta, readDraftText, resetChatDrafts, writeDraftMeta, writeDraftText } from '@/shared/chatDrafts';
 import type { CodexSessionState, Project, ServerEvent } from '@/shared/types';
 
-const { listeners, subscribe } = vi.hoisted(() => ({
+const { listeners, subscribe, nativeControls } = vi.hoisted(() => ({
   listeners: new Set<(event: ServerEvent) => void>(),
   subscribe: vi.fn(),
+  nativeControls: { goal: false, predictions: false, defaultRuntime: 'app-server' as CodexSessionState['runtime'] | undefined },
 }));
 vi.mock('@/shared/context/WebSocketContext', () => ({ useWebSocket: () => ({ subscribe }) }));
 vi.mock('@/shared/hooks/useProviderCapabilities', () => ({
-  useProviderCapabilities: () => ({ codex: { nativeControls: { goal: false, predictions: false } } }),
+  useProviderCapabilities: () => ({ codex: { nativeControls } }),
 }));
 // The Worker activity hook reads the public plugin context; no Worker is installed here.
 vi.mock('@/modules/plugins', () => ({ usePlugins: () => ({ plugins: [] }) }));
@@ -80,6 +81,7 @@ beforeEach(() => {
   resetChatDrafts();
   serverDrafts.clear();
   listeners.clear();
+  nativeControls.defaultRuntime = 'app-server';
   subscribe.mockImplementation((listener: (event: ServerEvent) => void) => {
     listeners.add(listener);
     return () => { listeners.delete(listener); };
@@ -134,6 +136,49 @@ test('switching a new chat to Plan mode moves its draft into the allocated sessi
     type: 'chat.control', sessionId: 'created', control: { action: 'mode', mode: 'plan' },
   }));
   expect(hook.send.mock.calls.filter(([payload]) => (payload as { type: string }).type === 'chat.send')).toHaveLength(0);
+});
+
+test('fresh voice allocation moves the selected project draft and establishes the returned ID once', async () => {
+  const creation = deferredResponse();
+  const create = vi.spyOn(api.providers, 'createSession').mockReturnValue(creation.promise);
+  const hook = renderComposer();
+  expect(create).not.toHaveBeenCalled();
+  await act(async () => { hook.result.current.composer.setInput('keep the voice draft'); });
+
+  let allocations!: Promise<string[]>;
+  act(() => {
+    const createVoiceSession = hook.result.current.controls.createVoiceSession!;
+    allocations = Promise.all([createVoiceSession(), createVoiceSession()]);
+  });
+  expect(hook.result.current.controls.pending).toBe(true);
+  expect(create).toHaveBeenCalledExactlyOnceWith({ provider: 'codex', projectPath: PROJECT.fullPath, initialMessage: '' });
+  expect(hook.established).not.toHaveBeenCalled();
+  expect(hook.send).not.toHaveBeenCalled();
+
+  await act(async () => {
+    creation.resolve(createdSession('new-voice-session'));
+    expect(await allocations).toEqual(['new-voice-session', 'new-voice-session']);
+  });
+  expect(hook.established).toHaveBeenCalledExactlyOnceWith('new-voice-session');
+  expect(hook.result.current.sessionId).toBe('new-voice-session');
+  expect(hook.result.current.controls.createVoiceSession).toBeUndefined();
+  expect(hook.result.current.composer.input).toBe('keep the voice draft');
+  expect(readDraftText('new-voice-session')).toBe('keep the voice draft');
+  expect(readDraftText('project:project-1')).toBe('');
+  expect(hook.send.mock.calls.filter(([payload]) => (payload as { type: string }).type === 'chat.send')).toHaveLength(0);
+});
+
+test.each([
+  { reason: 'with SDK as the default', defaultRuntime: 'sdk', enabled: true, project: PROJECT },
+  { reason: 'before the default is known', defaultRuntime: undefined, enabled: true, project: PROJECT },
+  { reason: 'when Codex is disabled', defaultRuntime: 'app-server', enabled: false, project: PROJECT },
+  { reason: 'without a selected project', defaultRuntime: 'app-server', enabled: true, project: null },
+] as const)('fresh voice allocation is unavailable $reason', ({ defaultRuntime, enabled, project }) => {
+  nativeControls.defaultRuntime = defaultRuntime;
+  const { result } = renderHook(() => useCodexControls({
+    enabled, sessionId: null, project, options: {}, sendMessage: vi.fn(), onSessionEstablished: vi.fn(),
+  }));
+  expect(result.current.createVoiceSession).toBeUndefined();
 });
 
 test('a failed session allocation leaves the project draft in place', async () => {
