@@ -12,6 +12,7 @@ import type {
 } from 'react';
 import { EraserIcon, PaperclipIcon, MessageSquareIcon, XIcon, Loader2, ArrowUpIcon, PencilIcon, PlusIcon, SlidersHorizontalIcon, ActivityIcon, MicIcon, ListTodoIcon } from 'lucide-react';
 
+import { getAndroidBridge } from '@/modules/android-bridge';
 import { useVoiceInput } from '@/modules/chat/hooks/useVoiceInput';
 import { useVoiceAvailable } from '@/modules/chat/hooks/useVoiceAvailable';
 import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
@@ -325,6 +326,18 @@ export default function ChatComposer({
   // The mobile layout is gated by the same 640px breakpoint as the composer's
   // sm: utilities, so CSS and the React branches below cannot disagree.
   const { isMobile } = useDeviceSettings({ mobileBreakpoint: 640, trackPWA: false });
+  const nativeVoiceSessionId = isMobile && voiceState === 'idle' && codexControls?.state?.runtime === 'app-server'
+    ? codexControls.sessionId
+    : null;
+  const androidBridge = nativeVoiceSessionId ? getAndroidBridge() : null;
+  const openVoiceChat = androidBridge?.openVoiceChat;
+  const openNativeVoice = nativeVoiceSessionId && typeof openVoiceChat === 'function'
+    ? () => {
+        void openVoiceChat.call(androidBridge, nativeVoiceSessionId).catch((error: unknown) => {
+          handleVoiceError(error instanceof Error && error.message ? error.message : t('voice.openFailed'));
+        });
+      }
+    : null;
   // Which bottom sheet is open, if any. Kept here because both the collapsed +
   // and the expanded settings entry open them, and the provider panels portal
   // into the settings sheet.
@@ -1065,11 +1078,11 @@ export default function ChatComposer({
                 label={t('input.attachFiles')}
                 onClick={() => { close(); openAttachmentPicker(); }}
               />
-              {onVoiceTranscript && voiceAvailable && (
+              {(openNativeVoice || (onVoiceTranscript && voiceAvailable)) && (
                 <MobileSheetAction
                   icon={<MicIcon />}
                   label={isRecording ? t('voice.stopRecording') : t('voice.input')}
-                  onClick={() => { close(); voiceToggle(); }}
+                  onClick={() => { close(); (openNativeVoice ?? voiceToggle)(); }}
                 />
               )}
               <MobileSheetAction

@@ -302,6 +302,7 @@
   },
   "voice": {
     "input": "Voice input",
+    "openFailed": "Could not open voice input.",
     "stopRecording": "Stop recording",
     "transcribing": "Transcribing…",
     "speak": "Read aloud",

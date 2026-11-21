@@ -409,16 +409,15 @@ class MainActivity : Activity(), BridgeHost.Host {
 
     private fun publishVoiceShortcut() {
         val shortcuts = getSystemService(ShortcutManager::class.java)
-        if (shortcuts.dynamicShortcuts.any { it.id == SHELL_ACTION_VOICE }) return
         // A static shortcut clears the existing task. Keep the live WebView for the warm launch.
         val shortcut = ShortcutInfo.Builder(this, SHELL_ACTION_VOICE)
             .setShortLabel(getString(R.string.action_voice))
-            .setIcon(Icon.createWithResource(this, R.mipmap.ic_launcher))
+            .setIcon(Icon.createWithResource(this, R.mipmap.ic_shortcut_voice))
             .setIntent(Intent(Intent.ACTION_MAIN, null, this, MainActivity::class.java)
                 .addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                 .putExtra(EXTRA_SHELL_ACTION, SHELL_ACTION_VOICE))
             .build()
-        shortcuts.addDynamicShortcuts(listOf(shortcut))
+        AppRuntime.io.execute { shortcuts.addDynamicShortcuts(listOf(shortcut)) }
     }
 
     @Suppress("DEPRECATION")
@@ -466,6 +465,8 @@ class MainActivity : Activity(), BridgeHost.Host {
     }
 
     // ---------------------------------------------------------------- BridgeHost.Host
+
+    override fun openVoiceChat(sessionId: String) = openVoice(sessionId)
 
     override fun notificationPermissionGranted(): Boolean = Notifications.canPostEvents(this)
 

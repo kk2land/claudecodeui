@@ -1781,8 +1781,8 @@ export type AndroidShare = {
 
 /**
  * The injected `window.cloudcliAndroid` public API. Every method is implemented
- * by the native document-start wrapper; the web adapter only validates and
- * calls it, so missing methods mean the bridge is unavailable.
+ * by the native document-start wrapper. The web adapter validates the required
+ * methods, and callers check for optional capabilities before using them.
  */
 export type AndroidBridge = {
   version: 1;
@@ -1814,6 +1814,7 @@ export type AndroidBridge = {
     mimeType?: string;
     blob: Blob;
   }): Promise<{ saved: boolean }>;
+  openVoiceChat?(sessionId: string): Promise<void>;
 };
 
 /** Rejection codes from the Android bridge contract; a UI may branch on these but must show the real failure. */

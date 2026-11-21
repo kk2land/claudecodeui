@@ -18,7 +18,7 @@ import org.json.JSONObject
 
 /**
  * WebView bridge host (contract §3.2-§3.6). Installs the document-start script and the
- * main-frame-only web message listener for the configured origin, then serves the 12 public
+ * main-frame-only web message listener for the configured origin, then serves the public
  * methods plus the transfer control messages.
  */
 class BridgeHost(
@@ -35,6 +35,7 @@ class BridgeHost(
         fun requestNotificationPermission(onResult: (Boolean) -> Unit)
         fun pickDocuments(multiple: Boolean, onResult: (List<Uri>?) -> Unit)
         fun createDocument(name: String, mimeType: String, onResult: (Uri?) -> Unit)
+        fun openVoiceChat(sessionId: String)
     }
 
     private data class FileMeta(val uri: Uri, val name: String, val mimeType: String, val size: Long)
@@ -154,6 +155,15 @@ class BridgeHost(
             "discardShare" -> handleRemoveShare(id, params)
             "file.pick" -> handlePickFiles(id, params)
             "file.save" -> handleSaveFile(id, params)
+            "openVoiceChat" -> {
+                val sessionId = params.opt("sessionId") as? String
+                if (sessionId.isNullOrBlank()) {
+                    respondError(id, BridgeErrorCode.INVALID_ARGUMENT, "sessionId must be a nonblank string")
+                } else {
+                    host.openVoiceChat(sessionId)
+                    respond(id, null)
+                }
+            }
             "transfer.finish" -> handleFinishTransfer(id, params)
             else -> respondError(id, BridgeErrorCode.UNAVAILABLE, "Unknown method")
         }

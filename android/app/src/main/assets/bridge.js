@@ -360,6 +360,9 @@
       return request('discardShare', { id: id });
     },
     pickFiles: pickFiles,
-    saveFile: saveFile
+    saveFile: saveFile,
+    openVoiceChat: function (sessionId) {
+      return request('openVoiceChat', { sessionId: sessionId });
+    }
   };
 })();
