@@ -13,7 +13,7 @@ import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerTaskRole } from "../shared/task-roles.js";
 
 const timeoutSeconds = z.number().int().positive().nullable().optional().describe(
-  "省略时用所选配置的硬超时；显式秒数覆盖本轮，null 关闭本轮硬超时",
+  "start/resume 默认省略，使用所选配置的硬超时。仅当用户明确指定本轮硬超时时传秒数。用户明确要求本轮取消硬超时时传 null",
 );
 const viewField = z
   .enum(["compact"])

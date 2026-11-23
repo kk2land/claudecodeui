@@ -35,7 +35,7 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 - `worker_start` 显式选 `workspace.mode`。`existing` 写入不重叠，`worktree` 隔离并可指定 `baseRef`。脏源默认拒绝，仅已授权、确认不依赖未提交改动且记录基线后用 `allowDirtySource: true`。
 - `worker_resume` 用原 workerId、cwd、home 和原生会话，不传 `taskRole`，模型/effort 沿用原 run 除非用户指定覆盖。只读任务不能续接为写入任务。其余范围或契约变化由主代理决定。续接只交接变化的部分。
 - 配置只在用户明确选择时传入，省略时按已启用配置路由。`type` 只是引擎过滤条件，不能替代配置。角色含义或配置选择有疑问时读 [角色与配置路由](references/routing.md)。
-- 默认省略 `timeoutSeconds`，由实际 Worker 配置决定超时。仅需覆盖本轮预算时传入，长任务按可验收阶段续接。覆盖与 `null` 语义见 [角色与配置路由](references/routing.md)。提示词给出命令预算，长命令后台执行，单次同步等待不超过 60 秒。测试已报超时而进程未退出时，停止本任务自己的进程并保留日志。
+- start 和 resume 默认都省略 `timeoutSeconds`，由所选配置决定硬超时。长任务按可验收阶段续接。仅当用户明确指定本轮硬超时（给出秒数或时长）时传秒数。用户明确要求本轮取消硬超时才传 `null`。预计时长、要求快审、等待窗口、软提醒都沿用默认硬超时。覆盖与 `null` 语义见 [角色与配置路由](references/routing.md)。提示词给出命令预算，长命令后台执行，单次同步等待不超过 60 秒。测试已报超时而进程未退出时，停止本任务自己的进程并保留日志。
 
 ## 视图与回包
 
