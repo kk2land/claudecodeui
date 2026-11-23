@@ -278,6 +278,43 @@ test("a bound run opens on the conversation tab with the run's own session and l
   }
 });
 
+test("a legacy DSH prompt is marked retired and its run action is disabled", async () => {
+  const mounted = await mountDetail({
+    task: {
+      projectId: "project-a",
+      projectName: "项目 A",
+      projectPath: "/tmp/project-a",
+      taskId: "nightly",
+      definition: {
+        ...taskDefinition,
+        agent: { provider: "dsh", model: "gateway/flash", effort: "high" },
+      },
+      updatedAt: "2026-02-03T00:00:00.000Z",
+      nextRun: null,
+      activeRuns: [],
+      lastRun: null,
+    },
+    hostCapabilities: "open-only",
+  });
+  try {
+    // The list identifies the task as retired and explains the missing automatic schedule.
+    assert.match(mounted.text(), /已停用/);
+    assert.match(mounted.text(), /请在“编辑任务”中改选 Codex/);
+    assert.match(mounted.text(), /不自动排期/);
+
+    await mounted.click("Nightly");
+    await waitFor(() => mounted.findButton("立即运行") !== undefined, "任务详情");
+    const start = mounted.findButton("立即运行")!;
+    assert.equal(start.disabled, true);
+    assert.match(mounted.text(), /DSH 提示词已停用/);
+    assert.match(mounted.text(), /改为 codex/);
+    // No manual run was requested merely by opening the detail.
+    assert.equal(mounted.calls.some((call) => call.path === "/run"), false);
+  } finally {
+    mounted.close();
+  }
+});
+
 test("selecting another run, another tab, the task list, or unmounting disposes the old viewer", async () => {
   const latest = run({ id: "run-2", sessionId: "session-b", startedAt: "2026-02-04T04:05:06.000Z" });
   const earlier = run({ id: "run-1", sessionId: "session-a" });

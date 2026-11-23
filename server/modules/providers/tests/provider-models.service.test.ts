@@ -415,7 +415,6 @@ test('allowed effort levels come from the provider, not from the built-in models
     codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
     cursor: [],
     opencode: ['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'thinking'],
-    dsh: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
   };
   for (const [provider, levels] of Object.entries(expectedLevels) as Array<[LLMProvider, string[]]>) {
     assert.deepEqual((await service.getProviderModels(provider)).EFFORT_LEVELS, levels, provider);
@@ -449,13 +448,13 @@ for (const onlyCustom of [false, true]) {
   test(`discovery of an existing custom model preserves one editable row (custom-only: ${onlyCustom})`, async () => {
     const predefined = createModels('default');
     const { service } = createTestService({ models: () => predefined });
-    const existing = await service.createCustomModel('dsh', {
+    const existing = await service.createCustomModel('opencode', {
       id: 'gateway/model',
       model: 'My model',
       effort: { values: ['high'], default: 'high' },
     });
     const recordId = existing.model.recordId as number;
-    const other = await service.createCustomModel('dsh', { id: 'gateway/other', model: 'Other' });
+    const other = await service.createCustomModel('opencode', { id: 'gateway/other', model: 'Other' });
     predefined.OPTIONS.push({
       value: 'gateway/model',
       label: 'Discovered name',
@@ -463,17 +462,17 @@ for (const onlyCustom of [false, true]) {
     });
     predefined.OPTIONS.push({ value: 'gateway/new', label: 'New discovery' });
 
-    const merged = await service.setCustomModelsOnly('dsh', onlyCustom);
+    const merged = await service.setCustomModelsOnly('opencode', onlyCustom);
     assert.equal(new Set(merged.OPTIONS.map(({ value }) => value)).size, merged.OPTIONS.length);
     assert.deepEqual(merged.OPTIONS.find(({ value }) => value === 'gateway/model'), existing.model);
     assert.equal(merged.DEFAULT, onlyCustom ? 'gateway/model' : 'default');
 
-    const renamed = await service.updateCustomModel('dsh', recordId, { id: 'gateway/model', model: 'Renamed' });
+    const renamed = await service.updateCustomModel('opencode', recordId, { id: 'gateway/model', model: 'Renamed' });
     assert.equal(renamed.model.label, 'Renamed');
     assert.equal(renamed.model.recordId, recordId);
     assert.equal(renamed.model.isCustom, true);
     assert.deepEqual(renamed.model.effort, existing.model.effort);
-    const edited = await service.updateCustomModel('dsh', recordId, {
+    const edited = await service.updateCustomModel('opencode', recordId, {
       id: 'gateway/model',
       model: 'Renamed',
       effort: { values: ['high', 'xhigh'], default: 'xhigh' },
@@ -484,15 +483,15 @@ for (const onlyCustom of [false, true]) {
 
     for (const id of ['gateway/model', 'gateway/new']) {
       for (const mutate of [
-        () => service.createCustomModel('dsh', { id, model: 'Duplicate' }),
-        () => service.updateCustomModel('dsh', other.model.recordId as number, { id, model: 'Duplicate' }),
+        () => service.createCustomModel('opencode', { id, model: 'Duplicate' }),
+        () => service.updateCustomModel('opencode', other.model.recordId as number, { id, model: 'Duplicate' }),
       ]) {
         await assert.rejects(mutate, (error) => error instanceof AppError
           && error.code === 'MODEL_ID_ALREADY_EXISTS' && error.statusCode === 409);
       }
     }
 
-    const moved = await service.updateCustomModel('dsh', recordId, { id: 'gateway/renamed', model: 'Moved' });
+    const moved = await service.updateCustomModel('opencode', recordId, { id: 'gateway/renamed', model: 'Moved' });
     assert.equal(moved.models.OPTIONS.some(({ value, isCustom }) => value === 'gateway/model' && !isCustom), !onlyCustom);
     assert.equal(moved.models.OPTIONS.find(({ value }) => value === 'gateway/renamed')?.recordId, recordId);
   });
@@ -503,14 +502,14 @@ test('deleting a custom override retains the session model only if discovery rem
     for (const hasOtherCustom of [false, true]) {
       const predefined = createModels('default');
       const { service, catalog } = createTestService({ models: () => predefined });
-      const existing = await service.createCustomModel('dsh', { id: 'gateway/model', model: 'Custom' });
+      const existing = await service.createCustomModel('opencode', { id: 'gateway/model', model: 'Custom' });
       if (hasOtherCustom) {
-        await service.createCustomModel('dsh', { id: 'gateway/other', model: 'Other' });
+        await service.createCustomModel('opencode', { id: 'gateway/other', model: 'Other' });
       }
       predefined.OPTIONS.push({ value: 'gateway/model', label: 'Discovered' });
-      await service.setCustomModelsOnly('dsh', onlyCustom);
+      await service.setCustomModelsOnly('opencode', onlyCustom);
 
-      const removed = await service.deleteCustomModel('dsh', existing.model.recordId as number);
+      const removed = await service.deleteCustomModel('opencode', existing.model.recordId as number);
       const discovered = removed.models.OPTIONS.find(({ value }) => value === 'gateway/model');
       if (onlyCustom && hasOtherCustom) {
         assert.equal(discovered, undefined);

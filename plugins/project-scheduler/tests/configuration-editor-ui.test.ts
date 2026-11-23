@@ -255,6 +255,7 @@ test("raw field validation rejects invalid args and env without dropping input",
 type Mounted = {
   container: HTMLElement;
   calls: Array<{ method: string; path: string; body: unknown }>;
+  modelCalls: string[];
   emit(context: unknown): void;
   unmount(): void;
   dom: { window: Window & typeof globalThis };
@@ -342,7 +343,7 @@ async function typeInto(input: HTMLInputElement | HTMLTextAreaElement, value: st
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
-/** Model catalogs used by DOM tests; effort levels mirror real provider shapes. */
+/** Codex model catalog used by DOM tests. */
 const DEFAULT_CATALOGS = {
   codex: {
     DEFAULT: "gpt-6-sol",
@@ -359,18 +360,6 @@ const DEFAULT_CATALOGS = {
         value: "gpt-6-luna",
         label: "GPT-6 Luna",
         effort: { values: [{ value: "low" }, { value: "medium" }] },
-      },
-    ],
-  },
-  dsh: {
-    DEFAULT: "default",
-    OPTIONS: [
-      { value: "default", label: "default" },
-      {
-        value: "magpie/flash",
-        label: "Flash",
-        description: "magpie",
-        effort: { values: [{ value: "off" }, { value: "high" }] },
       },
     ],
   },
@@ -421,9 +410,7 @@ type RpcMode = {
    * Host catalog responses keyed by provider; a promise defers or rejects the lookup and a
    * function runs on every request, which lets a test fail once and succeed on retry.
    */
-  models?: Partial<
-    Record<"codex" | "dsh", unknown | Promise<unknown> | (() => Promise<unknown>)>
-  >;
+  models?: Partial<Record<"codex", unknown | Promise<unknown> | (() => Promise<unknown>)>>;
   /** Omits host.models entirely to emulate an older host. */
   withoutModels?: boolean;
   /** Per-run records returned by GET /runs; omitted means no run history. */
@@ -440,6 +427,7 @@ async function mountPlugin(mode: RpcMode = {}) {
   )) as HostModule;
   const container = dom.window.document.getElementById("host")!;
   const calls: Array<{ method: string; path: string; body: unknown }> = [];
+  const modelCalls: string[] = [];
   const listeners = new Set<(context: unknown) => void>();
   let context: { theme: "light"; project: { name: string; path: string } | null } = {
     theme: "light",
@@ -458,8 +446,10 @@ async function mountPlugin(mode: RpcMode = {}) {
       ? {}
       : {
           models(provider: "codex" | "dsh") {
-            const reply = mode.models?.[provider];
-            if (reply === undefined) return Promise.resolve(DEFAULT_CATALOGS[provider]);
+            modelCalls.push(provider);
+            if (provider === "dsh") return Promise.reject(new Error("DSH catalog unsupported"));
+            const reply = mode.models?.codex;
+            if (reply === undefined) return Promise.resolve(DEFAULT_CATALOGS.codex);
             if (typeof reply === "function") return reply();
             return Promise.resolve(reply);
           },
@@ -529,6 +519,7 @@ async function mountPlugin(mode: RpcMode = {}) {
   const mounted: Mounted = {
     container,
     calls,
+    modelCalls,
     emit(next) {
       context = next as typeof context;
       for (const listener of listeners) listener(context);
@@ -1106,7 +1097,7 @@ function savedAgent(mounted: Mounted, taskIndex = 0): Record<string, unknown> {
     : parsed.tasks[taskIndex]?.agent ?? {};
 }
 
-test("DOM: task model/effort inherit the project agent until the provider changes", async () => {
+test("DOM: task model/effort inherit the project agent and only Codex is selectable", async () => {
   const { mounted, root } = await openEditor();
   try {
     await waitFor(
@@ -1126,15 +1117,283 @@ test("DOM: task model/effort inherit the project agent until the provider change
       ["", "default", "low", "medium", "high"],
     );
 
-    await selectValue(byLabel(root, "任务 provider") as HTMLSelectElement, "dsh");
+    const provider = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.deepEqual([...provider.options].map((option) => option.value), ["", "codex"]);
+    assert.deepEqual(mounted.modelCalls, ["codex"]);
+    await selectValue(provider, "codex");
     await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
     // A provider switch writes an explicit provider and resets model/effort inheritance safely.
     button(root, "保存并装载").click();
     await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
     assert.deepEqual(savedAgent(mounted), {
-      provider: "dsh",
+      provider: "codex",
       effort: "default",
     });
+  } finally {
+    mounted.unmount();
+  }
+});
+
+const LEGACY_DSH_CONFIG = {
+  version: 1,
+  defaults: { agent: { provider: "dsh", model: "gateway/flash", effort: "high" } },
+  tasks: [
+    { id: "inherited", type: "prompt", cron: "0 0 9 * * *", prompt: "继承" },
+    {
+      id: "explicit",
+      type: "prompt",
+      cron: "0 0 9 * * *",
+      prompt: "指定",
+      agent: { provider: "dsh", model: "gateway/other", effort: "high", extra: "keep" },
+    },
+    {
+      id: "script",
+      type: "script",
+      cron: "0 0 9 * * *",
+      command: "bash",
+      agent: { provider: "dsh", model: "gateway/script" },
+    },
+  ],
+};
+
+test("DOM: copying explicit or inherited DSH prompts requires choosing Codex first", async () => {
+  const config = {
+    ...LEGACY_DSH_CONFIG,
+    tasks: LEGACY_DSH_CONFIG.tasks.map((task) =>
+      task.id === "explicit" ? { ...task, enabled: false } : task,
+    ),
+  };
+  const { mounted, root } = await openConfigEditor(JSON.stringify(config));
+  try {
+    for (const id of ["inherited", "explicit"]) {
+      button(root, id).click();
+      await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === id, "选择 " + id);
+      button(root, "复制").click();
+      await waitFor(() => textOf(root.querySelector(".cron-notice")).includes("请先改选 Codex 再复制"), "复制提示");
+      assert.equal(root.querySelectorAll(".cron-editor-tasks li").length, config.tasks.length);
+      (byLabel(root, "关闭提示") as HTMLButtonElement).click();
+      await waitFor(() => !root.querySelector(".cron-notice"), "提示已关闭");
+    }
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    assert.deepEqual(savedTasks(mounted), config);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: copying DSH scripts and Codex prompts retains their configuration", async () => {
+  const codex = {
+    id: "codex-task", type: "prompt", cron: "0 0 9 * * *", prompt: "Codex",
+    enabled: false, agent: { provider: "codex", model: "gpt-6-sol", effort: "high" },
+  };
+  const config = { ...LEGACY_DSH_CONFIG, tasks: [...LEGACY_DSH_CONFIG.tasks, codex] };
+  const { mounted, root } = await openConfigEditor(JSON.stringify(config));
+  try {
+    button(root, "script").click();
+    await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "script", "选择脚本");
+    button(root, "复制").click();
+    await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "script-copy", "复制脚本");
+    button(root, "codex-task").click();
+    await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "codex-task", "选择 Codex 任务");
+    button(root, "复制").click();
+    await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "codex-task-copy", "复制 Codex 任务");
+    button(root, "explicit").click();
+    await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "explicit", "选择旧 DSH 任务");
+    await selectValue(byLabel(root, "任务 provider") as HTMLSelectElement, "codex");
+    button(root, "复制").click();
+    await waitFor(() => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "explicit-copy", "改选 Codex 后复制");
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    const saved = savedTasks(mounted);
+    const tasks = saved.tasks as Array<Record<string, unknown>>;
+    const byId = new Map(tasks.map((task) => [task.id, task]));
+    const converted = { ...config.tasks[1], agent: { provider: "codex", effort: "default", extra: "keep" } };
+    assert.deepEqual(byId.get("inherited"), config.tasks[0]);
+    assert.deepEqual(byId.get("explicit"), converted);
+    assert.deepEqual(byId.get("explicit-copy"), { ...converted, id: "explicit-copy", name: "explicit-copy" });
+    assert.deepEqual(byId.get("script"), config.tasks[2]);
+    assert.deepEqual(byId.get("script-copy"), { ...config.tasks[2], id: "script-copy", name: "script-copy" });
+    assert.deepEqual(byId.get("codex-task"), codex);
+    assert.deepEqual(byId.get("codex-task-copy"), { ...codex, id: "codex-task-copy", name: "codex-task-copy" });
+    assert.deepEqual(saved.defaults, config.defaults);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: legacy DSH defaults and tasks remain visible and survive unrelated edits", async () => {
+  const { mounted, root } = await openConfigEditor(JSON.stringify(LEGACY_DSH_CONFIG));
+  try {
+    await waitFor(() => mounted.modelCalls.length > 0, "Codex 目录请求");
+    const defaults = byLabel(root, "默认 agent provider") as HTMLSelectElement;
+    assert.equal(defaults.value, "dsh");
+    assert.equal(defaults.selectedOptions[0]!.disabled, true);
+    assert.match(textOf(defaults.selectedOptions[0]), /dsh.*已停止支持/);
+    assert.equal((byLabel(root, "默认 agent model") as HTMLSelectElement).value, "gateway/flash");
+    assert.equal((byLabel(root, "默认 agent effort") as HTMLSelectElement).value, "high");
+
+    const inherited = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.equal(inherited.value, "");
+    assert.equal(inherited.selectedOptions[0]!.disabled, true);
+    assert.match(textOf(inherited.selectedOptions[0]), /dsh.*已停止支持/);
+    assert.match(textOf((byLabel(root, "任务 model") as HTMLSelectElement).options[0]), /gateway\/flash/);
+    assert.match(textOf((byLabel(root, "任务 effort") as HTMLSelectElement).options[0]), /high/);
+    assert.match(textOf(root), /DSH 已停止支持提示词任务/);
+    assert.match(textOf(root), /脚本任务的 AGENT_EXEC 仍可使用 DSH/);
+
+    button(root, "explicit").click();
+    await waitFor(() => (byLabel(root, "任务 provider") as HTMLSelectElement)?.value === "dsh", "旧任务配置");
+    const explicit = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.equal(explicit.selectedOptions[0]!.disabled, true);
+    assert.equal((byLabel(root, "任务 model") as HTMLSelectElement).value, "gateway/other");
+    assert.equal((byLabel(root, "任务 effort") as HTMLSelectElement).value, "high");
+    await typeInto(byLabel(root, "任务名称") as HTMLInputElement, "只修改名称");
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    const saved = savedTasks(mounted);
+    const tasks = saved.tasks as Array<Record<string, unknown>>;
+    assert.deepEqual(saved.defaults, LEGACY_DSH_CONFIG.defaults);
+    assert.deepEqual(tasks[0], LEGACY_DSH_CONFIG.tasks[0]);
+    assert.deepEqual(tasks[1], { ...LEGACY_DSH_CONFIG.tasks[1], name: "只修改名称" });
+    assert.deepEqual(tasks[2], LEGACY_DSH_CONFIG.tasks[2]);
+    assert.deepEqual(mounted.modelCalls, ["codex"]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: legacy DSH can be changed to Codex but cannot be selected again", async () => {
+  const { mounted, root } = await openConfigEditor(JSON.stringify(LEGACY_DSH_CONFIG));
+  try {
+    await selectValue(byLabel(root, "任务 provider") as HTMLSelectElement, "codex");
+    let provider = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.equal(provider.value, "codex");
+    assert.equal(provider.options[0]!.disabled, true);
+    assert.equal([...provider.options].some((option) => option.value === "dsh"), false);
+
+    button(root, "explicit").click();
+    await waitFor(() => (byLabel(root, "任务 provider") as HTMLSelectElement)?.value === "dsh", "旧任务配置");
+    await selectValue(byLabel(root, "任务 provider") as HTMLSelectElement, "codex");
+    provider = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.equal(provider.options[0]!.disabled, true);
+    assert.equal([...provider.options].some((option) => option.value === "dsh"), false);
+
+    await selectValue(byLabel(root, "默认 agent provider") as HTMLSelectElement, "codex");
+    const defaults = byLabel(root, "默认 agent provider") as HTMLSelectElement;
+    assert.equal([...defaults.options].some((option) => option.value === "dsh"), false);
+    assert.equal((byLabel(root, "任务 provider") as HTMLSelectElement).options[0]!.disabled, false);
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    assert.deepEqual(savedAgent(mounted, -1), { provider: "codex", effort: "default" });
+    assert.deepEqual(savedAgent(mounted, 0), { provider: "codex", effort: "default" });
+    assert.deepEqual(savedAgent(mounted, 1), { provider: "codex", effort: "default", extra: "keep" });
+    assert.deepEqual(savedAgent(mounted, 2), LEGACY_DSH_CONFIG.tasks[2]!.agent);
+    assert.deepEqual(mounted.modelCalls, ["codex"]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: script to prompt converts an effective DSH agent to Codex with a notice", async () => {
+  const { mounted, root } = await openConfigEditor(JSON.stringify(LEGACY_DSH_CONFIG));
+  try {
+    button(root, "script").click();
+    await waitFor(
+      () => (byLabel(root, "任务 ID") as HTMLInputElement)?.value === "script",
+      "选择脚本",
+    );
+    await selectValue(byLabel(root, "任务类型") as HTMLSelectElement, "prompt");
+    await waitFor(
+      () => textOf(root.querySelector(".cron-notice")).includes("DSH 已停止支持提示词任务"),
+      "转换提示",
+    );
+    assert.match(textOf(root.querySelector(".cron-notice")), /改为 codex/);
+    const provider = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.equal(provider.value, "codex");
+    assert.equal([...provider.options].some((option) => option.value === "dsh"), false);
+    // The DSH model/effort are gone; the task now uses an explicit Codex agent.
+    assert.equal((byLabel(root, "任务 model") as HTMLSelectElement).value, "");
+    assert.equal((byLabel(root, "任务 effort") as HTMLSelectElement).value, "");
+    await typeInto(byLabel(root, "任务 prompt") as HTMLTextAreaElement, "转换后的提示词");
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    const saved = savedTasks(mounted);
+    const tasks = saved.tasks as Array<Record<string, unknown>>;
+    assert.deepEqual(tasks[0], LEGACY_DSH_CONFIG.tasks[0]);
+    assert.deepEqual(tasks[1], LEGACY_DSH_CONFIG.tasks[1]);
+    assert.deepEqual(tasks[2], {
+      ...LEGACY_DSH_CONFIG.tasks[2],
+      type: "prompt",
+      prompt: "转换后的提示词",
+      agent: { provider: "codex" },
+    });
+    assert.deepEqual(saved.defaults, LEGACY_DSH_CONFIG.defaults);
+    assert.deepEqual(mounted.modelCalls, ["codex"]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: prompt to script keeps the DSH agent because scripts may still use AGENT_EXEC", async () => {
+  const { mounted, root } = await openConfigEditor(JSON.stringify(LEGACY_DSH_CONFIG));
+  try {
+    button(root, "explicit").click();
+    await waitFor(
+      () => (byLabel(root, "任务 provider") as HTMLSelectElement)?.value === "dsh",
+      "选择旧 DSH 任务",
+    );
+    await selectValue(byLabel(root, "任务类型") as HTMLSelectElement, "script");
+    // Script tasks do not show the agent form, and DSH stays valid for their AGENT_EXEC calls.
+    assert.equal(byLabel(root, "任务 provider"), null);
+    assert.equal(root.querySelector(".cron-notice"), null);
+    await typeInto(byLabel(root, "脚本 command") as HTMLInputElement, "bash");
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    const saved = savedTasks(mounted);
+    assert.deepEqual(
+      (saved.tasks as Array<Record<string, unknown>>)[1],
+      {
+        ...LEGACY_DSH_CONFIG.tasks[1],
+        type: "script",
+        command: "bash",
+      },
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a new prompt does not inherit a legacy DSH default, while scripts keep their defaults", async () => {
+  const { mounted, root } = await openConfigEditor(JSON.stringify(LEGACY_DSH_CONFIG));
+  try {
+    await waitFor(() => callsTo(mounted, "/configuration/preview").length > 0, "初始预览");
+    button(root, "新增提示词").click();
+    await waitFor(() => (byLabel(root, "任务 provider") as HTMLSelectElement)?.value === "codex", "新提示词 provider");
+    const provider = byLabel(root, "任务 provider") as HTMLSelectElement;
+    assert.equal(provider.options[0]!.disabled, true);
+    assert.equal([...provider.options].some((option) => option.value === "dsh"), false);
+    await typeInto(byLabel(root, "任务 prompt") as HTMLTextAreaElement, "新任务提示词");
+    button(root, "新增脚本").click();
+    await waitFor(() => Boolean(byLabel(root, "脚本 command")), "新脚本");
+    await typeInto(byLabel(root, "脚本 command") as HTMLInputElement, "true");
+    await waitFor(() => !button(root, "保存并装载").disabled, "校验完成");
+    button(root, "保存并装载").click();
+    await waitFor(() => callsTo(mounted, "/configuration/save").length === 1, "保存");
+    const saved = savedTasks(mounted);
+    const tasks = saved.tasks as Array<Record<string, unknown>>;
+    assert.deepEqual(saved.defaults, LEGACY_DSH_CONFIG.defaults);
+    assert.deepEqual(tasks.slice(0, 3), LEGACY_DSH_CONFIG.tasks);
+    assert.deepEqual(tasks[3]!.agent, { provider: "codex" });
+    assert.equal(tasks[4]!.type, "script");
+    assert.equal(tasks[4]!.agent, undefined);
+    assert.deepEqual(mounted.modelCalls, ["codex"]);
   } finally {
     mounted.unmount();
   }
@@ -1320,6 +1579,7 @@ test("DOM: catalog failures keep the draft and a retry loads fresh levels", asyn
       "重试后加载真实级别",
     );
     assert.equal(attempts, 2);
+    assert.deepEqual(mounted.modelCalls, ["codex", "codex"]);
     assert.equal(callsTo(mounted, "/configuration/save").length, 0);
   } finally {
     mounted.unmount();

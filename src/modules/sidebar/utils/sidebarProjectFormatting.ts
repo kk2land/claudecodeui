@@ -214,5 +214,4 @@ export const PROVIDER_LABELS: Record<LLMProvider, string> = {
   codex: 'Codex',
   cursor: 'Cursor',
   opencode: 'OpenCode',
-  dsh: 'DeepSeek Harness',
 };

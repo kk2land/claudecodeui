@@ -92,7 +92,7 @@ export type SchedulerHost = {
    * Optional host catalog lookup. Older hosts do not expose it, so a missing method or a failed
    * request must read as "catalog unavailable" and leave authored values untouched.
    */
-  models?(provider: "codex" | "dsh"): Promise<SchedulerModelCatalog>;
+  models?(provider: "codex"): Promise<SchedulerModelCatalog>;
   /**
    * Optional host capability that renders the app's read-only session transcript into a DOM
    * container the plugin owns. Absent on hosts that cannot show live output, in which case the

@@ -79,6 +79,65 @@ test("script AGENT_EXEC invokes the configured provider and model and returns re
   assert.match(output, /GLOBAL=shared/);
 });
 
+test("script AGENT_EXEC still runs an inherited DSH agent", async (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "cron-script-dsh-"));
+  const project = path.join(root, "project");
+  const bin = path.join(root, "dsh");
+  fs.mkdirSync(path.join(project, ".cloudcli"), { recursive: true });
+  fs.writeFileSync(
+    bin,
+    '#!/usr/bin/env node\nconst fs=require("fs");const args=process.argv.slice(2);const patch=JSON.parse(fs.readFileSync(args[args.lastIndexOf("--patch")+1],"utf8"));fs.writeFileSync("dsh-call.json",JSON.stringify({patch,prompt:fs.readFileSync(0,"utf8")}));console.log(JSON.stringify({type:"text",text:"DSH script result"}));console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:"DSH script result"}));',
+    { mode: 0o700 },
+  );
+  const script =
+    'const r=require("child_process").spawnSync(process.env.AGENT_EXEC,["script prompt"],{encoding:"utf8"});' +
+    'process.stdout.write(r.stdout||"");process.stderr.write(r.stderr||"");process.exit(r.status??1)';
+  fs.writeFileSync(
+    path.join(project, ".cloudcli/project-schedules.json"),
+    JSON.stringify({
+      version: 1,
+      defaults: { agent: { provider: "dsh", model: "gateway/script" } },
+      tasks: [{ id: "script", type: "script", cron: "0 0 0 1 1 *", command: process.execPath, args: ["-e", script] }],
+    }),
+  );
+  const catalog = path.join(root, "projects.json");
+  fs.writeFileSync(catalog, JSON.stringify({
+    generatedAt: Date.now(),
+    projects: [{ id: "p", name: "project", path: project }],
+  }));
+  const previousBin = process.env.CLOUDCLI_DSH_BIN;
+  const previousPatches = process.env.CLOUDCLI_DSH_PATCHES;
+  process.env.CLOUDCLI_DSH_BIN = bin;
+  process.env.CLOUDCLI_DSH_PATCHES = "[]";
+  const store = new SchedulerStore(path.join(root, "data"));
+  const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
+  t.after(async () => {
+    await scheduler.close();
+    store.close();
+    if (previousBin === undefined) delete process.env.CLOUDCLI_DSH_BIN;
+    else process.env.CLOUDCLI_DSH_BIN = previousBin;
+    if (previousPatches === undefined) delete process.env.CLOUDCLI_DSH_PATCHES;
+    else process.env.CLOUDCLI_DSH_PATCHES = previousPatches;
+    fs.rmSync(root, { recursive: true, force: true });
+  });
+  scheduler.load(undefined, false, true);
+  const run = scheduler.start("p", "script", "manual");
+  const deadline = Date.now() + 8000;
+  while (!store.run(run.id)?.endedAt && Date.now() < deadline)
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(store.run(run.id)?.status, "success");
+  assert.match(scheduler.log(run.id, "stdout", 0).text, /DSH script result/);
+  const call = JSON.parse(fs.readFileSync(path.join(project, "dsh-call.json"), "utf8")) as {
+    prompt: string;
+    patch: Array<{ id: string; config?: unknown }>;
+  };
+  assert.equal(call.prompt, "script prompt");
+  assert.deepEqual(call.patch.find((row) => row.id === "agent-default-model")?.config, {
+    provider: "gateway",
+    model: "script",
+  });
+});
+
 test("run usage aggregates prompt and every script AGENT_EXEC invocation", async (t) => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "cron-script-usage-"));
   const project = path.join(root, "project");

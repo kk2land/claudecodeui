@@ -56,9 +56,6 @@ vi.mock('@/modules/chat/hooks/useChatProviderState', () => ({
 vi.mock('@/modules/chat/hooks/useCodexControls', () => ({
   useCodexControls: () => ({ state: { runtime: 'app-server', questions: [] } }),
 }));
-vi.mock('@/modules/chat/hooks/useProviderRuntimeControls', () => ({
-  useProviderRuntimeControls: () => ({ available: false }),
-}));
 vi.mock('@/modules/chat/hooks/useCodexModelProviders', () => ({
   useCodexModelProviders: () => ({ available: false }),
 }));

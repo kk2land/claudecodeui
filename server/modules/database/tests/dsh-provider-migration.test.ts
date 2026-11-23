@@ -6,8 +6,15 @@ import test from 'node:test';
 
 import { closeConnection, getConnection, initializeDatabase, providerModelsDb, sessionsDb } from '@/modules/database/index.js';
 import { runMigrations } from '@/modules/database/migrations.js';
+import type { LLMProvider } from '@/shared/types.js';
 
-test('DSH model migration preserves upstream columns, indexes, rows, effort and autoincrement state', async () => {
+/**
+ * The removed DSH provider id. The applied migration and persisted rows still
+ * carry it, so this regression keeps exercising the raw legacy value.
+ */
+const LEGACY_DSH_PROVIDER = 'dsh' as unknown as LLMProvider;
+
+test('legacy DSH model migration preserves upstream columns, indexes, rows, effort and autoincrement state', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-migration-'));
   const previous = process.env.DATABASE_PATH;
   closeConnection(); process.env.DATABASE_PATH = path.join(root, 'auth.db');
@@ -32,14 +39,14 @@ test('DSH model migration preserves upstream columns, indexes, rows, effort and 
     assert.deepEqual(db.prepare('SELECT id, effort_values, effort_default, upstream_extra FROM provider_models WHERE id=42').get(),
       { id: 42, effort_values: '["high"]', effort_default: 'high', upstream_extra: 'preserve upstream' });
     assert(db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name='idx_custom_models'").get());
-    const model = providerModelsDb.createCustomProviderModel('dsh', { id: 'deepseek-official/custom', model: 'Custom' });
+    const model = providerModelsDb.createCustomProviderModel(LEGACY_DSH_PROVIDER, { id: 'deepseek-official/custom', model: 'Custom' });
     assert(model.recordId > 100);
-    assert.equal(providerModelsDb.listCustomProviderModels('dsh').length, 1);
+    assert.equal(providerModelsDb.listCustomProviderModels(LEGACY_DSH_PROVIDER).length, 1);
     db.exec('DROP TABLE provider_models');
     db.exec(legacySql);
     db.exec("INSERT INTO provider_models(id,provider,model_id,model_name) VALUES(200,'codex','removed','Removed'); DELETE FROM provider_models;");
     runMigrations(db);
-    assert(providerModelsDb.createCustomProviderModel('dsh', { id: 'fresh', model: 'Fresh' }).recordId > 200);
+    assert(providerModelsDb.createCustomProviderModel(LEGACY_DSH_PROVIDER, { id: 'fresh', model: 'Fresh' }).recordId > 200);
     const { sessionsService } = await import('@/modules/providers/index.js');
     const nativeLog = path.join(root, 'session.v4.jsonl');
     await writeFile(nativeLog, 'preserve all generations');

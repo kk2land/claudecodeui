@@ -18,8 +18,7 @@
     "claude": "Claude",
     "cursor": "Cursor",
     "codex": "Codex",
-    "opencode": "OpenCode",
-    "dsh": "DeepSeek Harness"
+    "opencode": "OpenCode"
   },
   "tools": {
     "settings": "Tool Settings",
@@ -188,27 +187,6 @@
   },
   "usageLimit": {
     "resetAt": "Claude usage limit reached. Your limit will reset at **{{time}} {{timezone}}** - {{date}}"
-  },
-  "runtime": {
-    "settings": "{{provider}} runtime settings",
-    "mode": "Runtime",
-    "modes": {
-      "acp": "ACP",
-      "headless": "headless"
-    },
-    "loading": "Loading…",
-    "stop": "Stop {{runtime}}",
-    "processRunning": "Process running",
-    "processIdle": "Process stopped",
-    "startedAt": "Started",
-    "launcherPath": "Launcher path",
-    "starting": "Starting…",
-    "switching": "Switching runtime…",
-    "stopping": "Stopping process…",
-    "sessionScope": "Applies to this session. A process starts when you send the next message.",
-    "noInteractivePermissions": "This runtime has no interactive approval channel; permissions follow the provider profile.",
-    "queueHeld": "Queued messages are paused after stopping the process.",
-    "resumeQueue": "Resume queue"
   },
   "codex": {
     "processRunning": "Process running",
@@ -418,8 +396,7 @@
       "cursor": "Ready to use Cursor with {{model}}. Start typing your message below.",
       "codex": "Ready to use Codex with {{model}}. Start typing your message below.",
       "opencode": "Ready to use OpenCode with {{model}}. Start typing your message below.",
-      "default": "Select a provider above to begin",
-      "dsh": "Ready with DeepSeek Harness {{model}}"
+      "default": "Select a provider above to begin"
     },
     "pressToSearch": "Press <kbd>{{shortcut}}</kbd> to search sessions, files, and commits",
     "chooseModel": "Choose a model",

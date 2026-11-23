@@ -208,6 +208,11 @@ export default function PluginTabContent({
             if (provider !== 'codex' && provider !== 'dsh') {
               throw new Error(`Unsupported provider: ${String(provider)}`);
             }
+            // The DSH provider is no longer registered, so the host serves no
+            // catalog for it; a plugin form reports this instead of a fake list.
+            if (provider === 'dsh') {
+              throw new Error('The DSH provider has been removed.');
+            }
             const res = await api.providers.models(provider);
             if (!res.ok) {
               throw new Error(`Failed to load ${provider} models (HTTP ${res.status})`);

@@ -22,7 +22,7 @@ type ParsedTaskNotification = {
 type ToolResultSource = NormalizedMessage['toolResult'] | NormalizedMessage | null;
 
 function formatToolResult(source: NonNullable<ToolResultSource>): NonNullable<NormalizedMessage['toolResult']> {
-  // Older DSH servers nested standalone results. Keep those replayed/history rows readable.
+  // Older servers nested standalone results. Keep those replayed/history rows readable.
   const nested = 'toolResult' in source ? source.toolResult : null;
   return {
     content: formatToolResultContent(source.content ?? nested?.content),

@@ -18,7 +18,6 @@ import {
     reapOrphanedOpenCodeServers,
     sessionRetentionService,
     setCodexWorkerBridge,
-    setDshWorkerBridge,
     setStageLogBridge,
 } from '@/modules/providers/index.js';
 import { broadcastCodexRateLimits, broadcastToConnectedClients, chatRunRegistry, createWebSocketServer, onChatRunCompleted } from '@/modules/websocket/index.js';
@@ -115,12 +114,10 @@ setStageLogBridge(projectSchedulerModule.logBridge);
 // Providers receive Worker lifecycle callbacks through composition only; they
 // never runtime-import the workers module.
 setCodexWorkerBridge(workerModule.host.bridge, workerModule.mcpUrl);
-setDshWorkerBridge(workerModule.host.dshBridge);
 const queryClaude = providerRuntimeService.getRunner('claude');
 const queryCursor = providerRuntimeService.getRunner('cursor');
 const queryCodex = providerRuntimeService.getRunner('codex');
 const queryOpenCode = providerRuntimeService.getRunner('opencode');
-const queryDsh = providerRuntimeService.getRunner('dsh');
 const gitRoutes = createGitModule({
     queryClaude,
     queryCursor,
@@ -130,7 +127,6 @@ const agentRoutes = createAgentModule({
     queryCursor,
     queryCodex,
     queryOpenCode,
-    queryDsh,
 });
 
 // Single WebSocket server that handles chat, shell, and plugin proxy paths.

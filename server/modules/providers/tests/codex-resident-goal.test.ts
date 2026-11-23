@@ -127,7 +127,6 @@ async function harness(runTest: (h: GoalHarness) => Promise<void>) {
       hasBackgroundWork: () => false,
       isQueueBlocked: (id: string) => Boolean(sessionRuntimeDb.get(id).queueHeld),
       getState: () => runtime.getState(SESSION),
-      getManagedState: () => undefined,
       getPendingApprovalsForSession: () => [],
       resolveToolApproval: () => undefined,
       stopBackgroundTask: async () => false,

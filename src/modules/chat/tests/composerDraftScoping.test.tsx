@@ -76,15 +76,15 @@ beforeEach(() => {
   serverDrafts = [];
 });
 
-test('opening DSH and editing an attachment-only queue keeps composer input a string', async () => {
+test('opening a session and editing an attachment-only queue keeps composer input a string', async () => {
   const attachment = { name: 'notes.txt', path: '/uploads/notes.txt', mimeType: 'text/plain', size: 5 };
   serverDrafts = [{
-    scope: 'session-dsh',
+    scope: 'session-opencode',
     text: 'unsent draft',
     queuedMessage: { id: 'queued-file', attachments: [attachment] },
   }];
   await hydrateChatDrafts();
-  const view = renderComposer({ id: 'session-dsh' }, 'dsh');
+  const view = renderComposer({ id: 'session-opencode' }, 'opencode');
   assert.equal(view.result.current.input.trim(), 'unsent draft');
   assert.equal(view.result.current.queuedDraft?.content, '');
   assert.deepEqual(view.result.current.queuedDraft?.uploadedAttachments, [attachment]);

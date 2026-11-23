@@ -678,10 +678,31 @@ export type PiModelCatalog = {
   thinkingLevels: string[];
 };
 
+/** One model declared by the DSH headless profile's static patch. */
+export type DshModelOption = {
+  /** The full `provider/model` route persisted as a Worker config's `model`. */
+  route: string;
+  label: string;
+  /** Reasoning levels the declaration lists; an empty list means the model declares none. */
+  efforts: string[];
+};
+
+/**
+ * `GET /catalog/dsh` response, read from `$DSH_HOME/profiles/headless/cordis.patch.yml`.
+ * DSH is a Worker execution engine only: its app provider was removed, so the plugin serves this
+ * directory itself instead of asking the host. `effortLevels` are the DSH effort names offered for
+ * a route typed when the static patch declares no models.
+ */
+export type DshModelCatalog = {
+  models: DshModelOption[];
+  effortLevels: string[];
+};
+
 /**
  * Optional authenticated host catalog capabilities. The Worker client adds these as optional
  * `models` / `codexModelProviders` / `codexModelProviderModels` members of `WorkerHost` in
- * `client/api.ts`; a missing capability must read as "catalog unavailable".
+ * `client/api.ts`; a missing capability must read as "catalog unavailable". DSH uses its own
+ * plugin route (`GET /catalog/dsh`) because the host no longer serves a DSH catalog.
  */
 export type WorkerHostCatalogCapabilities = {
   models?(provider: "codex" | "dsh"): Promise<WorkerModelCatalog>;

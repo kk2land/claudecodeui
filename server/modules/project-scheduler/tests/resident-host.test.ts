@@ -70,7 +70,6 @@ function createHarness(options: {
       return options.abort ? options.abort() : true;
     },
     getState: () => states.get(SESSION),
-    getManagedState: () => undefined,
     hasBackgroundWork: () => false,
     isQueueBlocked: (sessionId: string) => Boolean(states.get(sessionId)?.queueHeld),
   } as unknown as ProviderRuntimeGateway;
@@ -195,6 +194,25 @@ test('recovery resumes exactly one continue for a persisted running binding and 
       effort: null,
       runtime: 'app-server',
     });
+    residentBindingsDb.insert({
+      taskId: 'task-stopping',
+      sessionId: 'stopping-session',
+      projectId: '',
+      name: 'stopping',
+      provider: 'codex',
+      providerSessionId: 'native-stopping',
+      enabled: true,
+      visible: true,
+      status: 'stopping',
+      executionId: 'exec-stopping',
+      stopCause: 'user_stopped',
+      terminal: null,
+      permissionMode: null,
+      sandboxMode: null,
+      model: null,
+      effort: null,
+      runtime: 'app-server',
+    });
 
     // A real restart starts with an empty run registry.
     chatRunRegistry.clearAll();
@@ -234,6 +252,13 @@ test('recovery resumes exactly one continue for a persisted running binding and 
     assert.equal(disabled.terminal?.alert, false);
     // Stopped: untouched.
     assert.equal(residentBindingsDb.getByTaskId('task-stopped')?.terminal, null);
+    // A Codex stop that was still settling keeps its existing behavior: recovery
+    // neither continues it nor rewrites its row.
+    assert.equal(continueCalls.some((call) => call.sessionId === 'stopping-session'), false);
+    const codexStopping = residentBindingsDb.getByTaskId('task-stopping')!;
+    assert.equal(codexStopping.status, 'stopping');
+    assert.equal(codexStopping.stopCause, 'user_stopped');
+    assert.equal(codexStopping.terminal, null);
 
     // A second recovery on this host (e.g. a plugin reconnect) does nothing.
     await second.host.recoverAfterRestart();
@@ -534,6 +559,167 @@ test('a provider without resident support is refused explicitly', async () => {
       harness.host.handleRequest('adopt', { taskId: 'task-claude', sessionId: 'claude-session' }),
       (error: unknown) => error instanceof AppError && error.code === 'unsupported_provider',
     );
+    await harness.host.shutdown();
+  });
+});
+
+test('a persisted binding from a retired provider ends silently and stays removable', async () => {
+  await withDatabase(async () => {
+    const retiredSession = 'retired-dsh-session';
+    sessionsDb.createAppSession(retiredSession, 'dsh', path.join('dsh-project'), 'DSH conversation');
+    sessionsDb.assignProviderSessionId(retiredSession, 'dsh-native-1');
+    // The shape a DSH binding had when it was still adoptable: enabled, running.
+    residentBindingsDb.insert({
+      taskId: 'task-retired',
+      sessionId: retiredSession,
+      projectId: '',
+      name: 'DSH conversation',
+      provider: 'dsh',
+      providerSessionId: 'dsh-native-1',
+      enabled: true,
+      visible: true,
+      status: 'running',
+      executionId: 'dsh-exec-1',
+      stopCause: null,
+      terminal: null,
+      permissionMode: null,
+      sandboxMode: null,
+      model: 'gw/model',
+      effort: null,
+      runtime: null,
+    });
+    // A retired binding can also survive in `stopping`: its stop had no adapter to
+    // confirm it, so recovery must clear it exactly like the running one.
+    const stoppingSession = 'retired-dsh-stopping';
+    sessionsDb.createAppSession(stoppingSession, 'dsh', path.join('dsh-project'), 'DSH stopping');
+    sessionsDb.assignProviderSessionId(stoppingSession, 'dsh-native-stopping');
+    residentBindingsDb.insert({
+      taskId: 'task-retired-stopping',
+      sessionId: stoppingSession,
+      projectId: '',
+      name: 'DSH stopping',
+      provider: 'dsh',
+      providerSessionId: 'dsh-native-stopping',
+      enabled: true,
+      visible: true,
+      status: 'stopping',
+      executionId: 'dsh-exec-stopping',
+      stopCause: 'user_stopped',
+      terminal: null,
+      permissionMode: null,
+      sandboxMode: null,
+      model: null,
+      effort: null,
+      runtime: null,
+    });
+
+    const harness = createHarness({
+      continueTurn: () => {
+        throw new Error('a retired provider binding must never be continued');
+      },
+    });
+    await harness.host.recoverAfterRestart();
+
+    const recovered = residentBindingsDb.getByTaskId('task-retired')!;
+    assert.equal(recovered.status, 'stopped');
+    assert.equal(recovered.stopCause, 'disabled');
+    // Ended, not failed: no alert, and the episode is recorded as a stopped one.
+    assert.equal(recovered.terminal?.cause, 'disabled');
+    assert.equal(recovered.terminal?.status, 'stopped');
+    assert.equal(recovered.terminal?.alert, false);
+    // Identity, native id, dispatch settings and the switch are preserved as stored.
+    assert.equal(recovered.provider, 'dsh');
+    assert.equal(recovered.providerSessionId, 'dsh-native-1');
+    assert.equal(recovered.model, 'gw/model');
+    assert.equal(recovered.enabled, true);
+    // No provider round trip and no fabricated Codex runtime.
+    assert.deepEqual(harness.aborts, []);
+    assert.deepEqual(harness.continueCalls, []);
+    assert.equal(sessionsDb.isSessionResidentProtected(retiredSession), true);
+
+    const listed = await harness.host.handleRequest('status', { taskId: 'task-retired' }) as {
+      bindings: ResidentBindingView[];
+    };
+    assert.equal(listed.bindings[0]?.status, 'stopped');
+    assert.equal(listed.bindings[0]?.runtime.provider, 'dsh');
+
+    // The leftover `stopping` row is ended the same silent way and no longer blocks
+    // anything: its stored switch, provider and session stay as they were.
+    const recoveredStopping = residentBindingsDb.getByTaskId('task-retired-stopping')!;
+    assert.equal(recoveredStopping.status, 'stopped');
+    assert.equal(recoveredStopping.stopCause, 'disabled');
+    assert.equal(recoveredStopping.terminal?.cause, 'disabled');
+    assert.equal(recoveredStopping.terminal?.alert, false);
+    assert.equal(recoveredStopping.enabled, true);
+    assert.equal(recoveredStopping.provider, 'dsh');
+    assert.equal(sessionsDb.isSessionResidentProtected(stoppingSession), true);
+    assert.deepEqual(harness.aborts, []);
+
+    // Manual continue and re-enable refuse the retired provider explicitly.
+    const refused = (error: unknown) => error instanceof AppError && error.code === 'unsupported_provider';
+    await assert.rejects(harness.host.handleRequest('continue', { taskId: 'task-retired' }), refused);
+    await assert.rejects(
+      harness.host.handleRequest('setEnabled', { taskId: 'task-retired', enabled: true }),
+      refused,
+    );
+    assert.deepEqual(harness.continueCalls, []);
+
+    // The ordinary remove flow cleans the binding up and keeps the session.
+    const removed = await harness.host.handleRequest('remove', { taskId: 'task-retired' }) as {
+      removed: boolean;
+      sessionId: string;
+    };
+    assert.equal(removed.removed, true);
+    assert.equal(removed.sessionId, retiredSession);
+    assert.equal(residentBindingsDb.getByTaskId('task-retired'), null);
+    assert.equal(sessionsDb.getSessionById(retiredSession)?.session_id, retiredSession);
+
+    // The recovered `stopping` binding is removable through the same flow.
+    const removedStopping = await harness.host.handleRequest('remove', {
+      taskId: 'task-retired-stopping',
+    }) as { removed: boolean; sessionId: string };
+    assert.equal(removedStopping.removed, true);
+    assert.equal(removedStopping.sessionId, stoppingSession);
+    assert.equal(residentBindingsDb.getByTaskId('task-retired-stopping'), null);
+    assert.equal(sessionsDb.getSessionById(stoppingSession)?.session_id, stoppingSession);
+    await harness.host.shutdown();
+  });
+});
+
+test('stopping a retired provider binding ends it locally without calling the provider', async () => {
+  await withDatabase(async () => {
+    const retiredSession = 'retired-dsh-running';
+    sessionsDb.createAppSession(retiredSession, 'dsh', path.join('dsh-project'), 'DSH running');
+    sessionsDb.assignProviderSessionId(retiredSession, 'dsh-native-2');
+    residentBindingsDb.insert({
+      taskId: 'task-retired-stop',
+      sessionId: retiredSession,
+      projectId: '',
+      name: 'DSH running',
+      provider: 'dsh',
+      providerSessionId: 'dsh-native-2',
+      enabled: true,
+      visible: true,
+      status: 'running',
+      executionId: 'dsh-exec-2',
+      stopCause: null,
+      terminal: null,
+      permissionMode: null,
+      sandboxMode: null,
+      model: null,
+      effort: null,
+      runtime: null,
+    });
+
+    const harness = createHarness();
+    const stopped = await harness.host.handleRequest('stop', { taskId: 'task-retired-stop' }) as {
+      binding: ResidentBindingView;
+    };
+    assert.deepEqual(harness.aborts, []);
+    assert.equal(stopped.binding.status, 'stopped');
+    assert.equal(stopped.binding.terminal?.cause, 'user_stopped');
+    assert.equal(stopped.binding.terminal?.alert, false);
+    assert.equal(stopped.binding.runtime.provider, 'dsh');
     await harness.host.shutdown();
   });
 });

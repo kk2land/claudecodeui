@@ -554,6 +554,9 @@ export function handleShellConnection(
         if (provider === 'gptweb') {
           throw new Error('GPT Web provider has been removed.');
         }
+        if (provider === 'dsh') {
+          throw new Error('The DSH provider has been removed.');
+        }
         const initialCommand = readString(data.initialCommand);
         const forceRestart = readBoolean(data.forceRestart);
         const colorScheme = readColorScheme(data.colorScheme);

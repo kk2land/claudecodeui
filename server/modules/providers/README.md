@@ -384,16 +384,14 @@ deletions remove the corresponding app index and history-cache entry.
 Codex can reject deleting a parent whose history is still referenced by a kept
 paginated fork; that parent remains eligible for a later sweep.
 
-DSH retention uses `DSH_HOME/sessions` (default `~/.dsh/sessions`), honoring the
-existing `CLOUDCLI_DSH_SESSIONS_DIR` override. All regular native generation
-files, including compressed `.zstd` logs, expire after 30 days by file mtime.
-Both providers retain files exactly at the cutoff and skip known active
-sessions. DSH matches deleted files to canonical index paths, including a linked
-configured home. The scanners preserve lock files and do not traverse symlink entries.
+Retention only sweeps Codex, the one provider with a native file store whose
+lifetime this server owns. The scanners preserve lock files and do not traverse
+symlink entries.
 
-The Worker plugin independently expires its native DSH and Pi session files
-after 3 days, once at plugin startup and then every 24 hours, including the legacy
-external session roots. Its configurable task-history retention remains separate.
+The Worker plugin independently expires the native session files of the child
+engines it launches (DSH and Pi) after 3 days, once at plugin startup and then
+every 24 hours, including the legacy external session roots. Its configurable
+task-history retention remains separate.
 
 ## Common Mistakes
 
@@ -414,6 +412,20 @@ external session roots. Its configurable task-history retention remains separate
 
 
 
-## DeepSeek Harness (`dsh`)
+## Removed DeepSeek Harness (`dsh`) provider
 
-The DSH adapter lives in `list/dsh/` and supports only ACP and headless execution. It owns its subprocesses, converts native/ACP/headless events through one normalizer, and reads native versioned/compressed logs through the pinned official format catalog. Capabilities intentionally omit unsupported native controls. CloudCLI-owned MCP declarations are passed to ACP sessions or mounted by a temporary headless overlay; they do not rewrite native profile files. See [implementation and configuration](../../../docs/deepseek-harness-provider-plan.md).
+The `dsh` provider adapter (`list/dsh/`) was removed and the id is no longer
+registered: `providerRegistry.resolveProvider('dsh')` throws
+`UNSUPPORTED_PROVIDER`, and the provider routes, model catalog, auth check, MCP
+writer, skills, runtime controls and session watcher no longer serve it. Existing
+`dsh` rows, transcripts, `provider_models` records, `session_runtime_settings`
+rows and `$DSH_HOME` credentials are kept as-is but are excluded from user-facing
+session lists and draft dispatch; opening one can only be archived or deleted
+without touching its native files.
+
+DSH still runs outside this app provider: the bundled Worker plugin launches
+`dsh` child runs with its own engine, session patches and model patch, and its
+settings keep the `dsh` worker type. What the host no longer offers is a DSH
+*parent*: scheduled prompt tasks that own a native session and resident tasks are
+Codex-only, so a stored `dsh` scheduler config stays readable but its run is
+refused explicitly instead of starting a transcript the server cannot read.

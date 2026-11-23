@@ -103,8 +103,7 @@ function toolResult(result: unknown): Record<string, unknown> {
  * host service, host MCP proxy, SDK MCP client and fixture CLI. No model or
  * user configuration is touched.
  */
-for (const provider of ['codex', 'dsh'] as const) {
-test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${provider} parents`, { timeout: 90_000 }, async (t) => {
+test('worker entry, host IPC and MCP proxy deliver and hold real results for Codex parents', { timeout: 90_000 }, async (t) => {
   ensureBuiltEntry();
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'worker-e2e-'));
   const project = path.join(root, 'project');
@@ -186,7 +185,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     paused: false,
   };
   const sessions = new Map([
-    ['session-1', { project_path: project, provider }],
+    ['session-1', { project_path: project, provider: 'codex' }],
   ]);
   const wakeCalls: Record<string, unknown>[] = [];
   let parentBusy = true;
@@ -199,7 +198,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     runtime: {
       isQueueBlocked: () => false,
       hasBackgroundWork: () => false,
-      getState: () => ({ runtime: provider === 'dsh' ? 'acp' : 'app-server', phase: 'idle', queueHeld: false }),
+      getState: () => ({ runtime: 'app-server', phase: 'idle', queueHeld: false }),
     },
     hasActiveRun: () => parentBusy,
     sessions: { getSessionById: (sessionId) => sessions.get(sessionId) ?? null },
@@ -243,14 +242,10 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     userId: 7,
     appServerInstanceId: 'instance-1',
   };
-  const config = provider === 'dsh' ? null : await host.bridge.prepareSession(codexInput);
-  const codexMcp = config ? (config as {
+  const config = await host.bridge.prepareSession(codexInput);
+  const mcp = (config as {
     'mcp_servers.cloudcli_workers': { url: string; http_headers: { Authorization: string } };
-  })['mcp_servers.cloudcli_workers'] : null;
-  const dshInput = { sessionId: 'session-1', projectPath: project, userId: 7, runtimeInstanceId: 'instance-1' };
-  const dshMcp = provider === 'dsh' ? await host.dshBridge.prepareSession(dshInput) : null;
-  const mcp = codexMcp ?? { url: dshMcp!.url, http_headers: { Authorization: dshMcp!.headers.Authorization } };
-  const lifecycle = provider === 'dsh' ? host.dshBridge : host.bridge;
+  })['mcp_servers.cloudcli_workers'];
   assert.equal(mcp.url, `http://127.0.0.1:${proxyPort}/api/worker-mcp`);
   assert.match(mcp.http_headers.Authorization, /^Bearer /);
 
@@ -261,7 +256,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   await client.connect(transport);
   t.after(async () => { await client.close(); });
 
-  if (provider === 'codex') {
+  {
     await providerSkillsService.setProviderSkillEnabled('codex', { sourcePath: skillPath, enabled: false });
     assert.equal(await host.bridge.prepareSession(codexInput), null);
     for (const name of ['worker_start', 'worker_resume']) {
@@ -330,9 +325,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   })) as { worker: { id: string }; run: { id: string } };
   // Recreating the parent's transport while its child is running must keep
   // the live MCP credential usable and allow the same Worker to finish.
-  assert.deepEqual(provider === 'codex'
-    ? await host.bridge.prepareSession(codexInput)
-    : await host.dshBridge.prepareSession(dshInput), provider === 'codex' ? config : dshMcp);
+  assert.deepEqual(await host.bridge.prepareSession(codexInput), config);
   const waited = toolResult(await client.callTool({
     name: 'worker_wait',
     arguments: { workerId: started.worker.id, timeoutSeconds: 20 },
@@ -408,7 +401,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
     })).json() as { workers: Array<{ id: string; latestRun: { status: string } | null }> };
     return current.workers.find((item) => item.id === stoppedWorker.worker.id)?.latestRun?.status;
   }, (status) => status === 'running', 10_000);
-  assert.equal(await lifecycle.stopSession('session-1', 'user-stop'), true);
+  assert.equal(await host.bridge.stopSession('session-1', 'user-stop'), true);
   const pausedStart = await client.callTool({
     name: 'worker_start',
     arguments: {
@@ -431,7 +424,7 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   assert.equal(wakeCalls.length, 3);
 
   // Manual retry is the only path from held to a new automatic delivery.
-  await lifecycle.activateSession('session-1');
+  await host.bridge.activateSession('session-1');
   state = await (await fetch(`http://127.0.0.1:${ready}/state`, {
     headers: { authorization: 'Bearer plugin-ui-token' },
   })).json() as { notifications: WorkerNotification[] };
@@ -455,4 +448,3 @@ test(`worker entry, host IPC and MCP proxy deliver and hold real results for ${p
   child.kill('SIGTERM');
   await new Promise<void>((resolve) => child.once('exit', () => resolve()));
 });
-}

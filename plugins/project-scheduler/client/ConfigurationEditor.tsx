@@ -12,6 +12,7 @@ import type { SchedulerHost } from "./api.js";
 import { schedulerApi, type SchedulerProjectConfig } from "./api.js";
 import {
   addDraftTask,
+  changeTaskType,
   cloneConfig,
   COMMON_TIMEZONES,
   configTaskId,
@@ -418,7 +419,14 @@ export function ConfigurationEditor({
   const addTask = (type: "script" | "prompt") => {
     if (savingRef.current) return;
     const id = nextTaskId(tasks.map(configTaskId).filter(Boolean), type + "-task");
-    const result = addDraftTask(text, createTaskDraft(id, type));
+    const task = createTaskDraft(id, type);
+    if (
+      type === "prompt" &&
+      parsed.ok &&
+      getConfigValue(parsed.document.value, ["defaults", "agent", "provider"]) === "dsh"
+    )
+      task.agent = { provider: "codex" };
+    const result = addDraftTask(text, task);
     if ("error" in result) {
       report(result.error);
       return;
@@ -430,6 +438,14 @@ export function ConfigurationEditor({
   };
   const copyTask = (index: number) => {
     if (savingRef.current) return;
+    const task = tasks[index];
+    if (
+      task?.type === "prompt" &&
+      (getConfigValue(task, ["agent", "provider"]) ?? defaultAgentValue.provider) === "dsh"
+    ) {
+      report("DSH 已停止支持提示词任务，请先改选 Codex 再复制。");
+      return;
+    }
     const result = copyDraftTask(text, index);
     if ("error" in result) {
       report(result.error);
@@ -995,17 +1011,26 @@ export function ConfigurationEditor({
                     writeTaskPath(selected, ["cron"], cron);
                     setForceCustom(cronTemplateOf(cron).kind === "custom");
                   }}
-                  onTypeChange={(type) =>
-                    mutate((document) => {
-                      const task = (document.tasks as ConfigTask[])[selected];
-                      if (!task) throw new Error("任务不存在");
-                      task.type = type;
-                      // Only the prompt-only reuse flag is cleared: script tasks ignore it, and
-                      // fields this editor does not understand stay exactly as authored.
-                      if (type !== "prompt")
-                        deleteConfigValueInPlace(task, ["reuseSession"]);
-                    })
-                  }
+                  onTypeChange={(type) => {
+                    const result = changeTaskType(
+                      text,
+                      selected,
+                      type,
+                      defaultAgentValue.provider,
+                    );
+                    if ("error" in result) {
+                      report(result.error);
+                      return;
+                    }
+                    setText(result.text);
+                    setConflict(null);
+                    setLoadFailure(null);
+                    if (result.converted)
+                      report(
+                        "DSH 已停止支持提示词任务：本任务的 agent 已改为 codex，并清除仅适用于 DSH 的 model/effort；" +
+                          "请选择 Codex 模型后保存。其它字段和其它任务未改动。",
+                      );
+                  }}
                   onReuseSession={(reuse) =>
                     mutate((document) => {
                       const task = (document.tasks as ConfigTask[])[selected];

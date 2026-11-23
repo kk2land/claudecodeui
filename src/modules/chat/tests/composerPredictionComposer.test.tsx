@@ -8,7 +8,7 @@ import ChatComposer from '@/modules/chat/composer/ChatComposer';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { resetChatDrafts } from '@/shared/chatDrafts';
 import { resetUserPreferences } from '@/shared/userSettings';
-import type { CodexControls, ComposerPredictionControls, Project, ProjectSession, ProviderRuntimeControls, ToolPermissionDecision } from '@/shared/types';
+import type { CodexControls, ComposerPredictionControls, Project, ProjectSession, ToolPermissionDecision } from '@/shared/types';
 
 /**
  * Renders the real ChatComposer with the real composer hook to prove the
@@ -531,7 +531,7 @@ test('the mobile Plan badge follows native app-server plan, never SDK or an unsu
   assert.ok(within(tools() as HTMLElement).getByText('Plan'));
 
   view.rerender(
-    <Harness codexControls={controls()} overrides={{ codexControls: undefined, providerLabel: 'DeepSeek Harness', permissionMode: 'plan', availablePermissionModes: ['default'] }} />,
+    <Harness codexControls={controls()} overrides={{ codexControls: undefined, providerLabel: 'OpenCode', permissionMode: 'plan', availablePermissionModes: ['default'] }} />,
   );
   assert.equal(within(tools() as HTMLElement).queryByText('Plan'), null);
 });
@@ -630,22 +630,6 @@ test('the inline schedule menu works inside the + sheet and schedules without su
 
 /* ─── Mobile Worker activity ──────────────────────────────────────── */
 
-const dshRuntime = (): ProviderRuntimeControls => ({
-  sessionId: 'dsh-session',
-  available: true,
-  modes: ['acp', 'headless'],
-  stoppableModes: ['acp'],
-  hasActiveWorkers: true,
-  pending: false,
-  error: null,
-  control: vi.fn().mockResolvedValue(undefined),
-  prepareSend: vi.fn().mockResolvedValue('dsh-session'),
-  state: {
-    runtime: 'acp', phase: 'idle', queueHeld: false, supportsPermissionRequests: true,
-    diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null },
-  },
-});
-
 /** The Worker spinner lives beside + so a compact or expanded idle composer still shows it. */
 test('mobile keeps the Codex Worker spinner beside + through the compact and expanded composer', async () => {
   stubPhone();
@@ -684,21 +668,6 @@ test('the mobile Worker spinner disappears when the Worker finishes or the sessi
   assert.ok(screen.getByRole('button', { name: 'Add attachment or action' }));
 });
 
-test('DSH ACP shows the same mobile Worker spinner beside +', async () => {
-  stubPhone();
-  render(
-    <Harness
-      overrides={{ runtimeControls: dshRuntime(), providerLabel: 'DeepSeek Harness' }}
-    />,
-  );
-
-  const textarea = await findTextarea();
-  assert.equal(textarea.placeholder, 'Ask DeepSeek Harness');
-  const indicator = screen.getByTestId('mobile-worker-indicator');
-  assert.equal(indicator.getAttribute('aria-label'), 'A Worker is active in this session');
-  assert.ok(indicator.querySelector('.animate-spin'));
-  assert.ok(screen.getByRole('button', { name: 'Add attachment or action' }));
-});
 
 test('desktop keeps its existing settings spinner and gains no external duplicate', async () => {
   vi.stubGlobal('innerWidth', 1024);

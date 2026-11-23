@@ -111,9 +111,6 @@ vi.mock('@/modules/chat/hooks/useCodexControls', () => ({
     mode: harness.mode,
   } }),
 }));
-vi.mock('@/modules/chat/hooks/useProviderRuntimeControls', () => ({
-  useProviderRuntimeControls: () => ({ available: false }),
-}));
 vi.mock('@/modules/chat/hooks/useCodexModelProviders', () => ({
   useCodexModelProviders: () => {
     const activeSelection = { modelProvider: 'alpha', model: harness.routeWithoutModel ? null : 'a-model' };

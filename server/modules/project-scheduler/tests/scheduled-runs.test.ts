@@ -97,67 +97,11 @@ async function appendCodexTurn(
   await appendFile(filePath, `${codexTurn(index, prompt, reply).map((row) => JSON.stringify(row)).join('\n')}\n`);
 }
 
-function dshHeader(nativeSessionId: string, cwd: string) {
-  return { type: 'session', version: 4, id: nativeSessionId, createdAt: 1, cwd, isSeeded: false, delegationDepth: 0 };
-}
-
-function dshUser(seq: number, text: string) {
-  return {
-    type: 'user/message',
-    seq,
-    time: seq + 1,
-    surfaceOp: 'append',
-    data: {
-      id: `user-${seq}`,
-      role: 'user',
-      source: { kind: 'user' },
-      content: [{ type: 'text', text }],
-    },
-  };
-}
-
-function dshAssistant(seq: number, text: string) {
-  return {
-    type: 'assistant/message',
-    seq,
-    time: seq + 1,
-    surfaceOp: 'append',
-    data: {
-      turn: 1,
-      step: 1,
-      message: {
-        id: `assistant-${seq}`,
-        role: 'assistant',
-        source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-        content: [{ type: 'text', text }],
-      },
-    },
-  };
-}
-
-async function writeDshTranscript(
-  sessionsRoot: string,
-  nativeSessionId: string,
-  cwd: string,
-  rows: Array<Record<string, unknown>>,
-  version = 4,
-): Promise<string> {
-  const directory = path.join(sessionsRoot, 'workspace', nativeSessionId);
-  await mkdir(directory, { recursive: true });
-  const filePath = path.join(directory, `session.v${version}.jsonl`);
-  await writeFile(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
-  return filePath;
-}
-
-async function appendDshRows(filePath: string, rows: Array<Record<string, unknown>>): Promise<void> {
-  await appendFile(filePath, `${rows.map((row) => JSON.stringify(row)).join('\n')}\n`);
-}
-
 function preparePayload(input: {
   projectId: string;
   taskId: string;
   runId: string;
-  provider: 'codex' | 'dsh';
+  provider: 'codex';
   cwd: string;
   sessionsRoot: string;
   reuseSession?: boolean;
@@ -168,7 +112,7 @@ function preparePayload(input: {
     runId: input.runId,
     agent: {
       provider: input.provider,
-      model: input.provider === 'codex' ? 'gpt-test' : 'deepseek-test',
+      model: 'gpt-test',
       effort: 'high',
     },
     cwd: input.cwd,
@@ -378,40 +322,31 @@ test('the same task id in two projects keeps separate sessions and bindings', as
 test('finish is scoped to one execution and an active external run blocks detached writes', async () => {
   await withDatabase(async (root) => {
     const { projectId, projectPath } = await createProject(root, 'project');
-    const sessionsRoot = path.join(root, 'dsh-sessions');
-    const nativeId = 'dsh-native-session';
-    await writeDshTranscript(
-      sessionsRoot,
-      nativeId,
-      projectPath,
-      [dshHeader(nativeId, projectPath), dshUser(0, 'first question'), dshAssistant(1, 'first answer')],
-    );
+    const sessionsRoot = path.join(root, 'custom-codex-home', 'sessions');
+    const nativeId = 'thread-external-run';
+    const transcript = await writeCodexTranscript(sessionsRoot, nativeId, projectPath);
     const { service } = createService();
 
     const prepared = await service.handleRequest('scheduledPrepare', preparePayload({
       projectId,
-      taskId: 'dsh-task',
-      runId: 'run-dsh',
-      provider: 'dsh',
+      taskId: 'detached-task',
+      runId: 'run-detached',
+      provider: 'codex',
       cwd: projectPath,
       sessionsRoot,
       reuseSession: true,
     })) as { sessionId: string; executionId: string; nativeSessionId: string | null };
     assert.equal(prepared.nativeSessionId, null);
     await service.handleRequest('scheduledAttachNative', {
-      runId: 'run-dsh',
+      runId: 'run-detached',
       executionId: prepared.executionId,
       nativeSessionId: nativeId,
     });
-    assert.equal(
-      sessionsDb.getSessionById(prepared.sessionId)?.jsonl_path,
-      path.join(sessionsRoot, 'workspace', nativeId, 'session.v4.jsonl'),
-    );
+    assert.equal(sessionsDb.getSessionById(prepared.sessionId)?.jsonl_path, transcript);
 
     const runtime = {
       hasRuntime: () => true,
       getState: () => undefined,
-      getManagedState: () => undefined,
       hasBackgroundWork: () => false,
     } as unknown as ProviderRuntimeGateway;
     const detached = await runDetachedChatTurn(
@@ -422,7 +357,7 @@ test('finish is scoped to one execution and an active external run blocks detach
     assert.equal(chatRunRegistry.isProcessing(prepared.sessionId), true);
 
     const wrong = await service.handleRequest('scheduledFinishRun', {
-      runId: 'run-dsh',
+      runId: 'run-detached',
       executionId: 'not-this-execution',
       outcome: { code: 0, success: true },
     }) as { finished: boolean };
@@ -430,7 +365,7 @@ test('finish is scoped to one execution and an active external run blocks detach
     assert.equal(chatRunRegistry.isProcessing(prepared.sessionId), true);
 
     const finished = await service.handleRequest('scheduledFinishRun', {
-      runId: 'run-dsh',
+      runId: 'run-detached',
       executionId: prepared.executionId,
       outcome: { code: null, success: false, aborted: true, reason: 'plugin restart' },
     }) as { finished: boolean };
@@ -443,9 +378,9 @@ test('finish is scoped to one execution and an active external run blocks detach
     // A reported failure with code 0 must still surface as a failed terminal.
     const retry = await service.handleRequest('scheduledPrepare', preparePayload({
       projectId,
-      taskId: 'dsh-task',
-      runId: 'run-dsh-retry',
-      provider: 'dsh',
+      taskId: 'detached-task',
+      runId: 'run-detached-retry',
+      provider: 'codex',
       cwd: projectPath,
       sessionsRoot,
       reuseSession: true,
@@ -453,7 +388,7 @@ test('finish is scoped to one execution and an active external run blocks detach
     assert.equal(retry.sessionId, prepared.sessionId);
     assert.equal(retry.nativeSessionId, nativeId);
     await service.handleRequest('scheduledFinishRun', {
-      runId: 'run-dsh-retry',
+      runId: 'run-detached-retry',
       executionId: retry.executionId,
       outcome: { code: 0, success: false, reason: 'agent reported failure' },
     });
@@ -713,115 +648,6 @@ test('Codex native history sees rows appended while the scheduled run is still b
 
     await service.handleRequest('scheduledFinishRun', {
       runId: 'run-live-codex',
-      executionId: prepared.executionId,
-      outcome: { code: 0, success: true },
-    });
-  });
-});
-
-test('DSH native history reads the custom-root session and follows live rows and a newer generation', async () => {
-  await withDatabase(async (root) => {
-    const { projectId, projectPath } = await createProject(root, 'project');
-    const sessionsRoot = path.join(root, 'dsh-live', 'sessions');
-    const nativeId = 'dsh-live-native';
-    const transcript = await writeDshTranscript(sessionsRoot, nativeId, projectPath, [
-      dshHeader(nativeId, projectPath),
-      dshUser(0, 'first dsh question'),
-      dshAssistant(1, 'first dsh answer'),
-    ]);
-    const { service } = createService();
-
-    const prepared = await service.handleRequest('scheduledPrepare', preparePayload({
-      projectId,
-      taskId: 'live-dsh',
-      runId: 'run-live-dsh',
-      provider: 'dsh',
-      cwd: projectPath,
-      sessionsRoot,
-      reuseSession: true,
-    })) as { sessionId: string; executionId: string };
-    await service.handleRequest('scheduledAttachNative', {
-      runId: 'run-live-dsh',
-      executionId: prepared.executionId,
-      nativeSessionId: nativeId,
-    });
-    assert.equal(chatRunRegistry.isProcessing(prepared.sessionId), true);
-    assert.equal(sessionsDb.getSessionById(prepared.sessionId)?.jsonl_path, transcript);
-
-    const first = await sessionsService.fetchHistory(prepared.sessionId);
-    assert.ok(first.messages.some((message) => message.content === 'first dsh answer'));
-
-    await appendDshRows(transcript, [
-      dshUser(2, 'live follow up'),
-      {
-        type: 'assistant/message',
-        seq: 3,
-        time: 4,
-        surfaceOp: 'append',
-        data: {
-          turn: 1,
-          step: 1,
-          message: {
-            id: 'assistant-3',
-            role: 'assistant',
-            source: { kind: 'model', provider: 'deepseek-official', model: 'deepseek-v4-flash' },
-            content: [
-              { type: 'text', text: 'live follow-up answer' },
-              { type: 'tool-call', id: 'read-live', name: 'read', arguments: '{"path":"file.txt"}' },
-            ],
-          },
-        },
-      },
-      {
-        type: 'tool/call',
-        seq: 4,
-        time: 5,
-        surfaceOp: 'append',
-        data: { turn: 1, step: 1, callId: 'read-live', name: 'read', arguments: '{"path":"file.txt"}' },
-      },
-      {
-        type: 'tool/result',
-        seq: 5,
-        time: 6,
-        surfaceOp: 'append',
-        sourceEventSeqs: [4],
-        data: {
-          turn: 1,
-          step: 1,
-          message: {
-            id: 'result-live',
-            role: 'tool',
-            source: { kind: 'tool', callId: 'read-live' },
-            toolCallId: 'read-live',
-            content: [{ type: 'text', text: 'live file contents' }],
-            isError: false,
-          },
-        },
-      },
-    ]);
-    const second = await sessionsService.fetchHistory(prepared.sessionId);
-    assert.ok(second.messages.some((message) => message.content === 'live follow up'));
-    assert.ok(second.messages.some((message) => message.content === 'live follow-up answer'));
-    const liveTool = second.messages.find((message) => message.kind === 'tool_use' && message.toolName === 'read');
-    assert.ok(liveTool);
-    const liveResult = second.messages.find(
-      (message) => message.kind === 'tool_result' && message.toolId === liveTool.toolId,
-    );
-    assert.equal(liveResult?.content, 'live file contents');
-
-    // Compaction writes a newer generation next to the indexed v4 file; history must follow it.
-    await writeDshTranscript(sessionsRoot, nativeId, projectPath, [
-      dshHeader(nativeId, projectPath),
-      dshUser(0, 'after compaction'),
-      dshAssistant(1, 'compacted answer'),
-    ], 5);
-    const compacted = await sessionsService.fetchHistory(prepared.sessionId);
-    assert.ok(compacted.messages.some((message) => message.content === 'compacted answer'));
-    assert.ok(!compacted.messages.some((message) => message.content === 'live follow-up answer'));
-    assert.equal(chatRunRegistry.isProcessing(prepared.sessionId), true);
-
-    await service.handleRequest('scheduledFinishRun', {
-      runId: 'run-live-dsh',
       executionId: prepared.executionId,
       outcome: { code: 0, success: true },
     });

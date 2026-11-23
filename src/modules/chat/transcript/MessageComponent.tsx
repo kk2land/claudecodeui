@@ -140,13 +140,11 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
     ? t('messageTypes.cursor')
     : provider === 'codex'
       ? t('messageTypes.codex')
-      : provider === 'dsh'
-        ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' })
-        : provider === 'opencode'
-          ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
-          : provider === 'pi'
-            ? t('messageTypes.pi', { defaultValue: 'Pi' })
-            : t('messageTypes.claude');
+      : provider === 'opencode'
+        ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
+        : provider === 'pi'
+          ? t('messageTypes.pi', { defaultValue: 'Pi' })
+          : t('messageTypes.claude');
 
   if (shouldHideThinkingMessage) {
     return null;

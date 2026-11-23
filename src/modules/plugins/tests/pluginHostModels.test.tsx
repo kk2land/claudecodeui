@@ -208,7 +208,7 @@ describe('PluginTabContent host models capability', () => {
     }
   });
 
-  it('refuses providers outside the allowlist and reports HTTP failures', async () => {
+  it('refuses providers outside the allowlist, the removed provider, and reports HTTP failures', async () => {
     stubAssetsAndPlugins();
     const { api } = await import('@/shared/api');
     const models = vi
@@ -231,9 +231,12 @@ describe('PluginTabContent host models capability', () => {
         harness!.models!('claude' as unknown as 'codex'),
       ).rejects.toThrow(/Unsupported provider/);
       expect(models).not.toHaveBeenCalled();
+      // The removed DSH provider is refused before any request is made.
+      await expect(harness!.models!('dsh')).rejects.toThrow(/DSH provider has been removed/);
+      expect(models).not.toHaveBeenCalledWith('dsh');
       // A failed upstream response rejects instead of returning a bogus catalog.
-      await expect(harness!.models!('dsh')).rejects.toThrow(/HTTP 503/);
-      expect(models).toHaveBeenCalledWith('dsh');
+      await expect(harness!.models!('codex')).rejects.toThrow(/HTTP 503/);
+      expect(models).toHaveBeenCalledWith('codex');
     } finally {
       vi.restoreAllMocks();
     }

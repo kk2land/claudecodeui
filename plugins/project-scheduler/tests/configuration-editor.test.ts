@@ -168,6 +168,32 @@ test("unknown top-level and task fields survive a save unchanged", (t) => {
   assert.equal(document.text, content);
 });
 
+test("editing and saving legacy DSH defaults and tasks preserves their values", (t) => {
+  const f = fixture(t);
+  const defaults = { agent: { provider: "dsh", model: "gateway/default", effort: "high" } };
+  const scriptAgent = { provider: "dsh", model: "gateway/script" };
+  const tasks = [
+    { id: "prompt", type: "prompt", cron: "0 0 0 1 1 *", prompt: "hello" },
+    scriptTask("script", { agent: scriptAgent }),
+  ];
+  f.write(f.text(tasks, { defaults }));
+  const document = f.scheduler.readConfiguration("p")!;
+  const edited = JSON.parse(document.text) as { defaults: unknown; tasks: Array<Record<string, unknown>> };
+  edited.tasks[0]!.name = "edited";
+  const text = JSON.stringify(edited, null, 2);
+  assert.equal(f.scheduler.previewConfiguration("p", text)!.valid, true);
+  const saved = f.scheduler.saveConfiguration("p", text, document.revision)!;
+  assert.equal(saved.saved, true);
+  assert.equal(saved.loaded, true);
+  const reloaded = JSON.parse(f.scheduler.readConfiguration("p")!.text);
+  assert.deepEqual(reloaded.defaults, defaults);
+  assert.deepEqual(reloaded.tasks[0], { ...tasks[0], name: "edited" });
+  assert.deepEqual(reloaded.tasks[1], tasks[1]);
+  const agents = Object.fromEntries(f.store.definitions().map((row) => [row.taskId, row.definition.agent]));
+  assert.deepEqual(agents.prompt, defaults.agent);
+  assert.deepEqual(agents.script, scriptAgent);
+});
+
 test("removed tasks are deleted from the store and from other projects only for this project", (t) => {
   const f = fixture(t);
   const first = f.text([scriptTask("alpha"), scriptTask("beta")]);

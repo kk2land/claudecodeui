@@ -12,19 +12,36 @@ For every task that creates, modifies, refactors, or reviews frontend code under
 
 The long-lived integration branch is `codex-app-server`. Design changes so future updates from `main` can be merged **into `codex-app-server`** with minimal conflicts and clear behavior.
 
-- Before implementation, inspect the difference from `main` and identify shared files likely to change upstream. Keep provider additions in their owning directories; put DeepSeek Harness code in `server/modules/providers/list/dsh/`.
+- Before implementation, inspect the difference from `main` and identify shared files likely to change upstream. Keep provider code in its owning directory under `server/modules/providers/list/`.
 - Prefer small, additive changes to registries, capabilities, routes, shared contracts, and UI entry points. Reuse existing provider interfaces and normalized events. Add optional extension points only when required by real consumers, with existing providers retaining their behavior.
-- Keep Codex-specific protocol and controls inside the Codex adapter. Do not copy Codex's implementation or broadly rename/refactor shared code just to add DSH. Do not combine provider work with unrelated formatting, file moves, cleanup, or dependency upgrades.
+- Keep Codex-specific protocol and controls inside the Codex adapter. Do not copy Codex's implementation or broadly rename/refactor shared code just to add a provider. Do not combine provider work with unrelated formatting, file moves, cleanup, or dependency upgrades.
 - Drive UI availability from actual provider capabilities. Unsupported plan, steer, history, permission, or model features must be reported explicitly rather than simulated as native support.
 - Preserve upstream database migrations. Add incremental, compatible migrations for new provider constraints or state, preserving existing data, columns, and indexes.
 - Separate provider implementation, necessary shared integration, and unrelated fixes into reviewable commits. Keep shared-file edits localized so upstream changes remain recognizable.
-- After bringing `main` into this branch, reconcile its provider/runtime/UI changes with both Codex app-server and DSH behavior. Run the affected provider and shared-path regressions, plus the repository's applicable build, type, and lint checks.
+- After bringing `main` into this branch, reconcile its provider/runtime/UI changes with Codex app-server behavior. Run the affected provider and shared-path regressions, plus the repository's applicable build, type, and lint checks.
 
-See [DeepSeek Harness provider plan](docs/deepseek-harness-provider-plan.md) for the proposed scope, protocol limits, and implementation stages.
+## DeepSeek Harness (`dsh`) status
 
-## DeepSeek Harness scope
+The `dsh` app provider was removed: no registry entry, capability row, chat or
+settings entry, model catalog, auth check, MCP writer, skills, runtime controls,
+session watcher, retention sweep or transcript reader remain, and its HTTP
+endpoints answer `UNSUPPORTED_PROVIDER`. Do not reintroduce it without a new
+agreed plan; the repository guidance that described its ACP/headless scope is
+historical (see the git history of `server/modules/providers/list/dsh/`).
 
-The DSH provider supports ACP and headless transports only. Do not add a DSH SDK runtime, native steer, or native plan mode. Inputs submitted during a run use the existing application queue. Preserve the existing Codex features independently.
+Stored `dsh` rows, transcripts, `provider_models` records,
+`session_runtime_settings` rows and `$DSH_HOME` credentials must be preserved:
+they stay in the database, are excluded from the session lists and draft
+dispatch by the `RETIRED_SESSION_PROVIDERS` predicate, and are only ever archived
+or deleted without touching their native files.
+
+Two independent DSH paths remain and must keep working:
+
+- The bundled Worker plugin launches `dsh` child runs with its own engine, session
+  patch and model patch; its `dsh` worker type and settings stay intact.
+- The project-scheduler plugin keeps `dsh` agent configuration readable. Native
+  scheduled prompt sessions and resident tasks are Codex-only, so the host
+  refuses a `dsh` job explicitly instead of starting a session it cannot read.
 
 ## Service restarts
 

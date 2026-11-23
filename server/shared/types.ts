@@ -77,7 +77,7 @@ export type AuthenticatedWebSocketRequest = IncomingMessage & {
  * Use this as the source of truth whenever a function or payload needs to identify
  * a specific LLM integration.
  */
-export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode' | 'dsh';
+export type LLMProvider = 'claude' | 'codex' | 'cursor' | 'opencode';
 
 // ---------------------------
 //----------------- SESSION RETENTION ------------
@@ -93,60 +93,6 @@ export type SessionRetentionSummary = {
 };
 
 // ---------------------------
-//----------------- DEEPSEEK HARNESS ------------
-/** Supported DSH process surfaces; neither uses the DSH SDK or native controls. */
-export type DshRuntimeMode = 'acp' | 'headless';
-
-/** DSH session preferences persisted independently of Codex's native collaboration mode. */
-export type DshRuntimeSettings = {
-  runtime: DshRuntimeMode;
-  queueHeld: boolean;
-};
-
-/** Launch snapshot shared by DSH configuration, process ownership, and native history readers. */
-export type DshConfiguration = {
-  mode: DshRuntimeMode;
-  bin: string;
-  home: string;
-  sessionsRoot: string;
-  patches: string[];
-  env: NodeJS.ProcessEnv;
-  timeoutMs: number;
-  idleMs: number;
-};
-
-/** Read-only native DSH artifact, decoded through its official format catalog. */
-export type DshSessionLog = {
-  filePath: string;
-  header: { id: string; cwd?: string; createdAt: number; origin?: string; parentSession?: string };
-  events: AnyRecord[];
-};
-
-// ---------------------------
-//----------------- PROVIDER PROCESS MANAGEMENT ------------
-/** Application-level process controls, validated by the owning adapter against its supported transports. */
-export type ProviderRuntimeAction =
-  | { action: 'runtime'; runtime: string }
-  | { action: 'stop' }
-  | { action: 'queue-resume' };
-
-/** Read-only process snapshot for the runtime panel; querying it must never launch or resume a process. */
-export type ProviderRuntimeState = {
-  runtime: string;
-  phase: 'idle' | 'starting' | 'running' | 'switching' | 'stopping';
-  queueHeld: boolean;
-  supportsPermissionRequests: boolean;
-  /** True while this ACP parent has a registered Worker connection, including after idle process recycling. */
-  workerEnabled?: boolean;
-  diagnostics: {
-    running: boolean;
-    pid: number | null;
-    startedAt: number | null;
-    launcherPath: string | null;
-    cliVersion: string | null;
-  };
-};
-
 // ---------------------------
 
 /**
@@ -2394,8 +2340,6 @@ export type ProviderRuntimeGateway = SideQuestionRuntime & {
   /** Scheduling asks providers whether a session must keep its automatic queue on hold. */
   isQueueBlocked?(sessionId: string): boolean;
   getState?(provider: LLMProvider, sessionId: string): CodexSessionState | undefined;
-  /** Worker/chat orchestration reads application-owned runtime state without route-level session validation. */
-  getManagedState?(provider: LLMProvider, sessionId: string): ProviderRuntimeState | undefined;
   control?(provider: LLMProvider, sessionId: string, action: CodexControlAction, options: AnyRecord, writer: ProviderRuntimeWriter): Promise<CodexSessionState>;
   hasRuntime(provider: string): boolean;
   run(
@@ -2730,10 +2674,10 @@ export type StageLogMcpConfig = {
 };
 
 /**
- * Host-owned stage logging capability, consumed by the Codex app-server, Codex exec and DSH
+ * Host-owned stage logging capability, consumed by the Codex app-server and Codex exec
  * adapters. `prepareSession` is idempotent per runtime instance + application session and returns
  * the temporary MCP connection the adapter must inject through its own existing seam (an
- * app-server thread `config`, the exec client `config`, or the DSH mcp-client patch). It never
+ * app-server thread `config` or the exec client `config`). It never
  * edits a native profile and never decides logging eligibility; a null result simply means the
  * adapter keeps working without the tool.
  *
@@ -2755,29 +2699,6 @@ export type StageLogBridge = {
 // ---------------------------
 
 //----------------- WORKER HOST BRIDGE ------------
-/**
- * Application-owned Worker lifecycle used by the DSH adapter and Workers host.
- * The runtime instance survives ACP idle process recycling. prepareSession is
- * idempotent within that instance and application session, returning only a
- * temporary HTTP MCP connection; it never edits a native profile. Explicit user
- * turns may activate a paused owner, while automatic wake-ups may not.
- */
-export type DshWorkerBridge = {
-  /** Registered ownership survives ACP process recycling; pause is tracked independently. */
-  isSessionEnabled(sessionId: string): boolean;
-  prepareSession(input: {
-    sessionId: string;
-    projectPath: string;
-    userId: string | number | null;
-    runtimeInstanceId: string;
-  }): Promise<{ url: string; headers: Record<string, string> } | null>;
-  activateSession(sessionId: string): Promise<void>;
-  stopSession(sessionId: string, reason: string): Promise<boolean>;
-  closeRuntime(runtimeInstanceId: string, reason: string): Promise<void>;
-  /** True while this DSH runtime's owner still has an active Worker run. */
-  hasActiveWorkers(sessionId: string): Promise<boolean>;
-};
-
 /** One claimed Worker reminder or result merged into the parent wake-up turn; `running` denotes a soft-budget reminder. */
 export type WorkerWakeResult = {
   workerId: string;
@@ -2839,7 +2760,6 @@ export type WorkerIpcTransport = {
  */
 export type WorkerHostService = {
   bridge: CodexWorkerBridge;
-  dshBridge: DshWorkerBridge;
   fenceCancel(input: WorkerCancelFenceInput): number;
   /** Checks the current skill setting for a known owner; unknown tokens remain the plugin's responsibility. */
   assertMcpSkillEnabled(authorization: string | undefined): Promise<void>;

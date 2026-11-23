@@ -13,6 +13,16 @@ const STATUS_LABELS: Record<ResidentTaskStatus, string> = {
   stopped: "已停止",
 };
 
+/** Providers this build can still drive. A stored binding may name a retired one. */
+const SUPPORTED_PROVIDERS: ReadonlySet<string> = new Set(["codex"]);
+
+/**
+ * True when the binding's recorded provider was retired from this build. The host keeps that
+ * provider (it is never rewritten to Codex), so the row reports the task as disabled.
+ */
+export function isRetiredResidentProvider(task: Pick<ResidentTaskRow, "runtime">): boolean {
+  return !SUPPORTED_PROVIDERS.has(task.runtime.provider);
+}
 
 /** Chinese label for the host-reported lifecycle status; unknown values say so instead of guessing. */
 export function residentStatusLabel(status: ResidentTaskStatus | null): string {
@@ -25,6 +35,8 @@ export type ResidentTaskActions = {
   canStop: boolean;
   /** Only a stopped binding resumes, and only on an explicit continue — never on plugin ready. */
   canContinue: boolean;
+  /** Enabling is refused for a retired provider, so the row must not offer the switch. */
+  canEnable: boolean;
   /** Unbinding stops first, so it is offered unless a stop is already settling. */
   canRemove: boolean;
   /** Explanation shown beside a withheld action, or null when the row explains itself. */
@@ -32,20 +44,28 @@ export type ResidentTaskActions = {
 };
 
 /** Actions available for one binding, derived only from the host's reported status. */
-export function residentTaskActions(task: Pick<ResidentTaskRow, "status" | "enabled">): ResidentTaskActions {
+export function residentTaskActions(
+  task: Pick<ResidentTaskRow, "status" | "enabled" | "runtime">,
+): ResidentTaskActions {
+  // A retired provider has no run control here: stopping or continuing it would
+  // either be refused or reach a provider this build does not have.
+  const retired = isRetiredResidentProvider(task);
   const running = task.status === "running";
   const stopping = task.status === "stopping";
   const stopped = task.status === "stopped";
-  const canContinue = stopped && task.enabled;
+  const canContinue = !retired && stopped && task.enabled;
   return {
-    canStop: running,
+    canStop: !retired && running,
     canContinue,
+    canEnable: !retired,
     canRemove: !stopping,
-    note: !task.enabled
-      ? "已禁用：不会自动恢复，也仍保持保护状态"
-      : running
-        ? "在前台聊天继续输入不会打断常驻运行"
-        : null,
+    note: retired
+      ? "该 Agent 已停用：不会恢复或继续运行，可删除常驻任务以清理（原会话与历史保留）"
+      : !task.enabled
+        ? "已禁用：不会自动恢复，也仍保持保护状态"
+        : running
+          ? "在前台聊天继续输入不会打断常驻运行"
+          : null,
   };
 }
 

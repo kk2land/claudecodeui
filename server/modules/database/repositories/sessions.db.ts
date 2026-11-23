@@ -37,9 +37,22 @@ type RecentSessionsPage = {
 const SESSION_ROW_COLUMNS =
   'session_id, provider, provider_session_id, project_path, jsonl_path, session_source, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at, last_opened_at';
 
-// Keep retired GPT Web rows available by id and for explicit project deletion,
-// while excluding them from UI pages, search, and transcript pruning.
-const VISIBLE_SESSION_PROVIDER_SQL = "provider <> 'gptweb'";
+/**
+ * Provider ids this build no longer registers. Their rows stay available by id
+ * and for explicit project deletion, but they never enter UI pages, search,
+ * transcript pruning, draft dispatch, or a realtime sidebar broadcast.
+ */
+const RETIRED_SESSION_PROVIDERS: readonly string[] = ['gptweb', 'dsh'];
+
+/** SQL form of `RETIRED_SESSION_PROVIDERS`, optionally qualified by a table alias. */
+function retiredProviderSql(alias?: string): string {
+  const column = alias ? `${alias}.provider` : 'provider';
+  const list = RETIRED_SESSION_PROVIDERS.map((provider) => `'${provider}'`).join(', ');
+  return `${column} NOT IN (${list})`;
+}
+
+/** Unaliased predicate for the single-table maintenance queries. */
+const VISIBLE_SESSION_PROVIDER_SQL = retiredProviderSql();
 
 /** Codex's SDK runtime writes `session_meta.payload.source`, and SDK runs stamp it "exec". */
 const CODEX_EXEC_SESSION_SOURCE = 'exec';
@@ -70,7 +83,7 @@ function visibleSessionsSql(alias: string = 'sessions'): string {
       WHERE resident.session_id = ${alias}.session_id AND resident.visible = 0
     )`;
 
-  return `${alias}.provider <> 'gptweb'${execVisibility}${residentVisibility}`;
+  return `${retiredProviderSql(alias)}${execVisibility}${residentVisibility}`;
 }
 
 const SQLITE_UTC_TIMESTAMP_REGEX = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/;
@@ -662,7 +675,7 @@ export const sessionsDb = {
   isSessionVisibleToUser(
     row: Pick<SessionRow, 'session_id' | 'provider' | 'session_source'>
   ): boolean {
-    if (row.provider === 'gptweb') {
+    if (RETIRED_SESSION_PROVIDERS.includes(row.provider)) {
       return false;
     }
     if (residentBindingsDb.isSessionHidden(row.session_id)) {

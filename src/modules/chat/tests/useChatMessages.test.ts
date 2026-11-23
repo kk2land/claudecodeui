@@ -21,7 +21,7 @@ function message(
   };
 }
 
-for (const provider of ['codex', 'dsh'] as const) {
+for (const provider of ['codex', 'opencode'] as const) {
   for (const status of ['completed', 'running', 'failed', 'cancelled', 'interrupted', 'unknown']) {
     test(`${provider} renders a Worker ${status} wake-up as a task notification and result`, () => {
       const title = `Automatic Worker ${status === 'running' ? 'progress reminder / ' : ''}execution result (batch batch-1).`;
@@ -159,10 +159,10 @@ test('preserves existing UI objects when an older message is prepended', () => {
   assert.strictEqual(withOlderHistory[2], initial[1]);
 });
 
-test('attaches legacy nested DSH results and refreshes the cached tool row', () => {
-  const call = message('call', { provider: 'dsh', kind: 'tool_use', toolId: 'read-1', toolName: 'read' });
+test('attaches legacy nested tool results and refreshes the cached tool row', () => {
+  const call = message('call', { provider: 'codex', kind: 'tool_use', toolId: 'read-1', toolName: 'read' });
   const result = message('result', {
-    provider: 'dsh', kind: 'tool_result', toolId: 'read-1', content: undefined,
+    provider: 'codex', kind: 'tool_result', toolId: 'read-1', content: undefined,
     toolResult: { content: 'file contents', isError: false },
   });
   const pending = normalizedToChatMessages([call]);
@@ -222,7 +222,7 @@ test('retains inline tool results and structured output formatting', () => {
 
 test('renders a legacy nested result without a tool id with its error status', () => {
   const result = message('result', {
-    provider: 'dsh', kind: 'tool_result', content: undefined,
+    provider: 'codex', kind: 'tool_result', content: undefined,
     toolResult: { content: 'Read failed', isError: true },
   });
   const rows = normalizedToChatMessages([result]);

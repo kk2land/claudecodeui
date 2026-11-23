@@ -46,6 +46,11 @@ const time = (value: string | null | undefined, zone?: string) =>
       })
     : "—";
 const key = (task: SchedulerTaskRow) => task.projectId + ":" + task.taskId;
+/** The host only gives Codex prompt tasks a native session; legacy DSH prompts stay readable. */
+const retiredPrompt = (task: SchedulerTaskRow) =>
+  task.definition.type === "prompt" && task.definition.agent.provider === "dsh";
+const RETIRED_HINT =
+  "DSH 提示词已停用：请在“编辑任务”中把 agent.provider 改为 codex 并保存装载；脚本任务的 AGENT_EXEC 仍可使用 DSH。";
 const token = (value: number | null | undefined) =>
   typeof value === "number" && Number.isFinite(value)
     ? value.toLocaleString("zh-CN")
@@ -488,7 +493,9 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                   <td>
                     <code>{task.definition.cron}</code>
                     <small>
-                      {time(task.nextRun, task.definition.timezone)}
+                      {retiredPrompt(task)
+                        ? "不自动排期"
+                        : time(task.nextRun, task.definition.timezone)}
                       <br />
                       {task.definition.timezone}
                     </small>
@@ -498,27 +505,35 @@ function Scheduler({ host }: { host: SchedulerHost }) {
                       ? task.definition.command?.split(/[\\/]/).pop() +
                         " / 脚本"
                       : task.definition.agent.provider + " / 提示词"}
+                    {retiredPrompt(task) && (
+                      <span className="cron-badge">已停用</span>
+                    )}
                     <small className="cron-command-preview">
                       <code>
                         {task.definition.type === "script"
                           ? task.definition.args.join(" ")
                           : task.definition.agent.model}
                       </code>
+                      {retiredPrompt(task) && " · 请在“编辑任务”中改选 Codex"}
                     </small>
                   </td>
                   <td className="cron-toggle-cell">
-                    <button
-                      type="button"
-                      role="switch"
-                      className="cron-task-switch"
-                      aria-label={`${task.projectName} / ${task.definition.name} 临时自动调度`}
-                      aria-checked={task.definition.enabled}
-                      disabled={pendingToggles.has(key(task))}
-                      onClick={() => void toggleTask(task)}
-                    >
-                      <span className="cron-switch-track" aria-hidden="true"><span /></span>
-                      {task.definition.enabled ? "已开启" : "已关闭"}
-                    </button>
+                    {retiredPrompt(task) ? (
+                      <small className="cron-muted">提示词已停用</small>
+                    ) : (
+                      <button
+                        type="button"
+                        role="switch"
+                        className="cron-task-switch"
+                        aria-label={`${task.projectName} / ${task.definition.name} 临时自动调度`}
+                        aria-checked={task.definition.enabled}
+                        disabled={pendingToggles.has(key(task))}
+                        onClick={() => void toggleTask(task)}
+                      >
+                        <span className="cron-switch-track" aria-hidden="true"><span /></span>
+                        {task.definition.enabled ? "已开启" : "已关闭"}
+                      </button>
+                    )}
                   </td>
                   <td>
                     {task.activeRuns.length ? (
@@ -779,6 +794,8 @@ function RunDetail({
   const text = logState.key === logKey ? logState.text : "";
   const runTask = snapshot && snapshot.id === runId ? snapshot.task : null;
   const definition = runTask ?? task.definition;
+  // Blocking follows the current task, not an old run snapshot: converting to Codex re-enables it.
+  const retired = retiredPrompt(task);
   // What the run itself printed. The legacy conversation fallback shows this text instead of
   // inventing a native session, and the diagnostic tabs show it verbatim.
   const outputText = logInfo.expired
@@ -912,18 +929,28 @@ function RunDetail({
               停止本次
             </button>
           ) : (
-            <button onClick={onRun}>
+            <button
+              disabled={retired}
+              title={retired ? RETIRED_HINT : undefined}
+              onClick={onRun}
+            >
               <Play size={14} />
               立即运行
             </button>
           )}
         </div>
       </header>
+      {retired && (
+        <p className="cron-muted" role="status">
+          {RETIRED_HINT}
+        </p>
+      )}
       <div className="cron-definition">
         <span>
           {definition.type === "prompt"
             ? definition.agent.provider + " · " + definition.agent.model
             : definition.command}
+          {retired ? " · 已停用" : ""}
         </span>
         <code>{definition.cron}</code>
         <span>{definition.allowConcurrent ? "允许并发" : "禁止并发"}</span>

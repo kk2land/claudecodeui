@@ -3,6 +3,7 @@ import { Play, ScrollText, Square, Trash2 } from "lucide-react";
 
 import type { schedulerApi, SchedulerHost } from "./api.js";
 import {
+  isRetiredResidentProvider,
   residentCapacityNote,
   residentStatusLabel,
   residentTaskActions,
@@ -85,7 +86,7 @@ export function ResidentTasks({ api, host, projectId, onMessage }: ResidentTasks
       <p className="cron-resident-note">{residentCapacityNote()}</p>
       {!canOpenSession && (
         <p className="cron-resident-note" role="status">
-          当前宿主不提供打开会话能力：任务名不可点击，启用、可见、停止、继续与删除仍可用。
+          当前宿主不提供打开会话能力：任务名不可点击，其余控制仍可用。
         </p>
       )}
       {visibleTasks.length === 0 ? (
@@ -97,6 +98,9 @@ export function ResidentTasks({ api, host, projectId, onMessage }: ResidentTasks
         <ul className="cron-resident-list">
           {visibleTasks.map((task) => {
             const actions = residentTaskActions(task);
+            // A retired provider stays visible as a disabled task that can be cleaned up; it is
+            // never relabelled as Codex and never offered a stop or continue this host refuses.
+            const retired = isRetiredResidentProvider(task);
             const busy = pending.has(task.taskId);
             return (
               <li key={task.taskId} className="cron-resident-row">
@@ -112,15 +116,17 @@ export function ResidentTasks({ api, host, projectId, onMessage }: ResidentTasks
                 </button>
                 <small>
                   {task.projectId} · {task.runtime.provider} · {residentStatusLabel(task.status)}
-                  {task.enabled ? "" : " · 已禁用"}
+                  {retired ? " · Agent 已停用" : task.enabled ? "" : " · 已禁用"}
                   {task.visible ? "" : " · 前台隐藏"}
                 </small>
                 <div className="cron-resident-actions">
                   <label>
                     <input
                       type="checkbox"
-                      checked={task.enabled}
-                      disabled={busy}
+                      // A retired provider is stopped for good even when the stored
+                      // `enabled` flag is still true; show the real run state, not the flag.
+                      checked={!retired && task.enabled}
+                      disabled={busy || !actions.canEnable}
                       onChange={(event) =>
                         void operate(
                           task,

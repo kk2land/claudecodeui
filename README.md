@@ -289,7 +289,7 @@ Set `CLOUDCLI_HIDDEN_PROVIDERS` in the backend environment or `.env`, then resta
 export CLOUDCLI_HIDDEN_PROVIDERS="cursor,opencode"
 ```
 
-Supported IDs are `claude`, `codex`, `cursor`, `opencode`, and `dsh`. Commas or whitespace separate entries; IDs are case-insensitive and unknown entries are ignored. An unset or empty value shows every provider.
+Supported IDs are `claude`, `codex`, `cursor`, and `opencode`. Commas or whitespace separate entries; IDs are case-insensitive and unknown entries are ignored. An unset or empty value shows every provider.
 
 Hidden providers disappear from the new-chat model picker, its search results, and its model-library tabs, including all built-in and custom models. A previously selected hidden provider falls back to the first visible provider for new chats. If every provider is hidden, the picker is empty and the new-chat composer is unavailable. Existing sessions, stored model settings, provider runtimes, and API access remain available; this setting controls UI visibility only.
 
@@ -307,26 +307,16 @@ Settings → Agents → Codex → **Account** then shows the signed-in account's
 
 If the app-server exits or a refresh fails, the last values are kept and marked out of date rather than reset to a full quota; refreshing restores current values. An account change clears the cache so one account's quota can never appear under another. The feature is off by default, never polls, and does not keep the app-server alive.
 
-### DeepSeek Harness provider
+### Removed DeepSeek Harness provider
 
-Select **DeepSeek Harness** in the provider picker. Install `@deepseek-ai/dsh` on the machine running CloudCLI and configure the same DSH home and credentials used by that service:
+The `dsh` chat provider is gone: it is no longer registered, so it cannot be
+selected for a new chat and its provider endpoints answer `UNSUPPORTED_PROVIDER`.
+Existing `dsh` sessions, their transcripts, custom models, saved runtime rows and
+`$DSH_HOME` credentials are kept, but those sessions are hidden from the
+conversation lists and their queued drafts are never dispatched; archive or
+delete them instead of resuming them.
 
-```bash
-npm install -g @deepseek-ai/dsh@0.2.1-rc.2
-export DEEPSEEK_API_KEY="your-key"
-export CLOUDCLI_DSH_RUNTIME=acp
-# Optional: export CLOUDCLI_DSH_BIN=/absolute/path/to/dsh
-# Optional: export DSH_HOME=/absolute/path/to/.dsh
-```
-
-Restart CloudCLI after changing launch settings. `acp` is the default persistent stdio transport; set `CLOUDCLI_DSH_RUNTIME=headless` for one-shot JSON execution with session resume. Both use the existing chat queue for prompts submitted during a run. The DSH CLI is installed separately; CloudCLI includes only its pinned read-only session format libraries.
-
-ACP exposes one-time tool approvals in the chat. Headless uses environment/`.env` credentials by default and has no interactive approval channel. Connection status checks credential presence; the model runtime validates it when a task starts. Use `default` for DSH's configured selection, or add a custom `provider/model` entry in the model library.
-
-The model picker also reads static `config.providers.<provider>.models` declarations from `$DSH_HOME/profiles/headless/cordis.patch.yml` (default home: `~/.dsh`). It applies that file's patches in order by entry ID: later configs replace earlier configs, disabled entries and groups are hidden, and inserted or nested group declarations are included. It uses each model's `id`, `name`, and declared `reasoningEfforts`, preserving the full `provider/model` route. Existing manually added models take precedence when discovery returns the same route, remaining editable without duplicate picker rows. The file is reread on each model-list request; missing or invalid files leave `Profile default` and manually added models available.
-
-This discovery does not copy headless configuration into ACP: ACP must advertise the selected model in its own profile. Bundle defaults, executable YAML expressions, and `CLOUDCLI_DSH_PATCHES` overlays are not resolved by this static reader. References to bundle-owned entries are projected from the overrides in this file; their inherited configuration and group ancestry are unavailable.
-
-If selecting a model from the headless file reports `DSH does not advertise model`, set `CLOUDCLI_DSH_RUNTIME=headless` in CloudCLI's environment (or its root `.env`) and restart the backend. To keep using ACP, configure the same provider/model in `$DSH_HOME/profiles/acp/cordis.patch.yml`; a full `provider/model` route alone does not register it with ACP.
-
-See [DSH configuration, supported features and checks](docs/deepseek-harness-provider-plan.md) for patch overlays, native compressed history, MCP/skills, and deployment details.
+The DSH CLI itself is still used outside the app provider: the Worker plugin
+launches `dsh` child runs with its own engine, and the project-scheduler plugin
+keeps `dsh` agent configuration readable while the host refuses to start a DSH
+job that would own a native session.

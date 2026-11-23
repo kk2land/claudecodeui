@@ -151,7 +151,7 @@ it('groups /compact with /plan only in the Codex app-server menu', () => {
   rerender({ provider: 'codex', compactEnabled: false });
   assert.equal(result.current.slashCommands.some((command) => command.name === '/compact'), false);
   rerender({ provider: 'codex', compactEnabled: true });
-  rerender({ provider: 'dsh', compactEnabled: true });
+  rerender({ provider: 'opencode', compactEnabled: true });
   assert.ok(nonCodexMenuRenders.length > 0);
   assert.equal(nonCodexMenuRenders.some((commands) => commands.includes('/compact')), false);
 });
@@ -240,7 +240,7 @@ describe('slash command menu keyboard selection', () => {
   });
 });
 
-it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their native invocation on %s', async (selection) => {
+it.each(['click', 'Tab', 'Enter'])('finds a project skill by name and inserts its native invocation on %s', async (selection) => {
   const command = '/cloudcli-project-schedules';
   listSkills.mockResolvedValue(jsonResponse({
     data: {
@@ -261,7 +261,7 @@ it.each(['click', 'Tab', 'Enter'])('finds DSH skills by name and inserts their n
   textarea.setSelectionRange(input.length, input.length);
   const { result } = renderHook(() => useSlashCommands({
     selectedProject: project,
-    provider: 'dsh',
+    provider: 'opencode',
     input,
     setInput,
     textareaRef: { current: textarea },

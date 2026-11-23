@@ -121,7 +121,6 @@ type RenderArgs = {
   session?: ProjectSession;
   isLoading?: boolean;
   provider?: LLMProvider;
-  workerQueueEnabled?: boolean;
   onSessionIdle?: () => void;
   onSessionProcessing?: () => void;
 };
@@ -130,7 +129,6 @@ function renderHarness({
   session = SESSION_A,
   isLoading = false,
   provider = 'codex',
-  workerQueueEnabled = false,
   onSessionIdle = () => undefined,
   onSessionProcessing = () => undefined,
 }: RenderArgs = {}) {
@@ -152,7 +150,6 @@ function renderHarness({
       currentProviderEffort: 'medium',
       isLoading,
       ...(provider === 'codex' ? { codexControls: codexControls(workerIdleState) } : {}),
-      workerQueueEnabled,
       canAbortSession: false,
       tokenBudget: null,
       processingSessions: new Map(),
@@ -689,76 +686,6 @@ test('an in-flight queue PUT preserves a ticket accepted after its snapshot', as
   assert.deepEqual(view.result.current.composer.queuedDrafts.map(({ id }) => id), ['A', 'B']);
 });
 
-test('a DSH ACP Worker receipt becomes one queue card without keeping the optimistic row', async () => {
-  const { view, sent, submit, send } = renderHarness({ provider: 'dsh', workerQueueEnabled: true });
-  await submit('deploy the DSH worker');
-
-  const frame = sent.find((entry) => entry.type === 'chat.send');
-  assert.ok(frame);
-  await send(queueAck(frame, 'dsh-queued-1', [{
-    id: 'dsh-queued-1',
-    content: 'deploy the DSH worker',
-    options: frame.options as Record<string, unknown>,
-  }]));
-
-  await waitFor(() => assert.equal(view.result.current.composer.queuedDrafts.length, 1));
-  assert.equal(view.result.current.composer.queuedDrafts[0].id, 'dsh-queued-1');
-  assert.deepEqual(readQueuedMessages(SESSION_A.id).map(({ id }) => id), ['dsh-queued-1']);
-  assert.deepEqual(view.result.current.store.getMessages(SESSION_A.id), [], 'the optimistic row is replaced by its card');
-  assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1, 'the accepted DSH message is not resent');
-});
-
-test('a refused DSH ACP Worker send restores its prompt and descriptor without idling the turn', async () => {
-  const onSessionIdle = vi.fn();
-  const { view, sent, submit, send } = renderHarness({ provider: 'dsh', workerQueueEnabled: true, onSessionIdle });
-  const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
-  await submit('DSH prompt must survive', [file]);
-  const frame = sent.find((entry) => entry.type === 'chat.send');
-  assert.ok(frame);
-  const clientMessageId = (frame.options as Record<string, unknown>).clientMessageId;
-
-  await send({
-    kind: 'protocol_error',
-    sessionId: SESSION_A.id,
-    clientMessageId,
-    code: 'QUEUE_LIMIT_REACHED',
-    error: 'Queue is full (3)',
-  });
-
-  await waitFor(() => assert.equal(view.result.current.composer.input, 'DSH prompt must survive'));
-  assert.deepEqual(view.result.current.composer.attachedFiles, [], 'the refused DSH send restores its uploaded descriptor instead of a duplicate File');
-  assert.deepEqual(view.result.current.composer.storedAttachments, [UPLOADED]);
-  assert.deepEqual(readQueuedMessages(SESSION_A.id), []);
-  assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1, 'the refused DSH send is never auto-resent');
-  assert.equal(onSessionIdle.mock.calls.length, 0, 'the DSH refusal does not idle an active turn');
-  assert.equal(view.result.current.store.getMessages(SESSION_A.id).filter((row) => row.role === 'user').length, 0);
-});
-
-test('DSH headless sends remain receipt-free and do not restore a refused prompt', async () => {
-  const { view, sent, submit, send } = renderHarness({ provider: 'dsh', workerQueueEnabled: false });
-  const file = new File(['notes'], 'notes.txt', { type: 'text/plain' });
-  await submit('headless prompt', [file]);
-  const frame = sent.find((entry) => entry.type === 'chat.send');
-  assert.ok(frame);
-  const clientMessageId = (frame.options as Record<string, unknown>).clientMessageId;
-
-  await send({
-    kind: 'protocol_error',
-    sessionId: SESSION_A.id,
-    clientMessageId,
-    code: 'QUEUE_LIMIT_REACHED',
-    error: 'Queue is full (3)',
-  });
-
-  await waitFor(() => assert.equal(
-    view.result.current.store.getMessages(SESSION_A.id).filter((row) => row.role === 'user').length,
-    0,
-  ));
-  assert.equal(view.result.current.composer.input, '', 'headless keeps its existing composer behavior');
-  assert.deepEqual(view.result.current.composer.attachedFiles, []);
-  assert.deepEqual(readQueuedMessages(SESSION_A.id), []);
-  assert.equal(sent.filter((entry) => entry.type === 'chat.send').length, 1);
-});
 
 test('a delayed deletion only removes the ticket its snapshot knew', async () => {
   serverDrafts = [{

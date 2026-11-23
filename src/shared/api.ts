@@ -6,7 +6,7 @@ import {
 import { IS_PLATFORM } from '@/shared/utils';
 import { RESIDENT_TASKS_PLUGIN } from '@/shared/constants';
 import { readVoiceConfig, voiceConfigHeaders } from '@/shared/voiceConfig';
-import type { CodexModelProviderPatch, ProviderRuntimeAction, TodoDraftMeta } from '@/shared/types';
+import type { CodexModelProviderPatch, TodoDraftMeta } from '@/shared/types';
 
 // Headers are a plain record rather than the full `HeadersInit` union so the
 // defaults below can be merged with a caller's headers by spreading.
@@ -435,10 +435,6 @@ export const api = {
   // Provider (coding agent) endpoints — models, capabilities, sessions, MCP, skills.
   providers: {
     capabilities: (options: ApiRequestOptions = {}) => get('/api/providers/capabilities', options),
-    runtimeState: (provider: string, sessionId: string | null, options: ApiRequestOptions = {}) =>
-      get(`/api/providers/${encodeURIComponent(provider)}/runtime${query({ sessionId: sessionId ?? undefined })}`, options),
-    controlRuntime: (provider: string, sessionId: string, control: ProviderRuntimeAction) =>
-      post(`/api/providers/${encodeURIComponent(provider)}/runtime`, { sessionId, control }),
     authStatus: (provider: string) =>
       get(`/api/providers/${encodeURIComponent(provider)}/auth/status`),
     cliStatus: (provider: string) =>

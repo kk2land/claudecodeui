@@ -29,7 +29,8 @@ function fixture(t: TestContext) {
     }),
   );
   const store = new SchedulerStore(path.join(root, "data"));
-  const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
+  const host = fakeScheduledHost();
+  const scheduler = new ProjectScheduler(store, catalog, undefined, host.host);
   const config = (tasks: unknown[]) =>
     fs.writeFileSync(
       path.join(project, ".cloudcli", "project-schedules.json"),
@@ -40,7 +41,7 @@ function fixture(t: TestContext) {
     store.close();
     fs.rmSync(root, { recursive: true, force: true });
   });
-  return { root, project, catalog, store, scheduler, config };
+  return { root, project, catalog, store, scheduler, config, host };
 }
 function task(id: string, code = 'console.log("ok")', extra = {}) {
   return {
@@ -51,6 +52,47 @@ function task(id: string, code = 'console.log("ok")', extra = {}) {
     args: ["-e", code],
     ...extra,
   };
+}
+/** Installs a fake Codex binary under the host root the scheduler resolves. */
+function fakeCodex(root: string) {
+  const cpu = process.arch === "arm64" ? "aarch64" : "x86_64";
+  const suffix =
+    process.platform === "darwin" ? "apple-darwin" : "unknown-linux-musl";
+  const pkg = path.join(
+    root,
+    "node_modules",
+    "@openai",
+    "codex-" + process.platform + "-" + process.arch,
+  );
+  const binary = path.join(pkg, "vendor", cpu + "-" + suffix, "bin", "codex");
+  fs.mkdirSync(path.dirname(binary), { recursive: true });
+  fs.writeFileSync(path.join(root, "package.json"), "{}");
+  fs.writeFileSync(path.join(pkg, "package.json"), "{}");
+  return {
+    write(events: object[]) {
+      fs.writeFileSync(
+        binary,
+        '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>process.stdout.write(' +
+          JSON.stringify(
+            events.map((event) => JSON.stringify(event)).join("\n") + "\n",
+          ) +
+          '));',
+        { mode: 0o700 },
+      );
+    },
+  };
+}
+/** Points Codex resolution at one temporary host root and restores it afterwards. */
+function hostRoot(t: TestContext, root: string) {
+  const previous = process.env.CLOUDCLI_HOST_ROOT;
+  process.env.CLOUDCLI_HOST_ROOT = root;
+  t.after(() => {
+    if (previous === undefined) delete process.env.CLOUDCLI_HOST_ROOT;
+    else process.env.CLOUDCLI_HOST_ROOT = previous;
+  });
+}
+function message(id: string, text: string) {
+  return { type: "item.completed", item: { id, type: "agent_message", text } };
 }
 async function waitFor<T>(
   read: () => T,
@@ -132,35 +174,26 @@ test("stdout/stderr are captured separately and stderr does not imply failure", 
   assert.match(f.scheduler.log(run.id, "stderr", 0).text, /diagnostic/);
 });
 
-test("prompt zero exit without a final event records an unconfirmed result and an alert", async (t) => {
+test("prompt zero exit without a task result records an unconfirmed result and an alert", async (t) => {
   const f = fixture(t);
   f.store.saveSettings({
     ...f.store.settings(),
     telegram: { enabled: true, botToken: "123:test", chatId: "1", proxy: "" },
   });
-  const bin = path.join(f.root, "dsh");
-  fs.writeFileSync(
-    bin,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"session",sessionId:"native-unconfirmed"}));console.log(JSON.stringify({type:"text",text:"answer"}))});',
-    { mode: 0o700 },
-  );
-  const previous = process.env.CLOUDCLI_DSH_BIN,
-    previousPatches = process.env.CLOUDCLI_DSH_PATCHES;
-  process.env.CLOUDCLI_DSH_BIN = bin;
-  process.env.CLOUDCLI_DSH_PATCHES = "[]";
-  t.after(() => {
-    if (previous === undefined) delete process.env.CLOUDCLI_DSH_BIN;
-    else process.env.CLOUDCLI_DSH_BIN = previous;
-    if (previousPatches === undefined) delete process.env.CLOUDCLI_DSH_PATCHES;
-    else process.env.CLOUDCLI_DSH_PATCHES = previousPatches;
-  });
+  const codex = fakeCodex(f.root);
+  hostRoot(t, f.root);
+  codex.write([
+    { type: "thread.started", thread_id: "native-unconfirmed" },
+    message("answer", "answer"),
+    { type: "turn.completed" },
+  ]);
   f.config([
     {
       id: "agent",
       type: "prompt",
       cron: "0 0 0 1 1 *",
       prompt: "hello",
-      agent: { provider: "dsh", model: "default" },
+      agent: { provider: "codex", model: "default" },
     },
   ]);
   f.scheduler.load(undefined, false, true);
@@ -172,7 +205,8 @@ test("prompt zero exit without a final event records an unconfirmed result and a
   assert.equal(done?.status, "failed");
   assert.equal(done?.exitCode, 0);
   assert.equal(done?.alertStatus, "pending");
-  assert.match(done?.reason ?? "", /结果未确认/);
+  // The process exited cleanly but the final answer was not the agreed JSON result.
+  assert.match(done?.reason ?? "", /结果未确认：Agent 最终答复不是有效的任务结果 JSON/);
   assert.match(f.scheduler.log(run.id, "stdout", 0).text, /answer/);
 });
 
@@ -182,44 +216,32 @@ test("prompt task results persist with the real zero exit code and drive Telegra
     ...f.store.settings(),
     telegram: { enabled: true, botToken: "123:test", chatId: "1", proxy: "" },
   });
-  const bin = path.join(f.root, "dsh");
-  const previous = process.env.CLOUDCLI_DSH_BIN;
-  const previousPatches = process.env.CLOUDCLI_DSH_PATCHES;
-  process.env.CLOUDCLI_DSH_BIN = bin;
-  process.env.CLOUDCLI_DSH_PATCHES = "[]";
-  t.after(() => {
-    if (previous === undefined) delete process.env.CLOUDCLI_DSH_BIN;
-    else process.env.CLOUDCLI_DSH_BIN = previous;
-    if (previousPatches === undefined) delete process.env.CLOUDCLI_DSH_PATCHES;
-    else process.env.CLOUDCLI_DSH_PATCHES = previousPatches;
-  });
+  const codex = fakeCodex(f.root);
+  hostRoot(t, f.root);
   const scenarios = [
-    { id: "completed", text: '{"status":"success","summary":"报告已生成"}', kind: "completed", success: true },
-    { id: "task-failed", text: '{"status":"failed","summary":"接口权限不足"}', kind: "completed", success: false, reason: /任务未完成：接口权限不足/ },
-    { id: "agent-failed", text: '{"status":"success","summary":"报告已生成"}', kind: "error", success: false, reason: /Agent 执行失败：request failed/ },
-    { id: "unconfirmed", text: "无法确认结果", kind: "completed", success: false, reason: /结果未确认：.*JSON/ },
-    { id: "missing-terminal", text: '{"status":"success","summary":"报告已生成"}', success: false, reason: /结果未确认：未收到 Agent 结束状态/ },
+    { id: "completed", text: '{"status":"success","summary":"报告已生成"}', terminal: "completed", success: true },
+    { id: "task-failed", text: '{"status":"failed","summary":"接口权限不足"}', terminal: "completed", success: false, reason: /任务未完成：接口权限不足/ },
+    { id: "agent-failed", text: '{"status":"success","summary":"报告已生成"}', terminal: "failed", success: false, reason: /Agent 执行失败：request failed/ },
+    { id: "unconfirmed", text: "无法确认结果", terminal: "completed", success: false, reason: /结果未确认：.*JSON/ },
+    { id: "missing-terminal", text: '{"status":"success","summary":"报告已生成"}', terminal: "missing", success: false, reason: /结果未确认：未收到 Agent 结束状态/ },
   ];
   f.config(scenarios.map(({ id }) => ({
     id, type: "prompt", cron: "0 0 0 1 1 *", prompt: "生成并验收报告",
-    agent: { provider: "dsh", model: "default" },
+    agent: { provider: "codex", model: "default" },
   })));
   f.scheduler.load(undefined, false, true);
   const messages: string[] = [];
   const notifier = new TelegramNotifier(f.store, async (_settings, message) => { messages.push(message); });
   for (const scenario of scenarios) {
-    // Every prompt run persists a session, so the CLI must report its verified native id.
+    // Every persisted Codex run must report the thread it created, then its terminal state.
     const events: object[] = [
-      { type: "session", sessionId: "native-" + scenario.id },
-      { type: "status", phase: "turn_start", turn: 1 },
+      { type: "thread.started", thread_id: "native-" + scenario.id },
+      message("answer", scenario.text),
     ];
-    if (scenario.kind) events.push({ type: "status", phase: "turn_end", turn: 1,
-      reason: scenario.kind === "completed" ? { kind: "completed" }
-        : { kind: "error", error: { message: "request failed", code: "REQUEST_FAILED" } } });
-    events.push({ type: "final", text: scenario.text });
-    fs.writeFileSync(bin,
-      '#!/usr/bin/env node\nrequire("fs").readFileSync(0,"utf8");process.stdout.write(' + JSON.stringify(events.map((event) => JSON.stringify(event)).join("\n") + "\n") + ');',
-      { mode: 0o700 });
+    if (scenario.terminal === "completed") events.push({ type: "turn.completed" });
+    if (scenario.terminal === "failed")
+      events.push({ type: "turn.failed", error: { message: "request failed" } });
+    codex.write(events);
     const started = f.scheduler.start("p1", scenario.id, "manual");
     const run = await waitFor(() => f.store.run(started.id), (run) => Boolean(run?.endedAt));
     assert.equal(run?.status, scenario.success ? "success" : "failed");
@@ -282,6 +304,73 @@ test("process groups are stopped, including grandchildren", async (t) => {
   const size = fs.statSync(heartbeat).size;
   await new Promise((resolve) => setTimeout(resolve, 250));
   assert.equal(fs.statSync(heartbeat).size, size);
+});
+
+test("legacy DSH prompt tasks are never scheduled or started, while DSH scripts stay runnable", async (t) => {
+  const f = fixture(t);
+  // An inherited provider is resolved by the importer, so both forms must be excluded.
+  fs.writeFileSync(
+    path.join(f.project, ".cloudcli/project-schedules.json"),
+    JSON.stringify({
+      version: 1,
+      defaults: { agent: { provider: "dsh", model: "gateway/default", effort: "high" } },
+      tasks: [
+        { id: "inherited", type: "prompt", cron: "0 0 9 * * *", prompt: "继承" },
+        {
+          id: "explicit",
+          type: "prompt",
+          cron: "0 0 9 * * *",
+          prompt: "指定",
+          agent: { provider: "dsh", model: "gateway/other", effort: "high" },
+        },
+        {
+          id: "codex",
+          type: "prompt",
+          cron: "0 0 9 * * *",
+          prompt: "Codex",
+          agent: { provider: "codex" },
+        },
+        {
+          id: "script",
+          type: "script",
+          cron: "0 0 9 * * *",
+          command: process.execPath,
+          args: ["-e", 'console.log("script")'],
+        },
+      ],
+    }),
+  );
+  assert.equal(f.scheduler.load(undefined, false, true)[0]!.status, "valid");
+  const rows = new Map(f.scheduler.inventory().map((row) => [row.taskId, row]));
+  assert.equal(rows.get("inherited")!.definition.agent.provider, "dsh");
+  assert.equal(rows.get("inherited")!.nextRun, null);
+  assert.equal(rows.get("explicit")!.nextRun, null);
+  assert.ok(rows.get("codex")!.nextRun);
+  assert.ok(rows.get("script")!.nextRun);
+
+  for (const taskId of ["inherited", "explicit"]) {
+    assert.throws(
+      () => f.scheduler.start("p1", taskId, "manual"),
+      /停止支持 DSH 提示词任务/,
+    );
+    assert.throws(
+      () => f.scheduler.start("p1", taskId, "cron"),
+      /停止支持 DSH 提示词任务/,
+    );
+  }
+  // Rejections happen before a run row, host session, or alert exists.
+  assert.equal(f.store.runs("p1").length, 0);
+  assert.equal(f.store.pendingAlerts().length, 0);
+  assert.equal(f.host.requests("scheduledPrepare").length, 0);
+
+  // The script form keeps its DSH agent and still executes normally.
+  const run = f.scheduler.start("p1", "script", "manual");
+  assert.equal(run.status, "running");
+  const done = await waitFor(
+    () => f.store.run(run.id),
+    (value) => Boolean(value?.endedAt),
+  );
+  assert.equal(done?.status, "success");
 });
 
 test("automatic scheduling switches preserve JSON, active runs and project isolation; imports reset them", async (t) => {
@@ -732,13 +821,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   fs.writeFileSync(path.join(pkg, "package.json"), "{}");
   fs.writeFileSync(
     binary,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>console.log(JSON.stringify({type:"item.completed",item:{id:"a",type:"agent_message",text:"agent:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH}})));',
-    { mode: 0o700 },
-  );
-  const dsh = path.join(root, "dsh");
-  fs.writeFileSync(
-    dsh,
-    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"session",sessionId:"native-env"}));console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"dsh:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH})}))});',
+    '#!/usr/bin/env node\nprocess.stdin.resume();process.stdin.on("end",()=>{console.log(JSON.stringify({type:"thread.started",thread_id:"native-env"}));console.log(JSON.stringify({type:"item.completed",item:{id:"a",type:"agent_message",text:JSON.stringify({status:"success",summary:"codex:"+process.env.GLOBAL_ONLY+"/"+process.env.BOTH})}}));console.log(JSON.stringify({type:"turn.completed"}))});',
     { mode: 0o700 },
   );
   const script =
@@ -763,7 +846,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
         type: "prompt",
         cron: "0 0 0 1 1 *",
         prompt: "run",
-        agent: { provider: "dsh", model: "default" },
+        agent: { provider: "codex", model: "default" },
         env: { BOTH: "task-prompt" },
       },
     ],
@@ -771,10 +854,8 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   fs.writeFileSync(configFile, config);
   const originalConfig = fs.readFileSync(configFile, "utf8");
   const previousRoot = process.env.CLOUDCLI_HOST_ROOT;
-  const previousDsh = process.env.CLOUDCLI_DSH_BIN;
   const previousToken = process.env.CLOUDCLI_PLUGIN_TOKEN;
   process.env.CLOUDCLI_HOST_ROOT = root;
-  process.env.CLOUDCLI_DSH_BIN = dsh;
   process.env.CLOUDCLI_PLUGIN_TOKEN = "host-token";
   const store = new SchedulerStore(path.join(root, "data"));
   const scheduler = new ProjectScheduler(store, catalog, undefined, fakeScheduledHost().host);
@@ -783,8 +864,6 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
     store.close();
     if (previousRoot === undefined) delete process.env.CLOUDCLI_HOST_ROOT;
     else process.env.CLOUDCLI_HOST_ROOT = previousRoot;
-    if (previousDsh === undefined) delete process.env.CLOUDCLI_DSH_BIN;
-    else process.env.CLOUDCLI_DSH_BIN = previousDsh;
     if (previousToken === undefined) delete process.env.CLOUDCLI_PLUGIN_TOKEN;
     else process.env.CLOUDCLI_PLUGIN_TOKEN = previousToken;
     fs.rmSync(root, { recursive: true, force: true });
@@ -801,14 +880,14 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   // Script, its AGENT_EXEC child, and the prompt all see the global value; task.env wins for BOTH.
   assert.match(
     scheduler.log(scriptRun.id, "stdout", 0).text,
-    /script:global-1\/task[\s\S]*agent:global-1\/task/,
+    /script:global-1\/task[\s\S]*codex:global-1\/task/,
   );
-  // DSH prompt tasks receive the same global variables, and their task env wins.
+  // Codex prompt tasks receive the same global variables, and their task env wins.
   const promptRun = scheduler.start("p", "prompt", "manual");
   assert.equal((await wait(promptRun.id))?.status, "success");
   assert.match(
     scheduler.log(promptRun.id, "stdout", 0).text,
-    /dsh:global-1\/task-prompt/,
+    /codex:global-1\/task-prompt/,
   );
   // No reload: the next run reads the newly saved settings.
   store.saveSettings({
@@ -819,7 +898,7 @@ test("global env reaches scripts and prompts, task env wins, and saves apply wit
   assert.equal((await wait(next.id))?.status, "success");
   assert.match(
     scheduler.log(next.id, "stdout", 0).text,
-    /dsh:global-2\/task-prompt/,
+    /codex:global-2\/task-prompt/,
   );
   // The token stays stripped and neither project JSON nor run snapshots carry the global env.
   assert.equal(fs.readFileSync(configFile, "utf8"), originalConfig);

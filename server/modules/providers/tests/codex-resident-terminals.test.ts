@@ -107,7 +107,6 @@ async function harness(
       hasBackgroundWork: () => false,
       isQueueBlocked: () => false,
       getState: () => undefined,
-      getManagedState: () => undefined,
       getPendingApprovalsForSession: () => [],
       resolveToolApproval: () => undefined,
       stopBackgroundTask: async () => false,

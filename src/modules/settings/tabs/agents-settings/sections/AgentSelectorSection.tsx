@@ -13,7 +13,6 @@ const AGENT_NAMES: Record<AgentProvider, string> = {
   cursor: 'Cursor',
   codex: 'Codex',
   opencode: 'OpenCode',
-  dsh: 'DeepSeek Harness',
 };
 
 /** Rendered by AgentsSettingsTab to pick which agent provider the tab is configuring. */

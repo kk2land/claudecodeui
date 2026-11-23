@@ -26,10 +26,6 @@ import {
 } from '@/modules/providers/list/claude/claude-runtime.provider.js';
 import { codexRuntime } from '@/modules/providers/list/codex/codex-runtime.provider.js';
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
-import { DshConfigurationProvider } from '@/modules/providers/list/dsh/dsh-configuration.provider.js';
-import { DshEventsProvider } from '@/modules/providers/list/dsh/dsh-events.provider.js';
-import { DshMcpProvider } from '@/modules/providers/list/dsh/dsh-mcp.provider.js';
-import { DshRuntimeProvider } from '@/modules/providers/list/dsh/dsh-runtime.provider.js';
 import { cursorRuntime } from '@/modules/providers/list/cursor/cursor-runtime.provider.js';
 import { opencodeRuntime } from '@/modules/providers/list/opencode/opencode-runtime.provider.js';
 import type {
@@ -551,81 +547,6 @@ test('native codex: an auto-continued goal turn sends no notice of its own', asy
     } finally {
       if (previousGoals === undefined) delete process.env.CLOUDCLI_CODEX_GOAL_ENABLED;
       else process.env.CLOUDCLI_CODEX_GOAL_ENABLED = previousGoals;
-    }
-  });
-});
-
-/**
- * DSH reports one terminal notice per run on its real transports: a headless
- * failure is a failure (not a stop), and an aborted ACP turn is a stop.
- */
-const DSH_ACTOR = `#!/usr/bin/env node
-import { createInterface } from 'node:readline';
-if (process.argv.includes('acp')) {
-  const rl = createInterface({ input: process.stdin });
-  const output = (value) => process.stdout.write(JSON.stringify(value) + '\\n');
-  rl.on('line', (line) => {
-    const frame = JSON.parse(line);
-    if (frame.method === 'initialize') output({ id: frame.id, result: { protocolVersion: 1 } });
-    if (frame.method === 'session/new') output({ id: frame.id, result: { sessionId: 'native-notify' } });
-    // A prompt is never answered: the run is only ended by an explicit Stop.
-  });
-  rl.on('close', () => process.exit(0));
-} else {
-  let text = '';
-  process.stdin.on('data', (part) => { text += part; });
-  process.stdin.on('end', () => {
-    process.stdout.write(JSON.stringify({ type: 'session', sessionId: 'native-notify' }) + '\\n');
-    process.stdout.write(JSON.stringify({ type: 'final', text: 'done' }) + '\\n');
-    process.exitCode = 1;
-  });
-}
-`;
-
-async function dshRuntime(root: string, mode: 'headless' | 'acp') {
-  const bin = path.join(root, 'dsh.mjs');
-  await writeFile(bin, DSH_ACTOR, { mode: 0o755 });
-  const config = new DshConfigurationProvider({ PATH: process.env.PATH, DSH_HOME: root, CLOUDCLI_DSH_BIN: bin, CLOUDCLI_DSH_RUNTIME: mode });
-  const runtime = new DshRuntimeProvider(config, new DshEventsProvider(), new DshMcpProvider(config), { synchronize: async () => 0 });
-  return { runtime, config };
-}
-
-test('dsh headless: a failed run reports one failure and no stop', { skip: process.platform === 'win32' }, async () => {
-  await withDesktopListener(async ({ userId, payloads }) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-notify-fail-'));
-    try {
-      const { runtime } = await dshRuntime(root, 'headless');
-      const writer = createWriter(userId);
-      const context = { ...runtimeContext, resolveProviderSessionId: () => null };
-      await runtime.run('fail', { sessionId: 'dsh-app', cwd: root, model: 'default' }, writer, context).catch(() => {});
-      await waitFor(() => payloads.length > 0, 'the DSH failure notice');
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      assert.deepEqual(payloads.map((payload) => payload.data.code), ['run.failed']);
-      await runtime.close();
-    } finally {
-      await rm(root, { recursive: true, force: true });
-    }
-  });
-});
-
-test('dsh acp: a stopped run reports one stop/aborted and no failure', { skip: process.platform === 'win32' }, async () => {
-  await withDesktopListener(async ({ userId, payloads }) => {
-    const root = await mkdtemp(path.join(os.tmpdir(), 'dsh-notify-stop-'));
-    try {
-      const { runtime } = await dshRuntime(root, 'acp');
-      const writer = createWriter(userId);
-      const context = { ...runtimeContext, resolveProviderSessionId: () => null };
-      const run = runtime.run('stay busy', { sessionId: 'dsh-app', cwd: root, model: 'default' }, writer, context).catch(() => {});
-      await waitFor(() => runtime.listActiveSessions?.().length === 1, 'the ACP turn to start');
-      await runtime.management!.control('dsh-app', { action: 'stop' } as never);
-      await run;
-      await waitFor(() => payloads.length > 0, 'the DSH stop notice');
-      await new Promise((resolve) => setTimeout(resolve, 60));
-      assert.deepEqual(payloads.map((payload) => payload.data.code), ['run.stopped']);
-      assert.match(payloads[0].body, /stopped|aborted/i);
-      await runtime.close();
-    } finally {
-      await rm(root, { recursive: true, force: true });
     }
   });
 });

@@ -84,16 +84,20 @@ test('hidden providers remain usable through session and model APIs', async () =
   }
 });
 
-test('removed GPT Web provider is absent from capabilities and rejected by provider APIs', async () => {
+test('removed GPT Web and DSH providers are absent from capabilities and rejected by provider APIs', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
     const response = await fetch(`${baseUrl}/api/providers/capabilities`);
     const body = await response.json() as { data: { providers: Array<{ provider: string }> } };
     assert.equal(body.data.providers.some((row) => row.provider === 'gptweb'), false);
     assert.throws(() => providerRegistry.resolveProvider('gptweb'), { code: 'UNSUPPORTED_PROVIDER' });
-    for (const endpoint of ['capabilities', 'models', 'runtime', 'auth/status', 'mcp/servers', 'skills']) {
-      const removed = await fetch(`${baseUrl}/api/providers/gptweb/${endpoint}`);
-      assert.equal(removed.status, 400, endpoint);
-      assert.equal((await removed.json() as { error: { code: string } }).error.code, 'UNSUPPORTED_PROVIDER');
+    for (const provider of ['gptweb', 'dsh']) {
+      assert.equal(body.data.providers.some((row) => row.provider === provider), false);
+      assert.throws(() => providerRegistry.resolveProvider(provider), { code: 'UNSUPPORTED_PROVIDER' });
+      for (const endpoint of ['capabilities', 'models', 'auth/status', 'mcp/servers', 'skills']) {
+        const removed = await fetch(`${baseUrl}/api/providers/${provider}/${endpoint}`);
+        assert.equal(removed.status, 400, `${provider}/${endpoint}`);
+        assert.equal((await removed.json() as { error: { code: string } }).error.code, 'UNSUPPORTED_PROVIDER');
+      }
     }
     const created = await fetch(`${baseUrl}/api/providers/sessions`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -133,35 +137,16 @@ test('session creation route names a CloudCLI session from the initial message',
   });
 });
 
-test('runtime routes validate provider/session scope and persist DSH controls without starting a process', async () => {
+test('the removed runtime-control routes and provider are gone', async () => {
   await withProviderServer(async (baseUrl, workspacePath) => {
-    sessionsDb.createAppSession('dsh-controls', 'dsh', workspacePath);
     sessionsDb.createAppSession('codex-controls', 'codex', workspacePath);
-    const endpoint = `${baseUrl}/api/providers/dsh/runtime`;
-    const request = (sessionId: string, control: unknown) => fetch(endpoint, {
-      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ sessionId, control }),
-    });
-    const initial = await fetch(endpoint);
-    assert.equal(initial.status, 200);
-    assert.equal(((await initial.json()) as { data: { diagnostics: { running: boolean } } }).data.diagnostics.running, false);
-    assert.equal((await fetch(`${endpoint}?sessionId=missing`)).status, 404);
-    assert.equal((await request('codex-controls', { action: 'stop' })).status, 400);
-    assert.equal((await request('dsh-controls', { action: 'goal', operation: 'set' })).status, 400);
-    assert.equal((await request('dsh-controls', { action: 'runtime', runtime: 'sdk' })).status, 400);
-    const selected = await request('dsh-controls', { action: 'runtime', runtime: 'headless' });
-    assert.equal(selected.status, 200);
-    assert.equal(((await selected.json()) as { data: { runtime: string } }).data.runtime, 'headless');
-    assert.equal((await request('dsh-controls', { action: 'stop' })).status, 409);
-    await request('dsh-controls', { action: 'runtime', runtime: 'acp' });
-    const stopped = await request('dsh-controls', { action: 'stop' });
-    assert.equal(stopped.status, 200);
-    assert.equal(((await stopped.json()) as { data: { queueHeld: boolean } }).data.queueHeld, true);
-    const resumed = await request('dsh-controls', { action: 'queue-resume' });
-    assert.equal(((await resumed.json()) as { data: { queueHeld: boolean } }).data.queueHeld, false);
-    const saved = await fetch(`${endpoint}?sessionId=dsh-controls`);
-    const state = (await saved.json()) as { data: { runtime: string; diagnostics: { running: boolean } } };
-    assert.equal(state.data.runtime, 'acp');
-    assert.equal(state.data.diagnostics.running, false);
+    for (const provider of ['dsh', 'codex']) {
+      assert.equal((await fetch(`${baseUrl}/api/providers/${provider}/runtime`)).status, 404, provider);
+      assert.equal((await fetch(`${baseUrl}/api/providers/${provider}/runtime`, {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: 'codex-controls', control: { action: 'stop' } }),
+      })).status, 404, provider);
+    }
   });
 });
 

@@ -56,15 +56,7 @@ function TokenUsageSummary({ usage, onClick, provider }: TokenUsageSummaryProps)
       / (contextWindow - 12_000) * 100,
     )
     : null;
-  // ChatComposer passes the displayed provider label, so DSH arrives as either
-  // its provider id or the "DeepSeek Harness" label lowercased.
-  const isDsh = provider === 'dsh' || provider === 'deepseek harness';
-  // DSH reports its own live context usage, so it needs no Codex baseline.
-  // Clamp both ends: overfull usage is 0% and negative usage cannot exceed 100%.
-  const dshRemainingPercent = isDsh && contextWindow > 0
-    ? Math.round(Math.min(1, Math.max(0, 1 - usedTokens / contextWindow)) * 100)
-    : null;
-  const remainingPercent = codexRemainingPercent ?? dshRemainingPercent;
+  const remainingPercent = codexRemainingPercent;
 
   return (
     <button

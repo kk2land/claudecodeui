@@ -181,7 +181,6 @@ function getProviderLabel(provider: LLMProvider): string {
     codex: 'Codex',
     cursor: 'Cursor CLI',
     opencode: 'OpenCode',
-    dsh: 'DeepSeek Harness',
   };
   return labels[provider];
 }

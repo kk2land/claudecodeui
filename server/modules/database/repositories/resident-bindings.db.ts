@@ -241,9 +241,4 @@ export const residentBindingsDb = {
         .changes > 0
     );
   },
-
-  /** Bindings a host restart found in `running`, i.e. the ones that were live when it stopped. */
-  listRunning(): ResidentBindingRecord[] {
-    return residentBindingsDb.list().filter((record) => record.status === 'running');
-  },
 };

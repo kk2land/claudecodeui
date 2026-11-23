@@ -288,7 +288,7 @@ test('Agent route starts codex on the catalog default when the request names no 
  * model each provider runtime was started with, plus the catalogs read.
  */
 async function runWithoutModel(
-  provider: 'claude' | 'cursor' | 'dsh',
+  provider: 'claude' | 'cursor',
   catalogs: Record<string, { OPTIONS: { value: string; isCustom?: boolean }[]; DEFAULT: string; CUSTOM_MODELS_ONLY?: boolean }>,
   requestedModel?: string,
 ): Promise<{ models: (string | undefined)[]; catalogReads: string[] }> {
@@ -310,7 +310,6 @@ async function runWithoutModel(
     } as unknown as AgentDependencies['models'],
     queryClaude: recordModel,
     queryCursor: recordModel,
-    queryDsh: recordModel,
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
       method: 'POST',
@@ -394,24 +393,6 @@ test('Agent route starts Claude and Cursor on the first custom model while only 
   assert.deepEqual((await runWithoutModel('cursor', catalogs, 'gpt-5')).models, ['gpt-5']);
 });
 
-test('Agent route honors DSH catalog defaults and explicit model overrides', async () => {
-  const catalogs = {
-    dsh: {
-      OPTIONS: [{ value: 'gateway/deepseek', isCustom: true }],
-      DEFAULT: 'gateway/deepseek',
-      CUSTOM_MODELS_ONLY: true,
-    },
-  };
-  assert.deepEqual(await runWithoutModel('dsh', catalogs), {
-    models: ['gateway/deepseek'],
-    catalogReads: ['dsh'],
-  });
-  assert.deepEqual((await runWithoutModel('dsh', catalogs, 'another-model')).models, ['another-model']);
-  assert.deepEqual((await runWithoutModel('dsh', {
-    dsh: { OPTIONS: [{ value: 'default' }], DEFAULT: 'default' },
-  })).models, ['default']);
-});
-
 test('Agent route starts Claude on its built-in default and leaves Cursor to its CLI while built-in models are listed', async () => {
   const catalogs = {
     claude: {
@@ -440,11 +421,10 @@ test('Agent route starts Claude on its built-in default and leaves Cursor to its
   assert.deepEqual((await runWithoutModel('cursor', flagWithoutCustomModels)).models, [undefined]);
 });
 
-test('Agent route reads no model catalog for a continued session of an unregistered provider', async () => {
-  // A legacy row (e.g. 'gemini', removed in #964) has no catalog: the
-  // Providers service throws "Unsupported provider" for it. Continuing such a
-  // session runs no provider runtime, as before, instead of failing on the
-  // catalog read.
+test('Agent route refuses a continued session of an unregistered provider before any side effect', async () => {
+  // A legacy row (e.g. 'gemini', or a removed 'dsh' session) cannot run here:
+  // the request is refused, no provider runtime starts, and the stored row is
+  // left untouched for archive or delete.
   const catalogReads: string[] = [];
 
   await withAgentServer(createDependencies({
@@ -465,7 +445,7 @@ test('Agent route reads no model catalog for a continued session of an unregiste
         project_path: '/home/test/project',
       }),
       getSessionByProviderSessionId: () => null,
-      createAppSession: () => { throw new Error('a continued session must not create a row'); },
+      createAppSession: () => { throw new Error('a refused session must not create a row'); },
     },
   }), async (baseUrl) => {
     const response = await fetch(`${baseUrl}/api/agent`, {
@@ -478,7 +458,8 @@ test('Agent route reads no model catalog for a continued session of an unregiste
         stream: false,
       }),
     });
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 400);
+    assert.match(String(((await response.json()) as { error: string }).error), /gemini/);
   });
 
   assert.deepEqual(catalogReads, []);

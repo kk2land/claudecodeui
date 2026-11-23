@@ -28,7 +28,6 @@ import type {
   CodexForkModelSelection,
   LLMProvider,
   ProviderRuntimeGateway,
-  ProviderRuntimeState,
   ResidentContinueAdmission,
   ProviderRuntimeWriter,
   QueuedChatMessage,
@@ -165,28 +164,12 @@ function isChatTurnBusy(
 }
 
 /**
- * Reads the DSH Worker lifecycle that survives ACP idle process recycling.
- *
- * Used by the chat gateway's Worker-aware busy queue and stop path. Only an ACP
- * parent with a registered Worker connection qualifies; headless sessions and
- * ACP sessions without a Worker keep their previous chat behaviour.
- */
-function readDshWorkerState(
-  runtime: ProviderRuntimeGateway,
-  sessionId: string,
-): ProviderRuntimeState | undefined {
-  const state = runtime.getManagedState?.('dsh', sessionId);
-  return state?.runtime === 'acp' && state.workerEnabled === true ? state : undefined;
-}
-
-/**
  * Persists a `chat.send` that lost the race with an already-running turn.
  *
  * This is deliberately limited to sessions that promise an automatic,
  * Worker-aware queue: Codex app-server threads whose last setup accepted the
- * Worker MCP config, and DSH ACP parents with a registered Worker connection.
- * Everything else keeps the existing `RUN_IN_PROGRESS` behaviour for other
- * providers, SDK sessions, DSH headless, and DSH without a Worker.
+ * Worker MCP config. Everything else keeps the existing `RUN_IN_PROGRESS`
+ * behaviour for other providers and SDK sessions.
  *
  * The same attachment trust boundary as a normal send applies, and the turn is
  * appended behind every existing user message so a late send cannot jump the
@@ -207,24 +190,15 @@ function queueBusyChatSend(
     return false;
   }
 
-  // DSH state is application-owned and read from managed state; it is never
-  // placed in the Codex-specific `codexState` protocol field.
-  let dshWorkerState: ProviderRuntimeState | undefined;
-  if (provider === 'codex') {
-    const state = dependencies.runtime.getState?.('codex', sessionId);
-    if (state?.runtime !== 'app-server' || state.workerEnabled !== true) {
-      return false;
-    }
-    const codexSettings = sessionRuntimeDb.get(sessionId);
-    if (codexSettings.runtime !== 'app-server' || codexSettings.modelSelection?.model === null) {
-      return false;
-    }
-  } else if (provider === 'dsh') {
-    dshWorkerState = readDshWorkerState(dependencies.runtime, sessionId);
-    if (!dshWorkerState) {
-      return false;
-    }
-  } else {
+  if (provider !== 'codex') {
+    return false;
+  }
+  const state = dependencies.runtime.getState?.('codex', sessionId);
+  if (state?.runtime !== 'app-server' || state.workerEnabled !== true) {
+    return false;
+  }
+  const codexSettings = sessionRuntimeDb.get(sessionId);
+  if (codexSettings.runtime !== 'app-server' || codexSettings.modelSelection?.model === null) {
     return false;
   }
 
@@ -248,10 +222,8 @@ function queueBusyChatSend(
 
   // An idle session still has to protect a waiting user FIFO, and an accepted
   // ticket must be reported without running again. Otherwise a normal send
-  // proceeds through dispatchRun. DSH reports its native turn through
-  // application-owned state because the Codex getState protocol is not reused.
-  const busy = isChatTurnBusy(sessionId, provider, dependencies.runtime)
-    || Boolean(dshWorkerState && ['starting', 'running', 'stopping', 'stopFailed'].includes(dshWorkerState.phase));
+  // proceeds through dispatchRun.
+  const busy = isChatTurnBusy(sessionId, provider, dependencies.runtime);
   const hasQueued = sessionDraftsDb.hasQueuedMessages(sessionId);
   const alreadySent = sessionDraftsDb.hasSentChatMessage(numericUserId, sessionId, clientMessageId);
   if (!busy && !hasQueued && !alreadySent) {
@@ -1157,18 +1129,21 @@ async function handleChatAbort(
   const run = chatRunRegistry.getRun(sessionId);
   const session = sessionsDb.getSessionById(sessionId);
   const provider = session?.provider as LLMProvider | undefined;
+  // Retired providers keep their rows for reading and deletion, but their
+  // runtime is gone. Resolve that explicitly instead of letting getState throw
+  // into the generic INTERNAL_ERROR path; a session-less abort still falls
+  // through to NO_ACTIVE_RUN below.
+  if (provider && !dependencies.runtime.hasRuntime(provider)) {
+    sendProtocolError(ws, 'UNSUPPORTED_PROVIDER', `Provider "${provider}" is not available.`, sessionId);
+    return;
+  }
   const state = provider && dependencies.runtime.getState?.(provider, sessionId);
-  // A DSH ACP parent keeps its registered Worker connection across native
-  // turn/idle-process recycling. Stop must still reach that Worker host even
-  // when no native turn is running; a headless or Worker-less session does not
-  // qualify and keeps returning NO_ACTIVE_RUN.
-  const idleDshWorker = provider === 'dsh' ? readDshWorkerState(dependencies.runtime, sessionId) : undefined;
   if (typeof data.executionId === 'string' && run && run.executionId !== data.executionId && state?.goal?.status !== 'active') {
     sendJson(ws, { kind: 'control_result', sessionId, requestId: data.requestId, ok: false,
       error: 'The previous run already ended. This task has a different execution id.', codexState: state });
     return;
   }
-  if (!provider || ((!run || run.status !== 'running') && state?.runtime !== 'app-server' && !idleDshWorker)) {
+  if (!provider || ((!run || run.status !== 'running') && state?.runtime !== 'app-server')) {
     sendProtocolError(ws, 'NO_ACTIVE_RUN', `Session "${sessionId}" has no active run.`, sessionId);
     return;
   }
@@ -1432,23 +1407,13 @@ export async function runDetachedChatTurn(
 
   const activeRun = chatRunRegistry.getRun(input.sessionId);
   const nativeState = dependencies.runtime.getState?.(provider, input.sessionId);
-  // DSH exposes its application-owned lifecycle through managed state. A
-  // stopped/held or transitioning parent must keep automatic Worker wake-ups
-  // out; the Codex-specific getState shape is never fabricated for DSH.
-  // Scheduled messages keep their existing interruption strategy, so managed
-  // state is consulted only for an automatic Worker wake-up.
-  const dshState = provider === 'dsh' && input.workerSource
-    ? dependencies.runtime.getManagedState?.('dsh', input.sessionId)
-    : undefined;
-  const stoppedOrHeld = dshState
-    ? Boolean(dshState.queueHeld) || ['stopping', 'stopFailed'].includes(dshState.phase)
-    : Boolean(nativeState?.queueHeld) || ['stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
+  // A stopped/held or transitioning session must keep automatic Worker wake-ups
+  // out.
+  const stoppedOrHeld = Boolean(nativeState?.queueHeld) || ['stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
   if (input.workerSource && stoppedOrHeld) {
     return { started: false, error: 'The session is stopping or holding its queue.' };
   }
-  const activePhase = dshState
-    ? ['starting', 'stopping', 'stopFailed'].includes(dshState.phase)
-    : ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
+  const activePhase = ['starting', 'stopping', 'stopFailed'].includes(nativeState?.phase ?? '');
   // A scheduled prompt CLI run is owned by its plugin process, not this runtime:
   // no detached write may interrupt it, not even a scheduled message's timer.
   if (activeRun?.status === 'running' && chatRunRegistry.isExternalRun(input.sessionId)) {

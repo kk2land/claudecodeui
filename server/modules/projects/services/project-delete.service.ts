@@ -27,6 +27,13 @@ function uniqueJsonlPathsFromSessions(
   return result;
 }
 
+/**
+ * Retired provider ids whose native transcripts this build no longer indexes
+ * and must keep on disk (see the DSH status in AGENTS.md): a project delete
+ * removes their rows and superseded index entries but never their files.
+ */
+const PRESERVED_TRANSCRIPT_PROVIDERS: ReadonlySet<string> = new Set(['dsh']);
+
 async function unlinkJsonlIfExists(filePath: string): Promise<void> {
   try {
     await fs.unlink(filePath);
@@ -44,12 +51,18 @@ async function unlinkJsonlIfExists(filePath: string): Promise<void> {
  */
 export async function deleteSessionJsonlFilesForProjectPath(projectPath: string): Promise<void> {
   const sessions = sessionsDb.getSessionsByProjectPathIncludingArchived(projectPath);
+  // Retired providers keep their native files: only the rows and superseded
+  // index entries go with the project, so their sessions are skipped by the
+  // unlink pass but still reach the index cleanup below.
+  const transcriptSessions = sessions.filter(
+    (session) => !PRESERVED_TRANSCRIPT_PROVIDERS.has(session.provider),
+  );
   // Including the transcripts a session has left behind: editing a message on
   // a provider that rewinds by branching moves the session onto a copy, and
   // the row stops pointing at the file the replaced turns are still in.
   const paths = uniqueJsonlPathsFromSessions([
-    ...sessions,
-    ...sessions.flatMap((session) => sessionsDb
+    ...transcriptSessions,
+    ...transcriptSessions.flatMap((session) => sessionsDb
       .getSupersededTranscriptPaths(session.session_id)
       .map((jsonl_path) => ({ jsonl_path }))),
   ]);

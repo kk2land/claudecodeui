@@ -1,19 +1,19 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   SchedulerHost,
   SchedulerModelCatalog,
   SchedulerModelOption,
 } from "./api.js";
 
-/** The only providers whose host model catalog the scheduler may read. */
+/** Providers that can appear in existing scheduler configurations. */
 export type AgentProvider = "codex" | "dsh";
 /** One provider's catalog request state; errors keep authored values usable. */
 export type AgentCatalogEntry =
   | { status: "loading" }
   | { status: "error"; error: string; unsupported: boolean }
   | { status: "ready"; catalog: SchedulerModelCatalog };
-/** Catalog state for both schedulable providers, shared by the defaults and task forms. */
-export type AgentModelCatalogs = Record<AgentProvider, AgentCatalogEntry>;
+/** Catalog state shared by the defaults and task forms. */
+export type AgentModelCatalogs = Record<"codex", AgentCatalogEntry>;
 /** One coordinated agent edit; undefined deletes the property so the default is inherited. */
 export type AgentSelectionChange = {
   provider?: string;
@@ -26,7 +26,6 @@ const DEFAULT_EFFORT = "default";
 
 const loadingCatalogs = (): AgentModelCatalogs => ({
   codex: { status: "loading" },
-  dsh: { status: "loading" },
 });
 
 function isProvider(value: string): value is AgentProvider {
@@ -91,9 +90,8 @@ function readCatalog(value: unknown): SchedulerModelCatalog {
 }
 
 /**
- * Loads both provider catalogs through the optional host method. Requests are tracked per
- * provider and invalidated on retry/unmount, so a slow older response can never replace a newer
- * one. A host without the method reports one explicit unsupported error per provider.
+ * Loads the Codex catalog through the optional host method. Requests are invalidated on
+ * retry/unmount, so a slow older response can never replace a newer one.
  */
 export function useAgentModelCatalogs(
   host: SchedulerHost,
@@ -101,62 +99,41 @@ export function useAgentModelCatalogs(
 ): { catalogs: AgentModelCatalogs; retry(): void; canRetry: boolean } {
   // Catalog results are shared state: both the defaults form and every task form read them.
   const [catalogs, setCatalogs] = useState<AgentModelCatalogs>(loadingCatalogs);
-  // Bumping this counter starts a fresh pair of requests after an explicit retry.
+  // Bumping this counter starts a fresh request after an explicit retry.
   const [attempt, setAttempt] = useState(0);
-  const requestIds = useRef<Record<AgentProvider, number>>({
-    codex: 0,
-    dsh: 0,
-  });
   const canRetry = typeof host.models === "function";
   useEffect(() => {
     if (!enabled) return;
     let live = true;
-    // Capture the mutable counter object itself so cleanup never reads a possibly new ref value.
-    const ids = requestIds.current;
-    const load = async (provider: AgentProvider) => {
-      const requestId = ++ids[provider];
+    const load = async () => {
       if (typeof host.models !== "function") {
-        if (live && requestId === ids[provider])
-          setCatalogs((current) => ({
-            ...current,
-            [provider]: {
-              status: "error",
-              error: "当前宿主未提供模型目录接口",
-              unsupported: true,
-            },
-          }));
+        setCatalogs({
+          codex: {
+            status: "error",
+            error: "当前宿主未提供模型目录接口",
+            unsupported: true,
+          },
+        });
         return;
       }
-      setCatalogs((current) => ({
-        ...current,
-        [provider]: { status: "loading" },
-      }));
+      setCatalogs({ codex: { status: "loading" } });
       try {
-        const catalog = readCatalog(await host.models(provider));
-        if (!live || requestId !== ids[provider]) return;
-        setCatalogs((current) => ({
-          ...current,
-          [provider]: { status: "ready", catalog },
-        }));
+        const catalog = readCatalog(await host.models("codex"));
+        if (live) setCatalogs({ codex: { status: "ready", catalog } });
       } catch (error) {
-        if (!live || requestId !== ids[provider]) return;
-        setCatalogs((current) => ({
-          ...current,
-          [provider]: {
-            status: "error",
-            error: error instanceof Error ? error.message : String(error),
-            unsupported: false,
-          },
-        }));
+        if (live)
+          setCatalogs({
+            codex: {
+              status: "error",
+              error: error instanceof Error ? error.message : String(error),
+              unsupported: false,
+            },
+          });
       }
     };
-    void load("codex");
-    void load("dsh");
+    void load();
     return () => {
       live = false;
-      // Invalidate both in-flight requests so a late response cannot land after cleanup.
-      ids.codex++;
-      ids.dsh++;
     };
   }, [enabled, host, attempt]);
   const retry = useCallback(() => setAttempt((current) => current + 1), []);
@@ -219,8 +196,8 @@ export function AgentModelFields({
     ? fallbackProvider
     : "codex";
   const effectiveProvider = isProvider(provider) ? provider : inheritedProvider;
-  const entry = catalogs[effectiveProvider];
-  const catalog = entry.status === "ready" ? entry.catalog : null;
+  const entry = effectiveProvider === "codex" ? catalogs.codex : null;
+  const catalog = entry?.status === "ready" ? entry.catalog : null;
 
   // A task inherits the project model only while it keeps the project's provider.
   const inheritedModel =
@@ -251,9 +228,9 @@ export function AgentModelFields({
     !effortValues.some((level) => level.value === effort);
   const unknownModel =
     model !== "" && Boolean(catalog) && !modelOption;
-  const modelLoading = entry.status === "loading";
-  const catalogError = entry.status === "error" ? entry.error : null;
-  const unsupportedHost = entry.status === "error" && entry.unsupported;
+  const modelLoading = entry?.status === "loading";
+  const catalogError = entry?.status === "error" ? entry.error : null;
+  const unsupportedHost = entry?.status === "error" && entry.unsupported;
 
   const changeProvider = (next: string) => {
     if (next === provider) return;
@@ -292,13 +269,14 @@ export function AgentModelFields({
           value={provider}
           onChange={(event) => changeProvider(event.target.value)}
         >
-          <option value={INHERIT}>
+          <option value={INHERIT} disabled={scope === "task" && inheritedProvider === "dsh"}>
             {scope === "defaults"
               ? "继承（codex）"
-              : "继承项目默认（" + inheritedProvider + "）"}
+              : "继承项目默认（" + inheritedProvider +
+                (inheritedProvider === "dsh" ? "，已停止支持" : "") + "）"}
           </option>
           <option value="codex">codex</option>
-          <option value="dsh">dsh</option>
+          {provider === "dsh" && <option value="dsh" disabled>dsh（已停止支持）</option>}
         </select>
       </label>
       <label>
@@ -313,7 +291,9 @@ export function AgentModelFields({
             model !== "default" &&
             (!catalog ||
               !catalog.OPTIONS.some((option) => option.value === model)) && (
-              <option value={model}>{model}（当前文件，未在目录中）</option>
+              <option value={model}>
+                {model}{effectiveProvider === "dsh" ? "（当前文件）" : "（当前文件，未在目录中）"}
+              </option>
             )}
           {!catalog?.OPTIONS.some((option) => option.value === "default") && (
             <option value="default">default（显式使用宿主默认）</option>
@@ -346,7 +326,9 @@ export function AgentModelFields({
             </option>
           ))}
           {unknownEffort && (
-            <option value={effort}>{effort}（当前文件，未在目录中）</option>
+            <option value={effort}>
+              {effort}{effectiveProvider === "dsh" ? "（当前文件）" : "（当前文件，未在目录中）"}
+            </option>
           )}
         </select>
         <small>
@@ -361,6 +343,12 @@ export function AgentModelFields({
         </small>
       </label>
       <div className="cron-agent-status" role="status">
+        {effectiveProvider === "dsh" && (
+          <small className="cron-editor-invalid">
+            DSH 已停止支持提示词任务，原配置会保留；请选择 codex 以运行提示词任务。
+            脚本任务的 AGENT_EXEC 仍可使用 DSH。
+          </small>
+        )}
         {modelLoading && <small>正在加载 {effectiveProvider} 模型目录…</small>}
         {catalogError && (
           <small className="cron-editor-invalid" role="alert">
@@ -382,12 +370,12 @@ export function AgentModelFields({
             当前模型 “{model}” 不在目录中；已保留原值，不会自动改写。
           </small>
         )}
-        {unknownEffort && (
+        {unknownEffort && effectiveProvider !== "dsh" && (
           <small>
             当前 effort “{effort}” 不在该模型的目录中；已保留原值，不会自动改写。
           </small>
         )}
-        {effortValues.length === 0 && !modelLoading && !catalogError && (
+        {effectiveProvider !== "dsh" && effortValues.length === 0 && !modelLoading && !catalogError && (
           <small>
             当前模型没有声明 effort 级别，无法提供 effort 选项；不会伪造支持。
             {effort && effort !== DEFAULT_EFFORT

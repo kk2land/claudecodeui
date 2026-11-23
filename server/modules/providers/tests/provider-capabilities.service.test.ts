@@ -17,21 +17,7 @@ const CURATED_CATALOGS: Record<LLMProvider, ProviderModelsDefinition> = {
   codex: CODEX_PREDEFINED_MODELS,
   cursor: CURSOR_PREDEFINED_MODELS,
   opencode: OPENCODE_PREDEFINED_MODELS,
-  dsh: { DEFAULT: 'default', OPTIONS: [{ value: 'default', label: 'Profile default' }] },
 };
-
-test('DSH advertises live ACP context usage alongside both supported transports', () => {
-  const capabilities = providerCapabilitiesService.getProviderCapabilities('dsh');
-  assert.equal(capabilities.supportsImages, true);
-  assert.equal(capabilities.supportsFiles, true);
-  assert.equal(capabilities.supportsTokenUsage, true);
-  assert.deepEqual(capabilities.runtimeManagement?.modes, ['acp', 'headless']);
-  assert.equal(capabilities.supportsPermissionRequests, true);
-  // No native side conversation or steerable turn on ACP/headless.
-  assert.equal(capabilities.supportsSideQuestions, false);
-  assert.equal(capabilities.supportsSteering, false);
-  assert.equal(capabilities.nativeControls, undefined);
-});
 
 test('provider visibility normalizes environment entries without removing capabilities', () => {
   const original = process.env.CLOUDCLI_HIDDEN_PROVIDERS;
@@ -138,7 +124,6 @@ test('side questions are supported by claude, codex and opencode, not by cursor'
     claude: true,
     codex: true,
     cursor: false,
-    dsh: false,
     opencode: true,
   };
   for (const [provider, supported] of Object.entries(expected) as Array<[LLMProvider, boolean]>) {
@@ -154,5 +139,4 @@ test('steering is a Claude and OpenCode transport feature, distinct from Codex n
   assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').supportsSteering, false);
   assert.equal(providerCapabilitiesService.getProviderCapabilities('codex').nativeControls?.steer, true);
   assert.equal(providerCapabilitiesService.getProviderCapabilities('cursor').supportsSteering, false);
-  assert.equal(providerCapabilitiesService.getProviderCapabilities('dsh').supportsSteering, false);
 });

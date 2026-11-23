@@ -23,6 +23,7 @@ import {
 } from "./native.js";
 import type { ProgressTracker } from "./native.js";
 import { readLogPage } from "./logs.js";
+import { readDshCatalog } from "./dsh-catalog.js";
 import { readPiCatalog } from "./pi-catalog.js";
 import { sweepNativeSessions } from "./native-retention.js";
 import {
@@ -45,6 +46,7 @@ import type {
   WorkerMcpSettings,
   WorkerNotification,
   WorkerNotificationDelivery,
+  DshModelCatalog,
   PiModelCatalog,
   WorkerOwner,
   WorkerPlan,
@@ -235,6 +237,16 @@ export class WorkerService {
 
   settings(): WorkerSettings {
     return this.store.settings();
+  }
+
+  /**
+   * Reads the DSH headless profile's static model declarations. The plugin owns this directory:
+   * the host serves no DSH catalog after the app provider was removed.
+   */
+  async dshCatalog(): Promise<DshModelCatalog> {
+    const environment = this.guardianEnvironment(this.environment);
+    const { home } = nativeHome("dsh", this.options.dataDirectory, environment);
+    return readDshCatalog(home);
   }
 
   /** Reads the Pi agent home's configured models without starting the native CLI. */

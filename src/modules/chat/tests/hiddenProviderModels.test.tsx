@@ -17,7 +17,7 @@ const apiState = vi.hoisted(() => ({
   hidden: [] as string[], failedCatalogs: [] as string[], capabilitiesWait: null as Promise<void> | null,
   capabilitiesMode: 'success' as 'success' | 'network-error' | 'http-error' | 'invalid' | 'legacy',
 }));
-const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
+const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode'];
 const catalog = (provider: LLMProvider): ProviderModelsDefinition => ({
   DEFAULT: `${provider}-builtin`,
   OPTIONS: [

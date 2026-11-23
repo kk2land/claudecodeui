@@ -28,7 +28,7 @@ import { BackgroundTasksStrip } from '@/modules/chat/transcript/BackgroundTasksS
  */
 const INITIAL_MOUNTED_TAIL_ROWS = 30;
 
-/** The MCP server name the Worker host registers for both Codex and DSH. */
+/** The MCP server name the Worker host registers for a Worker-capable parent session. */
 const WORKER_MCP_TOOL_PREFIX = 'mcp__cloudcli_workers__';
 
 type ChatMessagesPaneProps = {

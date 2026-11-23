@@ -81,7 +81,6 @@ async function harness(runTest: (h: Harness) => Promise<void>): Promise<void> {
       questions: [],
       queueHeld: sessionRuntimeDb.get(sessionId).queueHeld,
     }),
-    getManagedState: () => undefined,
     isQueueBlocked: (id: string) => Boolean(sessionRuntimeDb.get(id).queueHeld),
     getPendingApprovalsForSession: () => [],
     resolveToolApproval: () => {},

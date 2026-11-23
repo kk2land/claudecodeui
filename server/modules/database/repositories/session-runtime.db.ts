@@ -1,27 +1,11 @@
 import { getConnection } from '@/modules/database/connection.js';
 import type { SessionRuntimeSettings } from '@/shared/index.js';
-import type { DshRuntimeSettings } from '@/shared/types.js';
 
 /** Used by Providers and WebSocket/Scheduled Messages to persist mode and queue stop intent. */
 export const sessionRuntimeDb = {
   /** Providers advertises this deployment default for Codex sessions without saved settings. */
   getDefaultCodexRuntime(): SessionRuntimeSettings['runtime'] {
     return process.env.CLOUDCLI_CODEX_RUNTIME_MODE === 'sdk' ? 'sdk' : 'app-server';
-  },
-  /** DSH uses the existing unconstrained runtime column without changing Codex defaults or modes. */
-  getDsh(sessionId: string): DshRuntimeSettings | null {
-    const row = getConnection().prepare('SELECT runtime, queue_held FROM session_runtime_settings WHERE session_id = ?')
-      .get(sessionId) as { runtime: string; queue_held: number } | undefined;
-    return row?.runtime === 'acp' || row?.runtime === 'headless'
-      ? { runtime: row.runtime, queueHeld: Boolean(row.queue_held) }
-      : null;
-  },
-  /** Providers saves the chosen DSH transport and explicit queue pause across server restarts. */
-  saveDsh(sessionId: string, settings: DshRuntimeSettings): void {
-    getConnection().prepare(`INSERT INTO session_runtime_settings(session_id, runtime, queue_held)
-      VALUES (?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET
-      runtime = excluded.runtime, queue_held = excluded.queue_held`)
-      .run(sessionId, settings.runtime, Number(settings.queueHeld));
   },
   get(sessionId: string): SessionRuntimeSettings {
     const row = getConnection().prepare(`SELECT settings.runtime, settings.mode, settings.queue_held,

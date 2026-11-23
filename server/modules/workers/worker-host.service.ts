@@ -6,10 +6,8 @@ import type {
   CodexSessionState,
   CodexWorkerBridge,
   CodexWorkerPrepareSessionInput,
-  DshWorkerBridge,
   ProviderSkill,
   ProviderSkillListOptions,
-  ProviderRuntimeState,
   WorkerCancelFenceInput,
   WorkerNotification,
   WorkerOwner,
@@ -33,9 +31,9 @@ type WorkerHostDependencies = {
   resolveMcpUrl(): string;
   runtime: {
     isQueueBlocked(sessionId: string): boolean;
-    getState?(provider: 'codex' | 'dsh', sessionId: string): {
+    getState?(provider: 'codex', sessionId: string): {
       runtime: string;
-      phase: CodexSessionState['phase'] | ProviderRuntimeState['phase'];
+      phase: CodexSessionState['phase'] | 'switching';
       queueHeld?: boolean;
       goal?: CodexSessionState['goal'];
     } | undefined;
@@ -56,7 +54,7 @@ type WorkerHostDependencies = {
 
 type RegisteredOwner = {
   owner: WorkerOwner;
-  provider: 'codex' | 'dsh';
+  provider: 'codex';
   token: string;
   /** True only after the plugin has acknowledged this owner registration. */
   registered: boolean;
@@ -120,7 +118,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     return [...owners.values()];
   }
 
-  async function isSkillEnabled(provider: 'codex' | 'dsh', projectPath: string): Promise<boolean> {
+  async function isSkillEnabled(provider: 'codex', projectPath: string): Promise<boolean> {
     const skills = await dependencies.skills.listProviderSkills(provider, { workspacePath: projectPath });
     return !skills.some((skill) => skill.name === 'cloudcli-workers' && skill.enabled === false);
   }
@@ -204,16 +202,13 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     if (entry.owner.paused) return 'paused';
     if (isQueueHeld(entry)) return 'queueHeld';
     const state = dependencies.runtime.getState?.(entry.provider, entry.owner.parentSessionId);
-    if (entry.provider === 'dsh' && state?.runtime !== 'acp') return 'unsupported-runtime';
     const phase = state?.phase;
     if (phase === 'stopping' || phase === 'stopFailed') return phase;
     return null;
   }
 
   function isQueueHeld(entry: RegisteredOwner): boolean {
-    return entry.provider === 'codex'
-      ? dependencies.settings.get(entry.owner.parentSessionId).queueHeld
-      : Boolean(dependencies.runtime.getState?.('dsh', entry.owner.parentSessionId)?.queueHeld);
+    return dependencies.settings.get(entry.owner.parentSessionId).queueHeld;
   }
 
   /** Normal parent work that must finish before a Worker result may wake it. */
@@ -482,11 +477,11 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     return targets.length;
   }
 
-  async function prepareOwner(input: CodexWorkerPrepareSessionInput, provider: 'codex' | 'dsh'): Promise<RegisteredOwner | null> {
+  async function prepareOwner(input: CodexWorkerPrepareSessionInput): Promise<RegisteredOwner | null> {
     if (!dependencies.isEnabled()) return null;
     const session = dependencies.sessions.getSessionById(input.sessionId);
     const projectPath = session?.project_path ? path.resolve(session.project_path) : null;
-    if (!session || session.provider !== provider || !projectPath) return null;
+    if (!session || session.provider !== 'codex' || !projectPath) return null;
     // The owner may only assert the real project this app session belongs to.
     if (path.resolve(input.projectPath) !== projectPath) return null;
     const project = dependencies.projects.getProjectPath(projectPath);
@@ -500,7 +495,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
       && previous.owner.projectId === project.project_id && previous.owner.projectPath === projectPath
       && previous.owner.userId === input.userId;
     const entry: RegisteredOwner = reuse ? previous : {
-      provider,
+      provider: 'codex',
       owner: {
         id: ownerId,
         parentSessionId: input.sessionId,
@@ -525,7 +520,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     // provisional owner while either asynchronous operation is pending.
     owners.set(ownerId, entry);
     sessionOwners.set(input.sessionId, ownerId);
-    const skillEnabled = await isSkillEnabled(provider, projectPath).catch((error) => {
+    const skillEnabled = await isSkillEnabled('codex', projectPath).catch((error) => {
       rollback();
       throw error;
     });
@@ -562,7 +557,7 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
 
   const bridge: CodexWorkerBridge = {
     async prepareSession(input) {
-      const entry = await prepareOwner(input, 'codex');
+      const entry = await prepareOwner(input);
       return entry ? {
         // Per-server override: unrelated MCP servers configured by the user are
         // preserved instead of being replaced by a top-level server table.
@@ -652,33 +647,8 @@ export function createWorkerHostService(dependencies: WorkerHostDependencies) {
     },
   };
 
-  const dshBridge: DshWorkerBridge = {
-    isSessionEnabled(sessionId) {
-      const entry = ownerFor(sessionId);
-      return !shuttingDown && dependencies.isEnabled() && entry?.provider === 'dsh'
-        && entry.registered && isCurrentOwner(entry);
-    },
-    async prepareSession(input) {
-      const entry = await prepareOwner({
-        sessionId: input.sessionId,
-        projectPath: input.projectPath,
-        userId: input.userId,
-        appServerInstanceId: input.runtimeInstanceId,
-      }, 'dsh');
-      return entry ? {
-        url: dependencies.resolveMcpUrl(),
-        headers: { Authorization: `Bearer ${entry.token}` },
-      } : null;
-    },
-    activateSession: bridge.activateSession,
-    stopSession: bridge.stopSession,
-    closeRuntime: bridge.closeAppServer,
-    hasActiveWorkers: bridge.hasActiveWorkers,
-  };
-
   return {
     bridge,
-    dshBridge,
     fenceCancel,
     /** The MCP proxy checks live skill policy; the plugin still owns token authentication. */
     async assertMcpSkillEnabled(authorization: string | undefined): Promise<void> {

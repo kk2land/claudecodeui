@@ -33,7 +33,6 @@ test('each startup sweeps immediately, including a restart in the same day', asy
   const options = {
     now: () => now,
     cleanupCodex: async (at: number) => { calls.push(at); return { exec: empty, other: empty }; },
-    cleanupDsh: async () => empty,
   };
   const first = createSessionRetentionService(options);
   first.start();
@@ -63,7 +62,6 @@ test('the timer repeats every 24 hours from startup without duplicate initializa
   const service = createSessionRetentionService({
     now: () => Date.now(),
     cleanupCodex: async () => { sweeps++; return { exec: empty, other: empty }; },
-    cleanupDsh: async () => empty,
   });
   try {
     service.start();
@@ -86,12 +84,11 @@ test('the timer repeats every 24 hours from startup without duplicate initializa
   }
 });
 
-test('active app/native and SDK ids are protected, provider failures are isolated, and shutdown drains a single sweep', async (t) => {
+test('active app/native and SDK ids are protected, a failed sweep is reported, and shutdown drains it', async (t) => {
   t.mock.method(console, 'info', () => {});
   const errors = t.mock.method(console, 'error', () => {});
   for (const [appId, nativeId, provider] of [
     ['app-sdk', 'native-sdk', 'codex'], ['app-native', 'native-app-server', 'codex'],
-    ['app-dsh', 'native-dsh', 'dsh'],
   ]) {
     sessionsDb.createAppSession(appId, provider, root, appId);
     sessionsDb.assignProviderSessionId(appId, nativeId);
@@ -103,7 +100,7 @@ test('active app/native and SDK ids are protected, provider failures are isolate
   t.mock.method(providerRegistry, 'resolveProvider', (id: string) => {
     const provider = resolveProvider(id);
     return { ...provider, runtime: { ...provider.runtime, listActiveSessions: () => [
-      { sessionId: id === 'codex' ? 'app-native' : 'app-dsh', startedAt: 0 },
+      { sessionId: 'app-native', startedAt: 0 },
     ] } };
   });
   let release!: () => void;
@@ -115,11 +112,7 @@ test('active app/native and SDK ids are protected, provider failures are isolate
       count++;
       assert.deepEqual([...ids].sort(), ['native-app-server', 'native-sdk']);
       await held;
-      return { exec: empty, other: empty };
-    },
-    cleanupDsh: async (_at, ids) => {
-      assert.deepEqual([...ids], ['native-dsh']);
-      throw new Error('fixture DSH failure');
+      throw new Error('fixture Codex sweep failure');
     },
   });
   const sweep = service.run();

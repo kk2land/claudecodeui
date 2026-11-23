@@ -77,15 +77,6 @@ type UseChatComposerStateArgs = {
   composerPredictionsUnsupported?: boolean;
   /** Open permission prompts in this chat hide any suggestion and its request. */
   composerPredictionsBlocked?: boolean;
-  /** Managed providers share allocation and finish pending runtime changes before sending. */
-  prepareSessionForSend?: (initialMessage: string) => Promise<string | null>;
-  /**
-   * Whether the selected provider's active transport has registered this
-   * session for Worker tools. A busy `chat.send` then goes to the server-owned
-   * durable queue and is answered with `chat_queued`; false keeps the existing
-   * local behavior for headless, plain and non-Worker sessions.
-   */
-  workerQueueEnabled?: boolean;
   executionIdsRef?: MutableRefObject<Map<string, string>>;
   isLoading: boolean;
   processingSessions?: SessionActivityMap;
@@ -330,8 +321,6 @@ export function useChatComposerState({
   composerPredictionsEligible = false,
   composerPredictionsBlocked = false,
   composerPredictionsUnsupported = false,
-  prepareSessionForSend,
-  workerQueueEnabled = false,
   executionIdsRef,
   processingSessions,
   canAbortSession,
@@ -1516,10 +1505,9 @@ export function useChatComposerState({
       const currentAttachments = queuedSubmission?.attachments ?? attachedFiles;
       const previouslyUploadedAttachments = queuedSubmission?.uploadedAttachments ?? [];
       // Snapshot this submission's todo sources before any await or draft-scope
-      // migration. A DSH new chat migrates the project draft inside
-      // `prepareSessionForSend`, which clears the live meta; reading it again
-      // after that would silently drop the sources. A queued entry owns its
-      // sources in its own persisted options.
+      // migration clears the live meta; reading it again after that would
+      // silently drop the sources. A queued entry owns its sources in its own
+      // persisted options.
       const queuedTodoIds = queuedSubmission?.options?.todoIds;
       const submissionTodoIds = queuedSubmission
         ? (Array.isArray(queuedTodoIds) ? queuedTodoIds.filter((id): id is string => typeof id === 'string') : [])
@@ -1766,19 +1754,7 @@ export function useChatComposerState({
       // via the session gateway. There is no client-visible session-id
       // handoff later — this id stays valid for the conversation's lifetime.
       let targetSessionId = selectedSession?.id || currentSessionId || null;
-      if (prepareSessionForSend) {
-        try {
-          targetSessionId = await prepareSessionForSend(messageContent);
-        } catch (error) {
-          addMessage({
-            type: 'error',
-            content: error instanceof Error ? error.message : String(error),
-            timestamp: new Date(),
-          });
-          return;
-        }
-        if (!targetSessionId) return;
-      } else if (!targetSessionId) {
+      if (!targetSessionId) {
         let createdSessionName = sessionSummary;
         try {
           const response = await api.providers.createSession({
@@ -1911,15 +1887,12 @@ export function useChatComposerState({
       };
       // Only a native transport with Worker configured can accept a normal
       // `chat.send` into the server-owned queue while this composer sees no
-      // local run. Codex keeps its own app-server check; DSH passes the
-      // equivalent ACP-and-worker-enabled flag. Other providers, headless
-      // sessions and edit sends keep their existing receipt-free behavior.
-      const tracksWorkerQueueReceipt = !editingAnchorId && (
-        workerQueueEnabled
-        || (provider === 'codex'
-          && codexControls?.state?.runtime === 'app-server'
-          && codexControls.state.workerEnabled === true)
-      );
+      // local run. Other providers and edit sends keep their existing
+      // receipt-free behavior.
+      const tracksWorkerQueueReceipt = !editingAnchorId
+        && provider === 'codex'
+        && codexControls?.state?.runtime === 'app-server'
+        && codexControls.state.workerEnabled === true;
       if (tracksWorkerQueueReceipt) {
         // Remember the exact prompt first so `chat_queued` can adopt the
         // server's ticket and a refusal can restore text and files.
@@ -1984,8 +1957,6 @@ export function useChatComposerState({
       }
 
       clearComposerDraft(draftScopeRef.current);
-      // Runtime selection can migrate the draft before React adopts the new session scope.
-      if (prepareSessionForSend) clearComposerDraft(targetSessionId);
     },
     [
       selectedSession,
@@ -1998,7 +1969,6 @@ export function useChatComposerState({
       executeCommand,
       isLoading,
       codexControls,
-      prepareSessionForSend,
       onSessionProcessing,
       onSessionEstablished,
       provider,
@@ -2007,7 +1977,6 @@ export function useChatComposerState({
       queueMessage,
       recordSentMessage,
       resetCommandMenuState,
-      workerQueueEnabled,
       scrollToBottom,
       selectedProject,
       sendMessage,

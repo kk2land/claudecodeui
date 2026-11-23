@@ -7,7 +7,6 @@ import {
   scheduledTaskSessionsDb,
   sessionsDb,
 } from '@/modules/database/index.js';
-import { resolveDshTranscript } from '@/modules/providers/index.js';
 import { chatRunRegistry } from '@/modules/websocket/index.js';
 import {
   AppError,
@@ -26,7 +25,7 @@ type PreparedRun = {
   sessionId: string;
   projectId: string;
   taskId: string;
-  provider: SchedulerAgent['provider'];
+  provider: 'codex';
   cwd: string;
   sessionsRoot: string;
   executionId: string;
@@ -59,14 +58,15 @@ function readString(payload: Record<string, unknown>, key: string): string {
   return value;
 }
 
-function readAgent(payload: Record<string, unknown>): SchedulerAgent {
+function readAgent(payload: Record<string, unknown>): SchedulerAgent & { provider: 'codex' } {
   const record = readObjectRecord(payload.agent);
   if (!record) {
     throw new AppError('"agent" is required.', { code: 'invalid_request', statusCode: 400 });
   }
   const provider = record.provider;
-  if (provider !== 'codex' && provider !== 'dsh') {
-    throw new AppError('Only Codex and DSH prompt tasks can own a native session.', {
+  // Only Codex keeps a native session this host can index and serve history for.
+  if (provider !== 'codex') {
+    throw new AppError('Only Codex prompt tasks can own a native session.', {
       code: 'invalid_request',
       statusCode: 400,
     });
@@ -156,7 +156,6 @@ async function isCodexTranscript(nativeSessionId: string, filePath: string): Pro
 }
 
 async function resolveTranscript(input: {
-  provider: SchedulerAgent['provider'];
   nativeSessionId: string;
   sessionsRoot: string;
   transcriptPath?: string;
@@ -166,55 +165,23 @@ async function resolveTranscript(input: {
   for (;;) {
     try {
       const root = await realpath(input.sessionsRoot);
-      if (input.provider === 'dsh') {
-        // The provider helper reuses DSH generation selection and header/decompression checks;
-        // this service only decides which directory may be read.
-        if (input.transcriptPath) {
-          const provided = await realpath(path.resolve(input.transcriptPath));
-          if (isInside(root, provided)) {
-            const found = await resolveDshTranscript({
-              sessionsRoot: input.sessionsRoot,
-              nativeSessionId: input.nativeSessionId,
-              filePath: provided,
-            });
-            if (found) return found;
-          }
+      // A reused Codex session is only readable when its indexed rollout is inside this run's
+      // effective home; never fall back to another home that happens to carry the same id.
+      if (input.indexedPath) {
+        const indexed = await realpath(input.indexedPath);
+        if (isInside(root, indexed) && await isCodexTranscript(input.nativeSessionId, indexed)) {
+          return indexed;
         }
-        if (input.indexedPath) {
-          const indexed = await realpath(input.indexedPath);
-          if (isInside(root, indexed)) {
-            const found = await resolveDshTranscript({
-              sessionsRoot: input.sessionsRoot,
-              nativeSessionId: input.nativeSessionId,
-              filePath: indexed,
-            });
-            if (found) return found;
-          }
+      }
+      if (input.transcriptPath) {
+        const target = await realpath(path.resolve(input.transcriptPath));
+        if (isInside(root, target) && await isCodexTranscript(input.nativeSessionId, target)) {
+          return target;
         }
-        const found = await resolveDshTranscript({
-          sessionsRoot: input.sessionsRoot,
-          nativeSessionId: input.nativeSessionId,
-        });
-        if (found) return found;
       } else {
-        // A reused Codex session is only readable when its indexed rollout is inside this run's
-        // effective home; never fall back to another home that happens to carry the same id.
-        if (input.indexedPath) {
-          const indexed = await realpath(input.indexedPath);
-          if (isInside(root, indexed) && await isCodexTranscript(input.nativeSessionId, indexed)) {
-            return indexed;
-          }
-        }
-        if (input.transcriptPath) {
-          const target = await realpath(path.resolve(input.transcriptPath));
-          if (isInside(root, target) && await isCodexTranscript(input.nativeSessionId, target)) {
-            return target;
-          }
-        } else {
-          for (const candidate of await findFilesRecursivelyCreatedAfter(root, '.jsonl', null)) {
-            if (await isCodexTranscript(input.nativeSessionId, candidate)) {
-              return await realpath(candidate);
-            }
+        for (const candidate of await findFilesRecursivelyCreatedAfter(root, '.jsonl', null)) {
+          if (await isCodexTranscript(input.nativeSessionId, candidate)) {
+            return await realpath(candidate);
           }
         }
       }
@@ -425,7 +392,6 @@ export function createScheduledRunHostService(dependencies: ScheduledRunHostDepe
       });
     }
     const filePath = await resolveTranscript({
-      provider: entry.provider,
       nativeSessionId,
       sessionsRoot: entry.sessionsRoot,
       transcriptPath,

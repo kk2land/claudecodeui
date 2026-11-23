@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { providerRegistry } from '@/modules/providers/provider.registry.js';
 import { createProviderRuntimeService } from '@/modules/providers/services/provider-runtime.service.js';
-import type { IProvider, IProviderRuntime, LLMProvider, ProviderRuntimeState } from '@/shared/index.js';
+import type { IProvider, IProviderRuntime, LLMProvider } from '@/shared/index.js';
 
 function createRuntime(overrides: Partial<IProviderRuntime> = {}): IProviderRuntime {
   return {
@@ -75,7 +75,6 @@ test('providerRegistry owns one runtime for every registered provider', () => {
     'codex',
     'cursor',
     'opencode',
-    'dsh',
   ]);
   assert.equal(providers.every((provider) => typeof provider.runtime.run === 'function'), true);
   assert.equal(providers.every((provider) => typeof provider.runtime.abort === 'function'), true);
@@ -148,23 +147,4 @@ test('queue blocking is optional and follows each provider-owned session policy'
   assert.equal(service.isQueueBlocked('codex-session'), true);
   held = false;
   assert.equal(service.isQueueBlocked('codex-session'), false);
-});
-
-test('managed state reads preserve DSH transport details without requiring a persisted session or Codex controls', () => {
-  const state: ProviderRuntimeState = {
-    runtime: 'acp', phase: 'idle', queueHeld: true, workerEnabled: true, supportsPermissionRequests: true,
-    diagnostics: { running: false, pid: null, startedAt: null, launcherPath: null, cliVersion: null },
-  };
-  const queried: Array<string | null> = [];
-  const service = createService([
-    createProvider('dsh', createRuntime({ management: {
-      getState(sessionId) { queried.push(sessionId); return state; },
-      async control() { return state; },
-    } })),
-    createProvider('claude', createRuntime()),
-  ]);
-  assert.equal(service.getManagedState('dsh', 'unpersisted-parent'), state);
-  assert.deepEqual(queried, ['unpersisted-parent']);
-  assert.equal(service.getState('dsh', 'unpersisted-parent'), undefined);
-  assert.equal(service.getManagedState('claude', 'plain-chat'), undefined);
 });

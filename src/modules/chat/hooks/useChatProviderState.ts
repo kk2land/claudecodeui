@@ -22,9 +22,6 @@ const FALLBACK_PROVIDER_EFFORT_VALUES: Partial<Record<LLMProvider, readonly stri
   // valid Max/Ultra selection from being reset during catalog hydration.
   codex: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
   opencode: ['none', 'low', 'medium', 'high', 'xhigh', 'max'],
-  // Configured pi-ai models can advertise xhigh and the intermediate levels.
-  // Preserve a saved choice while the profile-backed catalog is loading.
-  dsh: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
 };
 
 const toProviderEffortOptions = (
@@ -39,10 +36,9 @@ const FALLBACK_DEFAULT_MODEL: Record<LLMProvider, string> = {
   // any other model runs on the CLI's fallback metadata.
   codex: 'gpt-5.6-sol',
   opencode: 'anthropic/claude-sonnet-4-5',
-  dsh: 'default',
 };
 
-const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
+const PROVIDERS: LLMProvider[] = ['claude', 'cursor', 'codex', 'opencode'];
 
 /** localStorage key holding the user's default model for one provider. */
 const providerModelStorageKey = (provider: LLMProvider): string => `${provider}-model`;
@@ -58,7 +54,6 @@ const FALLBACK_PERMISSION_MODES: Record<LLMProvider, PermissionMode[]> = {
   cursor: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
   codex: ['default', 'acceptEdits', 'bypassPermissions'],
   opencode: ['default', 'acceptEdits', 'bypassPermissions', 'plan'],
-  dsh: ['default'],
 };
 
 type ProviderCapabilities = {

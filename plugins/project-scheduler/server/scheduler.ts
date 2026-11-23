@@ -66,6 +66,19 @@ type ActiveRun = {
 /** Host surface needed by scheduled runs; `ResidentHost` is the production implementation. */
 export type ScheduledHost = Pick<ResidentHost, "request">;
 
+/**
+ * The host only gives Codex prompt tasks a native session. A legacy DSH prompt stays readable in
+ * the store and the JSON file, but must never be scheduled; DSH scripts keep working through
+ * AGENT_EXEC and are not affected.
+ */
+function unsupportedPrompt(task: SchedulerTask): boolean {
+  return task.type === "prompt" && task.agent.provider === "dsh";
+}
+
+const UNSUPPORTED_PROMPT_REASON =
+  "宿主已停止支持 DSH 提示词任务：请在“编辑任务”中把该任务的 agent.provider 改为 codex 并保存装载；" +
+  "脚本任务的 AGENT_EXEC 仍可使用 DSH。";
+
 type ScheduledOutcome = {
   code: number | null;
   success: boolean;
@@ -170,6 +183,8 @@ export class ProjectScheduler {
     for (const row of this.store.definitions()) {
       if (!row.definition.enabled || !enabledProjects.has(row.projectId))
         continue;
+      // Auto scheduling can never start a prompt task the host has no session for.
+      if (unsupportedPrompt(row.definition)) continue;
       const timer = new Cron(
         row.definition.cron,
         {
@@ -352,6 +367,9 @@ export class ProjectScheduler {
         (task) => task.projectId === projectId && task.taskId === taskId,
       )?.definition;
     if (!project || !task) throw new Error("项目或任务不存在，或项目已归档");
+    // Reject before a run row, host session, or alert can be created; the draft keeps its values.
+    if (unsupportedPrompt(task))
+      throw new Error("任务 “" + task.name + "” " + UNSUPPORTED_PROMPT_REASON);
     // A callback already queued before disabling must not start another automatic run.
     if (trigger === "cron" && !task.enabled) throw new Error("任务自动调度已关闭");
     const now = new Date().toISOString();

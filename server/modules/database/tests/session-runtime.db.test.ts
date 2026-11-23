@@ -78,29 +78,32 @@ test('process stop persists holds for every native Codex queue while preserving 
   }
 });
 
-test('DSH transport and queue holds survive reconnecting to the database without changing Codex settings', async () => {
+test('a stored session-runtime row for a legacy provider survives reconnecting without changing Codex settings', async () => {
   const { mkdtemp, rm } = await import('node:fs/promises');
   const { tmpdir } = await import('node:os');
   const { join } = await import('node:path');
-  const directory = await mkdtemp(join(tmpdir(), 'dsh-runtime-settings-'));
+  const directory = await mkdtemp(join(tmpdir(), 'legacy-runtime-settings-'));
   const previous = process.env.DATABASE_PATH;
   closeConnection();
   process.env.DATABASE_PATH = join(directory, 'auth.db');
   try {
     await initializeDatabase();
-    sessionsDb.createAppSession('dsh-settings', 'dsh', directory);
+    // A row left behind by a provider this build no longer registers keeps its
+    // stored runtime and queue intent; nothing rewrites or deletes it.
+    sessionsDb.createAppSession('legacy-provider-settings', 'dsh', directory);
     sessionsDb.createAppSession('codex-settings', 'codex', directory);
     sessionRuntimeDb.update('codex-settings', { runtime: 'sdk', mode: 'plan', queueHeld: true });
-    assert.equal(sessionRuntimeDb.getDsh('dsh-settings'), null);
-    sessionRuntimeDb.saveDsh('dsh-settings', { runtime: 'headless', queueHeld: false });
-    sessionRuntimeDb.saveDsh('dsh-settings', { runtime: 'acp', queueHeld: true });
+    sessionRuntimeDb.update('legacy-provider-settings', { runtime: 'app-server', queueHeld: true });
     closeConnection();
     await initializeDatabase();
-    assert.deepEqual(sessionRuntimeDb.getDsh('dsh-settings'), { runtime: 'acp', queueHeld: true });
+    assert.deepEqual(sessionRuntimeDb.get('legacy-provider-settings'), {
+      runtime: 'app-server', mode: 'default', queueHeld: true,
+    });
     assert.deepEqual(sessionRuntimeDb.get('codex-settings'), { runtime: 'sdk', mode: 'plan', queueHeld: true });
-    assert.equal(sessionRuntimeDb.getDsh('codex-settings'), null);
     sessionRuntimeDb.holdCodexAppServerQueues();
-    assert.deepEqual(sessionRuntimeDb.getDsh('dsh-settings'), { runtime: 'acp', queueHeld: true });
+    assert.deepEqual(sessionRuntimeDb.get('legacy-provider-settings'), {
+      runtime: 'app-server', mode: 'default', queueHeld: true,
+    });
   } finally {
     closeConnection();
     if (previous === undefined) delete process.env.DATABASE_PATH; else process.env.DATABASE_PATH = previous;

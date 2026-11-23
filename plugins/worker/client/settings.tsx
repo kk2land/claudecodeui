@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import type {
   CodexModelsDirectory,
+  DshModelCatalog,
   PiModelCatalog,
   WorkerConfig,
   WorkerConfigUsage,
@@ -26,6 +27,7 @@ import type { WorkerHost } from "./api.js";
 import type { workerApi } from "./api.js";
 import {
   DEFAULT_EFFORT_LABEL,
+  dshEffortLevels,
   effortOptionsFor,
   modelOptionsFor,
   readCodexProviderModels,
@@ -204,7 +206,7 @@ type CatalogProblem = {
 };
 
 type CatalogView = {
-  dsh: WorkerModelCatalog | null;
+  dsh: DshModelCatalog | null;
   codex: WorkerModelCatalog | null;
   pi: PiModelCatalog | null;
   codexDirectory: CodexModelsDirectory | null;
@@ -267,7 +269,7 @@ export function SettingsView({
   // pointer. Only the drag handle is draggable; the order only changes on drop (or a move button).
   const [dragState, setDragState] = useState<{ id: string; overId: string | null } | null>(null);
 
-  const [dshCatalog, setDshCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
+  const [dshCatalog, setDshCatalog] = useState<Loadable<DshModelCatalog>>(loading());
   const [codexCatalog, setCodexCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
   const [piCatalog, setPiCatalog] = useState<Loadable<PiModelCatalog>>(loading());
   const [codexDirectory, setCodexDirectory] = useState<Loadable<CodexModelsDirectory>>(loading());
@@ -284,22 +286,24 @@ export function SettingsView({
   const [providerAttempt, setProviderAttempt] = useState(0);
   const inFlightProviders = useRef(new Set<string>());
 
-  // Catalogs are optional host capabilities: a failure only affects that engine's selects.
+  // Catalogs are optional capabilities: a failure only affects that engine's selects. DSH and Pi
+  // are served by this plugin; Codex metadata and its service directory come from the host.
   useEffect(() => {
     let live = true;
     setDshCatalog((current) => loading(current.value));
-    readHostModels(host, "dsh")
+    api
+      .dshCatalog()
       .then((value) => live && setDshCatalog({ status: "ready", value, error: "" }))
       .catch((error) => live && setDshCatalog({ status: "error", value: null, error: String(error) }));
     return () => {
       live = false;
     };
-  }, [host, dshAttempt]);
+  }, [api, dshAttempt]);
 
   useEffect(() => {
     let live = true;
     setCodexCatalog((current) => loading(current.value));
-    readHostModels(host, "codex")
+    readHostModels(host)
       .then((value) => live && setCodexCatalog({ status: "ready", value, error: "" }))
       .catch((error) => live && setCodexCatalog({ status: "error", value: null, error: String(error) }));
     return () => {
@@ -727,13 +731,29 @@ export function SettingsView({
               modelsEntry?.status === "loading" ||
               catalogView.loading.codexDirectory;
           }
+          // DSH's static directory is only partial information: every DSH card keeps a typable
+          // `provider/model` field with the directory as suggestions. A listed route offers its
+          // declared levels; a typed route offers the engine's levels.
           const models: ModelSelectOption[] = modelOptionsFor(config, {
             dsh: catalogView.dsh,
             codex: catalogView.codex,
             pi: catalogView.pi,
             codexProviderModels: modelsEntry?.value ?? null,
           });
-          const efforts = effortOptionsFor(models, config.model, config.effort);
+          const efforts =
+            config.type === "dsh"
+              ? effortOptionsFor(
+                  [
+                    {
+                      value: config.model ?? "",
+                      label: config.model ?? "",
+                      effort: dshEffortLevels(catalogView.dsh, config.model),
+                    },
+                  ],
+                  config.model,
+                  config.effort,
+                )
+              : effortOptionsFor(models, config.model, config.effort);
           const isDefault = draft.defaultConfigId === config.id;
           // Highlight this card as soon as a drag enters it (dragenter fires before the first
           // dragover); dragover then keeps the highlight and allows the drop.
@@ -967,17 +987,41 @@ export function SettingsView({
                 ) : null}
                 <label>
                   模型
-                  <select
-                    aria-label={"配置 " + position + " 模型"}
-                    value={config.model ?? ""}
-                    onChange={(event) => setModel(config, event.target.value)}
-                  >
-                    {models.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label}
-                      </option>
-                    ))}
-                  </select>
+                  {config.type === "dsh" ? (
+                    <>
+                      <input
+                        type="text"
+                        aria-label={"配置 " + position + " 模型"}
+                        placeholder="provider/model"
+                        spellCheck={false}
+                        list={"worker-dsh-models-" + config.id}
+                        value={config.model ?? ""}
+                        onChange={(event) => setModel(config, event.target.value)}
+                      />
+                      <datalist id={"worker-dsh-models-" + config.id}>
+                        {(catalogView.dsh?.models ?? []).map((option) => (
+                          <option key={option.route} value={option.route}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </datalist>
+                      <small>
+                        可选用目录建议，或直接填写完整 provider/model 路由；留空表示沿用执行器自身默认。
+                      </small>
+                    </>
+                  ) : (
+                    <select
+                      aria-label={"配置 " + position + " 模型"}
+                      value={config.model ?? ""}
+                      onChange={(event) => setModel(config, event.target.value)}
+                    >
+                      {models.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </label>
                 <label>
                   Reasoning

@@ -1,6 +1,10 @@
 # CloudCLI Worker 插件
 
-支持 Codex app-server 与 DSH ACP 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH、Pi 或 Codex 子任务执行，
+> **父会话范围：** CloudCLI 的 DSH app provider 已移除，因此宿主只接入 Codex app-server 父会话。
+> 插件自身仍以 DSH、Pi、Codex 三种引擎执行子任务（DSH 由插件直接启动 CLI，不依赖 app provider）；
+> DSH 作为父会话时所需的 ACP 会话注入已随该 provider 一并删除，历史说明保留在下方。
+
+支持 Codex app-server 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH、Pi 或 Codex 子任务执行，
 并在独立进程中记录运行、原始事件与结果。插件负责执行与记录；任务拆分、review 和 Git 集成仍由父会话
 与用户授权的主代理负责。插件保存主会话维护的计划与依赖记录，不提供自动依赖调度或 Git 集成。
 
@@ -37,7 +41,8 @@ DSH 可将同一个 skill 软链到 `${DSH_HOME:-$HOME/.dsh}/skills/cloudcli-wor
 
 MCP 连接由运行时临时注入，不在用户配置中预置：Codex app-server 通过 CLI `-c` 临时声明 Worker MCP URL
 并设 `enabled=false`，无需在 `config.toml` 预置；`thread/start` 与 `resume` 注入专属 owner 凭证，预测线程
-不启用 Worker MCP。DSH 仅在 ACP 启动时由临时 patch 挂载 HTTP Worker MCP，headless 不注入。
+不启用 Worker MCP。若父会话由 DSH ACP 提供，只在 ACP 启动时由临时 patch 挂载 HTTP Worker MCP，headless 不注入
+（该 ACP 父会话注入属于已移除的 app provider，当前不会发生）。
 Codex 原生预测 fork 会继承父线程 MCP 且拒绝配置覆盖；启用 Worker 工具的会话明确显示预测暂不可用，
 避免预测线程获得父会话的 Worker 凭证。未启用 Worker 的会话继续使用原生预测。
 当前服务的 Codex 配置中显式禁用 `cloudcli-workers` 后，宿主不再为该项目会话接入 Worker MCP；
@@ -270,15 +275,27 @@ provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配�
 
 ### 模型选择界面
 
-模型与 reasoning 全部使用下拉选择，按引擎读取真实目录：DSH 与 Codex 使用宿主模型目录；Codex 先从宿主读取
-模型服务目录，再按服务读取模型列表；Pi 通过插件 `GET /catalog/pi` 直接读取 `PI_CODING_AGENT_DIR`
-（或 `~/.pi/agent`）下 `models.json` 中 providers 配置的完整 provider/model 与 reasoning 布尔值；不启动 Pi，
-不使用凭据，也不执行 `!command`。文件缺失时目录为空。Codex 卡片顺序为
-先模型服务、再模型、再 reasoning：切换模型服务会清空该配置已选模型与 reasoning；切换模型会丢弃新模型
-不支持的 reasoning。目录接口不可用时卡片显示本地错误与重试，并保留当前配置值；模型或 reasoning 不在
-目录中时以“（当前已保存）”选项保留，普通保存不会清掉它们。留空表示沿用执行器自身默认。Codex 模型服务
+模型与 reasoning 按引擎读取真实目录，并只把目录当作可选建议而不是白名单。DSH 通过插件
+`GET /catalog/dsh` 只读 `${DSH_HOME:-$HOME/.dsh}/profiles/headless/cordis.patch.yml`（headless 静态 patch
+层）中声明的 `providers.*.models[]`，路由为完整 `provider/model`；只取模型 `id`、`name` 与
+`reasoningEfforts` 的键，忽略凭据环境变量、base URL 等其余字段，既不执行也不解析 `!!js` 表达式，不启动 CLI，
+也不写数据库。静态组合沿用 DSH 加载器语义：`insert` 列表新增条目，同 `id` 的后续 patch 整段替换目标的
+`config`/`disabled`/`group`（不与旧值合并，旧模型和旧 provider 随之消失），`name` 不同则不替换，禁用状态由
+最后一条 patch 单独决定；因此被替换或禁用的条目不会留在目录里。
+Codex 使用宿主模型目录；Codex 先从宿主读取模型服务目录，再按服务读取模型列表；Pi 通过插件
+`GET /catalog/pi` 直接读取 `PI_CODING_AGENT_DIR`（或 `~/.pi/agent`）下 `models.json` 中 providers 配置的
+完整 provider/model 与 reasoning 布尔值；不启动 Pi，不使用凭据，也不执行 `!command`。文件缺失时目录为空。
+Codex 卡片顺序为先模型服务、再模型、再 reasoning：切换模型服务会清空该配置已选模型与 reasoning；切换模型
+会丢弃新模型不支持的 reasoning。目录接口不可用时卡片显示本地错误与重试，并保留当前配置值；模型或 reasoning
+不在目录中时以“（当前已保存）”选项保留，普通保存不会清掉它们。留空表示沿用执行器自身默认。Codex 模型服务
 目录与模型列表由宿主全局 Codex home（`CODEX_HOME` 或 `~/.codex`）和环境读取，不随单个配置的 `codex.env`
 或运行 home 变化，这是已知范围限制。
+
+DSH 的模型字段始终是一个可手填完整 `provider/model` 路由的输入框，并用 `<datalist>` 列出目录建议，因此
+目录只声明了部分模型、甚至完全没有模型（文件缺失或 profile 只用 bundle 默认配置）时仍能设置有效路由；
+不会出现无法填写的目录、虚构模型或永远失败的重试。目录中的路由沿用其自己声明的 reasoning 级别（未声明级别
+的模型只保留“默认（沿用执行器）”）；手填的未列出路由改用执行器已有的 effort 名称列表，因此目录外但有效的
+完整路由仍可带 reasoning。最终合法性仍由运行时在发送前校验。
 
 Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名键以设置值覆盖继承值；`{}` 显式清除预填
 的 `CODEX_PROXY_BYPASS`。`legacyExtraArgs` 的每个元素是一个独立 argv，不拼接成 shell 字符串，不做引号或
@@ -343,11 +360,13 @@ DSH：
 - stdin 传 UTF-8 提示词，末尾参数 `-` 表示从 stdin 读取。
 - 必需的会话 patch 由插件从打包文件原样复制到每次运行的目录，并以绝对路径传入；原生执行器读取运行副本，
   续接也为新 run 准备独立副本。运行 patch 与 Worker 持久化的 home/session 隔离继续保留。
-- `DSH_HOME` 使用原环境值或 `~/.dsh`；会话根由插件显式设为实例数据目录下的 `sessions/dsh`。
+- `DSH_HOME` 使用原环境值或 `~/.dsh`；会话根由插件显式设为实例数据目录下的 `sessions/dsh`。模型目录
+  也从同一个 `DSH_HOME` 的 headless patch 读取（见“模型选择界面”），因此该变量同时决定运行与可选模型。
 - 模型与 effort 通过运行级 `agent-default-model` patch 注入，不伪造 CLI flags：完整 model ID 按第一个 `/`
   解析为 provider/model；裸 model 的 provider 固定为 `deepseek-official`；effort 必须同时有模型。
 - 用户没有独立的 DSH provider 或环境配置；`CLOUDCLI_DSH_PROVIDER`、`CLOUDCLI_DSH_PATCHES`、
-  `CLOUDCLI_DSH_BIN` 不再作为 Worker 运行配置。`CLOUDCLI_DSH_SMOKE_BIN` 仅是测试入口。
+  `CLOUDCLI_DSH_BIN`、`CLOUDCLI_DSH_SESSIONS_DIR` 不再作为 Worker 运行配置：Worker 只从 PATH 解析
+  `dsh`/`pi`（测试通过注入路径替代），并把 `CLOUDCLI_DSH_SMOKE_BIN` 仅当作测试入口。
 - 成功要求：exit 0、事件完整合法、`session.cwd` 与 ID 匹配、出现 final，且最后一个 turn_end 的
   `reason.kind=completed`。已确认 CLI 退出但事件协议非法（例如缺少或错误的原生会话身份）是 `failed`，
   不会据此猜测原生身份，也不能续接；只有进程存活/退出证据本身缺失时才是 `unknown`。
@@ -476,7 +495,8 @@ host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自�
 
 ## 验收限制
 
-自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；另有真实 Codex app-server 与 DSH ACP
+自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；模型目录回归在临时 fixture 中检查
+DSH headless patch 与 Pi `models.json` 的静态解析（含凭据不外泄与 `!!js` 不执行），不读取真实配置；另有真实 Codex app-server 与 DSH ACP
 连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用；它只是测试入口，不是 Worker 运行配置。
 Codex 版本按包分别锁定：app-server 经 compat alias（`@openai/codex-app-server-compat`）使用官方 CLI `0.169.0`
 （app-server 锁定该版本；旧线程不支持跨 provider resume，因此换服务改为带历史分支，并确认新 child 线程关闭后再应用新 Worker 配置）；根包 `@openai/codex` 与会话交接使用的 `@openai/codex-sdk` 仍为 `0.166.0`

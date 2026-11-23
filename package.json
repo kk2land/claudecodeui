@@ -184,8 +184,6 @@
     "@codemirror/lang-python": "^6.2.1",
     "@codemirror/merge": "^6.11.1",
     "@codemirror/theme-one-dark": "^6.1.2",
-    "@deepseek-ai/dsh-session": "0.2.1-rc.2",
-    "@deepseek-ai/dsh-session-format-catalog": "0.2.1-rc.2",
     "@iarna/toml": "^2.2.5",
     "@modelcontextprotocol/sdk": "^1.29.0",
     "@octokit/rest": "^22.0.0",

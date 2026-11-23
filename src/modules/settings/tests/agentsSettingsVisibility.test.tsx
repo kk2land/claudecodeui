@@ -51,7 +51,6 @@ const tabProps = () => ({
     cursor: authStatus(false),
     codex: authStatus(false),
     opencode: authStatus(false),
-    dsh: authStatus(false),
   },
   onProviderLogin: () => {},
   claudePermissions,
@@ -67,7 +66,7 @@ const renderTab = () => render(<AgentsSettingsTab {...tabProps()} />);
 
 /** The provider pills, read from the tablist buttons by their visible label. */
 const agentPills = () => screen.queryAllByRole('button')
-  .filter((button) => ['Claude', 'Cursor', 'Codex', 'OpenCode', 'DeepSeek Harness']
+  .filter((button) => ['Claude', 'Cursor', 'Codex', 'OpenCode']
     .some((name) => button.textContent?.includes(name)));
 
 const categoryTabs = () => screen.queryAllByRole('tab').map((tab) => tab.textContent);
@@ -80,7 +79,6 @@ beforeEach(() => {
     cursor: row('cursor'),
     codex: row('codex'),
     opencode: row('opencode'),
-    dsh: row('dsh'),
   };
 });
 
@@ -91,16 +89,14 @@ describe('AgentsSettingsTab provider visibility', () => {
       cursor: row('cursor', true),
       codex: row('codex'),
       opencode: row('opencode', true),
-      dsh: row('dsh'),
     };
 
     renderTab();
 
     const labels = agentPills().map((pill) => pill.textContent);
-    expect(labels).toHaveLength(3);
+    expect(labels).toHaveLength(2);
     expect(labels.some((label) => label?.includes('Claude'))).toBe(true);
     expect(labels.some((label) => label?.includes('Codex'))).toBe(true);
-    expect(labels.some((label) => label?.includes('DeepSeek Harness'))).toBe(true);
     expect(screen.queryByText('Cursor')).toBeNull();
     expect(screen.queryByText('OpenCode')).toBeNull();
   });
@@ -113,7 +109,6 @@ describe('AgentsSettingsTab provider visibility', () => {
     expect(agentPills().map((pill) => pill.textContent)).toHaveLength(2);
     expect(screen.queryByText('Cursor')).toBeNull();
     expect(screen.queryByText('OpenCode')).toBeNull();
-    expect(screen.queryByText('DeepSeek Harness')).toBeNull();
   });
 
   it('falls back to the first visible provider when the default is hidden', () => {
@@ -151,7 +146,6 @@ describe('AgentsSettingsTab provider visibility', () => {
         cursor: row('cursor'),
         codex: row('codex'),
         opencode: row('opencode'),
-        dsh: row('dsh'),
       };
     });
     rerender(<AgentsSettingsTab {...tabProps()} />);
@@ -165,27 +159,27 @@ describe('AgentsSettingsTab provider visibility', () => {
   it('switches the content and categories when another visible provider is selected', () => {
     renderTab();
 
-    const dshPill = agentPills().find((pill) => pill.textContent?.includes('DeepSeek Harness'));
-    expect(dshPill).toBeTruthy();
-    act(() => { dshPill?.click(); });
+    const openCodePill = agentPills().find((pill) => pill.textContent?.includes('OpenCode'));
+    expect(openCodePill).toBeTruthy();
+    act(() => { openCodePill?.click(); });
 
-    expect(content()).toBe('dsh:account');
-    // DSH has no permissions category, so the list narrows with the selection.
-    expect(categoryTabs()).toEqual(['Account', 'MCP Servers', 'Skills']);
+    expect(content()).toBe('opencode:account');
+    // OpenCode has no skills category, so the list narrows with the selection.
+    expect(categoryTabs()).toEqual(['Account', 'Permissions', 'MCP Servers']);
   });
 
   it('moves the category to the first one the newly selected provider supports', () => {
     renderTab();
 
-    const permissionsTab = screen.getAllByRole('tab').find((tab) => tab.textContent === 'Permissions');
-    act(() => { permissionsTab?.click(); });
-    expect(content()).toBe('claude:permissions');
+    const skillsTab = screen.getAllByRole('tab').find((tab) => tab.textContent === 'Skills');
+    act(() => { skillsTab?.click(); });
+    expect(content()).toBe('claude:skills');
 
-    const dshPill = agentPills().find((pill) => pill.textContent?.includes('DeepSeek Harness'));
-    act(() => { dshPill?.click(); });
+    const openCodePill = agentPills().find((pill) => pill.textContent?.includes('OpenCode'));
+    act(() => { openCodePill?.click(); });
 
-    // DSH has no permissions panel, so the correction lands on its first category.
-    expect(content()).toBe('dsh:account');
+    // OpenCode has no skills panel, so the correction lands on its first category.
+    expect(content()).toBe('opencode:account');
     expect(screen.getByRole('tab', { name: 'Account' }).getAttribute('aria-selected')).toBe('true');
   });
 

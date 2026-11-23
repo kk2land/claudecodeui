@@ -41,7 +41,7 @@ type SessionOutputProps = {
  * The provider to stamp rows with, in order of authority: the caller's session projection, the
  * session lookup, then a row that already carries one.
  *
- * A live-only row is the weakest source, so it is only read after the lookup: a DSH session whose
+ * A live-only row is the weakest source, so it is only read after the lookup: a session whose
  * first visible frame is a `stream_delta` must not be rendered as Codex just because the fallback
  * here ran before the session was read.
  */

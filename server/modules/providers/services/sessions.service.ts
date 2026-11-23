@@ -945,9 +945,11 @@ export const sessionsService = {
 
     let removedFromDisk = false;
     if (options.deletedFromDisk) {
-      if (session.provider === 'dsh') {
-        // One generation file is not the whole native conversation. Removing
-        // it alone can expose an older generation again on the next scan.
+      // Legacy guard: the DSH provider is no longer registered, but transcripts
+      // it indexed are still on disk. One generation file is not the whole
+      // native conversation, so removing it could expose an older generation
+      // again. Keep refusing the file delete instead of destroying old data.
+      if (session.provider === ('dsh' as LLMProvider)) {
         throw new AppError('Deleting native DSH logs is unavailable; archive the session instead.', {
           code: 'DSH_NATIVE_DELETE_UNSUPPORTED', statusCode: 409,
         });

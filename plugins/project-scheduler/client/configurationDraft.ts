@@ -241,6 +241,51 @@ export function copyDraftTask(
     index: index + 1,
   };
 }
+/**
+ * Resolves the provider an authored task would run with: its own value wins over the project
+ * default. Used only to explain a draft edit; saved values are never rewritten in place.
+ */
+export function effectiveAgentProvider(
+  task: ConfigTask,
+  defaultProvider?: unknown,
+): string {
+  const own = getConfigValue(task, ["agent", "provider"]);
+  if (typeof own === "string" && own) return own;
+  if (typeof defaultProvider === "string" && defaultProvider)
+    return defaultProvider;
+  return "codex";
+}
+/**
+ * Switches one authored task to a new type. A prompt needs Codex because the host only gives Codex
+ * prompt tasks a native session; a script may keep DSH for its own AGENT_EXEC. Converting a DSH
+ * task to a prompt writes an explicit Codex provider and drops only the DSH model/effort, leaving
+ * unknown agent fields and every other task intact. `converted` lets the editor say what changed
+ * instead of silently rewriting the saved file.
+ */
+export function changeTaskType(
+  text: string,
+  index: number,
+  type: "script" | "prompt",
+  defaultProvider?: unknown,
+): { text: string; converted: boolean } | { error: string } {
+  let converted = false;
+  const result = updateConfigText(text, (document) => {
+    const task = (document.tasks as ConfigTask[])[index];
+    if (!task) throw new Error("任务不存在");
+    // The provider is still authored here, before this callback rewrites the agent.
+    converted =
+      type === "prompt" && effectiveAgentProvider(task, defaultProvider) === "dsh";
+    task.type = type;
+    // Only the prompt-only reuse flag is cleared: script tasks ignore it, and fields this editor
+    // does not understand stay exactly as authored.
+    if (type !== "prompt") writeConfigValue(task, ["reuseSession"], undefined);
+    if (!converted) return;
+    writeConfigValue(task, ["agent", "model"], undefined);
+    writeConfigValue(task, ["agent", "effort"], undefined);
+    writeConfigValue(task, ["agent", "provider"], "codex");
+  });
+  return "error" in result ? result : { text: result.text, converted };
+}
 /** Removes one task from the draft. */
 export function removeDraftTask(text: string, index: number): ConfigTextResult {
   return updateConfigText(text, (value) => {

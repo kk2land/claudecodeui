@@ -68,6 +68,12 @@ app.get(
 );
 
 app.get(
+  "/catalog/dsh",
+  uiOnly,
+  route(() => service.dshCatalog()),
+);
+
+app.get(
   "/catalog/pi",
   uiOnly,
   route(() => service.piCatalog()),

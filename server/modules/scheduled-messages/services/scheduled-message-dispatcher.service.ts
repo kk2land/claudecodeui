@@ -4,7 +4,7 @@ import { announceScheduledMessagesChanged } from '@/modules/scheduled-messages/s
 import { chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
 import type { ProviderRuntimeGateway } from '@/modules/websocket/index.js';
 import { readQueuedChatMessage } from '@/shared/utils.js';
-import type { LLMProvider, QueuedChatMessage } from '@/shared/index.js';
+import type { QueuedChatMessage } from '@/shared/index.js';
 
 /**
  * How often due scheduled messages are looked for.
@@ -89,14 +89,10 @@ function isSessionSettled(sessionId: string, runtime: ProviderRuntimeGateway): b
   if (!session) {
     return true;
   }
-  const provider = session.provider as LLMProvider;
-  // Codex reports the app-server goal; DSH exposes its lifecycle as managed
-  // state. A goal or stop transition means the session is still working.
-  const state = provider === 'codex'
-    ? runtime.getState?.('codex', sessionId)
-    : runtime.getManagedState?.(provider, sessionId);
-  // Codex state carries the app-server goal; DSH managed state does not.
-  const goalActive = (state as { goal?: { status?: string } } | undefined)?.goal?.status === 'active';
+  // Codex reports the app-server goal; a goal or stop transition means the
+  // session is still working.
+  const state = runtime.getState?.('codex', sessionId);
+  const goalActive = state?.goal?.status === 'active';
   return !(goalActive || ['starting', 'stopping', 'stopFailed'].includes(state?.phase ?? ''));
 }
 

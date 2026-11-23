@@ -19,7 +19,7 @@ export function readResidentSessionInfo(input: {
   sessionId: string;
   provider: string;
 }): ResidentSessionInfo | null {
-  if (input.provider !== 'codex' && input.provider !== 'dsh') {
+  if (input.provider !== 'codex') {
     return null;
   }
   const record = residentBindingsDb.getBySessionId(input.sessionId);

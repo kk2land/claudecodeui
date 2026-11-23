@@ -94,7 +94,6 @@ function createHarness(options: {
     hasRuntime: () => true,
     abort: async () => true,
     getState: () => undefined,
-    getManagedState: () => undefined,
     hasBackgroundWork: () => false,
     isQueueBlocked: () => false,
   } as unknown as ProviderRuntimeGateway;

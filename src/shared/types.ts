@@ -24,7 +24,7 @@ export type { ResidentSessionInfo, ResidentStopCause, ResidentTaskStatus, Worker
 //----------------- LLM PROVIDER MODEL CATALOG ------------
 
 /** Identifies which coding-agent CLI backs a session, project selection or model list. */
-export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode' | 'dsh';
+export type LLMProvider = 'claude' | 'cursor' | 'codex' | 'opencode';
 
 /** Backend capability fields used by chat controls and sidebar session actions. */
 export type ProviderCapabilityRow = {
@@ -37,7 +37,6 @@ export type ProviderCapabilityRow = {
    * SDK or the real protocol must still be reported as unsupported rather than assumed to work.
    */
   nativeControls?: { goal?: boolean; predictions?: boolean; planHandoff?: boolean; defaultRuntime?: CodexSessionState['runtime'] };
-  runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /** Whether the server offers this provider's account quota card; absent or false hides it and skips its cache request. */
   accountRateLimits?: boolean;
   /**
@@ -2301,49 +2300,6 @@ type TaskStatus =
 
 /** A TaskMaster task's priority; high, medium and low are the known values and the string fallback tolerates anything else TaskMaster emits. */
 type TaskPriority = 'high' | 'medium' | 'low' | string;
-
-//----------------- PROVIDER PROCESS MANAGEMENT ------------
-/** Application controls for a provider's transports and managed process, independent of native agent features. */
-export type ProviderRuntimeAction =
-  | { action: 'runtime'; runtime: string }
-  | { action: 'stop' }
-  | { action: 'queue-resume' };
-
-/** Server-owned session runtime and process details, read without starting a process. */
-export type ProviderRuntimeState = {
-  runtime: string;
-  phase: 'idle' | 'starting' | 'running' | 'switching' | 'stopping';
-  queueHeld: boolean;
-  supportsPermissionRequests: boolean;
-  /** True while the server has registered this ACP session for Worker tools, including after idle recycling. */
-  workerEnabled?: boolean;
-  diagnostics: {
-    running: boolean;
-    pid: number | null;
-    startedAt: number | null;
-    launcherPath: string | null;
-    cliVersion: string | null;
-  };
-};
-
-/** Chat's runtime controller shared by its session hook, composer and process settings panel. */
-export type ProviderRuntimeControls = {
-  sessionId: string | null;
-  available: boolean;
-  modes: string[];
-  stoppableModes: string[];
-  /** Activity of Worker plugin runs owned by this session, independent of its ACP process. */
-  hasActiveWorkers?: boolean;
-  /** A failed Stop can be retried even after the native process exits or Worker activity cannot be read. */
-  canRetryStop?: boolean;
-  state: ProviderRuntimeState | null;
-  pending: boolean;
-  error: string | null;
-  control(action: ProviderRuntimeAction): Promise<void>;
-  /** Waits for runtime changes and shares their session allocation; null means the user navigated away. */
-  prepareSend(initialMessage: string): Promise<string | null>;
-};
-// ---------------------------
 
 //----------------- CODEX NATIVE CONTROLS ------------
 /** Native goal progress used by chat controls; token budget is optional. */

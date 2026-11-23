@@ -33,7 +33,7 @@ type Harness = {
  * flagged `external`, no native instance inside this server.
  */
 async function harness(
-  provider: 'codex' | 'dsh',
+  provider: 'codex' | 'opencode',
   runTest: (h: Harness) => Promise<void>,
 ): Promise<void> {
   const previous = process.env.DATABASE_PATH;
@@ -54,7 +54,6 @@ async function harness(
     hasRuntime: () => true,
     hasBackgroundWork: () => false,
     getState: () => undefined,
-    getManagedState: () => undefined,
     isQueueBlocked: () => false,
     getPendingApprovalsForSession: () => [],
     resolveToolApproval: () => {},
@@ -126,9 +125,9 @@ async function harness(
   }
 }
 
-// The guard is provider-neutral (it reads the registry's external flag), so one
-// case per supported scheduled provider proves both providers share it.
-for (const provider of ['codex', 'dsh'] as const) {
+// The guard is provider-neutral (it reads the registry's external flag), so a
+// second provider proves both runtimes share it.
+for (const provider of ['codex', 'opencode'] as const) {
   test(`chat.abort refuses an external scheduled ${provider} run instead of reporting a Stop it cannot perform`, async () => {
     await harness(provider, async (h) => {
       h.send({ type: 'chat.abort', requestId: 'stop-external', executionId: h.run.executionId });

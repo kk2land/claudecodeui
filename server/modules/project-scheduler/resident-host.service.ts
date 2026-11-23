@@ -71,6 +71,24 @@ function terminalStatus(
   return 'stopped';
 }
 
+/**
+ * Whether a stored binding's provider still exists in this build. Only Codex can
+ * be resident now, so a binding from a retired provider keeps its recorded
+ * provider (never rewritten to Codex) and is ended locally instead of dispatched.
+ * Consumers: adopt, continue/enable, stop, restart recovery.
+ */
+function isSupportedResidentProvider(provider: string): boolean {
+  return provider === 'codex';
+}
+
+/** Typed refusal for a continue/re-enable entry of a retired provider binding. */
+function retiredProviderError(): AppError {
+  return new AppError(
+    'This resident task uses an Agent that is no longer available; remove it to clean up.',
+    { code: 'unsupported_provider', statusCode: 409 },
+  );
+}
+
 function readString(payload: Record<string, unknown>, key: string): string {
   const value = payload[key];
   if (typeof value !== 'string' || !value.trim()) {
@@ -242,13 +260,10 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
   }
 
   /** Whether the session currently has an active provider run the host must not interrupt. */
-  function hasActiveRun(sessionId: string, provider: LLMProvider): boolean {
+  function hasActiveRun(sessionId: string): boolean {
     if (chatRunRegistry.isProcessing(sessionId)) return true;
-    const state = provider === 'codex'
-      ? runtime.getState?.('codex', sessionId)
-      : runtime.getManagedState?.(provider, sessionId);
-    // Codex state carries the app-server goal; DSH managed state does not.
-    const goalActive = (state as { goal?: { status?: string } } | undefined)?.goal?.status === 'active';
+    const state = runtime.getState?.('codex', sessionId);
+    const goalActive = state?.goal?.status === 'active';
     return Boolean(goalActive || ['starting', 'stopping', 'stopFailed'].includes(state?.phase ?? ''));
   }
 
@@ -274,9 +289,15 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
     if (
       record.status !== 'running'
       && record.status !== 'stopping'
-      && !hasActiveRun(record.sessionId, provider)
+      && !hasActiveRun(record.sessionId)
     ) {
       return record;
+    }
+    // A retired provider has no adapter in this build to abort. Close the stored
+    // episode locally so the binding reads as stopped instead of a failed stop;
+    // no provider call and no alert is produced.
+    if (!isSupportedResidentProvider(provider)) {
+      return commitTerminal(record, cause, { failed: false });
     }
     // The cause is persisted before the abort: an abort that completes quickly
     // must never be reported as a natural completion or an error.
@@ -318,8 +339,8 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       throw new AppError('The session no longer exists.', { code: 'session_unavailable', statusCode: 404 });
     }
     const provider = session.provider as LLMProvider;
-    if (provider !== 'codex' && provider !== 'dsh') {
-      throw new AppError('Only Codex (app-server or exec) and DSH sessions can be resident.', {
+    if (!isSupportedResidentProvider(provider)) {
+      throw new AppError('Only Codex (app-server or exec) sessions can be resident.', {
         code: 'unsupported_provider',
         statusCode: 400,
       });
@@ -328,7 +349,7 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       throw new AppError('The session has no native id yet.', { code: 'session_unavailable', statusCode: 409 });
     }
     const run = chatRunRegistry.getSnapshot(sessionId);
-    if ((run?.status === 'running' && run.dispatch.origin === 'control') || !hasActiveRun(sessionId, provider)) {
+    if ((run?.status === 'running' && run.dispatch.origin === 'control') || !hasActiveRun(sessionId)) {
       throw new AppError('Only a running session can become resident.', {
         code: 'not_running',
         statusCode: 409,
@@ -390,6 +411,11 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
       record = residentBindingsDb.update(taskId, { enabled: false })!;
       return { binding: toView(record) };
     }
+    // Re-enabling a binding whose provider was retired is refused explicitly: no
+    // dispatch entry in this build can serve it, and the flag must not imply one.
+    if (!isSupportedResidentProvider(record.provider)) {
+      throw retiredProviderError();
+    }
     record = residentBindingsDb.update(taskId, { enabled: true })!;
     // Re-enabling a stopped task resumes the original native session exactly
     // once; an active one is reported as-is and never fed a second input.
@@ -429,13 +455,18 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
 
   /** Sends one trusted continue turn in the original native session, then releases the held queue. */
   async function resume(record: ResidentBindingRecord): Promise<ResidentContinueResult> {
+    // A retired provider cannot be continued here; report it instead of asking a
+    // runtime that no longer exists for a turn.
+    if (!isSupportedResidentProvider(record.provider)) {
+      throw retiredProviderError();
+    }
     if (!record.enabled) {
       return { accepted: false, executionId: null, reason: 'disabled' };
     }
     if (
       record.status === 'running'
       || record.status === 'stopping'
-      || hasActiveRun(record.sessionId, record.provider as LLMProvider)
+      || hasActiveRun(record.sessionId)
     ) {
       return { accepted: false, executionId: null, reason: 'already_running' };
     }
@@ -549,7 +580,9 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
    * Restarts recovery: only bindings that were running and enabled when the
    * host stopped are resumed, in their original native session. A binding that
    * ended, failed or was stopped/disabled is never revived, and an explicit
-   * failure is reported as an alerting terminal instead of a new session.
+   * failure is reported as an alerting terminal instead of a new session. A
+   * binding from a provider retired from this build is never resumed either: its
+   * episode ends silently as `disabled` and stays removable.
    */
   async function recoverAfterRestart(): Promise<void> {
     if (recovered) return;
@@ -557,7 +590,13 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
     // A persisted `running` row belongs to the previous host process: there is no
     // live registry run for it here. Mark those rows stopped first so the normal
     // continue gate (which refuses an active binding) admits exactly one turn.
-    const leftovers = residentBindingsDb.listRunning();
+    // A retired provider can also leave `stopping` behind: its stop had no adapter
+    // left to confirm it, and the host would otherwise skip a row it must clear.
+    // A Codex `stopping` row keeps its existing behavior and is never touched here.
+    const leftovers = residentBindingsDb.list().filter(
+      (record) => record.status === 'running'
+        || (record.status === 'stopping' && !isSupportedResidentProvider(record.provider)),
+    );
     for (const leftover of leftovers) {
       residentBindingsDb.update(leftover.taskId, { status: 'stopped', stopCause: null });
     }
@@ -568,6 +607,14 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
     for (const leftover of leftovers) {
       const record = residentBindingsDb.getByTaskId(leftover.taskId);
       if (!record) continue;
+      // A binding from a retired provider keeps its provider, history and session,
+      // but cannot be resumed: end the persisted episode silently (never as a
+      // recovery failure) and leave cleanup to the ordinary remove flow.
+      if (!isSupportedResidentProvider(record.provider)) {
+        logSystem(record.sessionId, '重启恢复：Agent 已停用，常驻绑定不再运行', 'disabled', 'recovery');
+        commitTerminal(record, 'disabled', { reason: '该 Agent 已停用，常驻任务不会自动恢复。' });
+        continue;
+      }
       if (!record.enabled) {
         commitTerminal(record, 'disabled');
         continue;
@@ -626,12 +673,9 @@ export function createResidentHostService(dependencies: ResidentHostDependencies
           // A user-held queue is not pending automatic work: the saved entries
           // wait for an explicit resume, so the monitor must stop here instead of
           // staying "running" forever (and being revived by a restart).
-          const settings = current.provider === 'codex' ? sessionRuntimeDb.get(sessionId) : null;
-          const nativeState = current.provider === 'codex'
-            ? runtime.getState?.('codex', sessionId)
-            : runtime.getManagedState?.(current.provider as LLMProvider, sessionId);
-          const held = Boolean(settings?.queueHeld)
-            || Boolean((nativeState as { queueHeld?: boolean } | undefined)?.queueHeld);
+          const settings = sessionRuntimeDb.get(sessionId);
+          const nativeState = runtime.getState?.('codex', sessionId);
+          const held = Boolean(settings.queueHeld) || Boolean(nativeState?.queueHeld);
           if (!held) return;
           const failed = Boolean(snapshot.hadError || snapshot.success === false);
           commitTerminal(

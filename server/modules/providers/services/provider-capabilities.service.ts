@@ -35,8 +35,6 @@ type ProviderCapabilities = {
     defaultRuntime?: SessionRuntimeSettings['runtime'];
     /** This adapter implements the approved-plan handoff; the real CLI can still refuse it explicitly. */
     planHandoff: boolean };
-  /** Application transport/process controls, independent of provider-native plan or steer support. */
-  runtimeManagement?: { modes: string[]; stoppableModes: string[] };
   /**
    * Whether the account settings panel may show this provider's quota card.
    * Deployment-gated and off by default, so the frontend hides the card (and
@@ -121,7 +119,7 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     // Streaming input stays open for the whole run, and a user message written
     // to it with priority `next` joins the running turn.
     supportsSteering: true,
-    // Resident tasks reuse a native app-server/DSH session; the Claude SDK has
+    // Resident tasks reuse a native app-server session; the Claude SDK has
     // no equivalent session the host could keep owning.
     supportsResidentTasks: false,
     supportsContextClearing: true,
@@ -170,32 +168,6 @@ const PROVIDER_CAPABILITIES: Record<LLMProvider, ProviderCapabilities> = {
     supportsResidentTasks: true,
     // Codex's history reader only reads the thread the row points at, and its
     // indexer owns that transcript, so an earlier context cannot be stitched.
-    supportsContextClearing: false,
-  },
-  dsh: {
-    provider: 'dsh',
-    permissionModes: ['default'],
-    defaultPermissionMode: 'default',
-    // ACP/headless pass stored paths to DSH's model-gated read_image tool.
-    supportsImages: true,
-    supportsFiles: true,
-    supportsAbort: true,
-    // ACP supports prompts; the per-session runtime snapshot reports whether they are currently available.
-    supportsPermissionRequests: true,
-    runtimeManagement: { modes: ['acp', 'headless'], stoppableModes: ['acp'] },
-    // ACP's session/update usage_update carries authoritative context occupancy.
-    supportsTokenUsage: true,
-    supportsEffort: true,
-    effortLevels: ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'],
-    supportsMessageEditing: false,
-    supportsSessionForking: false,
-    // Neither transport offers a side conversation or a steerable turn: no
-    // native fork into a read-only thread, and the ACP/headless prompt is a
-    // whole new turn.
-    supportsSideQuestions: false,
-    supportsSteering: false,
-    // ACP and headless both expose a durable native session the host can resume.
-    supportsResidentTasks: true,
     supportsContextClearing: false,
   },
   opencode: {

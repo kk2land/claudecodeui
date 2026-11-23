@@ -39,7 +39,7 @@ function createBundledWorkerTransport(): WorkerIpcTransport {
 
 /**
  * Composition root for the Worker host bridge. The server entrypoint injects
- * the bridges into the Codex/DSH adapters and mounts `mcpRouter` before JWT routes;
+ * the bridge into the Codex app-server adapter and mounts `mcpRouter` before JWT routes;
  * providers never import this module, which keeps the runtime graph acyclic.
  */
 export function createWorkerModule(options: {
@@ -61,12 +61,7 @@ export function createWorkerModule(options: {
     isEnabled: () => isPluginEnabled(WORKER_PLUGIN),
     skills: providerSkillsService,
     resolveMcpUrl: () => mcpUrl,
-    runtime: {
-      ...providerRuntimeService,
-      getState: (provider, sessionId) => provider === 'dsh'
-        ? providerRuntimeService.getManagedState(provider, sessionId)
-        : providerRuntimeService.getState(provider, sessionId),
-    },
+    runtime: providerRuntimeService,
     hasActiveRun: (sessionId) => chatRunRegistry.getRun(sessionId)?.status === 'running',
     sessions: sessionsDb,
     projects: projectsDb,

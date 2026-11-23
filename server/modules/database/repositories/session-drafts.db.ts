@@ -307,7 +307,7 @@ export const sessionDraftsDb = {
          FROM session_drafts AS drafts
          INNER JOIN sessions ON sessions.session_id = drafts.draft_scope
          WHERE drafts.queued_message IS NOT NULL AND drafts.queue_status = 'queued'
-           AND sessions.provider <> 'gptweb'`;
+           AND sessions.provider NOT IN ('gptweb', 'dsh')`;
     const statement = getConnection().prepare(
       sessionId === undefined ? sql : `${sql} AND drafts.draft_scope = ?`,
     );

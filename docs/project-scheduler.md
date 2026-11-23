@@ -61,8 +61,8 @@ revision 冲突时保留草稿，并排显示最新文件原文，可明确选�
           "id": "review", "name": "每日检查", "type": "prompt",
           "cron": "0 0 9 * * *",
           "agent": {
-            "provider": "dsh",
-            "model": "deepseek-official/deepseek-v4-flash",
+            "provider": "codex",
+            "model": "gpt-6-sol",
             "effort": "high"
           },
           "prompt": "检查项目状态，报告问题与建议。"
@@ -70,21 +70,37 @@ revision 冲突时保留草稿，并排显示最新文件原文，可明确选�
       ]
     }
 
-`agent` 字段为 `provider`（codex 或 dsh）、`model` 与可选的 `effort`：
+> **DSH app provider 已移除。** 插件侧仍可读写 `provider: "dsh"` 的配置，但宿主不再提供 DSH
+> 原生会话：`scheduledPrepare` 对 dsh 提示词任务直接返回 400（仅 Codex 提示词任务可持有原生
+> 会话），`scheduledAttachNative` 也只为 Codex 解析 transcript。常驻（resident）任务同样只接受
+> Codex。模型下拉用的宿主目录对 dsh 返回 `UNSUPPORTED_PROVIDER`，插件保留配置文件里的已有值。
+> 旧 DSH 会话行、原生文件和凭据不会被清除或重标。插件调度器同样不会为 DSH 提示词创建计时器，
+> 手动开始会在写入运行记录、宿主会话或告警之前拒绝；任务列表与详情将这类任务标记为已停用。
+> 按脚本任务使用 `AGENT_EXEC` 的 DSH 配置仍可运行。旧 DSH 常驻绑定在列表中显示为已停用，
+> 可移除其绑定；原会话、日志与历史不会被删除。
 
-- provider/model 下拉列表来自宿主的已认证模型目录（`GET /api/providers/:provider/models`），
+`agent` 字段为 `provider`（新提示词任务使用 codex；旧配置可保留 dsh）、`model` 与可选的 `effort`：
+
+- provider/model 下拉列表只读取宿主的 Codex 模型目录（`GET /api/providers/codex/models`），
   不写死模型清单；列表加载失败或宿主不提供该能力时保留文件已有值并明确提示，可重试。
+  旧 `dsh` 值只作为当前文件值显示，不再提供可选的 dsh 目录或选项。
 - 任务省略 provider 时继承项目 `defaults.agent.provider`（再缺省为 codex）；省略 model 时
   只有 provider 相同才继承项目 model，否则使用 `default`。effort 仅在同一 provider 且同一
-  生效 model 下才继承。
+  生效 model 下才继承。新建提示词任务默认不带 agent，因此继承项目默认；只有当项目
+  `defaults.agent.provider` 仍是旧的 `dsh` 时，新建提示词任务才写成显式 codex，避免继承
+  已停止支持的 DSH 默认。
 - `effort` 可选值来自当前生效 model 的目录声明；`"default"` 表示显式不传 effort 并覆盖继承，
   省略表示继承/未设置。未知的历史 effort 会原样保留，不会被自动改写。
 - 切换 provider 会清空任务显式 model 并把 effort 置为 `default`；切换 model 同样把显式
   effort 置为 `default`，避免把上一个 provider/model 的参数带到新选择。
-- DSH headless 的 effort 只在显式 provider/model 路由下生效，因此 DSH 配非 default effort
-  却使用 `default` model 会在保存预览时被拒绝，而不是等运行才发现。
-- Codex 以 `-c model_reasoning_effort="…"` 作为单个 argv 传入 `codex exec`；DSH 将
-  `reasoningEffort` 写入临时 `agent-default-model` patch。`default` 与未设置都不传参数。
+- DSH 的 model/effort 只用于脚本 `AGENT_EXEC`；提示词任务不再运行 DSH，文件中的旧值会原样
+  保留，不会被自动改写。
+- Codex 以 `-c model_reasoning_effort="…"` 作为单个 argv 传入 `codex exec`；脚本的
+  DSH `AGENT_EXEC` 将 `reasoningEffort` 写入临时 `agent-default-model` patch。`default` 与
+  未设置都不传参数。
+- 编辑器把任务类型从 script 改为 prompt 时，如果该任务的有效 provider 是 dsh，会明确提示并
+  只把这一任务的 agent 改为显式 codex、清除仅适用于 DSH 的 model/effort；未知字段、其它任务
+  和文件里已有的旧 DSH 提示词都不会被自动重写。
 
 Cron 接受五或六段，六段首项为秒；时区使用 IANA 名称。cwd 默认为项目根目录，必须在项目内。
 脚本以 command、args 直接启动；管道请显式使用 bash -lc。任务 env 不能覆盖插件内部执行控制变量。
@@ -109,11 +125,10 @@ Cron 接受五或六段，六段首项为秒；时区使用 IANA 名称。cwd �
 macOS arm64 优先 node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/bin/codex。
 不依赖全局 Codex。提示词任务以 exec --json 启动（保留原生会话，不再传 --ephemeral），
 通过 stdin 传递提示词；脚本中的 AGENT_EXEC 仍以 exec --ephemeral --json 启动，不保存会话。
-DSH 使用宿主 CLOUDCLI_DSH_BIN（默认 dsh）、DSH_HOME 和 CLOUDCLI_DSH_PATCHES。提示词任务启用
-session-persistence-jsonl（默认写入 $DSH_HOME/sessions；设置了 CLOUDCLI_DSH_SESSIONS_DIR 时
-用临时 patch 把原生写入对齐到该目录）并保留 session-checkpoint-policy；脚本中的 AGENT_EXEC
-沿用原来的禁用持久化与 checkpoint 策略，不产生 pending 告警。两种情况都不修改 profile。
-DSH headless 文本在步骤提交时产生，不承诺逐 token 显示。
+DSH 使用宿主 CLOUDCLI_DSH_BIN（默认 dsh）、DSH_HOME 和 CLOUDCLI_DSH_PATCHES，只供脚本中的
+AGENT_EXEC 调用；它沿用禁用持久化与 checkpoint 策略，不产生 pending 告警，也不修改 profile。
+提示词任务只运行 Codex，旧 DSH 提示词配置只保留、不执行。DSH headless 文本在步骤提交时产生，
+不承诺逐 token 显示。
 
 无人值守任务沿用 CLI 权限配置，需要审批时不自动授予额外权限。
 脚本任务及脚本中的 AGENT_EXEC 以进程退出码为准：正常退出 0 即成功；非 0 或没有退出码则失败。
@@ -125,9 +140,9 @@ AGENT_EXEC 保留自由文本输出，不强制任务结果 JSON。spawn 失败�
 `status` 只接受 `success` 或 `failed`，`summary` 必须为非空字符串；权限不足、部分完成、无法验证
 或需要人工处理应报告 `failed` 并说明原因。建议在原提示词中写清验收条件。
 
-提示词任务仅在退出码为 0、Agent 正常结束且最终任务结果为 `success` 时记为成功。Codex 从本轮
-最后完成的 agent_message 读取结果并要求 turn.completed；DSH 从 final.text 读取结果，并要求
-status/turn_end 事件的 reason.kind 为 completed。Agent 明确失败或任务结果为 failed，即使退出码为 0 也记为失败。
+提示词任务（仅 Codex）仅在退出码为 0、Agent 正常结束且最终任务结果为 `success` 时记为成功。
+Codex 从本轮最后完成的 agent_message 读取结果并要求 turn.completed。Agent 明确失败或任务结果
+为 failed，即使退出码为 0 也记为失败。
 缺少结束事件、结果缺失或格式无效时记为失败，原因明确标注“结果未确认”。中间工具错误、临时
 error 事件或其他无效 JSON 行只作为诊断；恢复后最终满足成功条件仍可成功。
 
@@ -153,8 +168,8 @@ transcript 关联到同一会话。脚本任务和脚本中的 AGENT_EXEC 不建
 - 只要任务仍在已提交的配置中，它绑定过的会话就受保护：停用任务、关闭 `reuseSession`、
   修改 provider/cwd、插件关闭或宿主重启都不解除保护。只有删除任务才解除绑定，解除绑定只
   解锁会话，不删除会话或其历史。
-- 复用只支持现有两种 provider（Codex exec 与 DSH headless）且要求同一有效 cwd；宿主不可用时
-  提示词任务明确失败，不会退回无会话模式。运行中关闭插件会先停止 CLI，再释放宿主占用。
+- 复用只支持 Codex 提示词任务（Codex exec）且要求同一有效 cwd；宿主不可用时提示词任务
+  明确失败，不会退回无会话模式。运行中关闭插件会先停止 CLI，再释放宿主占用。
 
 ## 生命周期与日志
 
@@ -171,8 +186,8 @@ transcript 关联到同一会话。脚本任务和脚本中的 AGENT_EXEC 不建
 ## 常驻任务
 
 常驻任务复用正在运行的前台会话，不新建 Agent 进程、不写入项目 JSON，也不提供提示词或权限编辑。
-唯一创建入口是会话右上角「三点 → 设为常驻」：只有正在运行的前台 Codex 或 DSH 会话可创建，
-空闲置灰、其他 provider 或插件不可用时不可选；重复绑定由宿主拒绝而不是新建。
+唯一创建入口是会话右上角「三点 → 设为常驻」：只有正在运行的前台 Codex 会话可创建，
+空闲置灰、其他 provider（包括 DSH）或插件不可用时不可选；重复绑定由宿主拒绝而不是新建。
 转换不打断、不向会话输入，保留同一 app 原生会话、上下文、model/runtime 与权限；默认仍在
 前台可见，插件只是额外提供列表。插件任务 ID 在创建时由插件生成；任务名称跟随原会话当前
 名称，原会话改名后常驻列表随既有刷新显示新名称，已有任务无需重建。告警沿用插件全局 Telegram
@@ -182,7 +197,8 @@ transcript 关联到同一会话。脚本任务和脚本中的 AGENT_EXEC 不建
 Codex 常驻复用 CloudCLI Codex Provider 与原会话已经选择的 runtime：app-server 会话复用 CloudCLI
 管理的对应 app-server 连接，exec 会话沿用既有的 codex exec Provider 适配器，不另选独立的 task
 engine，也不改写原会话配置。模型、effort、权限与原生上下文都沿用原会话；宿主恢复或显式继续时
-按同一 provider 模式的同一原生会话发一次 continue。DSH 常驻同样沿用原会话已有配置。
+按同一 provider 模式的同一原生会话发一次 continue。旧 DSH 常驻绑定仍保留元数据与历史，但显示
+为已停用，可移除绑定，不会再创建或恢复 DSH 常驻运行。
 
 常驻状态与运行记录都由宿主持有：插件只保存任务元数据、固定为开启的 `notify`、以及已处理终态
 的光标；运行态一律通过 `cloudcli-scheduler-resident` IPC 向宿主查询和执行，宿主不可用时接口
@@ -205,7 +221,7 @@ executionId），终态插入与光标在同一事务中；重复投递不会新
   保护状态都保持不变。删除只解绑任务，保留原会话。
 
 只要绑定存在，该会话就受保护：禁用、隐藏、插件关闭都不取消保护，强制删除、归档、保留期清理、
-孤立会话清理、DSH 旧代际解绑、项目或 worktree 删除都不会物理删除它；已归档会话的原有语义不变。
+孤立会话清理、项目或 worktree 删除都不会物理删除它；已归档会话的原有语义不变。
 打开中的任务禁用或隐藏会刷新界面。
 
 宿主重启（优雅退出或崩溃）只恢复当时确实在运行且启用的绑定，并保持同一原生会话与同一
@@ -220,8 +236,8 @@ provider 模式；已结束、报错、
 常驻会话的 Agent 可以通过 `stage_log` 工具记录简短的阶段（例如「部署到 staging 完成」
 「测试套件失败」）。注入前提是定时任务插件已启用且宿主日志记录器就绪，与同会话中 Worker 是否
 启用无关。Codex 在 app-server 线程实际创建（thread/start）或恢复（thread/resume）时注入；会话
-已经加载时，不保证下一轮就带上该工具。Codex exec 每次运行单独注入，DSH 在 ACP 与 headless 下
-通过临时 patch 注入，不修改用户配置。工具的 description 自带记录规则，用户提示词可按业务补充
+已经加载时，不保证下一轮就带上该工具。Codex exec 每次运行单独注入，DSH 已不再支持常驻或提示词
+注入，因此不会向其会话注入 `stage_log`。工具的 description 自带记录规则，用户提示词可按业务补充
 要记的阶段；遗漏记录不影响对话。
 
 每条阶段包含两个时间：事件发生时间（可自己提供，缺省取记录时刻，用于展示）和记录入库时间

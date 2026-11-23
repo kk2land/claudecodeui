@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   codexModelOptions,
+  dshEffortLevels,
+  dshModelOptions,
   effortOptionsFor,
   piModelOptions,
 } from "../client/catalog.js";
@@ -77,4 +79,85 @@ test("Pi catalog failure keeps a saved default-model effort selectable", () => {
     ["", "high"],
   );
   assert.equal(efforts[1]!.label, "high（当前已保存）");
+});
+
+test("DSH rows persist the exact provider/model route with its declared levels", () => {
+  const catalog = {
+    models: [
+      {
+        route: "magpie/auto/deepseek-v4.1-flash",
+        label: "DeepSeek V4.1 Flash",
+        efforts: ["low", "high"],
+      },
+      {
+        route: "magpie-responses/openai/gpt-6-astra",
+        label: "GPT-6 Astra",
+        efforts: [],
+      },
+    ],
+    effortLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  };
+  const options = dshModelOptions(catalog, null, null);
+  assert.deepEqual(
+    options.map((option) => option.value),
+    ["", "magpie/auto/deepseek-v4.1-flash", "magpie-responses/openai/gpt-6-astra"],
+  );
+  // DSH applies reasoning only to an explicit model, so the default row has no levels.
+  assert.deepEqual(options[0], { value: "", label: "使用默认值", effort: [] });
+  assert.deepEqual(
+    effortOptionsFor(options, "magpie/auto/deepseek-v4.1-flash", null).map(
+      (option) => option.value,
+    ),
+    ["", "low", "high"],
+  );
+  assert.deepEqual(
+    effortOptionsFor(options, "magpie-responses/openai/gpt-6-astra", null).map(
+      (option) => option.value,
+    ),
+    [""],
+  );
+  // A listed route uses only the levels its declaration names.
+  assert.deepEqual(dshEffortLevels(catalog, "magpie/auto/deepseek-v4.1-flash"), [
+    "low",
+    "high",
+  ]);
+  assert.deepEqual(
+    dshEffortLevels(catalog, "magpie-responses/openai/gpt-6-astra"),
+    [],
+  );
+});
+
+test("a typed DSH route falls back to the engine levels and is kept when saving", () => {
+  const catalog = {
+    models: [
+      {
+        route: "magpie/listed",
+        label: "Listed",
+        efforts: ["high"],
+      },
+    ],
+    effortLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+  };
+  // A route outside the static directory cannot claim declared levels but is still settable.
+  assert.deepEqual(dshEffortLevels(catalog, "magpie/typed"), catalog.effortLevels);
+  assert.deepEqual(dshEffortLevels(null, "magpie/typed"), []);
+  // DSH applies reasoning only to an explicit model.
+  assert.deepEqual(dshEffortLevels(catalog, null), []);
+  assert.deepEqual(dshModelOptions(catalog, "magpie/typed", "xhigh"), [
+    { value: "", label: "使用默认值", effort: [] },
+    { value: "magpie/listed", label: "Listed", effort: ["high"] },
+    {
+      value: "magpie/typed",
+      label: "magpie/typed（当前已保存）",
+      effort: ["xhigh"],
+    },
+  ]);
+  assert.deepEqual(dshModelOptions(null, "magpie/legacy", "high"), [
+    { value: "", label: "使用默认值", effort: [] },
+    {
+      value: "magpie/legacy",
+      label: "magpie/legacy（当前已保存）",
+      effort: ["high"],
+    },
+  ]);
 });

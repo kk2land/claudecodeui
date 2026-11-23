@@ -19,8 +19,7 @@ import { useDeviceSettings } from '@/shared/hooks/useDeviceSettings';
 import { DEFAULT_EFFORT_VALUE, MAX_QUEUED_MESSAGES, MCP_ELICITATION_TOOL_NAME } from '@/shared/constants';
 import { Button } from '@/shared/ui';
 import { CodexControlPanel } from '@/modules/chat/composer/CodexControlPanel';
-import { ProviderRuntimePanel } from '@/modules/chat/composer/ProviderRuntimePanel';
-import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, ChatAttachment, CodexControls, CodexModelProviderControls, ComposerPredictionControls, PendingSteer, ProviderRuntimeControls, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
+import type { BackgroundSendChoice, BackgroundSendPrompt, ToolPermissionDecision, ChatAttachment, CodexControls, CodexModelProviderControls, ComposerPredictionControls, PendingSteer, QueuedDraft, ScheduledMessage, SlashCommand,SessionActivity,PendingPermissionRequest,PermissionMode,ProviderModelOption } from '@/shared/types';
 import {
   PromptInput,
   PromptInputHeader,
@@ -96,7 +95,6 @@ type ChatComposerProps = {
   queuedDraft?: QueuedDraft | null;
   codexControls?: CodexControls;
   codexModelProviders?: CodexModelProviderControls;
-  runtimeControls?: ProviderRuntimeControls;
   onExecutePlan?: () => void;
   backgroundSendPrompt: BackgroundSendPrompt | null;
   onResolveBackgroundSendPrompt: (choice: BackgroundSendChoice) => void;
@@ -210,7 +208,6 @@ export default function ChatComposer({
   queuedDrafts,
   codexControls,
   codexModelProviders,
-  runtimeControls,
   onExecutePlan,
   backgroundSendPrompt,
   onResolveBackgroundSendPrompt,
@@ -374,10 +371,10 @@ export default function ChatComposer({
   const hasPendingPermissions = pendingPermissionRequests.length > 0;
   const hasBlockingCodexQuestion = Boolean(codexControls?.state?.questions.some((request) => request.isBlocking));
   // Provider toolbars sit above the input, so their activity belongs inside it.
-  const hasControlPanel = Boolean(codexControls || runtimeControls);
+  const hasControlPanel = Boolean(codexControls);
   // A Worker run can outlive the main turn. On mobile its existing settings
   // spinner lives in the closed sheet, so the always-visible toolbar mirrors it.
-  const hasActiveWorkers = codexControls?.hasActiveWorkers === true || runtimeControls?.hasActiveWorkers === true;
+  const hasActiveWorkers = codexControls?.hasActiveWorkers === true;
   // Keep status components mounted while idle so their exit animation can finish.
   const showFloatingActivity = !hasPendingPermissions && !hasControlPanel;
   const hasFloatingActivityIndicator = Boolean(activity && showFloatingActivity);
@@ -623,7 +620,6 @@ export default function ChatComposer({
       )}
 
       {codexControls && <CodexControlPanel key={codexControls.sessionId ?? 'new'} controls={codexControls} modelProviders={codexModelProviders} hasQueuedDraft={hasQueuedDraft} hasRunningTasks={isLoading || Boolean(activity)} onExecutePlan={onExecutePlan ?? (() => {})} settingsContainer={isMobile ? mobileSettingsHost : undefined} todoButton={isMobile ? undefined : todoButton} />}
-      {runtimeControls && <ProviderRuntimePanel key={`${providerLabel}:${runtimeControls.sessionId ?? 'new'}`} controls={runtimeControls} hasQueuedDraft={hasQueuedDraft} providerLabel={providerLabel} settingsContainer={isMobile ? mobileSettingsHost : undefined} />}
       <BackgroundSendDialog
         prompt={backgroundSendPrompt}
         supportsSideQuestions={supportsSideQuestions && !hasTodoSource}
@@ -1228,7 +1224,7 @@ export default function ChatComposer({
                 </label>
               )}
 
-              {(codexControls || runtimeControls) && (
+              {codexControls && (
                 <div className="min-w-0 space-y-2 border-t border-border/50 pt-3">
                   <p className="text-xs font-medium text-muted-foreground">
                     {t('mobileComposer.runtime', { defaultValue: 'Runtime settings' })}

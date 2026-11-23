@@ -8,21 +8,11 @@ import { SchedulerStore } from "../server/store.js";
 import { defaultSettings, parseTasks } from "../server/configuration.js";
 import { fakeScheduledHost } from "./host-fixture.js";
 
-// A fake DSH headless CLI: it records its argv, reports a verified session, then finishes or
-// stays alive so tests can observe stop/close ordering.
-const dshScript = `const fs=require("fs");
-fs.appendFileSync("dsh-calls.jsonl",JSON.stringify({args:process.argv.slice(2)})+"\\n");
-fs.writeFileSync("agent-spawned.txt","");
-fs.readFileSync(0,"utf8");
-console.log(JSON.stringify({type:"session",sessionId:process.env.FAKE_NATIVE_SESSION||"native-a"}));
-if(process.env.FAKE_AGENT_HANG==="1"){setInterval(()=>{},1000);}
-else{
-console.log(JSON.stringify({type:"status",phase:"turn_end",reason:{kind:"completed"}}));
-console.log(JSON.stringify({type:"final",text:JSON.stringify({status:"success",summary:"ok"})}));
-}`;
-
-
-/** Fake Codex exec under the host dependency layout the scheduler resolves. */
+/**
+ * Fake Codex exec under the host dependency layout the scheduler resolves. It records its argv,
+ * reports a verified thread, then finishes or stays alive so tests can observe stop/close ordering.
+ * Prompt tasks only support Codex now, so every prompt fixture uses this CLI.
+ */
 function fakeCodex(root: string): void {
   const cpu = process.arch === "arm64" ? "aarch64" : "x86_64";
   const suffix =
@@ -43,10 +33,14 @@ function fakeCodex(root: string): void {
       [
         'const fs=require("fs");',
         'fs.appendFileSync("codex-calls.jsonl",JSON.stringify({args:process.argv.slice(2)})+"\\n");',
+        'fs.writeFileSync("agent-spawned.txt","");',
         'fs.readFileSync(0,"utf8");',
-        'console.log(JSON.stringify({type:"thread.started",thread_id:"thread-native"}));',
+        'console.log(JSON.stringify({type:"thread.started",thread_id:process.env.FAKE_NATIVE_SESSION||"thread-native"}));',
+        'if(process.env.FAKE_AGENT_HANG==="1"){setInterval(()=>{},1000);}',
+        'else{',
         'console.log(JSON.stringify({type:"item.completed",item:{id:"a",type:"agent_message",text:JSON.stringify({status:"success",summary:"ok"})}}));',
         'console.log(JSON.stringify({type:"turn.completed",usage:{input_tokens:4,output_tokens:2,cached_input_tokens:1}}));',
+        '}',
       ].join(""),
     { mode: 0o700 },
   );
@@ -78,8 +72,7 @@ function fixture(
       })),
     }),
   );
-  const dsh = path.join(root, "dsh");
-  fs.writeFileSync(dsh, "#!/usr/bin/env node\n" + dshScript, { mode: 0o700 });
+  fakeCodex(root);
   const store = new SchedulerStore(path.join(root, "data"));
   const fake = fakeScheduledHost();
   const scheduler = new ProjectScheduler(
@@ -89,16 +82,14 @@ function fixture(
     options.host === false ? undefined : fake.host,
   );
   const changes: Record<string, string | undefined> = {
-    CLOUDCLI_DSH_BIN: dsh,
-    CLOUDCLI_DSH_PATCHES: "[]",
+    CLOUDCLI_HOST_ROOT: root,
     FAKE_AGENT_HANG: undefined,
     FAKE_NATIVE_SESSION: undefined,
   };
   const before = Object.fromEntries(
     Object.keys(changes).map((key) => [key, process.env[key]]),
   );
-  process.env.CLOUDCLI_DSH_BIN = dsh;
-  process.env.CLOUDCLI_DSH_PATCHES = "[]";
+  process.env.CLOUDCLI_HOST_ROOT = root;
   delete process.env.FAKE_AGENT_HANG;
   delete process.env.FAKE_NATIVE_SESSION;
   t.after(async () => {
@@ -131,7 +122,7 @@ function promptTask(id: string, extra: Record<string, unknown> = {}) {
     type: "prompt",
     cron: "0 0 0 1 1 *",
     prompt: "run",
-    agent: { provider: "dsh", model: "default" },
+    agent: { provider: "codex", model: "default" },
     ...extra,
   };
 }
@@ -145,8 +136,8 @@ function scriptTask(id: string, extra: Record<string, unknown> = {}) {
     ...extra,
   };
 }
-function dshCalls(directory: string): string[][] {
-  const file = path.join(directory, "dsh-calls.jsonl");
+function codexCalls(directory: string): string[][] {
+  const file = path.join(directory, "codex-calls.jsonl");
   if (!fs.existsSync(file)) return [];
   return fs
     .readFileSync(file, "utf8")
@@ -198,9 +189,8 @@ test("a prompt task prepares a fresh app session for every run when reuseSession
   assert.equal(prepares[0]!.reuseSession, false);
   assert.equal(prepares[1]!.reuseSession, false);
   assert.notEqual(first.sessionId, second.sessionId);
-  // Neither run resumed a native session, and the app session was recorded on the run row.
-  for (const args of dshCalls(f.directory))
-    assert.equal(args.includes("--session-id"), false);
+  // Neither run resumed a native thread, and the app session was recorded on the run row.
+  for (const args of codexCalls(f.directory)) assert.equal(args.includes("resume"), false);
   const actions = f.fake.calls
     .map((call) => call.action)
     .filter((action) => action !== "scheduledSyncTasks");
@@ -212,7 +202,7 @@ test("a prompt task prepares a fresh app session for every run when reuseSession
     "scheduledAttachNative",
     "scheduledFinishRun",
   ]);
-  assert.equal(f.fake.requests("scheduledAttachNative")[0]!.nativeSessionId, "native-a");
+  assert.equal(f.fake.requests("scheduledAttachNative")[0]!.nativeSessionId, "thread-native");
 });
 
 test("reuseSession continues the same app and native session", async (t) => {
@@ -227,11 +217,11 @@ test("reuseSession continues the same app and native session", async (t) => {
   const prepares = f.fake.requests("scheduledPrepare");
   assert.equal(prepares[0]!.reuseSession, true);
   assert.equal(prepares[1]!.reuseSession, true);
-  const args = dshCalls(f.directory);
-  assert.equal(args[0]!.includes("--session-id"), false);
-  const index = args[1]!.indexOf("--session-id");
+  const args = codexCalls(f.directory);
+  assert.equal(args[0]!.includes("resume"), false);
+  const index = args[1]!.indexOf("resume");
   assert.ok(index >= 0);
-  assert.equal(args[1]![index + 1], "native-a");
+  assert.equal(args[1]![index + 1], "thread-native");
 });
 
 test("the same task id in two projects keeps separate sessions", async (t) => {
@@ -254,9 +244,9 @@ test("the same task id in two projects keeps separate sessions", async (t) => {
     prepares.map((payload) => payload.projectId),
     ["p1", "p2"],
   );
-  // p2 has its own binding, so it starts a new native session instead of resuming p1's.
-  const args = dshCalls(f.entries[1]!.directory);
-  assert.equal(args[0]!.includes("--session-id"), false);
+  // p2 has its own binding, so it starts a new native thread instead of resuming p1's.
+  const args = codexCalls(f.entries[1]!.directory);
+  assert.equal(args[0]!.includes("resume"), false);
 });
 
 test("reuseSession is a prompt-only, non-concurrent boolean at the parse boundary", (t) => {
@@ -286,33 +276,33 @@ test("reuseSession is a prompt-only, non-concurrent boolean at the parse boundar
 test("prepare gets the effective env's sessions root without touching the global env", async (t) => {
   const f = fixture(t);
   const home = path.join(f.root, "home");
-  const dshHome = path.join(f.root, "dsh-home");
+  const codexHome = path.join(f.root, "codex-home");
   f.store.saveSettings({
     ...f.store.settings(),
-    env: { HOME: home, DSH_HOME: dshHome },
+    env: { HOME: home, CODEX_HOME: codexHome },
   });
   f.config("p1", [promptTask("agent")]);
   f.scheduler.load(undefined, false, true);
   await finished(f, f.scheduler.start("p1", "agent", "manual").id);
   assert.equal(
     f.fake.requests("scheduledPrepare")[0]!.sessionsRoot,
-    path.join(dshHome, "sessions"),
+    path.join(codexHome, "sessions"),
   );
 
   // task.env wins over settings.env, and a relative native root resolves against the task cwd.
   const globalHome = process.env.HOME;
-  const globalOverride = process.env.CLOUDCLI_DSH_SESSIONS_DIR;
+  const globalOverride = process.env.CODEX_HOME;
   f.config("p1", [
-    promptTask("agent", { env: { CLOUDCLI_DSH_SESSIONS_DIR: "session-root" } }),
+    promptTask("agent", { env: { CODEX_HOME: "session-root" } }),
   ]);
   f.scheduler.load(undefined, false, true);
   await finished(f, f.scheduler.start("p1", "agent", "manual").id);
   assert.equal(
     f.fake.requests("scheduledPrepare")[1]!.sessionsRoot,
-    path.join(f.directory, "session-root"),
+    path.join(f.directory, "session-root", "sessions"),
   );
   assert.equal(process.env.HOME, globalHome);
-  assert.equal(process.env.CLOUDCLI_DSH_SESSIONS_DIR, globalOverride);
+  assert.equal(process.env.CODEX_HOME, globalOverride);
 });
 
 test("stop while waiting for prepare never spawns and releases the host slot", async (t) => {
@@ -337,7 +327,7 @@ test("stop while waiting for prepare never spawns and releases the host slot", a
   assert.equal(done.status, "stopped");
   assert.equal(done.sessionId, "session-slow");
   assert.equal(fs.existsSync(path.join(f.directory, "agent-spawned.txt")), false);
-  assert.deepEqual(dshCalls(f.directory), []);
+  assert.deepEqual(codexCalls(f.directory), []);
   assert.equal(f.fake.finished.has(run.id), true);
   assert.equal(f.fake.requests("scheduledFinishRun")[0]!.outcome.aborted, true);
 });
@@ -404,7 +394,7 @@ test("an aborted pre-spawn cleanup is never mistaken for an interrupted run", as
   assert.equal(finishes.length, 1);
   assert.equal(finishes[0]!.outcome.aborted, true);
   assert.equal(fs.existsSync(path.join(f.directory, "agent-spawned.txt")), false);
-  assert.deepEqual(dshCalls(f.directory), []);
+  assert.deepEqual(codexCalls(f.directory), []);
 });
 
 test("timeout while waiting for prepare never spawns and releases the host slot", async (t) => {
@@ -423,7 +413,7 @@ test("timeout while waiting for prepare never spawns and releases the host slot"
   const done = await finished(f, run.id);
   assert.equal(done.status, "timed_out");
   assert.equal(fs.existsSync(path.join(f.directory, "agent-spawned.txt")), false);
-  assert.deepEqual(dshCalls(f.directory), []);
+  assert.deepEqual(codexCalls(f.directory), []);
   assert.equal(f.fake.requests("scheduledFinishRun")[0]!.outcome.aborted, true);
 });
 
@@ -589,7 +579,7 @@ test("a prepare failure is explicit and never spawns an agent process", async (t
   assert.match(done.reason ?? "", /宿主会话准备失败：宿主忙碌/);
   assert.equal(done.sessionId, undefined);
   assert.equal(fs.existsSync(path.join(f.directory, "agent-spawned.txt")), false);
-  assert.deepEqual(dshCalls(f.directory), []);
+  assert.deepEqual(codexCalls(f.directory), []);
 });
 
 test("Codex prompt runs persist, attach and resume the same thread", async (t) => {

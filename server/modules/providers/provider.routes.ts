@@ -11,7 +11,6 @@ import { providerSkillsService } from '@/modules/providers/services/skills.servi
 import { sessionConversationsSearchService } from '@/modules/providers/services/session-conversations-search.service.js';
 import { sideQuestionsService } from '@/modules/providers/services/side-questions.service.js';
 import { sessionsService } from '@/modules/providers/services/sessions.service.js';
-import { providerRuntimeManagementService } from '@/modules/providers/services/provider-runtime-management.service.js';
 import { codexRateLimitsService } from '@/modules/providers/list/codex/codex-rate-limits.service.js';
 import { readResidentSessionInfo } from '@/modules/project-scheduler/index.js';
 import { codexModelProviderService } from '@/modules/providers/list/codex/codex-model-provider.service.js';
@@ -26,7 +25,6 @@ import type {
   ProviderSkillCreateFile,
   ProviderSkillCreateInput,
   ProviderSkillSetEnabledInput,
-  ProviderRuntimeAction,
   SessionForkOptions,
   UpsertProviderMcpServerInput,
 } from '@/shared/types.js';
@@ -368,7 +366,6 @@ const parseProvider = (value: unknown): LLMProvider => {
     || normalized === 'codex'
     || normalized === 'cursor'
     || normalized === 'opencode'
-    || normalized === 'dsh'
   ) {
     return normalized;
   }
@@ -1113,27 +1110,6 @@ router.get(
 );
 
 // ----------------- Session routes -----------------
-router.get('/:provider/runtime', asyncHandler(async (req: Request, res: Response) => {
-  const provider = parseProvider(req.params.provider);
-  const sessionId = req.query.sessionId === undefined ? null : parseSessionId(req.query.sessionId);
-  res.json(createApiSuccessResponse(providerRuntimeManagementService.getState(provider, sessionId)));
-}));
-
-router.post('/:provider/runtime', asyncHandler(async (req: Request, res: Response) => {
-  const provider = parseProvider(req.params.provider);
-  const sessionId = parseSessionId(req.body?.sessionId);
-  const raw = req.body?.control;
-  let action: ProviderRuntimeAction;
-  if (raw?.action === 'runtime' && typeof raw.runtime === 'string' && raw.runtime.length > 0 && raw.runtime.length <= 80) {
-    action = { action: 'runtime', runtime: raw.runtime };
-  } else if (raw?.action === 'stop' || raw?.action === 'queue-resume') {
-    action = { action: raw.action };
-  } else {
-    throw new AppError('Invalid runtime control.', { code: 'INVALID_CONTROL', statusCode: 400 });
-  }
-  res.json(createApiSuccessResponse(await providerRuntimeManagementService.control(provider, sessionId, action)));
-}));
-
 /**
  * Session gateway entry point: allocates the stable app-facing session id for
  * a brand-new chat. The frontend must call this before the first `chat.send`
@@ -1157,7 +1133,7 @@ router.get(
   asyncHandler(async (_req: Request, res: Response) => {
     const sessions = await sessionsService.listRunningSessions();
     // The three-dot menu reads this projection: `adoptable` is true only for a
-    // running Codex (either configured runtime) or DSH session with the plugin
+    // running Codex session (either configured runtime) with the plugin
     // available, so the sidebar enables "make resident" as soon as it runs.
     res.json(createApiSuccessResponse({
       sessions: sessions.map((entry) => {
@@ -1165,7 +1141,7 @@ router.get(
           sessionId: entry.sessionId,
           provider: entry.provider,
         });
-        // Only Codex/DSH carry the field; every other provider keeps its exact
+        // Only Codex carries the field; every other provider keeps its exact
         // pre-resident payload shape.
         return resident ? { ...entry, resident } : entry;
       }),

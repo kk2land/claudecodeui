@@ -88,7 +88,7 @@ export default function PermissionRequestsBanner({
 
         const rawInput = formatToolInputForDisplay(request.input);
         const context = request.context as { provider?: string; availableDecisions?: unknown[] } | undefined;
-        const native = context?.provider === 'codex' || context?.provider === 'dsh';
+        const native = context?.provider === 'codex';
         const nativeDecisions = context?.availableDecisions ?? ['accept', 'acceptForSession', 'decline', 'cancel'];
         const alwaysPatterns = readContextPatterns(request.context, 'always');
         const requestedPatterns = readContextPatterns(request.context, 'patterns') ?? [];

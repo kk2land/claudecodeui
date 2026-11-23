@@ -11,7 +11,7 @@ const WORKER_POLL_INTERVAL_MS = 2000;
 type Args = {
   /** True while a provider that can own Worker plugin runs is selected. */
   enabled: boolean;
-  /** False for a transport that never owns Worker runs (Codex SDK, DSH headless or unregistered ACP). */
+  /** False for a transport that never owns Worker runs (for example the Codex SDK runtime). */
   native: boolean;
   /** False while another workspace tab covers the chat; pauses polling without changing native controls. */
   chatActive?: boolean;
@@ -20,9 +20,10 @@ type Args = {
 };
 
 /**
- * Codex and DSH runtime controls use this to show activity only for a Worker
- * owned by the current session. It reuses the authenticated Worker plugin state
- * endpoint and is intentionally separate from each provider's own turn activity.
+ * The Codex and managed-transport runtime controls use this to show activity
+ * only for a Worker owned by the current session. It reuses the authenticated
+ * Worker plugin state endpoint and is intentionally separate from each
+ * provider's own turn activity.
  */
 export function useSessionWorkerActivity({ enabled, native, chatActive = true, projectId, sessionId }: Args): boolean {
   const { plugins } = usePlugins();

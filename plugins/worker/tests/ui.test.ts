@@ -362,6 +362,7 @@ type Mode = {
   conversation?: boolean;
   settings?: (body: unknown) => unknown;
   models?: (provider: "codex" | "dsh") => Promise<unknown>;
+  dshCatalog?: () => Promise<unknown>;
   codexProviders?: () => Promise<unknown>;
   codexProviderModels?: (modelProvider: string) => Promise<unknown>;
   piCatalog?: () => Promise<unknown>;
@@ -374,17 +375,21 @@ type ConversationViewRecord = {
   disposed: boolean;
 };
 
-const DSH_MODELS = {
-  DEFAULT: "deepseek-v4",
-  OPTIONS: [
-    { value: "default", label: "执行器默认" },
-    { value: "deepseek-v4", label: "DeepSeek V4" },
+// The plugin serves this directory from `$DSH_HOME`; routes keep the full `provider/model` form.
+const DSH_CATALOG = {
+  models: [
     {
-      value: "deepseek-v4-flash",
-      label: "DeepSeek V4 Flash",
-      effort: { default: "low", values: [{ value: "low" }, { value: "high" }] },
+      route: "magpie/auto/deepseek-v4.1-flash",
+      label: "DeepSeek V4.1 Flash",
+      efforts: ["low", "high"],
+    },
+    {
+      route: "magpie-responses/openai/gpt-6-astra",
+      label: "GPT-6 Astra",
+      efforts: ["off", "high"],
     },
   ],
+  effortLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
 };
 const CODEX_MODELS = {
   DEFAULT: "gpt-6-sol",
@@ -427,8 +432,11 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
   const views: ConversationViewRecord[] = [];
   let context = mode.context ?? DEFAULT_CONTEXT;
   const host: Record<string, unknown> = {
-    models: mode.models ?? (async (provider: "codex" | "dsh") =>
-      provider === "codex" ? CODEX_MODELS : DSH_MODELS),
+    // The host serves no DSH catalog: reaching it for DSH is a regression.
+    models: mode.models ?? (async (provider: "codex" | "dsh") => {
+      if (provider !== "codex") throw new Error("宿主未提供 DSH 模型目录");
+      return CODEX_MODELS;
+    }),
     codexModelProviders: mode.codexProviders ?? (async () => CODEX_DIRECTORY),
     codexModelProviderModels:
       mode.codexProviderModels ??
@@ -463,6 +471,10 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         return { prompt: null };
       }
       if (pathAndQuery === "/cancel") return { workerIds: ["worker-1"] };
+      if (pathAndQuery === "/catalog/dsh") {
+        if (mode.dshCatalog) return mode.dshCatalog();
+        return DSH_CATALOG;
+      }
       if (pathAndQuery === "/catalog/pi") {
         if (mode.piCatalog) return mode.piCatalog();
         return PI_CATALOG;
@@ -710,6 +722,16 @@ function optionValues(select: HTMLSelectElement): string[] {
 
 function optionLabels(select: HTMLSelectElement): string[] {
   return [...select.options].map((option) => textOf(option));
+}
+
+/** Suggestions of a typable model input's `<datalist>`; the input itself stays free text. */
+function datalistValues(input: HTMLInputElement): string[] {
+  const id = input.getAttribute("list");
+  const datalist = id ? input.ownerDocument.getElementById(id) : null;
+  if (!datalist) return [];
+  return [...datalist.querySelectorAll("option")].map(
+    (option) => (option as HTMLOptionElement).value,
+  );
 }
 
 async function openSettings(mounted: Mounted) {
@@ -984,24 +1006,45 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     assert.deepEqual(optionValues(codexReasoning), [""]);
     assert.deepEqual(requested, ["magpie", "openai"]);
 
-    // DSH maps the catalog's `default` sentinel to null and keeps real effort levels.
-    const dshModel = byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement;
+    // DSH keeps a typable full `provider/model` field with the static directory as suggestions.
+    const dshModel = byLabel(mounted.container, "配置 1 模型") as HTMLInputElement;
     const dshReasoning = byLabel(
       mounted.container,
       "配置 1 reasoning",
     ) as HTMLSelectElement;
-    assert.deepEqual(optionValues(dshModel), [
-      "",
-      "deepseek-v4",
-      "deepseek-v4-flash",
+    assert.equal(dshModel.tagName, "INPUT");
+    assert.deepEqual(datalistValues(dshModel), [
+      "magpie/auto/deepseek-v4.1-flash",
+      "magpie-responses/openai/gpt-6-astra",
     ]);
-    assert.equal(dshModel.options[0]!.textContent, "使用默认值");
-    await typeInto(dshModel, "deepseek-v4-flash");
+    assert.deepEqual(optionValues(dshReasoning), [""]);
+    await typeInto(dshModel, "magpie/auto/deepseek-v4.1-flash");
     await waitFor(
       () => optionValues(dshReasoning).includes("high"),
       "DSH reasoning",
     );
+    assert.deepEqual(optionValues(dshReasoning), ["", "low", "high"]);
     await typeInto(dshReasoning, "high");
+    // The directory is partial: an unlisted full route stays settable and uses the engine levels.
+    await typeInto(dshModel, "magpie/local/unlisted");
+    await waitFor(
+      () => optionValues(dshReasoning).includes("xhigh"),
+      "未列出路由的 reasoning",
+    );
+    assert.deepEqual(optionValues(dshReasoning), [
+      "",
+      "off",
+      "minimal",
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+    await typeInto(dshReasoning, "high");
+    await typeInto(dshModel, "magpie/auto/deepseek-v4.1-flash");
+    await waitFor(() => optionValues(dshReasoning).includes("low"), "回到目录路由");
+    assert.equal(callsTo(mounted, "/catalog/dsh").length, 1);
 
     // Pi keeps provider/model identity; a non-reasoning model does not claim thinking levels.
     const piModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
@@ -1041,7 +1084,7 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     assert.equal(byName["Codex default"].model, "magpie-1");
     assert.equal(byName["Codex default"].effort, null);
     assert.equal(byName["Codex default"].codex.modelProvider, null);
-    assert.equal(byName["DSH default"].model, "deepseek-v4-flash");
+    assert.equal(byName["DSH default"].model, "magpie/auto/deepseek-v4.1-flash");
     assert.equal(byName["DSH default"].effort, "high");
     assert.equal(byName["Pi default"].model, "openrouter/claude-sonnet");
     assert.equal(byName["Pi default"].effort, null);
@@ -1170,6 +1213,7 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
 test("DOM: catalog failures stay local, keep stored values and retry in place", async () => {
   let modelsFail = true;
+  let dshFail = true;
   let piFail = true;
   const settings = snapshot().settings as Record<string, any>;
   settings.configs = configDefaults();
@@ -1197,7 +1241,11 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
     state: () => snapshot({ settings }),
     models: async (provider) => {
       if (modelsFail) throw new Error("catalog down " + provider);
-      return provider === "codex" ? CODEX_MODELS : DSH_MODELS;
+      return CODEX_MODELS;
+    },
+    dshCatalog: async () => {
+      if (dshFail) throw new Error("dsh catalog down");
+      return DSH_CATALOG;
     },
     piCatalog: async () => {
       if (piFail) throw new Error("pi catalog down");
@@ -1225,9 +1273,13 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
       (byLabel(mounted.container, "配置 3 reasoning") as HTMLSelectElement).value,
       "ultra",
     );
+    // The DSH field is always typable: the stored route survives a directory failure.
+    const dshModel = byLabel(mounted.container, "配置 1 模型") as HTMLInputElement;
+    assert.equal(dshModel.value, "dsh-legacy");
+    assert.deepEqual(datalistValues(dshModel), []);
     assert.equal(
-      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
-      "dsh-legacy",
+      (byLabel(mounted.container, "配置 1 reasoning") as HTMLSelectElement).value,
+      "high",
     );
     assert.equal(
       (byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).value,
@@ -1252,16 +1304,22 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
 
     // Retrying recovers the catalogs without clearing any stored selection.
     modelsFail = false;
+    dshFail = false;
     piFail = false;
     const retries = retryButtons(mounted.container);
-    assert.ok(retries.length >= 3);
+    assert.ok(retries.length >= 4);
     for (const retry of retries) retry.click();
     await waitFor(
       () =>
-        optionLabels(byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).includes(
-          "DeepSeek V4",
+        datalistValues(byLabel(mounted.container, "配置 1 模型") as HTMLInputElement).includes(
+          "magpie/auto/deepseek-v4.1-flash",
         ),
       "DSH 目录恢复",
+    );
+    // Recovering suggestions never rewrites the stored route into a listed one.
+    assert.equal(
+      (byLabel(mounted.container, "配置 1 模型") as HTMLInputElement).value,
+      "dsh-legacy",
     );
     assert.ok(
       optionLabels(byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).includes(
@@ -1277,9 +1335,48 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
       "Pi 目录恢复",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 1 模型") as HTMLInputElement).value,
       "dsh-legacy",
     );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a DSH route outside the directory stays typable and uses the engine levels", async () => {
+  const mounted = await mountPlugin({
+    dshCatalog: async () => ({
+      models: [],
+      effortLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
+    }),
+  });
+  try {
+    await openSettings(mounted);
+    const model = byLabel(mounted.container, "配置 1 模型") as HTMLInputElement;
+    assert.equal(model.tagName, "INPUT");
+    assert.equal(model.value, "");
+    // An empty directory offers no suggestions but never blocks a valid full route.
+    assert.deepEqual(datalistValues(model), []);
+    const reasoning = byLabel(
+      mounted.container,
+      "配置 1 reasoning",
+    ) as HTMLSelectElement;
+    // DSH applies reasoning only to an explicit model, so the empty route offers no level.
+    assert.deepEqual(optionValues(reasoning), [""]);
+    await typeInto(model, "magpie/local/deepseek-v4-pro");
+    await waitFor(
+      () => optionValues(reasoning).includes("xhigh"),
+      "手工路由的 reasoning",
+    );
+    await typeInto(reasoning, "xhigh");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存手工路由");
+    const body = callsTo(mounted, "/settings")[0]!.body as {
+      configs: Array<Record<string, unknown>>;
+    };
+    assert.equal(body.configs[0]!.model, "magpie/local/deepseek-v4-pro");
+    assert.equal(body.configs[0]!.effort, "xhigh");
   } finally {
     mounted.unmount();
   }

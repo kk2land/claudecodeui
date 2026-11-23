@@ -21,7 +21,7 @@ type AgentsSettingsTabProps = {
 };
 
 /** Every agent provider this tab can render, before deployment visibility narrows the list. */
-const AGENT_PROVIDERS: AgentProvider[] = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
+const AGENT_PROVIDERS: AgentProvider[] = ['claude', 'cursor', 'codex', 'opencode'];
 
 /**
  * The capability row as this tab reads it. The shared row type only models the
@@ -71,7 +71,7 @@ export default function AgentsSettingsTab({
 
   const visibleCategories = useMemo<AgentCategory[]>(() => {
     if (!effectiveSelectedAgent) return [];
-    return effectiveSelectedAgent === 'dsh' ? ['account', 'mcp', 'skills'] : effectiveSelectedAgent === 'opencode'
+    return effectiveSelectedAgent === 'opencode'
       ? ['account', 'permissions', 'mcp']
       : ['account', 'permissions', 'mcp', 'skills'];
   }, [effectiveSelectedAgent]);
@@ -89,7 +89,6 @@ export default function AgentsSettingsTab({
       authStatus: providerAuthStatus.codex,
       onLogin: () => onProviderLogin('codex'),
     },
-    dsh: { authStatus: providerAuthStatus.dsh, onLogin: () => onProviderLogin('dsh') },
     opencode: {
       authStatus: providerAuthStatus.opencode,
       onLogin: () => onProviderLogin('opencode'),
@@ -100,7 +99,6 @@ export default function AgentsSettingsTab({
     providerAuthStatus.codex,
     providerAuthStatus.cursor,
     providerAuthStatus.opencode,
-    providerAuthStatus.dsh,
   ]);
 
   useEffect(() => {

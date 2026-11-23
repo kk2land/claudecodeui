@@ -29,7 +29,6 @@ import { useCodexModelProviders } from '@/modules/chat/hooks/useCodexModelProvid
 import { usePlanHandoff } from '@/modules/chat/hooks/usePlanHandoff';
 import { getToolConfig } from '@/modules/chat/tools/configs/toolConfigs';
 import { parseToolPayload } from '@/modules/chat/utils/messageTransforms';
-import { useProviderRuntimeControls } from '@/modules/chat/hooks/useProviderRuntimeControls';
 import { useChatComposerState } from '@/modules/chat/hooks/useChatComposerState';
 import { ProjectTodoDialog, useProjectTodos } from '@/modules/todos';
 import { useSessionStore } from '@/modules/chat/hooks/useSessionStore';
@@ -219,16 +218,6 @@ function ChatInterface({
     project: selectedProject, chatActive: isActive, options: { model: currentProviderModel, effort: currentProviderEffort, permissionMode },
     sendMessage, onSessionEstablished: handleSessionEstablished,
   });
-  const runtimeControls = useProviderRuntimeControls({
-    provider, sessionId: selectedSession?.id || currentSessionId,
-    project: selectedProject, chatActive: isActive, newSessionTrigger, onSessionEstablished: handleSessionEstablished,
-  });
-  // DSH registers Worker tools on the ACP session, including after idle
-  // recycling; only then does a busy chat.send become a durable queue receipt.
-  // Headless, plain and non-Worker sessions keep the existing composer path.
-  const workerQueueEnabled = provider === 'dsh'
-    && runtimeControls.state?.runtime === 'acp'
-    && runtimeControls.state.workerEnabled === true;
 
   // A history-preserving branch is an ordinary session row; navigating to it
   // leaves the source conversation, its selection and its queue untouched.
@@ -506,8 +495,6 @@ function ChatInterface({
     composerPredictionsBlocked: pendingPermissionRequests.length > 0,
     composerPredictionsUnsupported: codexControls.predictionsUnsupported === true
       && codexControls.state?.runtime !== 'sdk',
-    prepareSessionForSend: runtimeControls.available ? runtimeControls.prepareSend : undefined,
-    workerQueueEnabled,
     executionIdsRef,
     processingSessions,
     canAbortSession,
@@ -696,7 +683,7 @@ function ChatInterface({
       ? t('messageTypes.cursor')
       : provider === 'codex'
         ? t('messageTypes.codex')
-        : provider === 'dsh' ? t('messageTypes.dsh', { defaultValue: 'DeepSeek Harness' }) : provider === 'opencode'
+        : provider === 'opencode'
             ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
           : t('messageTypes.claude');
 
@@ -838,7 +825,6 @@ function ChatInterface({
           isDragActive={isDragActive}
           codexControls={provider === 'codex' ? codexControls : undefined}
           codexModelProviders={provider === 'codex' && codexControls.state?.runtime !== 'sdk' ? codexModelProviders : undefined}
-          runtimeControls={runtimeControls.available ? runtimeControls : undefined}
           onExecutePlan={() => handleVoiceTranscript(t('codex.implementPrompt'), false)}
           queuedDrafts={queuedDrafts}
           queuedDraft={queuedDraft}

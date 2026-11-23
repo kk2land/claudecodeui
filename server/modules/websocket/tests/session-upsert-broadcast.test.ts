@@ -163,15 +163,29 @@ test('a closed socket is skipped', async () => {
 test('copied threads broadcast the requested app session independently of the other provider', async () => {
   await withIsolatedDatabase(async () => {
     const codexId = sessionsDb.createSession('shared-thread', 'codex', '/workspace/native');
-    const dshId = sessionsDb.createSession('shared-thread', 'dsh', '/workspace/dsh', 'DSH', undefined, '2099-01-01T00:00:00Z');
+    const claudeId = sessionsDb.createSession('shared-thread', 'claude', '/workspace/claude', 'Claude', undefined, '2099-01-01T00:00:00Z');
     const connection = new FakeConnection();
     connectedClients.add(connection as never);
 
-    await broadcastSessionUpsertedBatch([codexId, dshId]);
+    await broadcastSessionUpsertedBatch([codexId, claudeId]);
 
     assert.deepEqual(connection.frames.map(frame => [frame.sessionId, frame.provider]), [
-      [codexId, 'codex'], [dshId, 'dsh'],
+      [codexId, 'codex'], [claudeId, 'claude'],
     ]);
+  });
+});
+
+test('retained DSH records beyond the indexed transcript are not broadcast into the sidebar', async () => {
+  await withIsolatedDatabase(async () => {
+    sessionsDb.createAppSession('legacy-dsh', 'dsh', '/workspace/legacy-dsh');
+    const connection = new FakeConnection();
+    connectedClients.add(connection as never);
+
+    await broadcastSessionUpserted('legacy-dsh');
+
+    assert.deepEqual(connection.frames, []);
+    // The row itself is preserved; only its sidebar projection is suppressed.
+    assert.ok(sessionsDb.getSessionById('legacy-dsh'));
   });
 });
 

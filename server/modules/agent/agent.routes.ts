@@ -8,7 +8,7 @@ import type { ProviderRunFunction } from '@/shared/types.js';
 import { normalizeProjectPath } from '../../shared/utils.js';
 
 /** The providers an Agent API run can start: the ones with a runtime and a model catalog. */
-const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode', 'dsh'];
+const AGENT_RUN_PROVIDERS = ['claude', 'cursor', 'codex', 'opencode'];
 
 /** What the route reads off a session row it continues: the row, not the request, says which provider and project a session belongs to. */
 type AgentSessionRow = {
@@ -41,7 +41,6 @@ type AgentRouterDependencies = {
   queryCursor: ProviderRunFunction;
   queryCodex: ProviderRunFunction;
   queryOpenCode: ProviderRunFunction;
-  queryDsh?: ProviderRunFunction;
   GithubClient: typeof import('@octokit/rest').Octokit;
 };
 
@@ -908,7 +907,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
     }
 
     if (requestedProvider !== null && !AGENT_RUN_PROVIDERS.includes(requestedProvider)) {
-      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", "opencode", or "dsh"' });
+      return res.status(400).json({ error: 'provider must be "claude", "cursor", "codex", or "opencode"' });
     }
 
     // Validate GitHub branch/PR creation requirements
@@ -938,6 +937,12 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       }
     }
     const provider = sessionRow?.provider ?? requestedProvider ?? 'claude';
+    // A continued session whose provider is no longer registered (a retired id
+    // such as dsh or gptweb) is refused before any side effect: no runtime can
+    // report a real result, and the stored row is left for archive or delete.
+    if (!AGENT_RUN_PROVIDERS.includes(provider)) {
+      return res.status(400).json({ error: `Provider "${provider}" is not supported by this server` });
+    }
 
     let finalProjectPath = null;
     let clonedProjectCreated = false;
@@ -1040,11 +1045,7 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
       // A request without `model` runs on the catalog's DEFAULT, the value
       // /api/providers/:provider/models and the API docs advertise. It is the
       // first custom model while the provider lists only custom models.
-      // Only the registered runnable providers have a catalog: a continued legacy
-      // session whose provider is no longer registered must not fail here.
-      const providerModels = AGENT_RUN_PROVIDERS.includes(provider)
-        ? await providerModelsService.getProviderModels(provider)
-        : null;
+      const providerModels = await providerModelsService.getProviderModels(provider);
       // Cursor otherwise leaves the choice to its CLI, so it only takes the
       // catalog DEFAULT when that is one of the user's own models.
       const cursorDefaultModel = providerModels?.CUSTOM_MODELS_ONLY === true
@@ -1088,12 +1089,6 @@ export function createAgentRouter(dependencies: AgentRouterDependencies): expres
           model: model || providerModels?.DEFAULT,
           effort,
           permissionMode: 'bypassPermissions'
-        }, run.writer);
-      } else if (provider === 'dsh') {
-        if (!dependencies.queryDsh) throw new Error('DSH runtime is not configured.');
-        await dependencies.queryDsh(message.trim(), {
-          projectPath: finalProjectPath, cwd: finalProjectPath, sessionId: appSessionId,
-          model: model || providerModels?.DEFAULT, effort, permissionMode: 'bypassPermissions',
         }, run.writer);
       } else if (provider === 'opencode') {
         console.log('Starting OpenCode CLI session');

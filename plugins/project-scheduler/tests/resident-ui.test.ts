@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  isRetiredResidentProvider,
   residentCapacityNote,
   residentStatusLabel,
   residentTaskActions,
@@ -62,6 +63,26 @@ test("a disabled binding explains that it keeps protection and will not recover"
   const actions = residentTaskActions(row({ status: "stopped", enabled: false }));
   assert.match(String(actions.note), /保护/);
   assert.equal(residentTaskActions(row({ status: "running" })).canRemove, true);
+});
+
+test("a binding from a retired provider is disabled and offers cleanup only", () => {
+  const retired = row({
+    status: "stopped",
+    runtime: { provider: "dsh", permissionMode: null, sandboxMode: null },
+  });
+  assert.equal(isRetiredResidentProvider(retired), true);
+  assert.equal(isRetiredResidentProvider(row()), false);
+  assert.deepEqual(residentTaskActions(retired), {
+    canStop: false,
+    canContinue: false,
+    canEnable: false,
+    canRemove: true,
+    note: "该 Agent 已停用：不会恢复或继续运行，可删除常驻任务以清理（原会话与历史保留）",
+  });
+  // A stale running status is still not stoppable, and stays removable.
+  const staleRunning = residentTaskActions({ ...retired, status: "running" });
+  assert.equal(staleRunning.canStop, false);
+  assert.equal(staleRunning.canRemove, true);
 });
 
 test("resident tasks are documented as not consuming the cron concurrency limit", () => {
@@ -312,6 +333,36 @@ test("a refused stop is reported and the task stays on screen", async () => {
   assert.ok(mountedHost.messages.some((message) => message.includes("停止失败")));
   assert.ok(mountedHost.messages.every((message) => !message.includes("已停止常驻任务")));
   assert.ok(mountedHost.findButton("停止"), "the task is still shown after a failed stop");
+  await mountedHost.close();
+});
+
+test("a retired provider row hides stop and continue, disables enable and keeps delete", async () => {
+  const retired = residentRow({
+    status: "stopped",
+    runtime: { provider: "dsh", permissionMode: null, sandboxMode: null },
+  });
+  const mountedHost = await mountResidentTasks({ tasks: [retired] });
+  const doc = mountedHost.window.document;
+
+  // Neither a stop nor a continue the host would refuse is offered.
+  assert.equal(mountedHost.findButton("停止"), undefined);
+  assert.equal(mountedHost.findButton("继续"), undefined);
+  const enabledBox = doc.querySelectorAll("input[type=checkbox]")[0] as HTMLInputElement;
+  // The stored switch may still say enabled; the row shows the real stopped state and
+  // cannot be switched on, while the visible toggle stays independent.
+  assert.equal(enabledBox.checked, false);
+  assert.equal(enabledBox.disabled, true);
+  const visibleBox = doc.querySelectorAll("input[type=checkbox]")[1] as HTMLInputElement;
+  assert.equal(visibleBox.checked, true);
+  assert.equal(visibleBox.disabled, false);
+  const text = doc.body.textContent ?? "";
+  assert.match(text, /dsh/);
+  assert.match(text, /Agent 已停用/);
+  assert.match(text, /可删除常驻任务以清理/);
+
+  // Cleanup still works through the ordinary remove flow.
+  await mountedHost.click("删除");
+  assert.ok(mountedHost.calls.some((call) => call.method === "DELETE" && call.path === "/resident-tasks/resident-1"));
   await mountedHost.close();
 });
 

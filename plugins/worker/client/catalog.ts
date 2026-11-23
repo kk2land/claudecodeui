@@ -1,6 +1,7 @@
 import type {
   CodexModelsDirectory,
   CodexServiceModelCatalog,
+  DshModelCatalog,
   PiModelCatalog,
   WorkerModelCatalog,
   WorkerModelOption,
@@ -22,15 +23,15 @@ export const DEFAULT_EFFORT_LABEL = "默认（沿用执行器）";
 export const SAVED_SUFFIX = "（当前已保存）";
 
 /**
- * Reads the optional host model catalog. A missing capability rejects so the editor shows a
- * local, retryable error instead of pretending the catalog is empty.
+ * Reads the optional host Codex model catalog. A missing capability rejects so the editor shows a
+ * local, retryable error instead of pretending the catalog is empty. DSH has no host entry: the
+ * plugin serves its own directory from `DSH_HOME`.
  */
 export async function readHostModels(
   host: WorkerHost,
-  provider: "codex" | "dsh",
 ): Promise<WorkerModelCatalog> {
-  if (!host.models) throw new Error("宿主未提供 " + provider + " 模型目录");
-  return host.models(provider);
+  if (!host.models) throw new Error("宿主未提供 Codex 模型目录");
+  return host.models("codex");
 }
 
 /** Reads the Codex inference-service directory; never carries provider credentials. */
@@ -69,23 +70,42 @@ function withSavedModel(
   ];
 }
 
-/** DSH model rows: the host catalog without its `default` sentinel, plus the null default. */
+/**
+ * DSH model rows from the plugin's own directory. The route is the exact persisted `model` value
+ * (`provider/model`); DSH applies reasoning only to an explicit model, so the default row carries
+ * no levels.
+ */
 export function dshModelOptions(
-  catalog: WorkerModelCatalog | null,
+  catalog: DshModelCatalog | null,
   model: string | null,
   effort: string | null,
 ): ModelSelectOption[] {
   const options: ModelSelectOption[] = [
     { value: "", label: DEFAULT_MODEL_LABEL, effort: [] },
-    ...(catalog?.OPTIONS ?? [])
-      .filter((option) => option.value !== "default")
-      .map((option) => ({
-        value: option.value,
-        label: option.label,
-        effort: effortValues(option),
-      })),
+    ...(catalog?.models ?? []).map((option) => ({
+      value: option.route,
+      label: option.label,
+      effort: option.efforts,
+    })),
   ];
   return withSavedModel(options, model, effort);
+}
+
+/**
+ * DSH effort levels for the current route: the levels the static directory declares for a listed
+ * model, the engine's levels for a route typed outside the directory, and none while no model is
+ * selected because DSH applies reasoning only to an explicit model.
+ */
+export function dshEffortLevels(
+  catalog: DshModelCatalog | null,
+  model: string | null,
+): string[] {
+  if (!model) return [];
+  return (
+    catalog?.models.find((option) => option.route === model)?.efforts ??
+    catalog?.effortLevels ??
+    []
+  );
 }
 
 /**
@@ -155,7 +175,7 @@ export function piModelOptions(
 export function modelOptionsFor(
   config: { type: WorkerType; model: string | null; effort: string | null },
   catalogs: {
-    dsh: WorkerModelCatalog | null;
+    dsh: DshModelCatalog | null;
     codex: WorkerModelCatalog | null;
     codexProviderModels: string[] | null;
     pi: PiModelCatalog | null;
