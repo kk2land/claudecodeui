@@ -142,6 +142,7 @@ function CountsBar({ counts }: { counts: WorkerStateSnapshot["counts"] }) {
       <CountCell label="DSH" counts={counts.dsh} />
       <CountCell label="Pi" counts={counts.pi} />
       <CountCell label="Codex" counts={counts.codex} />
+      <CountCell label="Antigravity" counts={counts.agy} />
       <CountCell label="全部" counts={counts.total} emphasize />
     </section>
   );
@@ -1530,9 +1531,13 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
     () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "codex") : emptyCounts()),
     [liveSnapshot],
   );
+  const agyCounts = useMemo(
+    () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "agy") : emptyCounts()),
+    [liveSnapshot],
+  );
   const counts = useMemo(
-    () => totalCounts([dshCounts, piCounts, codexCounts]),
-    [dshCounts, piCounts, codexCounts],
+    () => totalCounts([dshCounts, piCounts, codexCounts, agyCounts]),
+    [dshCounts, piCounts, codexCounts, agyCounts],
   );
   const settings = liveSnapshot?.settings ?? null;
   const loading = !liveSnapshot && !error;
@@ -1668,7 +1673,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
           <header className="worker-heading">
             <div>
               <h2>子任务 Worker</h2>
-              <p>DSH、Pi 与 Codex 子任务由插件执行并记录；执行成功不等于验收。</p>
+              <p>DSH、Pi、Codex 与 Antigravity 子任务由插件执行并记录；执行成功不等于验收。</p>
             </div>
             <div className="worker-actions">
               <button
@@ -1736,6 +1741,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
             dsh: dshCounts,
             pi: piCounts,
             codex: codexCounts,
+            agy: agyCounts,
             total: counts,
           }} />
           {!context.project ? (

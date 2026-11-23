@@ -80,14 +80,15 @@ test("canonical settings persist only canonical fields and project per-engine de
   assert.equal(saved.schemaVersion, 2);
   assert.equal(saved.defaultWorkerType, "dsh");
   assert.equal(saved.defaultConfigId, "dsh-default");
-  assert.deepEqual(saved.concurrency, { dsh: 2, pi: 1, codex: 3 });
-  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: true });
-  assert.deepEqual(saved.roles, { dsh: ["development"], pi: [], codex: [] });
+  assert.deepEqual(saved.concurrency, { dsh: 2, pi: 1, codex: 3, agy: 1 });
+  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: true, agy: false });
+  assert.deepEqual(saved.roles, { dsh: ["development"], pi: [], codex: [], agy: [] });
   assert.deepEqual(saved.defaults, {
     dsh: { model: "dsh-m", effort: "high" },
     // The default engine has no Pi config, so Pi projects its first list entry.
     pi: { model: "openrouter/fast", effort: "low" },
     codex: { model: null, effort: null },
+    agy: { model: null, effort: null },
   });
   assert.deepEqual(saved.codex, {
     env: { CODEX_PROXY_BYPASS: "1" },

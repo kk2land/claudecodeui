@@ -102,6 +102,9 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       "worker_wait",
     ],
   );
+  const startSchema = tools.tools.find((tool) => tool.name === "worker_start")
+    ?.inputSchema as { properties?: { type?: { enum?: string[] } } } | undefined;
+  assert.ok(startSchema?.properties?.type?.enum?.includes("agy"));
   const toolsJson = JSON.stringify(tools);
   t.diagnostic(`tools/list json: ${Buffer.byteLength(toolsJson, "utf8")}B`);
   const codexEnvSecret = "{{SECRET_xk2p9vqa}}";
@@ -149,17 +152,19 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       codex?: unknown;
     };
   }).settings;
-  assert.deepEqual(contextSettings.concurrency, { dsh: 3, pi: 3, codex: 3 });
+  assert.deepEqual(contextSettings.concurrency, { dsh: 3, pi: 3, codex: 3, agy: 1 });
   assert.deepEqual(contextSettings.defaults, {
     dsh: { model: "mcp-default-model", effort: "medium" },
     pi: { model: null, effort: null },
     codex: { model: null, effort: null },
+    agy: { model: null, effort: null },
   });
-  assert.deepEqual(contextSettings.enabled, { dsh: true, pi: true, codex: true });
+  assert.deepEqual(contextSettings.enabled, { dsh: true, pi: true, codex: true, agy: false });
   assert.deepEqual(contextSettings.roles, {
     dsh: [],
     pi: ["code_review"],
     codex: [],
+    agy: [],
   });
   assert.equal("codex" in contextSettings, false);
   const mcpConfigs = (context as {
@@ -759,4 +764,53 @@ test("compact start and resume receipts replay the accepted run across views", a
   });
   assert.equal(resumeConflict.isError, true);
   assert.equal(service.get(receipt.workerId).runs.length, 2);
+});
+
+test("MCP worker_start accepts an agy config and runs it end to end", async (t) => {
+  const { service } = createService(t, temporaryRoot("worker-mcp-agy-"));
+  service.updateSettings({
+    configs: [
+      ...service.settings().configs,
+      {
+        id: "agy-default",
+        name: "agy#1",
+        type: "agy",
+        enabled: true,
+        roles: [],
+        concurrency: 3,
+        hardTimeoutSeconds: 60,
+        model: "gemini-3.8-flash-low",
+        effort: "low",
+      },
+    ],
+    defaultConfigId: "agy-default",
+  });
+  const host = await mcpServer(service, "owner-token");
+  t.after(host.close);
+  const client = new Client({ name: "worker-test", version: "1.0.0" });
+  const transport = new StreamableHTTPClientTransport(host.url, {
+    requestInit: { headers: { authorization: "Bearer owner-token" } },
+  });
+  t.after(() => client.close());
+  await client.connect(transport);
+  const receipt = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: {
+        taskName: "agy over MCP",
+        type: "agy",
+        prompt: "reply over mcp",
+        workspace: { mode: "existing" },
+        writePaths: [],
+        requestId: "mcp-agy-start",
+      },
+    }),
+  ) as { worker: { id: string; type: string }; run: { id: string } };
+  assert.equal(receipt.worker.type, "agy");
+  const done = await service.wait(receipt.worker.id, 10);
+  assert.equal(done.run.id, receipt.run.id);
+  assert.equal(done.run.status, "completed");
+  assert.match(done.run.finalText ?? "", /agy answer/);
+  assert.equal(done.run.model, "gemini-3.8-flash-low");
+  assert.equal(done.run.effort, "low");
 });

@@ -7,6 +7,7 @@ import type {
   WorkerModelOption,
   WorkerType,
 } from "../shared/contracts.js";
+import { AGY_EFFORT_LEVELS, agyCompatibleEfforts } from "../shared/agy.js";
 import type { WorkerHost } from "./api.js";
 
 /**
@@ -171,6 +172,26 @@ export function piModelOptions(
   return withSavedModel(options, model, effort);
 }
 
+/**
+ * Antigravity rows. The CLI's model directory is a network-backed `agy models` command, so the
+ * editor keeps a typable native id instead of starting the CLI on page load. A model id with an
+ * effort suffix exposed by `agy models` (for example `gemini-3.8-flash-low`) offers only that
+ * effort; an unsuffixed id keeps every documented level because the CLI may accept effort for
+ * custom or non-variant ids.
+ */
+export function agyModelOptions(model: string | null): ModelSelectOption[] {
+  const options: ModelSelectOption[] = [
+    { value: "", label: DEFAULT_MODEL_LABEL, effort: [...AGY_EFFORT_LEVELS] },
+  ];
+  if (model && !options.some((option) => option.value === model))
+    options.push({
+      value: model,
+      label: model + SAVED_SUFFIX,
+      effort: agyCompatibleEfforts(model),
+    });
+  return options;
+}
+
 /** Model rows for a draft config of any engine; unavailable catalogs yield only the default. */
 export function modelOptionsFor(
   config: { type: WorkerType; model: string | null; effort: string | null },
@@ -185,6 +206,8 @@ export function modelOptionsFor(
     return dshModelOptions(catalogs.dsh, config.model, config.effort);
   if (config.type === "pi")
     return piModelOptions(catalogs.pi, config.model, config.effort);
+  if (config.type === "agy")
+    return agyModelOptions(config.model);
   return codexModelOptions(
     catalogs.codex,
     catalogs.codexProviderModels,

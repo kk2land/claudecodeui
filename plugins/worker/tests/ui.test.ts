@@ -308,16 +308,17 @@ function snapshot(overrides: Record<string, unknown> = {}) {
       dsh: counts({ running: 1 }),
       pi: counts(),
       codex: counts(),
+      agy: counts(),
       total: counts({ running: 1 }),
     },
     settings: {
       schemaVersion: 2,
       configs: configDefaults(),
       defaultConfigId: "dsh-default",
-      concurrency: { dsh: 3, pi: 3, codex: 3 },
+      concurrency: { dsh: 3, pi: 3, codex: 3, agy: 1 },
       defaultWorkerType: "dsh",
       enabled: { dsh: true, pi: true, codex: true },
-      roles: { dsh: [], pi: [], codex: [] },
+      roles: { dsh: [], pi: [], codex: [], agy: [] },
       defaults: {
         dsh: { model: null, effort: null },
         pi: { model: null, effort: null },
@@ -1452,6 +1453,7 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
           dsh: counts({ running: 2 }),
           pi: counts(),
           codex: counts(),
+          agy: counts(),
           total: counts({ running: 2 }),
         },
       }),
@@ -1503,7 +1505,7 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
   }
 });
 
-test("DOM: all three worker types have distinct labels and aggregate counts", async () => {
+test("DOM: all four worker types have distinct labels and aggregate counts", async () => {
   const records = [
     worker({ id: "worker-dsh", type: "dsh", taskName: "DSH 任务" }),
     worker({
@@ -1524,6 +1526,19 @@ test("DOM: all three worker types have distinct labels and aggregate counts", as
         exitCode: 0,
       }),
     }),
+    worker({
+      id: "worker-agy",
+      type: "agy",
+      configId: "agy-default",
+      configName: "agy#1",
+      taskName: "Antigravity 任务",
+      latestRun: run({
+        id: "run-agy",
+        workerId: "worker-agy",
+        status: "running",
+        finishedAt: null,
+      }),
+    }),
   ];
   const mounted = await mountPlugin({
     state: () =>
@@ -1533,12 +1548,13 @@ test("DOM: all three worker types have distinct labels and aggregate counts", as
           dsh: counts({ running: 1 }),
           pi: counts({ queued: 1 }),
           codex: counts({ completed: 1 }),
-          total: counts({ running: 1, queued: 1, completed: 1 }),
+          agy: counts({ running: 1 }),
+          total: counts({ running: 2, queued: 1, completed: 1 }),
         },
       }),
   });
   try {
-    await waitFor(() => textOf(mounted.container).includes("Codex 任务"), "三类型列表");
+    await waitFor(() => textOf(mounted.container).includes("Antigravity 任务"), "四类型列表");
     const summary = mounted.container.querySelector(
       '[aria-label="按类型统计"]',
     );
@@ -1546,10 +1562,15 @@ test("DOM: all three worker types have distinct labels and aggregate counts", as
     assert.ok(textOf(summary).includes("1DSH 执行中"));
     assert.ok(textOf(summary).includes("0Pi 执行中"));
     assert.ok(textOf(summary).includes("0Codex 执行中"));
-    assert.ok(textOf(summary).includes("1全部 执行中"));
+    assert.ok(textOf(summary).includes("1Antigravity 执行中"));
+    assert.ok(textOf(summary).includes("2全部 执行中"));
     assert.equal(
       textOf(mounted.container.querySelector(".worker-type-codex")),
       "Codex",
+    );
+    assert.equal(
+      textOf(mounted.container.querySelector(".worker-type-agy")),
+      "Antigravity",
     );
     assert.ok(
       textOf(mounted.container).includes(
@@ -1557,7 +1578,7 @@ test("DOM: all three worker types have distinct labels and aggregate counts", as
       ),
     );
     assert.ok(textOf(mounted.container).includes("配置 DSH default"));
-    assert.ok(textOf(mounted.container).includes("3 个 worker · 3 个状态记录"));
+    assert.ok(textOf(mounted.container).includes("4 个 worker · 4 个状态记录"));
   } finally {
     mounted.unmount();
   }
@@ -2144,6 +2165,106 @@ test("DOM: Pi's default model accepts thinking effort while DSH still needs an e
     };
     assert.equal(body.configs[1]!.model, null);
     assert.equal(body.configs[1]!.effort, "high");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+function agySettings(): Record<string, any> & {
+  configs: Array<Record<string, any>>;
+} {
+  const settings = snapshot().settings as Record<string, any> & {
+    configs: Array<Record<string, any>>;
+  };
+  settings.configs = [
+    ...configDefaults(),
+    {
+      id: "agy-default",
+      name: "agy#1",
+      type: "agy",
+      enabled: true,
+      roles: [],
+      concurrency: 3,
+      hardTimeoutSeconds: 600,
+      model: "gemini-3.8-flash-low",
+      effort: "low",
+    },
+  ];
+  return settings;
+}
+
+test("DOM: agy effort follows the selected model variant and clears incompatible values", async () => {
+  const settings = agySettings();
+  const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
+  try {
+    await openSettings(mounted);
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLInputElement;
+    const reasoning = byLabel(
+      mounted.container,
+      "配置 4 reasoning",
+    ) as HTMLSelectElement;
+    assert.deepEqual(optionValues(reasoning), ["", "low"]);
+
+    await typeInto(model, "gemini-3.8-flash-high");
+    await waitFor(
+      () => reasoning.value === "" && optionValues(reasoning).join(",") === ",high",
+      "切换 high 变体清空 low",
+    );
+    await typeInto(reasoning, "high");
+
+    // An id without a proven effort suffix is not guessed; all levels stay available.
+    await typeInto(model, "custom/vendor-model");
+    await waitFor(
+      () =>
+        reasoning.value === "high" &&
+        optionValues(reasoning).join(",") === ",low,medium,high,xhigh,max",
+      "裸模型保留显式 effort",
+    );
+
+    await typeInto(model, "gemini-3.8-flash-low");
+    await waitFor(
+      () => reasoning.value === "" && optionValues(reasoning).join(",") === ",low",
+      "切回 low 变体清空 high",
+    );
+    await typeInto(reasoning, "low");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "兼容组合可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存兼容组合");
+    const body = callsTo(mounted, "/settings")[0]!.body as {
+      configs: Array<Record<string, any>>;
+    };
+    assert.equal(body.configs[3]!.model, "gemini-3.8-flash-low");
+    assert.equal(body.configs[3]!.effort, "low");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a stored agy model/effort conflict is visible and blocks save", async () => {
+  const settings = agySettings();
+  settings.configs[3] = {
+    ...settings.configs[3],
+    model: "gemini-3.8-flash-low",
+    effort: "high",
+  };
+  const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
+  try {
+    await openSettings(mounted);
+    await waitFor(
+      () => textOf(mounted.container).includes("固定使用 low reasoning"),
+      "agy 冲突提示",
+    );
+    const reasoning = byLabel(
+      mounted.container,
+      "配置 4 reasoning",
+    ) as HTMLSelectElement;
+    assert.deepEqual(optionValues(reasoning), ["", "low", "high"]);
+    const stored = [...reasoning.options].find((option) => option.value === "high");
+    assert.ok(stored);
+    assert.equal(stored.disabled, true);
+    assert.match(textOf(stored), /当前已保存，与模型不兼容/);
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
   } finally {
     mounted.unmount();
   }

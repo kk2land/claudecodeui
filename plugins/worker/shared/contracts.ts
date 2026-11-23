@@ -14,10 +14,16 @@ export type { WorkerTaskRole };
 //----------------- WORKER IDENTITY AND STATUS ------------
 
 /**
- * Native worker runner implemented by the CloudCLI Worker plugin: DSH headless, Pi print/JSON, or
- * `codex exec`.
+ * Native worker runner implemented by the CloudCLI Worker plugin: DSH headless, Pi print/JSON,
+ * `codex exec`, or the Google Antigravity CLI in print/stream-json mode.
  */
-export type WorkerType = "dsh" | "pi" | "codex";
+export type WorkerType = "dsh" | "pi" | "codex" | "agy";
+
+/**
+ * Engine names that predate agy. The legacy full-map settings input still edits only these
+ * fixed initial configs; agy is configured through the canonical `configs` list.
+ */
+export type LegacyWorkerType = "dsh" | "pi" | "codex";
 
 /**
  * Lifecycle of one run. `queued` waits in FIFO order; `starting`, `running`, `stopping`, and
@@ -158,14 +164,16 @@ export type WorkerStartInput = {
   /**
    * Optional native model override. Explicit selections win over configured defaults and over
    * Codex extra args. Pi/DSH receive one complete native model identifier (for example
-   * `provider/model`) and their CLI/adapter resolves the route; they have no independent service.
+   * `provider/model`) and their CLI/adapter resolves the route; agy receives its native model id
+   * from `agy models`. None of these engines has an independent service.
    */
   model?: string;
   /** Independent model service, supported only for Codex; non-Codex requests reject it. */
   provider?: string;
   /**
    * Native reasoning effort. DSH requires an explicit model before effort can be applied; Pi
-   * accepts only its native thinking levels.
+   * accepts only its native thinking levels, and agy accepts its documented levels subject to
+   * the fixed effort encoded by some model ids.
    */
   effort?: string;
   /**
@@ -184,7 +192,8 @@ export type WorkerStartInput = {
  * A follow-up run for an existing worker. The cwd, home, and native session identity stay fixed;
  * each resume creates its own `runId` and may override model/effort explicitly. An independent
  * provider is Codex-only. Codex resumes its recorded native session id with `codex exec resume`;
- * old non-Codex providers are folded into the full model id.
+ * agy resumes its recorded `conversation_id` with `--conversation`; old non-Codex providers are
+ * folded into the full model id for Pi/DSH only.
  */
 export type WorkerResumeInput = {
   workerId: string;
@@ -446,7 +455,8 @@ export type WorkerNotification = {
  *
  * `model`/`effort` are the configured defaults used only when a request omits explicit
  * selections; null means the runner's own default. Pi stores the complete native model id,
- * which is often `provider/model`.
+ * which is often `provider/model`; agy stores a native model id from `agy models` (or an
+ * operator-provided custom id).
  * `codex` is present for `type: "codex"` configs only: `modelProvider` is the Codex inference
  * service (null keeps Codex's own default), `env` is merged over the inherited environment for
  * the run, and `legacyExtraArgs` are separate `codex exec` argv entries that were originally
@@ -585,13 +595,14 @@ export type WorkerSettingsUpdate = {
  *
  * `enabled` and `roles` are whole-setting optional: when a map is supplied it must contain all
  * three of `dsh`, `pi`, and `codex`; when omitted the stored value is kept. A supplied
- * `defaultWorkerType` must reference an initial config that is enabled afterwards.
+ * `defaultWorkerType` must reference an initial config that is enabled afterwards. agy is not
+ * part of this legacy shape; it is configured only through the canonical `configs` list.
  */
 export type WorkerLegacySettingsInput = {
   concurrency: { dsh: number; pi: number } & { codex?: number };
-  defaultWorkerType?: WorkerType;
-  enabled?: Record<WorkerType, boolean>;
-  roles?: Record<WorkerType, WorkerTaskRole[]>;
+  defaultWorkerType?: LegacyWorkerType;
+  enabled?: Record<LegacyWorkerType, boolean>;
+  roles?: Record<LegacyWorkerType, WorkerTaskRole[]>;
   defaults?: { dsh: WorkerDefault; pi: WorkerDefault } & { codex?: WorkerDefault };
   codex?: WorkerCodexSettings;
   retentionDays?: number;
@@ -718,6 +729,7 @@ export type WorkerCounts = {
   dsh: WorkerCountsByStatus;
   pi: WorkerCountsByStatus;
   codex: WorkerCountsByStatus;
+  agy: WorkerCountsByStatus;
   total: WorkerCountsByStatus;
 };
 

@@ -17,6 +17,7 @@ export const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
 export const dshFixture = path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs");
 export const piFixture = path.join(pluginRoot, "tests/fixtures/fake-pi.mjs");
 export const codexFixture = path.join(pluginRoot, "tests/fixtures/fake-codex.mjs");
+export const agyFixture = path.join(pluginRoot, "tests/fixtures/fake-agy.mjs");
 export const guardianSource = path.join(pluginRoot, "server/guardian.ts");
 
 export function temporaryRoot(prefix: string): string {
@@ -72,7 +73,7 @@ export function createService(
   const service = new WorkerService({
     dataDirectory: data,
     environment: env,
-    executablePaths: { dsh: dshFixture, pi: piFixture, codex: codexFixture },
+    executablePaths: { dsh: dshFixture, pi: piFixture, codex: codexFixture, agy: agyFixture },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
     dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
     ...extraOptions,

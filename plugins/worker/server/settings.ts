@@ -1,4 +1,5 @@
 import type {
+  LegacyWorkerType,
   WorkerCodexConfig,
   WorkerConfig,
   WorkerDefault,
@@ -7,13 +8,15 @@ import type {
   WorkerTaskRole,
   WorkerType,
 } from "./shared/index.js";
+import { AGY_EFFORT_LEVELS, agyEffortConflict } from "../shared/agy.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 
-/** Fixed ids of the three configs the schema-2 migration always creates. */
+/** Fixed ids of the legacy configs the schema-2 migration creates. */
 export const INITIAL_CONFIG_IDS: Record<WorkerType, string> = {
   dsh: "dsh-default",
   pi: "pi-default",
   codex: "codex-default",
+  agy: "agy-default",
 };
 
 /** Display names of the fixed initial configs; renaming them keeps the id unchanged. */
@@ -21,9 +24,13 @@ export const INITIAL_CONFIG_NAMES: Record<WorkerType, string> = {
   dsh: "dsh#1",
   pi: "pi#1",
   codex: "codex#1",
+  agy: "agy#1",
 };
 
-const TYPES: WorkerType[] = ["dsh", "pi", "codex"];
+/** Engines the schema-2 migration and legacy settings input still cover. */
+export const LEGACY_WORKER_TYPES: LegacyWorkerType[] = ["dsh", "pi", "codex"];
+/** Every engine the current canonical config list can project. */
+export const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex", "agy"];
 const DEFAULT_CODEX_ENV = { CODEX_PROXY_BYPASS: "1" };
 const DEFAULT_CODEX_ARGS = ["-c", "model_provider=magpie"];
 const DEFAULT_CONCURRENCY = 3;
@@ -110,6 +117,26 @@ function codexConfig(
   };
 }
 
+/**
+ * Applies agy's documented native reasoning levels and checks the remaining engine-specific
+ * effort rules. Pi accepts only its thinking levels; DSH needs an explicit model.
+ */
+export function validateConfigEffort(
+  type: WorkerType,
+  model: string | null,
+  effort: string | null,
+): string | null {
+  if (type === "agy" && effort && !(AGY_EFFORT_LEVELS as readonly string[]).includes(effort))
+    return "agy 配置的 effort 必须是 low、medium、high、xhigh 或 max";
+  if (type === "agy") {
+    const conflict = agyEffortConflict(model, effort);
+    if (conflict) return conflict;
+  }
+  if (type === "dsh" && effort && !model)
+    return "DSH 配置的 effort 需要同时配置 model";
+  return null;
+}
+
 /** Fresh-install settings used by WorkerStore; only Pi is configured by default. */
 export function defaultSettingsRecord(): WorkerSettingsRecord {
   return {
@@ -180,7 +207,7 @@ export function migrateLegacySettings(
   const codexArgs =
     stringList(legacyCodex.extraArgs) ?? [...DEFAULT_CODEX_ARGS];
 
-  const configs = TYPES.map((type): WorkerConfig => {
+  const configs = LEGACY_WORKER_TYPES.map((type): WorkerConfig => {
     const config: WorkerConfig = {
       id: INITIAL_CONFIG_IDS[type],
       name: INITIAL_CONFIG_NAMES[type],
@@ -198,8 +225,10 @@ export function migrateLegacySettings(
   });
 
   const configuredDefault = stored.defaultWorkerType;
-  const defaultType: WorkerType = TYPES.includes(configuredDefault as WorkerType)
-    ? (configuredDefault as WorkerType)
+  const defaultType: LegacyWorkerType = LEGACY_WORKER_TYPES.includes(
+    configuredDefault as LegacyWorkerType,
+  )
+    ? (configuredDefault as LegacyWorkerType)
     : "dsh";
   const defaultConfig =
     configs.find((config) => config.type === defaultType) ?? configs[0]!;
@@ -250,7 +279,7 @@ export function projectSettings(record: WorkerSettingsRecord): WorkerSettings {
   const enabled = {} as Record<WorkerType, boolean>;
   const roles = {} as Record<WorkerType, WorkerTaskRole[]>;
   const defaults = {} as Record<WorkerType, WorkerDefault>;
-  for (const type of TYPES) {
+  for (const type of WORKER_TYPES) {
     const config = configForType(configs, record.defaultConfigId, type);
     concurrency[type] = config?.concurrency ?? 1;
     enabled[type] = config?.enabled ?? false;

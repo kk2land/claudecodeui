@@ -41,6 +41,7 @@ export const TYPE_LABELS: Record<WorkerType, string> = {
   dsh: "DSH",
   pi: "Pi",
   codex: "Codex",
+  agy: "Antigravity",
 };
 
 export const DELIVERY_LABELS: Record<WorkerNotificationDelivery, string> = {

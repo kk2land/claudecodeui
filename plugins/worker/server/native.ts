@@ -115,6 +115,17 @@ export function nativeHome(
     const resolvedHome = home(environment, "CODEX_HOME", ".codex");
     return { home: resolvedHome, sessionsRoot: path.join(resolvedHome, "sessions") };
   }
+  if (type === "agy") {
+    // The Antigravity CLI reads its own fixed config directory under `~/.gemini`; the plugin
+    // does not invent a home override or copy credentials. The run's home is recorded only.
+    const userHome = nonBlank(environment.HOME)
+      ? path.resolve(expandHome(environment.HOME!))
+      : os.homedir();
+    return {
+      home: path.join(userHome, ".gemini", "antigravity-cli"),
+      sessionsRoot: path.join(dataDirectory, "sessions", "agy"),
+    };
+  }
   return {
     home: home(environment, "PI_CODING_AGENT_DIR", path.join(".pi", "agent")),
     sessionsRoot: path.join(dataDirectory, "sessions", "pi"),
@@ -228,6 +239,36 @@ function preparePi(input: PrepareInput): NativeLaunch {
 }
 
 /**
+ * Builds the Antigravity print/stream-json launch. The prompt is attached to `--print=` so it
+ * is always the flag value, never a positional argument that the Go flag parser could consume
+ * as another flag's value. Headless agy cannot prompt for tool approval, so the documented
+ * `--dangerously-skip-permissions` flag is required for write-capable Worker tasks.
+ */
+function prepareAgy(input: PrepareInput): NativeLaunch {
+  const model = nonBlank(input.run.model);
+  const effort = nonBlank(input.run.effort);
+  const sessionId = input.previous?.nativeSessionId ?? null;
+  const argv = [
+    input.executable,
+    "--print=" + input.prompt,
+    "--output-format",
+    "stream-json",
+    "--dangerously-skip-permissions",
+  ];
+  if (model) argv.push("--model", model);
+  if (effort) argv.push("--effort", effort);
+  if (sessionId) argv.push("--conversation", sessionId);
+  return {
+    argv,
+    cwd: input.cwd,
+    env: { ...input.baseEnvironment },
+    prompt: input.prompt,
+    expectedSessionId: sessionId,
+    sessionFile: null,
+  };
+}
+
+/**
  * Builds a Codex exec invocation. All exec-level options, including configured extra args, stay
  * before the resume subcommand; the thread id is the only positional before the stdin prompt.
  */
@@ -276,6 +317,7 @@ function prepareCodex(input: PrepareInput): NativeLaunch {
 export function prepareLaunch(input: PrepareInput): NativeLaunch {
   if (input.type === "dsh") return prepareDsh(input);
   if (input.type === "codex") return prepareCodex(input);
+  if (input.type === "agy") return prepareAgy(input);
   return preparePi(input);
 }
 
@@ -984,6 +1026,155 @@ export function parsePi(
   };
 }
 
+/**
+ * Parses the Antigravity `--output-format stream-json` event stream. Usage is summed from this
+ * run's completed `agent_response` steps: the CLI's `result.usage` is conversation-cumulative on
+ * resume, so it is only a fallback for a brand-new conversation with no step samples. A denied
+ * tool action is a failed Worker turn even when agy reports SUCCESS with an empty response.
+ */
+export function parseAgy(
+  file: string,
+  expectedSessionId: string | null,
+  expectedCwd: string,
+): NativeExecution {
+  let sessionId: string | null = null;
+  let validatedSessionId: string | null = null;
+  let initSeen = false;
+  let resultSeen = false;
+  let resultStatus: string | null = null;
+  let resultUsage: unknown = null;
+  let identityMismatch = false;
+  let finalText: string | null = null;
+  let error: string | null = null;
+  let usageScope: "run" | "session" = "run";
+  const buckets = emptyBuckets();
+  const fail = (message: string) => {
+    if (error === null) error = message;
+  };
+  for (const { value, number } of lines(file)) {
+    if (value === undefined || typeof value !== "object" || Array.isArray(value)) {
+      fail("无效 agy 事件 (line " + number + ")");
+      continue;
+    }
+    const event = value as Record<string, unknown>;
+    const kind = event.event;
+    if (typeof kind !== "string") {
+      fail("无效 agy 事件 (line " + number + ")");
+      continue;
+    }
+    if (kind === "init") {
+      initSeen = true;
+      const id = event.conversation_id;
+      let identityValid = false;
+      if (typeof id !== "string" || !id.trim())
+        fail("agy init 缺少有效 conversation_id");
+      else if (sessionId !== null) fail("出现多个 agy init 事件");
+      else {
+        sessionId = id;
+        if (expectedSessionId !== null && id !== expectedSessionId)
+          fail("agy resume 返回了不同会话 ID");
+        else identityValid = true;
+      }
+      const init = event.init;
+      const cwd =
+        init && typeof init === "object" && !Array.isArray(init)
+          ? (init as Record<string, unknown>).cwd
+          : null;
+      const cwdValid =
+        typeof cwd === "string" &&
+        path.isAbsolute(cwd) &&
+        samePath(cwd, expectedCwd);
+      if (!cwdValid) fail("agy init 工作目录不匹配");
+      if (identityValid && cwdValid && sessionId !== null)
+        validatedSessionId = sessionId;
+      continue;
+    }
+    if (kind === "step_update") {
+      const step =
+        event.step_update && typeof event.step_update === "object" && !Array.isArray(event.step_update)
+          ? (event.step_update as Record<string, unknown>)
+          : null;
+      if (!step) continue;
+      if (step.state !== "DONE" || step.step_type !== "agent_response") continue;
+      addUsage(buckets, step.usage, {
+        input: "input_tokens",
+        output: "output_tokens",
+        cacheRead: "cache_read_tokens",
+        cacheWrite: "cache_write_tokens",
+        total: "total_tokens",
+      });
+      continue;
+    }
+    if (kind !== "result") continue;
+    resultSeen = true;
+    const result =
+      event.result && typeof event.result === "object" && !Array.isArray(event.result)
+        ? (event.result as Record<string, unknown>)
+        : null;
+    if (!result) {
+      fail("agy result 事件缺少 result 对象");
+      continue;
+    }
+    resultStatus = typeof result.status === "string" ? result.status : null;
+    if (
+      sessionId !== null &&
+      typeof result.conversation_id === "string" &&
+      result.conversation_id &&
+      result.conversation_id !== sessionId
+    ) {
+      identityMismatch = true;
+      fail("agy result 与会话 ID 不一致");
+    }
+    if (resultStatus !== "SUCCESS") {
+      const message = result.error;
+      fail(
+        typeof message === "string" && message
+          ? message
+          : "agy 报告执行失败: " + String(resultStatus),
+      );
+      continue;
+    }
+    if (typeof result.response !== "string") fail("agy result 缺少 response");
+    else finalText = result.response;
+    const denied = Array.isArray(result.denied_actions) ? result.denied_actions : [];
+    if (denied.length) {
+      const actions = denied
+        .map((entry) => {
+          if (!entry || typeof entry !== "object" || Array.isArray(entry)) return null;
+          const action = (entry as Record<string, unknown>).action;
+          return typeof action === "string" && action ? action : null;
+        })
+        .filter((action): action is string => action !== null);
+      fail(
+        "agy 拒绝执行需要权限的工具" +
+          (actions.length ? ": " + actions.join(", ") : ""),
+      );
+    }
+    resultUsage = result.usage;
+  }
+  if (!initSeen) fail("缺少 agy init 事件");
+  if (!resultSeen) fail("缺少 agy result 事件");
+  if (buckets.samples === 0 && resultStatus === "SUCCESS") {
+    // A new conversation's result is run-scoped; a resumed conversation's result is cumulative.
+    addUsage(buckets, resultUsage, {
+      input: "input_tokens",
+      output: "output_tokens",
+      cacheRead: "cache_read_tokens",
+      cacheWrite: "cache_write_tokens",
+      total: "total_tokens",
+    });
+    if (expectedSessionId !== null) usageScope = "session";
+  }
+  return {
+    success: error === null,
+    nativeSessionId: identityMismatch ? null : validatedSessionId,
+    nativeSessionFile: null,
+    finalText,
+    usage: toUsage(buckets, usageScope, error !== null),
+    error,
+  };
+}
+
 function codexRolloutUsage(
   file: string | null,
   baseline: WorkerCodexUsageBaseline | null,
@@ -1209,7 +1400,13 @@ export function trackProgress(
 ): void {
   if (!event || typeof event !== "object" || Array.isArray(event)) return;
   const value = event as Record<string, unknown>;
-  const kind = value.type;
+  // agy wraps every event in an `event` discriminator instead of `type`.
+  const kind =
+    typeof value.type === "string"
+      ? value.type
+      : type === "agy" && typeof value.event === "string"
+        ? value.event
+        : null;
   if (typeof kind !== "string") return;
   if (type === "dsh") {
     if (kind === "session") progress.phase = "session";
@@ -1240,6 +1437,35 @@ export function trackProgress(
       progress.currentTool = null;
     } else if (kind === "error") {
       progress.phase = "error";
+      progress.active.clear();
+      progress.currentTool = null;
+    }
+  } else if (type === "agy") {
+    progress.phase = kind;
+    if (kind === "step_update") {
+      const step =
+        value.step_update && typeof value.step_update === "object" && !Array.isArray(value.step_update)
+          ? (value.step_update as Record<string, unknown>)
+          : null;
+      if (step) {
+        const stepType = typeof step.step_type === "string" ? step.step_type : null;
+        const state = typeof step.state === "string" ? step.state : null;
+        if (stepType) progress.phase = stepType;
+        if (stepType === "tool") {
+          if (state === "ACTIVE") {
+            progress.currentTool =
+              typeof step.tool_name === "string" && step.tool_name
+                ? step.tool_name
+                : null;
+          } else if (state === "DONE" || state === "ERROR") {
+            progress.steps++;
+            progress.currentTool = null;
+          }
+        } else if (stepType === "agent_response" && state === "DONE") {
+          progress.steps++;
+        }
+      }
+    } else if (kind === "result") {
       progress.active.clear();
       progress.currentTool = null;
     }

@@ -119,17 +119,19 @@ test("legacy settings migrate once into fixed initial configs and canonical stor
   ]);
   assert.equal(settings.defaultConfigId, "codex-default");
   assert.equal(settings.defaultWorkerType, "codex");
-  assert.deepEqual(settings.concurrency, { dsh: 4, pi: 4, codex: 3 });
-  assert.deepEqual(settings.enabled, { dsh: false, pi: true, codex: true });
+  assert.deepEqual(settings.concurrency, { dsh: 4, pi: 4, codex: 3, agy: 1 });
+  assert.deepEqual(settings.enabled, { dsh: false, pi: true, codex: true, agy: false });
   assert.deepEqual(settings.roles, {
     dsh: ["development"],
     pi: [],
     codex: ["code_review"],
+    agy: [],
   });
   assert.deepEqual(settings.defaults, {
     dsh: { model: "dsh-m", effort: "high" },
     pi: { model: "provider/pi-legacy", effort: "medium" },
     codex: { model: "gpt6-astra", effort: "max" },
+    agy: { model: null, effort: null },
   });
   const codex = settings.configs.find((config) => config.id === "codex-default")!;
   assert.deepEqual(codex.codex, {
@@ -348,7 +350,7 @@ test("a store without a settings row persists defaults and backfills legacy work
     model: null,
     effort: null,
   }]);
-  assert.deepEqual(settings.enabled, { dsh: false, pi: true, codex: false });
+  assert.deepEqual(settings.enabled, { dsh: false, pi: true, codex: false, agy: false });
   assert.deepEqual(settings.codex, { env: {}, extraArgs: [] });
   assert.equal(store.worker("worker-defaults")?.configId, "dsh-default");
   assert.equal(

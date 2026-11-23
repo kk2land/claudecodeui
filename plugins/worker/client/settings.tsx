@@ -23,6 +23,7 @@ import type {
   WorkerType,
 } from "../shared/contracts.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
+import { agyEffortConflict } from "../shared/agy.js";
 import type { WorkerHost } from "./api.js";
 import type { workerApi } from "./api.js";
 import {
@@ -37,7 +38,7 @@ import {
 } from "./catalog.js";
 import { TASK_ROLE_LABELS, TYPE_LABELS } from "./format.js";
 
-const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex"];
+const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex", "agy"];
 
 /** Result of one optional host catalog read; a stale value stays visible while retrying. */
 type Loadable<T> = {
@@ -439,6 +440,15 @@ export function SettingsView({
     (config) =>
       config.type === "codex" && envResults[config.id]?.error,
   );
+  const agyConfigConflict = draft.configs
+    .map((config) => ({
+      name: config.name,
+      message:
+        config.type === "agy"
+          ? agyEffortConflict(config.model, config.effort)
+          : null,
+    }))
+    .find((entry) => entry.message);
   const validationMessage = !draft.configs.length
     ? "至少需要一个 Worker 配置。"
     : draft.configs.some((config) => !config.name.trim())
@@ -458,7 +468,9 @@ export function SettingsView({
                 config.type === "dsh" && config.effort && !config.model,
             )
           ? "DSH reasoning 需要同时配置 DSH 模型。"
-          : codexNameWithEnvError
+          : agyConfigConflict
+            ? "配置 " + agyConfigConflict.name + "：" + agyConfigConflict.message
+            : codexNameWithEnvError
           ? "配置 " +
             codexNameWithEnvError.name +
             "：" +
@@ -712,6 +724,9 @@ export function SettingsView({
             if (catalogView.errors.pi)
               catalogProblems.push({ message: catalogView.errors.pi, source: "pi" });
             catalogLoading = catalogView.loading.pi;
+          } else if (config.type === "agy") {
+            // agy has no plugin catalog: the model id is typed and effort follows the shared variant rule.
+            catalogLoading = false;
           } else {
             if (catalogView.errors.codex)
               catalogProblems.push({ message: catalogView.errors.codex, source: "codex" });
@@ -753,7 +768,13 @@ export function SettingsView({
                   config.model,
                   config.effort,
                 )
-              : effortOptionsFor(models, config.model, config.effort);
+              : config.type === "agy"
+                ? effortOptionsFor(models, config.model, null)
+                : effortOptionsFor(models, config.model, config.effort);
+          const agyConflict =
+            config.type === "agy"
+              ? agyEffortConflict(config.model, config.effort)
+              : null;
           const isDefault = draft.defaultConfigId === config.id;
           // Highlight this card as soon as a drag enters it (dragenter fires before the first
           // dragover); dragover then keeps the highlight and allows the drop.
@@ -987,26 +1008,38 @@ export function SettingsView({
                 ) : null}
                 <label>
                   模型
-                  {config.type === "dsh" ? (
+                  {config.type === "dsh" || config.type === "agy" ? (
                     <>
                       <input
                         type="text"
                         aria-label={"配置 " + position + " 模型"}
-                        placeholder="provider/model"
+                        placeholder={
+                          config.type === "agy"
+                            ? "模型 ID，留空使用 agy 默认"
+                            : "provider/model"
+                        }
                         spellCheck={false}
-                        list={"worker-dsh-models-" + config.id}
+                        list={
+                          config.type === "dsh"
+                            ? "worker-dsh-models-" + config.id
+                            : undefined
+                        }
                         value={config.model ?? ""}
                         onChange={(event) => setModel(config, event.target.value)}
                       />
-                      <datalist id={"worker-dsh-models-" + config.id}>
-                        {(catalogView.dsh?.models ?? []).map((option) => (
-                          <option key={option.route} value={option.route}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </datalist>
+                      {config.type === "dsh" ? (
+                        <datalist id={"worker-dsh-models-" + config.id}>
+                          {(catalogView.dsh?.models ?? []).map((option) => (
+                            <option key={option.route} value={option.route}>
+                              {option.label}
+                            </option>
+                          ))}
+                        </datalist>
+                      ) : null}
                       <small>
-                        可选用目录建议，或直接填写完整 provider/model 路由；留空表示沿用执行器自身默认。
+                        {config.type === "agy"
+                          ? "填写 agy 的原生模型 ID（可用 agy models 查看）；留空沿用执行器自身默认。"
+                          : "可选用目录建议，或直接填写完整 provider/model 路由；留空表示沿用执行器自身默认。"}
                       </small>
                     </>
                   ) : (
@@ -1037,6 +1070,11 @@ export function SettingsView({
                         {option.label || DEFAULT_EFFORT_LABEL}
                       </option>
                     ))}
+                    {agyConflict && config.effort ? (
+                      <option value={config.effort} disabled>
+                        {config.effort}（当前已保存，与模型不兼容）
+                      </option>
+                    ) : null}
                   </select>
                 </label>
                 </div>

@@ -6,7 +6,7 @@ function line(event: unknown): string {
   return JSON.stringify(event) + "\n";
 }
 
-function rowsOf(type: "pi" | "codex" | "dsh", events: unknown[]) {
+function rowsOf(type: "pi" | "codex" | "dsh" | "agy", events: unknown[]) {
   const stream = createConversationStream(type);
   for (const event of events) stream.push(line(event));
   stream.flush();
@@ -409,4 +409,85 @@ test("long conversations keep every row instead of trimming the oldest", () => {
   const rows = rowsOf("pi", events);
   assert.equal(rows.length, 2500);
   assert.equal(rows[0]!.text, "row 0");
+});
+
+test("agy renders streamed text once, a tool lifecycle, and the final result", () => {
+  const rows = rowsOf("agy", [
+    {
+      event: "step_update",
+      step_update: {
+        step_index: 1,
+        state: "ACTIVE",
+        step_type: "agent_response",
+        text_delta: "agy ",
+      },
+    },
+    {
+      event: "step_update",
+      step_update: {
+        step_index: 1,
+        state: "DONE",
+        step_type: "agent_response",
+        text_delta: "answer",
+      },
+    },
+    {
+      event: "step_update",
+      step_update: {
+        step_index: 2,
+        state: "ACTIVE",
+        step_type: "tool",
+        tool_name: "run_command",
+        tool_info: { parameters: { CommandLine: "echo hi" } },
+      },
+    },
+    {
+      event: "step_update",
+      step_update: {
+        step_index: 2,
+        state: "DONE",
+        step_type: "tool",
+        tool_name: "run_command",
+        tool_info: {
+          parameters: { CommandLine: "echo hi" },
+          output: "hi",
+        },
+      },
+    },
+    {
+      event: "result",
+      result: { status: "SUCCESS", response: "agy answer" },
+    },
+  ]);
+  assert.equal(rows.length, 2);
+  assert.deepEqual(
+    rows.map((row) => row.role),
+    ["assistant", "tool"],
+  );
+  assert.equal(rows[0]!.text, "agy answer");
+  assert.equal(rows[0]!.streaming, false);
+  assert.equal(rows[1]!.toolName, "run_command");
+  assert.deepEqual(rows[1]!.toolInput, { CommandLine: "echo hi" });
+  assert.equal(rows[1]!.toolOutput, "hi");
+  assert.equal(rows[1]!.streaming, false);
+});
+
+test("agy shows denied actions and result errors as error rows", () => {
+  const rows = rowsOf("agy", [
+    {
+      event: "result",
+      result: {
+        status: "SUCCESS",
+        response: "",
+        denied_actions: [{ action: "write_file" }],
+      },
+    },
+    {
+      event: "result",
+      result: { status: "ERROR", error: "invalid model selection" },
+    },
+  ]);
+  assert.equal(rows.length, 2);
+  assert.match(rows[0]!.text, /write_file/);
+  assert.match(rows[1]!.text, /invalid model selection/);
 });

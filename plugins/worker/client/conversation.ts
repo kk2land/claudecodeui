@@ -16,6 +16,8 @@
  *   mcp_tool_call, web_search, todo_list, error.
  * - DSH headless: `text`/`thinking` chunks, `status` phases, `tool_call`/`tool_result`, `final`
  *   emitted after `turn_end` with the same text the stream already produced.
+ * - Antigravity (`agy`): `init`/`step_update` (`user_input`, `agent_response`, `tool`) and a final
+ *   `result` with the authoritative response, error, or denied actions.
  */
 
 import type {
@@ -549,9 +551,106 @@ function dshHandler(rows: Rows): Handler {
   };
 }
 
+/**
+ * Antigravity `--output-format stream-json` events. Each `step_update` identifies its step by
+ * index, so streamed text and the final `result.response` update the same row instead of
+ * duplicating the answer.
+ */
+function agyHandler(rows: Rows): Handler {
+  let lastTextRow: string | null = null;
+  let errors = 0;
+  const report = (text: string) => {
+    rows.upsert("agy-error-" + errors++, { role: "error", text });
+  };
+  return (event) => {
+    const kind = event.event;
+    if (kind === "step_update") {
+      const step = object(event.step_update);
+      if (!step || typeof step.step_index !== "number") return;
+      const index = step.step_index;
+      const stepType = string(step.step_type);
+      const state = string(step.state);
+      if (stepType === "tool") {
+        const info = object(step.tool_info);
+        const patch: RowPatch = {
+          role: "tool",
+          text: "",
+          toolId: "agy-" + index,
+          streaming: state === "ACTIVE",
+        };
+        const name = string(step.tool_name) ?? (info ? string(info.name) : undefined);
+        if (name) patch.toolName = name;
+        const input = info ? object(info.parameters) : null;
+        if (input) patch.toolInput = input;
+        const output = info ? flat(info.output) : undefined;
+        if (output !== undefined) patch.toolOutput = output;
+        if (state === "ERROR") patch.isError = true;
+        rows.upsert("agy-tool-" + index, patch);
+        return;
+      }
+      if (stepType !== "agent_response") return;
+      const id = "agy-text-" + index;
+      const delta = string(step.text_delta) ?? "";
+      if (state === "ACTIVE" || state === "DONE") {
+        rows.upsert(id, {
+          role: "assistant",
+          text: rows.text(id) + delta,
+          streaming: state === "ACTIVE",
+        });
+        lastTextRow = id;
+      }
+      return;
+    }
+    if (kind !== "result") return;
+    const result = object(event.result);
+    if (!result) return;
+    const denied = Array.isArray(result.denied_actions) ? result.denied_actions : [];
+    if (denied.length) {
+      const actions = denied
+        .map((entry) => {
+          const item = object(entry);
+          return item ? string(item.action) : undefined;
+        })
+        .filter((action): action is string => Boolean(action));
+      report(
+        "agy 拒绝执行需要权限的工具" +
+          (actions.length ? ": " + actions.join(", ") : ""),
+      );
+    }
+    const status = string(result.status);
+    if (status !== "SUCCESS") {
+      report(string(result.error) ?? "agy 报告执行失败: " + String(status));
+      return;
+    }
+    const body = string(result.response);
+    if (body === undefined) return;
+    if (lastTextRow) {
+      const current = rows.text(lastTextRow);
+      if (
+        body === current ||
+        body.startsWith(current) ||
+        current.startsWith(body)
+      ) {
+        rows.upsert(lastTextRow, {
+          role: "assistant",
+          text: body,
+          streaming: false,
+        });
+        return;
+      }
+    }
+    rows.upsert("agy-text-final-" + errors++, {
+      role: "assistant",
+      text: body,
+      streaming: false,
+    });
+  };
+}
+
 function handlerFor(type: WorkerType, rows: Rows): Handler {
   if (type === "pi") return piHandler(rows);
   if (type === "codex") return codexHandler(rows);
+  if (type === "agy") return agyHandler(rows);
   return dshHandler(rows);
 }
 

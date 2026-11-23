@@ -802,14 +802,15 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   } as never);
   const normalized = service.settings();
   assert.equal(normalized.defaultWorkerType, "dsh");
-  assert.deepEqual(normalized.enabled, { dsh: true, pi: true, codex: true });
-  assert.deepEqual(normalized.roles, { dsh: [], pi: [], codex: [] });
+  assert.deepEqual(normalized.enabled, { dsh: true, pi: true, codex: true, agy: false });
+  assert.deepEqual(normalized.roles, { dsh: [], pi: [], codex: [], agy: [] });
   assert.deepEqual(normalized.defaults, {
     dsh: { model: null, effort: null },
     pi: { model: null, effort: null },
     codex: { model: null, effort: null },
+    agy: { model: null, effort: null },
   });
-  assert.deepEqual(normalized.concurrency, { dsh: 5, pi: 2, codex: 3 });
+  assert.deepEqual(normalized.concurrency, { dsh: 5, pi: 2, codex: 3, agy: 1 });
   assert.deepEqual(normalized.codex, {
     env: { CODEX_PROXY_BYPASS: "1" },
     extraArgs: ["-c", "model_provider=magpie"],
@@ -840,16 +841,18 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     },
   });
   assert.equal(saved.defaultWorkerType, "pi");
-  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: false });
+  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: false, agy: false });
   assert.deepEqual(saved.roles, {
     dsh: ["testing", "development"],
     pi: ["plan_review"],
     codex: ["code_review"],
+    agy: [],
   });
   assert.deepEqual(saved.defaults, {
     dsh: { model: "dsh-model", effort: "high" },
     pi: { model: "pi-model", effort: "low" },
     codex: { model: "codex-model", effort: "xhigh" },
+    agy: { model: null, effort: null },
   });
   assert.deepEqual(saved.codex, {
     env: { TEST_CODEX_CUSTOM: "custom-value" },

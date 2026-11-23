@@ -32,7 +32,7 @@ const startShape = {
     .string()
     .optional()
     .describe("指定配置 id，须存在且启用；省略时按已启用配置路由"),
-  type: z.enum(["dsh", "pi", "codex"]).optional(),
+  type: z.enum(["dsh", "pi", "codex", "agy"]).optional(),
   taskRole: z
     .enum(taskRoleValues)
     .optional()
@@ -46,7 +46,7 @@ const startShape = {
   }),
   writePaths: z.array(z.string()),
   model: z.string().optional(),
-  provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/DSH 请使用完整 model"),
+  provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/DSH/agy 请使用完整 model"),
   effort: z.string().optional(),
   timeoutSeconds,
   requestId: z.string(),
@@ -214,7 +214,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_start",
     {
-      description: "异步启动一个 DSH、Pi 或 Codex 子任务，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行提醒与终态通过 Worker outbox 自动通知父会话，不要轮询保活",
+      description: "异步启动一个 DSH、Pi、Codex 或 Antigravity (agy) 子任务，必须显式选择 worktree 或 existing 工作区。接受后立即返回（可能仍在排队），运行提醒与终态通过 Worker outbox 自动通知父会话，不要轮询保活",
       inputSchema: startShape,
     },
     async ({ view, ...input }) => {
@@ -237,7 +237,7 @@ export function createWorkerMcpServer(
         workerId: z.string(),
         prompt: z.string(),
         model: z.string().optional(),
-        provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/DSH 请使用完整 model"),
+        provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/DSH/agy 请使用完整 model"),
         effort: z.string().optional(),
         timeoutSeconds,
         requestId: z.string(),

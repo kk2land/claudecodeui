@@ -1,10 +1,11 @@
 # CloudCLI Worker 插件
 
 > **父会话范围：** CloudCLI 的 DSH app provider 已移除，因此宿主只接入 Codex app-server 父会话。
-> 插件自身仍以 DSH、Pi、Codex 三种引擎执行子任务（DSH 由插件直接启动 CLI，不依赖 app provider）；
-> DSH 作为父会话时所需的 ACP 会话注入已随该 provider 一并删除，历史说明保留在下方。
+> 插件自身仍以 DSH、Pi、Codex、Antigravity（`agy`）四种引擎执行子任务（DSH 与 agy 由插件直接启动 CLI，
+> 不依赖 app provider）；DSH 作为父会话时所需的 ACP 会话注入已随该 provider 一并删除，历史说明保留在下方。
 
-支持 Codex app-server 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH、Pi 或 Codex 子任务执行，
+支持 Codex app-server 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH、Pi、Codex 或
+Antigravity（`agy`）子任务执行，
 并在独立进程中记录运行、原始事件与结果。插件负责执行与记录；任务拆分、review 和 Git 集成仍由父会话
 与用户授权的主代理负责。插件保存主会话维护的计划与依赖记录，不提供自动依赖调度或 Git 集成。
 
@@ -124,7 +125,7 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 交接提示词须约定命令预算：长命令后台执行，单次同步等待不超过 60 秒；测试已报超时但进程未退出时，
 停止该任务自己的进程并保留日志。同一失败已在未修改基线上复现后，记录限制并继续剩余交付，不再重复完整测试。
 
-父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi/Codex 占额与排队数、阶段、耗时、软提醒、
+父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi/Codex/Antigravity 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。列表与详情显示任务记录的角色，历史记录缺少
 角色时详情显示未指定，列表不额外展示。设置页按每个 Worker 配置管理启用开关、并发、硬超时和倾向任务；配置
 停用后保留模型、角色等内容，重新启用后继续使用。页面只读状态并执行取消、暂停、恢复、清理和
@@ -190,8 +191,8 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 
 ## Worker 配置：引擎、启用、角色、并发、硬超时、模型与 Codex 服务
 
-执行引擎固定为 `dsh`、`pi`、`codex` 三种。用户可以管理多个具名 Worker 配置；首次使用只创建并启用
-`pi-default`（pi default），`defaultConfigId` 为 `pi-default`。DSH 和 Codex 配置由用户按需添加。
+执行引擎为 `dsh`、`pi`、`codex`、`agy` 四种。用户可以管理多个具名 Worker 配置；首次使用只创建并启用
+`pi-default`（pi default），`defaultConfigId` 为 `pi-default`。DSH、Codex 与 agy 配置由用户按需添加。
 从旧设置迁移时仍生成三个初始配置并保留原 `defaultWorkerType`，映射为对应初始配置的
 `defaultConfigId`；只有旧值缺失或无效时才回退 `dsh-default`，迁移结果不会一律改成 DSH。每个配置包含
 `id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`hardTimeoutSeconds`、`model`、
@@ -220,8 +221,8 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 `defaults`、`defaultWorkerType`、`codex` 是只读兼容投影：按引擎取 `defaultConfigId` 属于该引擎时的默认
 配置，否则取列表中该引擎的第一个配置；某引擎没有配置时 `enabled` 为 `false`、`roles` 为 `[]`、
 `concurrency` 为 1、`defaults` 为 null model/effort、`codex` 为空 env/args。`defaultWorkerType` 投影
-`defaultConfigId` 的类型。旧客户端仍可提交旧版映射更新，但它只能编辑三个初始固定配置；任一初始配置已被
-删除时整次更新失败。
+`defaultConfigId` 的类型。投影包含 agy；旧客户端仍可提交旧版映射更新，但它只能编辑三个初始固定配置；任一
+初始配置已被删除时整次更新失败。
 
 首次使用时 `GET /state` 的 `settings` 形状示例（软提醒 600 秒 / 20 步、硬超时默认 300 秒）：
 
@@ -232,14 +233,15 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
           "roles": [], "concurrency": 3, "hardTimeoutSeconds": 300, "model": null, "effort": null }
       ],
       "defaultConfigId": "pi-default",
-      "concurrency": { "dsh": 1, "pi": 3, "codex": 1 },
+      "concurrency": { "dsh": 1, "pi": 3, "codex": 1, "agy": 1 },
       "defaultWorkerType": "pi",
-      "enabled": { "dsh": false, "pi": true, "codex": false },
-      "roles": { "dsh": [], "pi": [], "codex": [] },
+      "enabled": { "dsh": false, "pi": true, "codex": false, "agy": false },
+      "roles": { "dsh": [], "pi": [], "codex": [], "agy": [] },
       "defaults": {
         "dsh": { "model": null, "effort": null },
         "pi": { "model": null, "effort": null },
-        "codex": { "model": null, "effort": null }
+        "codex": { "model": null, "effort": null },
+        "agy": { "model": null, "effort": null }
       },
       "codex": { "env": {}, "extraArgs": [] },
       "retentionDays": 1,
@@ -251,7 +253,10 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 规范的 `PUT /settings` 整份替换 `configs`，并在保存前原子校验：`id` 唯一且非空、`name` 非空、`type` 合法、
 `enabled` 为布尔值、`roles` 只含任务角色目录中的值、`concurrency` 为正整数、`defaultConfigId` 引用已启用
 配置；每项 `hardTimeoutSeconds` 为正整数或 `null`，省略时补为 300 秒。
-Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同时配置模型；Codex 配置必须带 `codex`
+Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同时配置模型，agy 的 effort 必须是 CLI
+`--help` 公布的 `low`/`medium`/`high`/`xhigh`/`max`；若 agy 模型 ID 以 `agy models` 实际公布的
+`-low`/`-medium`/`-high`/`-xhigh` 变体结尾，则 effort 必须是同一档或留空，否则保存被拒绝并指出模型与
+支持档位。没有这些后缀的 ID 不按名称猜约束，仍可带原生支持的 effort；最终由 CLI 校验。Codex 配置必须带 `codex`
 对象，`env` 为字符串到字符串映射，`legacyExtraArgs` 为字符串数组，含 `-C`/`--cd` 的项被拒绝。任一项非法
 都会让整次更新失败且不保存任何字段。`retentionDays` 为正整数，省略时保留原值；`schemaVersion` 由服务端
 管理，客户端不提供。
@@ -297,6 +302,13 @@ DSH 的模型字段始终是一个可手填完整 `provider/model` 路由的输�
 的模型只保留“默认（沿用执行器）”）；手填的未列出路由改用执行器已有的 effort 名称列表，因此目录外但有效的
 完整路由仍可带 reasoning。最终合法性仍由运行时在发送前校验。
 
+agy 的模型目录来自 `agy models`，该命令会访问网络，因此设置页不在加载时启动 CLI，也不伪造模型目录；
+模型字段与 DSH 一样是可手填的原生模型 ID 输入框（例如 `gemini-3.8-flash-low`），留空表示沿用 agy 自身
+默认。设置页只对已证实带 effort 变体后缀的 ID 收窄 effort：`-low`/`-medium`/`-high`/`-xhigh` 模型仅提供
+同档和“默认”，切换模型时按现有逻辑清空不兼容的 effort；无此后缀的 ID 仍提供
+`low`/`medium`/`high`/`xhigh`/`max`，不把任意后缀臆断为约束，最终由 CLI 校验。已有配置若保存了冲突组合，
+界面显示模型固定档位与“当前已保存，与模型不兼容”的不可选值，阻止保存，不会静默改写用户的原值。
+
 Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名键以设置值覆盖继承值；`{}` 显式清除预填
 的 `CODEX_PROXY_BYPASS`。`legacyExtraArgs` 的每个元素是一个独立 argv，不拼接成 shell 字符串，不做引号或
 空格解析；空数组表示没有额外参数。`modelProvider` 是独立的模型服务选择，启动时以
@@ -316,13 +328,17 @@ Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名
 新任务的 model/effort 优先级为：请求显式值 > 所选配置的 `model`/`effort` > 执行器原生默认。provider 只有
 Codex 支持：请求显式 provider > 所选配置的 `codex.modelProvider` > Codex 原生默认；非 Codex 类型若显式
 传入非空 provider，会在幂等重放检查之后以 `PROVIDER_UNSUPPORTED` 拒绝，旧请求的幂等重放仍返回原结果。
-Pi 把完整模型 ID 直接传给 `--model`，不再接受 `--provider`；DSH 的 provider/model 由运行模型 patch 表达。
+Pi 把完整模型 ID 直接传给 `--model`，不再接受 `--provider`；DSH 的 provider/model 由运行模型 patch 表达；
+agy 把模型 ID 原样传给 `--model`，provider 同样不支持。配置保存、创建和续接都在现有服务边界校验已知的
+变体/effort 冲突，拒绝时不写入新 worker 或 run；续接继承的旧记录若与当前模型冲突也会明确报错，必须显式
+改用兼容 effort。
 
 `worker_resume` 保持原 worker 类型与 `configId`、cwd、home 和原生会话身份，默认沿用上一次 run 记录的
 model/provider/effort，不套用当前配置；显式 model/effort（Codex 还包括 provider）仍可覆盖。旧 Pi 的独立
 provider 会折叠进完整模型 ID，并按大小写不敏感的前缀去重；旧 DSH 的独立 provider 与原始 model 直接拼接为
 provider/model；旧 DSH 裸 model 只从该 run 自己生成的 `model.patch.yml` 恢复路由证据，完整 ID 不依赖旧
-patch；没有证据时续接要求显式提供完整 model（`MODEL_REQUIRED`）。历史记录不重写，续接创建新的 runId。
+patch；没有证据时续接要求显式提供完整 model（`MODEL_REQUIRED`）。agy 的模型 ID 原样沿用上一次 run 的记录，
+不拼接 provider。历史记录不重写，续接创建新的 runId。
 原类型或配置已停用时，续接请求保留原配置但按启用规则拒绝。Codex 续接使用记录的 `thread_id` 执行
 `codex exec resume --json`，每次仍读取当前配置的 Codex env 与保留的启动参数。
 
@@ -332,7 +348,8 @@ patch；没有证据时续接要求显式提供完整 model（`MODEL_REQUIRED`�
 范围包括 `CODEX_DSH_SESSIONS_ROOT`（默认 `$HOME/tmp/codex-dsh-sessions`）、`$HOME/.pi/agent/sessions`，
 以及插件数据目录下的 `sessions/dsh`、`sessions/pi`。DSH 的历史 generation 和 `.zstd` 文件也参与清理。
 Codex 原生 session 目录不纳入这一 DSH/Pi 批量 retention 删除，不会按上述 3 天规则被清扫；其保留由固定
-home 下的 Codex 自身行为与配置决定。恰好达到 3 天的文件仍保留；排队、启动、运行、停止中或状态未知的
+home 下的 Codex 自身行为与配置决定。agy 的会话由 Antigravity CLI 自己的 `~/.gemini/antigravity-cli` 管理，
+同样不纳入插件的 3 天批量删除；插件只记录 `conversation_id` 并在续接时传回。恰好达到 3 天的文件仍保留；排队、启动、运行、停止中或状态未知的
 Worker 引用的原生会话会跳过。DSH 即使尚无文件路径也按已记录的原生 ID 保护会话目录，Pi 在启动前记录
 文件路径；恢复记录仍无法确定会话身份时，保留该运行所属会话根，待确认停止后再参与清理。
 `HOME` 缺失时依次使用 `USERPROFILE` 和系统用户目录定位共享会话目录。
@@ -385,6 +402,36 @@ Pi：
 - 成功要求：exit 0、会话身份匹配、最终 assistant 的 `stopReason=stop`、最终 `agent_end` 的
   `willRetry=false`、`agent_settled` 的 `aborted=false`。原生重试后最终成功可以接受。
 
+Antigravity（`agy`）：
+
+    agy --print=<提示词> --output-format stream-json --dangerously-skip-permissions \
+      [--model <原生模型 ID>] [--effort <low|medium|high|xhigh|max>] \
+      [--conversation <原生 conversation_id>]
+
+- 使用本机 agy `1.5.14` 验证的 `--print` 非交互模式和 `stream-json` 结构化事件；提示词作为 `--print=` 的
+  完整值传入，避免 Go flag 解析器把以 `-` 开头的提示词误当成下个参数。`stdout` 每行一个 JSON 事件，
+  `stderr` 保留 CLI 警告与失败信息。
+- 原生会话身份是 `init` 事件的 `conversation_id`；首次运行记录该 ID，续接通过 `--conversation` 传回，
+  返回不同 ID（包括 CLI 警告 conversation 不存在后新建会话）时判失败且不覆盖已记录身份。`init.cwd`
+  必须与 worker cwd 匹配。
+- headless 模式无法交互授权，写文件等工具会被自动拒绝；插件因此按 CLI 明确文档加入
+  `--dangerously-skip-permissions`，让 Worker 能完成实现类任务。该参数影响整个 agy 进程，工作区范围不是
+  OS 沙箱，必须依赖任务工作区与主代理 review。若 CLI 仍返回 `denied_actions`，插件把该 run 判为失败并
+  展示被拒绝的工具，而不是把空响应当成功。
+- `--model` 直传原生模型 ID（例如 `gemini-3.8-flash-low`，可用 `agy models` 查看）；`--effort` 仅接受
+  `low`/`medium`/`high`/`xhigh`/`max`。本机 `agy models` 的固定变体以 `-low`/`-medium`/`-high`/`-xhigh`
+  结尾，实测同档 effort（如 low+low、high+high）或省略 effort 可运行；不同档（如 low+high）在启动前返回
+  `invalid model selection … conflicts with --effort=high`。本机 `gemini-pro-orchestrator-neon` 配 high 返回
+  `--effort is not supported for model`，但插件没有动态能力目录，不能据此把所有无后缀或自定义 ID 都判为
+  不支持 effort；无固定后缀的 ID 保留原生 effort 选择，由 CLI 返回实际支持结果。agy 没有独立 provider，
+  `provider` 会像 Pi/DSH 一样被拒绝。
+- 成功要求：exit 0、恰好一个合法 `init`、匹配预期身份的 `conversation_id` 与 cwd、收到 `result` 且
+  status 为 `SUCCESS`、没有 `denied_actions`。`result.error` 或 `ERROR` 状态按失败保存，错误文本直接来自 CLI。
+- `result.usage` 在续接时是会话累计，因此本次运行用量由本次日志内已完成的 `agent_response` step 累加；
+  只有新会话且没有任何 step 样本时才回退到 `result.usage`，续接无 step 样本时标记为 session 范围。
+- agy 的配置目录与会话存储由 CLI 自己管理（本机为 `~/.gemini/antigravity-cli`），插件不注入 home、不复制
+  凭据，也不把 agy 会话纳入插件的 3 天批量删除。
+
 Codex：
 
 - 新启动使用 `codex exec`，续接使用 `codex exec resume --json` 和已记录的原生 `thread_id`。
@@ -414,10 +461,10 @@ Codex：
 读取。
 
 每个 run 单独保存用量字段 `inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、
-`totalTokens` 以及 `scope`/`partial`。DSH/Pi 按原生样本累加并标记本次运行范围；Codex 按上述基线差分。
+`totalTokens` 以及 `scope`/`partial`。DSH/Pi/agy 按原生样本累加并标记本次运行范围；Codex 按上述基线差分。
 未知或未上报的字段保持 `null`，真实 0 仍显示 0，不估算也不裁剪。失败、取消或超时的 run 对已收集用量标记
 `partial`，插件重启后无法确认停止的 `unknown` run 同样标记 `partial`，成功结果按已确认的原生数据保存。
-UI 对 Codex 显示“输入（含缓存）”，对 DSH/Pi 显示“未缓存输入”，并显示缓存读取/写入、合计、统计范围与
+UI 对 Codex 显示“输入（含缓存）”，对 DSH/Pi/agy 显示“未缓存输入”，并显示缓存读取/写入、合计、统计范围与
 部分统计标记；历史记录缺少范围时显示为未标注。
 
 ## 自动唤醒、Stop 与恢复

@@ -13,6 +13,7 @@ import {
   nativeHome,
   newProgress,
   parseCodex,
+  parseAgy,
   parseDsh,
   parsePi,
   prepareLaunch,
@@ -28,12 +29,16 @@ import { readPiCatalog } from "./pi-catalog.js";
 import { sweepNativeSessions } from "./native-retention.js";
 import {
   INITIAL_CONFIG_IDS,
+  LEGACY_WORKER_TYPES,
+  WORKER_TYPES,
   configById,
   extractCodexLaunch,
   projectSettings,
+  validateConfigEffort,
 } from "./settings.js";
 import type {
   GuardianEvidence,
+  LegacyWorkerType,
   WorkerCancelInput,
   WorkerCleanupInput,
   WorkerCodexConfig,
@@ -335,9 +340,7 @@ export class WorkerService {
       );
     if (
       input.defaultWorkerType !== undefined &&
-      input.defaultWorkerType !== "dsh" &&
-      input.defaultWorkerType !== "pi" &&
-      input.defaultWorkerType !== "codex"
+      !LEGACY_WORKER_TYPES.includes(input.defaultWorkerType)
     )
       throw new WorkerFailure(
         "INVALID_SETTINGS",
@@ -352,14 +355,14 @@ export class WorkerService {
       const value = input.enabled;
       if (!value || typeof value !== "object" || Array.isArray(value))
         throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 dsh、pi、codex 的布尔值");
-      if (["dsh", "pi", "codex"].some((type) => typeof value[type as WorkerType] !== "boolean"))
+      if (LEGACY_WORKER_TYPES.some((type) => typeof value[type] !== "boolean"))
         throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 dsh、pi、codex 的布尔值");
     }
     if (input.roles !== undefined) {
       const value = input.roles;
       if (!value || typeof value !== "object" || Array.isArray(value))
         throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 dsh、pi、codex 的 role 数组");
-      for (const type of ["dsh", "pi", "codex"] as const) {
+      for (const type of LEGACY_WORKER_TYPES) {
         const entries = value[type];
         if (
           !Array.isArray(entries) ||
@@ -408,10 +411,10 @@ export class WorkerService {
     if (codexConcurrency !== undefined)
       initial("codex").concurrency = codexConcurrency;
     if (input.enabled)
-      for (const type of ["dsh", "pi", "codex"] as const)
+      for (const type of LEGACY_WORKER_TYPES)
         initial(type).enabled = input.enabled[type];
     if (input.roles)
-      for (const type of ["dsh", "pi", "codex"] as const)
+      for (const type of LEGACY_WORKER_TYPES)
         initial(type).roles = [...input.roles[type]];
     if (input.defaults !== undefined) {
       const currentCodex: WorkerDefaults["codex"] = {
@@ -419,7 +422,7 @@ export class WorkerService {
         effort: initial("codex").effort,
       };
       const defaults = this.validateDefaults(input.defaults, currentCodex);
-      for (const type of ["dsh", "pi", "codex"] as const) {
+      for (const type of LEGACY_WORKER_TYPES) {
         if (type === "codex" && input.defaults.codex === undefined) continue;
         initial(type).model = defaults[type].model;
         initial(type).effort = defaults[type].effort;
@@ -492,8 +495,8 @@ export class WorkerService {
     if (!id) throw new WorkerFailure("INVALID_SETTINGS", "配置 id 不能为空");
     if (!name) throw new WorkerFailure("INVALID_SETTINGS", "配置 name 不能为空");
     const type = entry.type as WorkerType;
-    if (type !== "dsh" && type !== "pi" && type !== "codex")
-      throw new WorkerFailure("INVALID_SETTINGS", "配置 type 必须是 dsh、pi 或 codex");
+    if (!WORKER_TYPES.includes(type))
+      throw new WorkerFailure("INVALID_SETTINGS", "配置 type 必须是 dsh、pi、codex 或 agy");
     if (typeof entry.enabled !== "boolean")
       throw new WorkerFailure("INVALID_SETTINGS", "配置 enabled 必须是布尔值");
     if (!Array.isArray(entry.roles) || entry.roles.some(
@@ -531,8 +534,9 @@ export class WorkerService {
     };
     if (type === "pi" && effort && !(PI_THINKING_LEVELS as readonly string[]).includes(effort))
       throw new WorkerFailure("INVALID_SETTINGS", "Pi 配置的 effort 必须是受支持的 thinking 级别");
-    if (type === "dsh" && effort && !model)
-      throw new WorkerFailure("INVALID_SETTINGS", "DSH 配置的 effort 需要同时配置 model");
+    const effortProblem = validateConfigEffort(type, model, effort);
+    if (effortProblem)
+      throw new WorkerFailure("INVALID_SETTINGS", effortProblem);
     if (type === "codex") {
       if (!entry.codex || typeof entry.codex !== "object" || Array.isArray(entry.codex))
         throw new WorkerFailure("INVALID_SETTINGS", "Codex 配置必须包含 codex 对象");
@@ -611,18 +615,18 @@ export class WorkerService {
         );
   }
 
-  /** Validates dsh/pi entries plus optional codex and normalizes blank strings to null. */
+  /** Validates the legacy dsh/pi/codex defaults and normalizes blank strings to null. */
   private validateDefaults(
     value: NonNullable<WorkerLegacySettingsInput["defaults"]>,
     currentCodex: WorkerDefaults["codex"],
-  ): WorkerDefaults {
+  ): Record<LegacyWorkerType, WorkerDefaults["codex"]> {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new WorkerFailure(
         "INVALID_SETTINGS",
         "defaults 必须包含 dsh 和 pi 两个配置对象",
       );
-    const result = {} as WorkerDefaults;
-    for (const type of ["dsh", "pi", "codex"] as const) {
+    const result = {} as Record<LegacyWorkerType, WorkerDefaults["codex"]>;
+    for (const type of LEGACY_WORKER_TYPES) {
       if (type === "codex" && value.codex === undefined) {
         result.codex = currentCodex;
         continue;
@@ -892,11 +896,9 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_INPUT", "taskName 不能为空");
     if (
       input.type !== undefined &&
-      input.type !== "dsh" &&
-      input.type !== "pi" &&
-      input.type !== "codex"
+      !WORKER_TYPES.includes(input.type)
     )
-      throw new WorkerFailure("INVALID_INPUT", "type 必须是 dsh、pi 或 codex");
+      throw new WorkerFailure("INVALID_INPUT", "type 必须是 dsh、pi、codex 或 agy");
     if (typeof input.prompt !== "string" || !input.prompt.trim())
       throw new WorkerFailure("INVALID_INPUT", "prompt 不能为空");
     if (typeof input.requestId !== "string" || !input.requestId.trim())
@@ -1109,6 +1111,9 @@ export class WorkerService {
       }
       return { model, provider: null, effort };
     }
+    // agy model ids are native CLI ids (for example `gemini-3.8-flash-low`) and never carry an
+    // independent provider; a bare id must not be mistaken for a legacy DSH route.
+    if (type === "agy") return { model, provider: null, effort };
     if (model && previous.provider) {
       // Historical DSH routes are already provider/model; do not deduplicate the prefix.
       model = previous.provider + "/" + model;
@@ -1126,7 +1131,7 @@ export class WorkerService {
     return { model, provider: null, effort };
   }
 
-  /** Rejects a non-empty independent provider for engines that no longer support one. */
+  /** Rejects a non-empty independent provider for engines that do not support one. */
   private rejectNonCodexProvider(
     type: WorkerType,
     provider: string | undefined,
@@ -1134,7 +1139,7 @@ export class WorkerService {
     if (type !== "codex" && clean(provider))
       throw new WorkerFailure(
         "PROVIDER_UNSUPPORTED",
-        "provider 仅 Codex 支持；Pi/DSH 请使用完整 model",
+        "provider 仅 Codex 支持；Pi/DSH/agy 请使用完整 model",
       );
   }
 
@@ -1177,6 +1182,12 @@ export class WorkerService {
       !(PI_THINKING_LEVELS as readonly string[]).includes(selection.effort)
     )
       throw new WorkerFailure("INVALID_INPUT", "不支持的 Pi thinking 级别");
+    const effortProblem = validateConfigEffort(
+      type,
+      selection.model,
+      selection.effort,
+    );
+    if (effortProblem) throw new WorkerFailure("INVALID_INPUT", effortProblem);
   }
 
   private timeoutFor(
@@ -1445,6 +1456,24 @@ export class WorkerService {
       ) {
         run.nativeSessionId = value.thread_id.trim();
         identityChanged = true;
+      } else if (worker.type === "agy" && value?.event === "init") {
+        const init =
+          value.init && typeof value.init === "object" && !Array.isArray(value.init)
+            ? (value.init as Record<string, unknown>)
+            : null;
+        const id = value.conversation_id;
+        const cwd = init?.cwd;
+        if (
+          typeof id === "string" &&
+          id.trim() &&
+          path.basename(id) === id &&
+          typeof cwd === "string" &&
+          path.isAbsolute(cwd) &&
+          path.resolve(cwd) === path.resolve(worker.cwd)
+        ) {
+          run.nativeSessionId = id;
+          identityChanged = true;
+        }
       }
     }
     run.progress.steps = handle.progress.steps ? handle.progress.steps : null;
@@ -1459,6 +1488,7 @@ export class WorkerService {
       handle.progress.phase === "turn.completed" ||
       handle.progress.phase === "turn.failed" ||
       handle.progress.phase === "final" ||
+      handle.progress.phase === "result" ||
       handle.progress.phase === "error";
     if (important || timestamp - handle.lastProgressSave >= 250) {
       handle.lastProgressSave = timestamp;
@@ -1501,10 +1531,13 @@ export class WorkerService {
     const handle = this.handles.get(runId);
     if (handle?.finalized) return;
     if (handle) handle.finalized = true;
+    // A live handle carries the exact expected identity for this launch, including an explicit
+    // null for a first run. Only recovery without a handle falls back to the recorded run id.
+    const expectedSessionId = handle ? handle.expectedSessionId : run.nativeSessionId;
     const parsed =
       run.status === "queued"
         ? null
-        : this.parseRun(worker, run, handle?.expectedSessionId ?? run.nativeSessionId);
+        : this.parseRun(worker, run, expectedSessionId);
     let status: WorkerStatus;
     let error: WorkerFailure | null = null;
     let hold = handle?.holdNotification ?? false;
@@ -1601,6 +1634,8 @@ export class WorkerService {
           sessionFile: run.nativeSessionFile,
           sessionsRoot: run.sessionsRoot,
         });
+      if (worker.type === "agy")
+        return parseAgy(events, expectedSessionId, worker.cwd);
       return parsePi(
         events,
         expectedSessionId,
@@ -1682,6 +1717,7 @@ export class WorkerService {
       dsh: Object.fromEntries(STATUSES.map((status) => [status, 0])),
       pi: Object.fromEntries(STATUSES.map((status) => [status, 0])),
       codex: Object.fromEntries(STATUSES.map((status) => [status, 0])),
+      agy: Object.fromEntries(STATUSES.map((status) => [status, 0])),
       total: Object.fromEntries(STATUSES.map((status) => [status, 0])),
     } as WorkerStateSnapshot["counts"];
     for (const worker of workers) {

@@ -672,6 +672,9 @@ function parseSpecSelection(
     } else if (type === "pi" && arg === "--thinking") {
       if (typeof next === "string" && next.trim()) selection.effort = next.trim();
       index++;
+    } else if (type === "agy" && arg === "--effort") {
+      if (typeof next === "string" && next.trim()) selection.effort = next.trim();
+      index++;
     } else if (type === "codex" && (arg === "-c" || arg === "--config")) {
       if (typeof next !== "string") continue;
       if (next.startsWith("model_provider="))
