@@ -24,6 +24,7 @@ import {
 } from "./native.js";
 import type { ProgressTracker } from "./native.js";
 import { readLogPage } from "./logs.js";
+import { readAgyCatalog } from "./agy-catalog.js";
 import { readDshCatalog } from "./dsh-catalog.js";
 import { readPiCatalog } from "./pi-catalog.js";
 import { sweepNativeSessions } from "./native-retention.js";
@@ -37,6 +38,7 @@ import {
   validateConfigEffort,
 } from "./settings.js";
 import type {
+  AgyModelCatalog,
   GuardianEvidence,
   LegacyWorkerType,
   WorkerCancelInput,
@@ -259,6 +261,16 @@ export class WorkerService {
     const environment = this.guardianEnvironment(this.environment);
     const { home } = nativeHome("pi", this.options.dataDirectory, environment);
     return readPiCatalog(home);
+  }
+
+  /**
+   * Reads the local Antigravity CLI's model directory. `agy models` is network-backed, so the
+   * settings page only calls this route when an agy config exists; the executable is resolved
+   * exactly like a Worker run's and inherits the same stripped environment.
+   */
+  async agyCatalog(): Promise<AgyModelCatalog> {
+    const environment = this.guardianEnvironment(this.environment);
+    return readAgyCatalog(this.executable("agy", environment), environment);
   }
 
   updateSettings(input: WorkerSettingsInput): WorkerSettings {

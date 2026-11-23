@@ -1,4 +1,5 @@
 import type {
+  AgyModelCatalog,
   CodexModelsDirectory,
   CodexServiceModelCatalog,
   DshModelCatalog,
@@ -7,7 +8,6 @@ import type {
   WorkerModelOption,
   WorkerType,
 } from "../shared/contracts.js";
-import { AGY_EFFORT_LEVELS, agyCompatibleEfforts } from "../shared/agy.js";
 import type { WorkerHost } from "./api.js";
 
 /**
@@ -21,6 +21,8 @@ export type ModelSelectOption = SelectOption & { effort: string[] };
 
 export const DEFAULT_MODEL_LABEL = "使用默认值";
 export const DEFAULT_EFFORT_LABEL = "默认（沿用执行器）";
+/** AGY's own model directory is optional, so its empty row states the runner fallback explicitly. */
+export const AGY_DEFAULT_MODEL_LABEL = "默认（沿用执行器）";
 export const SAVED_SUFFIX = "（当前已保存）";
 
 /**
@@ -173,21 +175,28 @@ export function piModelOptions(
 }
 
 /**
- * Antigravity rows. The CLI's model directory is a network-backed `agy models` command, so the
- * editor keeps a typable native id instead of starting the CLI on page load. A model id with an
- * effort suffix exposed by `agy models` (for example `gemini-3.8-flash-low`) offers only that
- * effort; an unsuffixed id keeps every documented level because the CLI may accept effort for
- * custom or non-variant ids.
+ * Antigravity rows from the real `agy models` directory. The persisted value is the native CLI id
+ * and the label is the CLI's display name. Each model carries its own effort, so no row exposes a
+ * selectable reasoning level; a saved id missing from the directory stays selectable, as does the
+ * empty row that follows the runner's own default.
  */
-export function agyModelOptions(model: string | null): ModelSelectOption[] {
+export function agyModelOptions(
+  catalog: AgyModelCatalog | null,
+  model: string | null,
+): ModelSelectOption[] {
   const options: ModelSelectOption[] = [
-    { value: "", label: DEFAULT_MODEL_LABEL, effort: [...AGY_EFFORT_LEVELS] },
+    { value: "", label: AGY_DEFAULT_MODEL_LABEL, effort: [] },
+    ...(catalog?.models ?? []).map((option) => ({
+      value: option.id,
+      label: option.label,
+      effort: [],
+    })),
   ];
   if (model && !options.some((option) => option.value === model))
     options.push({
       value: model,
       label: model + SAVED_SUFFIX,
-      effort: agyCompatibleEfforts(model),
+      effort: [],
     });
   return options;
 }
@@ -196,6 +205,7 @@ export function agyModelOptions(model: string | null): ModelSelectOption[] {
 export function modelOptionsFor(
   config: { type: WorkerType; model: string | null; effort: string | null },
   catalogs: {
+    agy: AgyModelCatalog | null;
     dsh: DshModelCatalog | null;
     codex: WorkerModelCatalog | null;
     codexProviderModels: string[] | null;
@@ -207,7 +217,7 @@ export function modelOptionsFor(
   if (config.type === "pi")
     return piModelOptions(catalogs.pi, config.model, config.effort);
   if (config.type === "agy")
-    return agyModelOptions(config.model);
+    return agyModelOptions(catalogs.agy, config.model);
   return codexModelOptions(
     catalogs.codex,
     catalogs.codexProviderModels,

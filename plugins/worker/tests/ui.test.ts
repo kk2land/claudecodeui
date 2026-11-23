@@ -367,6 +367,7 @@ type Mode = {
   codexProviders?: () => Promise<unknown>;
   codexProviderModels?: (modelProvider: string) => Promise<unknown>;
   piCatalog?: () => Promise<unknown>;
+  agyCatalog?: () => Promise<unknown>;
 };
 
 type ConversationViewRecord = {
@@ -422,6 +423,14 @@ const PI_CATALOG = {
     { provider: "openrouter", id: "claude-sonnet", reasoning: false },
   ],
   thinkingLevels: ["off", "low", "high"],
+};
+// The plugin's own `GET /catalog/agy` runs the local CLI; ids and labels are its real rows.
+const AGY_CATALOG = {
+  models: [
+    { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+    { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
+    { id: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)" },
+  ],
 };
 
 async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
@@ -479,6 +488,10 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       if (pathAndQuery === "/catalog/pi") {
         if (mode.piCatalog) return mode.piCatalog();
         return PI_CATALOG;
+      }
+      if (pathAndQuery === "/catalog/agy") {
+        if (mode.agyCatalog) return mode.agyCatalog();
+        return AGY_CATALOG;
       }
       if (pathAndQuery === "/settings") {
         if (mode.settings) return mode.settings(body);
@@ -2193,54 +2206,138 @@ function agySettings(): Record<string, any> & {
   return settings;
 }
 
-test("DOM: agy effort follows the selected model variant and clears incompatible values", async () => {
+test("DOM: agy models are a real select and reasoning is fixed to the model default", async () => {
   const settings = agySettings();
   const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
   try {
     await openSettings(mounted);
-    const model = byLabel(mounted.container, "配置 4 模型") as HTMLInputElement;
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
       "配置 4 reasoning",
     ) as HTMLSelectElement;
-    assert.deepEqual(optionValues(reasoning), ["", "low"]);
+    assert.equal(model.tagName, "SELECT");
+    assert.deepEqual(optionValues(model), [
+      "",
+      "gemini-3.8-flash-low",
+      "gemini-3.8-flash-high",
+      "gemini-pro-orchestrator-neon",
+    ]);
+    assert.equal(optionLabels(model)[0], "默认（沿用执行器）");
+    assert.equal(optionLabels(model)[1], "Gemini 3.8 Flash (Low)");
+    assert.equal(model.value, "gemini-3.8-flash-low");
+    // The previously stored level is neither shown nor editable: agy models own their effort.
+    assert.deepEqual(optionValues(reasoning), [""]);
+    assert.deepEqual(optionLabels(reasoning), ["默认（随模型）"]);
+    assert.equal(reasoning.disabled, true);
+    assert.equal(callsTo(mounted, "/catalog/agy").length, 1);
 
-    await typeInto(model, "gemini-3.8-flash-high");
+    await typeInto(model, "gemini-pro-orchestrator-neon");
     await waitFor(
-      () => reasoning.value === "" && optionValues(reasoning).join(",") === ",high",
-      "切换 high 变体清空 low",
+      () => model.value === "gemini-pro-orchestrator-neon",
+      "选择真实模型",
     );
-    await typeInto(reasoning, "high");
+    assert.deepEqual(optionValues(reasoning), [""]);
+    assert.equal(reasoning.value, "");
 
-    // An id without a proven effort suffix is not guessed; all levels stay available.
-    await typeInto(model, "custom/vendor-model");
-    await waitFor(
-      () =>
-        reasoning.value === "high" &&
-        optionValues(reasoning).join(",") === ",low,medium,high,xhigh,max",
-      "裸模型保留显式 effort",
-    );
-
-    await typeInto(model, "gemini-3.8-flash-low");
-    await waitFor(
-      () => reasoning.value === "" && optionValues(reasoning).join(",") === ",low",
-      "切回 low 变体清空 high",
-    );
-    await typeInto(reasoning, "low");
-    await waitFor(() => !button(mounted.container, "保存设置").disabled, "兼容组合可保存");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "agy 可保存");
     button(mounted.container, "保存设置").click();
-    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存兼容组合");
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存 agy 配置");
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[3]!.model, "gemini-3.8-flash-low");
-    assert.equal(body.configs[3]!.effort, "low");
+    assert.equal(body.configs[3]!.model, "gemini-pro-orchestrator-neon");
+    assert.equal(body.configs[3]!.effort, null);
   } finally {
     mounted.unmount();
   }
 });
 
-test("DOM: a stored agy model/effort conflict is visible and blocks save", async () => {
+test("DOM: agy runs the directory only for an agy config and fills the select from it", async () => {
+  const settings = snapshot().settings as Record<string, unknown> & {
+    configs: Array<Record<string, any>>;
+  };
+  settings.configs = configDefaults();
+  let calls = 0;
+  const mounted = await mountPlugin({
+    state: () => snapshot({ settings }),
+    agyCatalog: async () => {
+      calls += 1;
+      return AGY_CATALOG;
+    },
+  });
+  try {
+    await openSettings(mounted);
+    // `agy models` is a network-backed CLI command: no agy card, no request.
+    assert.equal(calls, 0);
+    (byLabel(mounted.container, "新增 Antigravity 配置") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 模型")), "新增 agy 配置");
+    await waitFor(() => calls === 1, "首个 agy 配置触发目录");
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    await waitFor(
+      () => optionValues(model).includes("gemini-3.8-flash-low"),
+      "agy 目录加载",
+    );
+    assert.deepEqual(optionValues(model), [
+      "",
+      "gemini-3.8-flash-low",
+      "gemini-3.8-flash-high",
+      "gemini-pro-orchestrator-neon",
+    ]);
+    await typeInto(model, "gemini-3.8-flash-low");
+    // Deleting the only agy config removes the need and never re-runs the CLI.
+    (byLabel(mounted.container, "配置 4 删除") as HTMLButtonElement).click();
+    await waitFor(() => !byLabel(mounted.container, "配置 4 模型"), "删除 agy 配置");
+    assert.equal(calls, 1);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a failing agy directory keeps the saved id and retries in place", async () => {
+  const settings = agySettings();
+  let calls = 0;
+  const mounted = await mountPlugin({
+    state: () => snapshot({ settings }),
+    agyCatalog: async () => {
+      calls += 1;
+      if (calls === 1) throw new Error("agy catalog down");
+      return AGY_CATALOG;
+    },
+  });
+  try {
+    await openSettings(mounted);
+    const card = byLabel(mounted.container, "配置 4 模型")!.closest("details")!;
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    const reasoning = byLabel(
+      mounted.container,
+      "配置 4 reasoning",
+    ) as HTMLSelectElement;
+    await waitFor(() => textOf(card).includes("agy catalog down"), "agy 目录失败");
+    assert.equal(model.value, "gemini-3.8-flash-low");
+    assert.deepEqual(optionValues(model), ["", "gemini-3.8-flash-low"]);
+    assert.match(
+      optionLabels(model)[1]!,
+      /gemini-3\.8-flash-low（当前已保存）/,
+    );
+    assert.deepEqual(optionLabels(reasoning), ["默认（随模型）"]);
+    assert.equal(reasoning.disabled, true);
+
+    findButton(card, "重试")!.click();
+    await waitFor(() => !textOf(card).includes("agy catalog down"), "agy 目录重试");
+    await waitFor(
+      () => optionValues(model).includes("gemini-3.8-flash-high"),
+      "agy 目录恢复",
+    );
+    assert.equal(calls, 2);
+    assert.equal(model.value, "gemini-3.8-flash-low");
+    assert.equal(reasoning.value, "");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a stale stored agy effort is not shown, cleared on save and never blocks", async () => {
   const settings = agySettings();
   settings.configs[3] = {
     ...settings.configs[3],
@@ -2251,20 +2348,28 @@ test("DOM: a stored agy model/effort conflict is visible and blocks save", async
   try {
     await openSettings(mounted);
     await waitFor(
-      () => textOf(mounted.container).includes("固定使用 low reasoning"),
-      "agy 冲突提示",
+      () => Boolean(byLabel(mounted.container, "配置 4 reasoning")),
+      "agy reasoning",
     );
+    // The obsolete UI conflict warning is gone; the old level never blocks the save.
+    assert.equal(textOf(mounted.container).includes("固定使用 low reasoning"), false);
     const reasoning = byLabel(
       mounted.container,
       "配置 4 reasoning",
     ) as HTMLSelectElement;
-    assert.deepEqual(optionValues(reasoning), ["", "low", "high"]);
-    const stored = [...reasoning.options].find((option) => option.value === "high");
-    assert.ok(stored);
-    assert.equal(stored.disabled, true);
-    assert.match(textOf(stored), /当前已保存，与模型不兼容/);
-    assert.equal(button(mounted.container, "保存设置").disabled, true);
-    assert.equal(callsTo(mounted, "/settings").length, 0);
+    assert.deepEqual(optionValues(reasoning), [""]);
+    assert.deepEqual(optionLabels(reasoning), ["默认（随模型）"]);
+    assert.equal(reasoning.disabled, true);
+    assert.equal(reasoning.value, "");
+
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "旧 effort 不阻止保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存 agy 默认 effort");
+    const body = callsTo(mounted, "/settings")[0]!.body as {
+      configs: Array<Record<string, any>>;
+    };
+    assert.equal(body.configs[3]!.model, "gemini-3.8-flash-low");
+    assert.equal(body.configs[3]!.effort, null);
   } finally {
     mounted.unmount();
   }

@@ -33,12 +33,6 @@ export function agyFixedModelEffort(model: string | null | undefined): AgyFixedE
   return null;
 }
 
-/** Efforts the UI may offer for a model; fixed variants offer only their native level. */
-export function agyCompatibleEfforts(model: string | null | undefined): string[] {
-  const fixed = agyFixedModelEffort(model);
-  return fixed ? [fixed] : [...AGY_EFFORT_LEVELS];
-}
-
 /**
  * Explains a known model/effort conflict. Only effort variants proven by `agy models` are
  * constrained; an unsuffixed model returns null so the CLI can validate the pair itself.

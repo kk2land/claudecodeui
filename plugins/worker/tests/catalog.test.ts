@@ -9,8 +9,6 @@ import {
   piModelOptions,
 } from "../client/catalog.js";
 import {
-  AGY_EFFORT_LEVELS,
-  agyCompatibleEfforts,
   agyEffortConflict,
   agyFixedModelEffort,
 } from "../shared/agy.js";
@@ -169,41 +167,49 @@ test("a typed DSH route falls back to the engine levels and is kept when saving"
   ]);
 });
 
-test("agy offers only a model's fixed effort while leaving unsuffixed ids unrestricted", () => {
-  const fixed = agyModelOptions("gemini-3.8-flash-low");
-  assert.deepEqual(fixed, [
-    {
-      value: "",
-      label: "使用默认值",
-      effort: [...AGY_EFFORT_LEVELS],
-    },
-    {
-      value: "gemini-3.8-flash-low",
-      label: "gemini-3.8-flash-low（当前已保存）",
-      effort: ["low"],
-    },
+test("agy rows persist native ids with model-owned effort and keep a saved id it lacks", () => {
+  const catalog = {
+    models: [
+      { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)" },
+      { id: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)" },
+      { id: "custom/vendor-model", label: "Custom Vendor" },
+    ],
+  };
+  const options = agyModelOptions(catalog, "gemini-3.8-flash-low");
+  assert.deepEqual(options, [
+    { value: "", label: "默认（沿用执行器）", effort: [] },
+    { value: "gemini-4-neon-high", label: "Gemini 4 Neon (High)", effort: [] },
+    { value: "gemini-3.8-flash-low", label: "Gemini 3.8 Flash (Low)", effort: [] },
+    { value: "custom/vendor-model", label: "Custom Vendor", effort: [] },
   ]);
+  // Every agy model owns its effort, so the editor exposes no selectable reasoning level.
   assert.deepEqual(
-    effortOptionsFor(fixed, "gemini-3.8-flash-low", null).map(
+    effortOptionsFor(options, "gemini-3.8-flash-low", null).map(
       (option) => option.value,
     ),
-    ["", "low"],
+    [""],
   );
 
-  // A bare/custom id cannot be inferred from its name; keep every documented level available.
-  const bare = agyModelOptions("custom/vendor-model");
-  assert.deepEqual(bare.at(-1)?.effort, [...AGY_EFFORT_LEVELS]);
-  assert.deepEqual(
-    effortOptionsFor(bare, "custom/vendor-model", null).map((option) => option.value),
-    ["", ...AGY_EFFORT_LEVELS],
-  );
+  // The directory may be stale, so a stored id the CLI no longer lists stays selectable.
+  const saved = agyModelOptions(catalog, "gemini-3.8-flash-medium");
+  assert.deepEqual(saved.at(-1), {
+    value: "gemini-3.8-flash-medium",
+    label: "gemini-3.8-flash-medium（当前已保存）",
+    effort: [],
+  });
+  // An unavailable catalog leaves only the runner default and the already stored id.
+  assert.deepEqual(agyModelOptions(null, "custom/vendor-model"), [
+    { value: "", label: "默认（沿用执行器）", effort: [] },
+    {
+      value: "custom/vendor-model",
+      label: "custom/vendor-model（当前已保存）",
+      effort: [],
+    },
+  ]);
 
+  // The server-side compatibility check stays: explicit MCP effort is still validated.
   assert.equal(agyFixedModelEffort("gemini-4-neon-xhigh"), "xhigh");
   assert.equal(agyFixedModelEffort("gemini-3.8-flash-max"), null);
-  assert.deepEqual(agyCompatibleEfforts("gemini-3.8-flash-low"), ["low"]);
-  assert.deepEqual(agyCompatibleEfforts("custom/vendor-model"), [
-    ...AGY_EFFORT_LEVELS,
-  ]);
   assert.equal(agyEffortConflict("gemini-3.8-flash-low", "low"), null);
   assert.equal(agyEffortConflict("gemini-3.8-flash-low", null), null);
   assert.match(

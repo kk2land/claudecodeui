@@ -689,6 +689,23 @@ export type PiModelCatalog = {
   thinkingLevels: string[];
 };
 
+/** One model from the native Antigravity CLI's own `agy models` directory. */
+export type AgyModelOption = {
+  /** The native CLI id persisted as a Worker config's `model` (for example `gemini-4-neon-high`). */
+  id: string;
+  /** The CLI's display name; it never replaces the persisted id. */
+  label: string;
+};
+
+/**
+ * `GET /catalog/agy` response, read from the local `agy models` command in the Worker environment.
+ * AGY is a Worker execution engine only; its directory is network-backed, so the route runs on
+ * demand instead of on settings load.
+ */
+export type AgyModelCatalog = {
+  models: AgyModelOption[];
+};
+
 /** One model declared by the DSH headless profile's static patch. */
 export type DshModelOption = {
   /** The full `provider/model` route persisted as a Worker config's `model`. */

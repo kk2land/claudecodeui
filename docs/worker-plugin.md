@@ -290,6 +290,8 @@ provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配�
 Codex 使用宿主模型目录；Codex 先从宿主读取模型服务目录，再按服务读取模型列表；Pi 通过插件
 `GET /catalog/pi` 直接读取 `PI_CODING_AGENT_DIR`（或 `~/.pi/agent`）下 `models.json` 中 providers 配置的
 完整 provider/model 与 reasoning 布尔值；不启动 Pi，不使用凭据，也不执行 `!command`。文件缺失时目录为空。
+agy 通过插件 `GET /catalog/agy` 在 Worker 环境中按 PATH 解析已有 `agy` 可执行文件并运行 `agy models`，
+只读取原生 ID 与显示名，不修改、安装或登录 CLI。
 Codex 卡片顺序为先模型服务、再模型、再 reasoning：切换模型服务会清空该配置已选模型与 reasoning；切换模型
 会丢弃新模型不支持的 reasoning。目录接口不可用时卡片显示本地错误与重试，并保留当前配置值；模型或 reasoning
 不在目录中时以“（当前已保存）”选项保留，普通保存不会清掉它们。留空表示沿用执行器自身默认。Codex 模型服务
@@ -302,12 +304,18 @@ DSH 的模型字段始终是一个可手填完整 `provider/model` 路由的输�
 的模型只保留“默认（沿用执行器）”）；手填的未列出路由改用执行器已有的 effort 名称列表，因此目录外但有效的
 完整路由仍可带 reasoning。最终合法性仍由运行时在发送前校验。
 
-agy 的模型目录来自 `agy models`，该命令会访问网络，因此设置页不在加载时启动 CLI，也不伪造模型目录；
-模型字段与 DSH 一样是可手填的原生模型 ID 输入框（例如 `gemini-3.8-flash-low`），留空表示沿用 agy 自身
-默认。设置页只对已证实带 effort 变体后缀的 ID 收窄 effort：`-low`/`-medium`/`-high`/`-xhigh` 模型仅提供
-同档和“默认”，切换模型时按现有逻辑清空不兼容的 effort；无此后缀的 ID 仍提供
-`low`/`medium`/`high`/`xhigh`/`max`，不把任意后缀臆断为约束，最终由 CLI 校验。已有配置若保存了冲突组合，
-界面显示模型固定档位与“当前已保存，与模型不兼容”的不可选值，阻止保存，不会静默改写用户的原值。
+agy 的模型目录来自 `agy models`，该命令会访问网络，因此目录只在确实需要时请求：打开已包含 agy 配置的
+设置页，或新增/切换出首个 agy 配置；没有 agy 配置时不会启动 CLI。目录按需在 Worker 环境中执行，沿用与
+运行相同的 PATH 解析和已清理的环境（不注入、不复制凭据），并设置正常网络超时，不使用 shell 拼接。
+模型字段是真正的下拉列表，值为原生模型 ID（例如 `gemini-3.8-flash-low`），标签是 CLI 给出的显示名；
+第一项是“默认（沿用执行器）”，选它保存 `null`，表示留空并沿用 agy 自身默认。目录请求失败时，卡片提示
+“模型目录读取失败，已保留当前配置值”并提供重试；此时下拉列表仍保留“默认（沿用执行器）”和当前已存模型
+（标注“当前已保存”），原值不会被清掉，保存也不会丢失。目录里没有当前已存 ID 时同样以该选项保留。
+agy 模型自带 effort（`-low`/`-medium`/`-high`/`-xhigh` 等变体就是固定档位），因此设置页的 Reasoning 是
+不可编辑的“默认（随模型）”单项，无论默认模型还是任一目录变体都一样，不再提供档位选择或冲突警告。
+保存 agy 配置时推理档位统一回到模型默认并提交 `effort: null`，打开旧配置里保存的显式档位或与模型冲突的
+档位也不会显示、不会阻止保存，保存一次即清理。直接通过 MCP 新建/续接仍可显式指定 effort，由原有的
+服务端兼容校验决定是否接受；这不改变配置契约，也不做持久化迁移。
 
 Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名键以设置值覆盖继承值；`{}` 显式清除预填
 的 `CODEX_PROXY_BYPASS`。`legacyExtraArgs` 的每个元素是一个独立 argv，不拼接成 shell 字符串，不做引号或
@@ -543,7 +551,8 @@ host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自�
 ## 验收限制
 
 自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；模型目录回归在临时 fixture 中检查
-DSH headless patch 与 Pi `models.json` 的静态解析（含凭据不外泄与 `!!js` 不执行），不读取真实配置；另有真实 Codex app-server 与 DSH ACP
+DSH headless patch、Pi `models.json` 的静态解析（含凭据不外泄与 `!!js` 不执行）以及 agy 在 Worker 环境中
+运行 `models` 的 `ID<TAB>显示名` 解析（含执行失败、无法解析的错误路径、环境继承与 stderr 不外泄），不读取真实配置；另有真实 Codex app-server 与 DSH ACP
 连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用；它只是测试入口，不是 Worker 运行配置。
 Codex 版本按包分别锁定：app-server 经 compat alias（`@openai/codex-app-server-compat`）使用官方 CLI `0.169.0`
 （app-server 锁定该版本；旧线程不支持跨 provider resume，因此换服务改为带历史分支，并确认新 child 线程关闭后再应用新 Worker 配置）；根包 `@openai/codex` 与会话交接使用的 `@openai/codex-sdk` 仍为 `0.166.0`

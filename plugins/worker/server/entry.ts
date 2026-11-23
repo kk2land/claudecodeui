@@ -74,6 +74,12 @@ app.get(
 );
 
 app.get(
+  "/catalog/agy",
+  uiOnly,
+  route(() => service.agyCatalog()),
+);
+
+app.get(
   "/catalog/pi",
   uiOnly,
   route(() => service.piCatalog()),

@@ -11,6 +11,7 @@ import {
   Trash2,
 } from "lucide-react";
 import type {
+  AgyModelCatalog,
   CodexModelsDirectory,
   DshModelCatalog,
   PiModelCatalog,
@@ -23,7 +24,6 @@ import type {
   WorkerType,
 } from "../shared/contracts.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
-import { agyEffortConflict } from "../shared/agy.js";
 import type { WorkerHost } from "./api.js";
 import type { workerApi } from "./api.js";
 import {
@@ -202,30 +202,33 @@ function fallbackDefault(
 /** One local catalog failure rendered on the card that depends on it, with its own retry. */
 type CatalogProblem = {
   message: string;
-  source: "dsh" | "pi" | "codex" | "codexDirectory" | "codexProvider";
+  source: "agy" | "dsh" | "pi" | "codex" | "codexDirectory" | "codexProvider";
   provider?: string;
 };
 
 type CatalogView = {
+  agy: AgyModelCatalog | null;
   dsh: DshModelCatalog | null;
   codex: WorkerModelCatalog | null;
   pi: PiModelCatalog | null;
   codexDirectory: CodexModelsDirectory | null;
   codexModels: Record<string, Loadable<string[]>>;
   errors: {
+    agy?: string;
     dsh?: string;
     pi?: string;
     codex?: string;
     codexDirectory?: string;
   };
   loading: {
+    agy: boolean;
     dsh: boolean;
     pi: boolean;
     codex: boolean;
     codexDirectory: boolean;
   };
   retry(
-    source: "dsh" | "pi" | "codex" | "codexDirectory" | "codexProvider",
+    source: "agy" | "dsh" | "pi" | "codex" | "codexDirectory" | "codexProvider",
     provider?: string,
   ): void;
 };
@@ -271,6 +274,7 @@ export function SettingsView({
   const [dragState, setDragState] = useState<{ id: string; overId: string | null } | null>(null);
 
   const [dshCatalog, setDshCatalog] = useState<Loadable<DshModelCatalog>>(loading());
+  const [agyCatalog, setAgyCatalog] = useState<Loadable<AgyModelCatalog>>(loading());
   const [codexCatalog, setCodexCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
   const [piCatalog, setPiCatalog] = useState<Loadable<PiModelCatalog>>(loading());
   const [codexDirectory, setCodexDirectory] = useState<Loadable<CodexModelsDirectory>>(loading());
@@ -281,6 +285,7 @@ export function SettingsView({
   const codexModelsRef = useRef<Record<string, Loadable<string[]>>>({});
   const providerRequestTokens = useRef<Record<string, number>>({});
   const [dshAttempt, setDshAttempt] = useState(0);
+  const [agyAttempt, setAgyAttempt] = useState(0);
   const [codexAttempt, setCodexAttempt] = useState(0);
   const [piAttempt, setPiAttempt] = useState(0);
   const [directoryAttempt, setDirectoryAttempt] = useState(0);
@@ -300,6 +305,27 @@ export function SettingsView({
       live = false;
     };
   }, [api, dshAttempt]);
+
+  // `agy models` hits the network, so the directory is only requested once the draft actually
+  // uses agy: opening settings that contain an agy config, or adding/retargeting one. Collapsing
+  // away the last agy config performs no request.
+  const needsAgyCatalog = draft.configs.some(
+    (config) => config.type === "agy",
+  );
+  useEffect(() => {
+    if (!needsAgyCatalog) return;
+    let live = true;
+    setAgyCatalog((current) => loading(current.value));
+    api
+      .agyCatalog()
+      .then((value) => live && setAgyCatalog({ status: "ready", value, error: "" }))
+      .catch(
+        (error) => live && setAgyCatalog({ status: "error", value: null, error: String(error) }),
+      );
+    return () => {
+      live = false;
+    };
+  }, [api, needsAgyCatalog, agyAttempt]);
 
   useEffect(() => {
     let live = true;
@@ -386,12 +412,14 @@ export function SettingsView({
   }, [host, providerKey, providerAttempt]);
 
   const catalogView: CatalogView = {
+    agy: agyCatalog.value,
     dsh: dshCatalog.value,
     codex: codexCatalog.value,
     pi: piCatalog.value,
     codexDirectory: codexDirectory.value,
     codexModels,
     errors: {
+      agy: agyCatalog.status === "error" ? agyCatalog.error : undefined,
       dsh: dshCatalog.status === "error" ? dshCatalog.error : undefined,
       pi: piCatalog.status === "error" ? piCatalog.error : undefined,
       codex: codexCatalog.status === "error" ? codexCatalog.error : undefined,
@@ -399,13 +427,15 @@ export function SettingsView({
         codexDirectory.status === "error" ? codexDirectory.error : undefined,
     },
     loading: {
+      agy: agyCatalog.status === "loading",
       dsh: dshCatalog.status === "loading",
       pi: piCatalog.status === "loading",
       codex: codexCatalog.status === "loading",
       codexDirectory: codexDirectory.status === "loading",
     },
     retry(source, provider) {
-      if (source === "dsh") setDshAttempt((value) => value + 1);
+      if (source === "agy") setAgyAttempt((value) => value + 1);
+      else if (source === "dsh") setDshAttempt((value) => value + 1);
       else if (source === "pi") setPiAttempt((value) => value + 1);
       else if (source === "codex") setCodexAttempt((value) => value + 1);
       else if (source === "codexDirectory") setDirectoryAttempt((value) => value + 1);
@@ -440,15 +470,6 @@ export function SettingsView({
     (config) =>
       config.type === "codex" && envResults[config.id]?.error,
   );
-  const agyConfigConflict = draft.configs
-    .map((config) => ({
-      name: config.name,
-      message:
-        config.type === "agy"
-          ? agyEffortConflict(config.model, config.effort)
-          : null,
-    }))
-    .find((entry) => entry.message);
   const validationMessage = !draft.configs.length
     ? "至少需要一个 Worker 配置。"
     : draft.configs.some((config) => !config.name.trim())
@@ -468,9 +489,7 @@ export function SettingsView({
                 config.type === "dsh" && config.effort && !config.model,
             )
           ? "DSH reasoning 需要同时配置 DSH 模型。"
-          : agyConfigConflict
-            ? "配置 " + agyConfigConflict.name + "：" + agyConfigConflict.message
-            : codexNameWithEnvError
+          : codexNameWithEnvError
           ? "配置 " +
             codexNameWithEnvError.name +
             "：" +
@@ -569,10 +588,16 @@ export function SettingsView({
     });
 
   const setModel = (config: WorkerConfig, value: string) => {
+    // agy models carry their own effort, so the editor never keeps an explicit level for them.
+    if (config.type === "agy") {
+      update(config.id, { model: value || null, effort: null });
+      return;
+    }
     // A model change drops an effort the newly selected model does not support.
     const models = modelOptionsFor(
       { ...config, model: value || null },
       {
+        agy: catalogView.agy,
         dsh: catalogView.dsh,
         codex: catalogView.codex,
         pi: catalogView.pi,
@@ -604,6 +629,9 @@ export function SettingsView({
     const body: WorkerSettingsUpdate = {
       configs: draft.configs.map((config) => {
         const name = config.name.trim();
+        // agy effort always follows the selected model; a stale saved level is dropped here.
+        if (config.type === "agy")
+          return { ...config, name, roles: [...config.roles], effort: null };
         if (config.type !== "codex" || !config.codex)
           return { ...config, name, roles: [...config.roles] };
         return {
@@ -725,8 +753,9 @@ export function SettingsView({
               catalogProblems.push({ message: catalogView.errors.pi, source: "pi" });
             catalogLoading = catalogView.loading.pi;
           } else if (config.type === "agy") {
-            // agy has no plugin catalog: the model id is typed and effort follows the shared variant rule.
-            catalogLoading = false;
+            if (catalogView.errors.agy)
+              catalogProblems.push({ message: catalogView.errors.agy, source: "agy" });
+            catalogLoading = catalogView.loading.agy;
           } else {
             if (catalogView.errors.codex)
               catalogProblems.push({ message: catalogView.errors.codex, source: "codex" });
@@ -750,6 +779,7 @@ export function SettingsView({
           // `provider/model` field with the directory as suggestions. A listed route offers its
           // declared levels; a typed route offers the engine's levels.
           const models: ModelSelectOption[] = modelOptionsFor(config, {
+            agy: catalogView.agy,
             dsh: catalogView.dsh,
             codex: catalogView.codex,
             pi: catalogView.pi,
@@ -768,13 +798,7 @@ export function SettingsView({
                   config.model,
                   config.effort,
                 )
-              : config.type === "agy"
-                ? effortOptionsFor(models, config.model, null)
-                : effortOptionsFor(models, config.model, config.effort);
-          const agyConflict =
-            config.type === "agy"
-              ? agyEffortConflict(config.model, config.effort)
-              : null;
+              : effortOptionsFor(models, config.model, config.effort);
           const isDefault = draft.defaultConfigId === config.id;
           // Highlight this card as soon as a drag enters it (dragenter fires before the first
           // dragover); dragover then keeps the highlight and allows the drop.
@@ -1008,74 +1032,77 @@ export function SettingsView({
                 ) : null}
                 <label>
                   模型
-                  {config.type === "dsh" || config.type === "agy" ? (
+                  {config.type === "dsh" ? (
                     <>
                       <input
                         type="text"
                         aria-label={"配置 " + position + " 模型"}
-                        placeholder={
-                          config.type === "agy"
-                            ? "模型 ID，留空使用 agy 默认"
-                            : "provider/model"
-                        }
+                        placeholder="provider/model"
                         spellCheck={false}
-                        list={
-                          config.type === "dsh"
-                            ? "worker-dsh-models-" + config.id
-                            : undefined
-                        }
+                        list={"worker-dsh-models-" + config.id}
                         value={config.model ?? ""}
                         onChange={(event) => setModel(config, event.target.value)}
                       />
-                      {config.type === "dsh" ? (
-                        <datalist id={"worker-dsh-models-" + config.id}>
-                          {(catalogView.dsh?.models ?? []).map((option) => (
-                            <option key={option.route} value={option.route}>
-                              {option.label}
-                            </option>
-                          ))}
-                        </datalist>
-                      ) : null}
+                      <datalist id={"worker-dsh-models-" + config.id}>
+                        {(catalogView.dsh?.models ?? []).map((option) => (
+                          <option key={option.route} value={option.route}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </datalist>
                       <small>
-                        {config.type === "agy"
-                          ? "填写 agy 的原生模型 ID（可用 agy models 查看）；留空沿用执行器自身默认。"
-                          : "可选用目录建议，或直接填写完整 provider/model 路由；留空表示沿用执行器自身默认。"}
+                        可选用目录建议，或直接填写完整 provider/model 路由；留空表示沿用执行器自身默认。
                       </small>
                     </>
                   ) : (
-                    <select
-                      aria-label={"配置 " + position + " 模型"}
-                      value={config.model ?? ""}
-                      onChange={(event) => setModel(config, event.target.value)}
-                    >
-                      {models.map((option) => (
-                        <option key={option.value} value={option.value}>
-                          {option.label}
-                        </option>
-                      ))}
-                    </select>
+                    <>
+                      <select
+                        aria-label={"配置 " + position + " 模型"}
+                        value={config.model ?? ""}
+                        onChange={(event) => setModel(config, event.target.value)}
+                      >
+                        {models.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label}
+                          </option>
+                        ))}
+                      </select>
+                      {config.type === "agy" ? (
+                        <small>
+                          模型列表来自本机 agy models；留空沿用执行器自身默认。
+                        </small>
+                      ) : null}
+                    </>
                   )}
                 </label>
                 <label>
                   Reasoning
-                  <select
-                    aria-label={"配置 " + position + " reasoning"}
-                    value={config.effort ?? ""}
-                    onChange={(event) =>
-                      update(config.id, { effort: event.target.value || null })
-                    }
-                  >
-                    {efforts.map((option) => (
-                      <option key={option.value} value={option.value}>
-                        {option.label || DEFAULT_EFFORT_LABEL}
-                      </option>
-                    ))}
-                    {agyConflict && config.effort ? (
-                      <option value={config.effort} disabled>
-                        {config.effort}（当前已保存，与模型不兼容）
-                      </option>
-                    ) : null}
-                  </select>
+                  {config.type === "agy" ? (
+                    <>
+                      <select
+                        aria-label={"配置 " + position + " reasoning"}
+                        value=""
+                        disabled
+                      >
+                        <option value="">默认（随模型）</option>
+                      </select>
+                      <small>agy 模型自带 effort，保存时沿用所选模型默认。</small>
+                    </>
+                  ) : (
+                    <select
+                      aria-label={"配置 " + position + " reasoning"}
+                      value={config.effort ?? ""}
+                      onChange={(event) =>
+                        update(config.id, { effort: event.target.value || null })
+                      }
+                    >
+                      {efforts.map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label || DEFAULT_EFFORT_LABEL}
+                        </option>
+                      ))}
+                    </select>
+                  )}
                 </label>
                 </div>
                 {catalogProblems.length ? (
