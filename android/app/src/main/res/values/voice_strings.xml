@@ -45,6 +45,8 @@
     <string name="voice_hint_speak">Pause when you finish speaking to send your message.</string>
     <string name="voice_hint_interrupt">Speak to interrupt.</string>
     <string name="voice_hint_draft">Your draft is in the transcript.</string>
+    <string name="voice_hint_web_input">Open CloudCLI to reply or approve.</string>
+    <string name="voice_hint_queue_retry">Could not check the queue. Try again.</string>
     <string name="voice_hint_review">Review what you say in the transcript.</string>
     <string name="voice_hint_playback_error">Reply audio failed. Read the reply in the transcript.</string>
     <string name="voice_hint_mic_settings">Allow microphone access in Android settings to speak.</string>
@@ -56,7 +58,8 @@
     <string name="voice_web_delivery">Confirm delivery in CloudCLI</string>
     <string name="voice_web_error">The session needs attention</string>
     <string name="voice_delivery_checking">Checking delivery in history and the queue…</string>
-    <string name="voice_delivery_settings_timeout">Session settings timed out. Your draft is ready to edit.</string>
+    <string name="voice_delivery_settings_timeout">Session settings timed out. Try again.</string>
+    <string name="voice_delivery_state_unavailable">Could not check the session. Try again.</string>
     <string name="voice_delivery_connection_lost">Connection interrupted. Your draft is ready to edit.</string>
     <string name="voice_delivery_reconnect">Delivery will be checked when the connection returns.</string>
     <string name="voice_delivery_sent">Message delivered.</string>
@@ -66,8 +69,10 @@
     <string name="voice_delivery_verify_web">Check the session in CloudCLI before sending again.</string>
     <string name="voice_delivery_preparing">Preparing message…</string>
     <string name="voice_delivery_permission_settings">Open the session in CloudCLI to load its permission settings.</string>
-    <string name="voice_delivery_queue_occupied">A message is already queued. You can edit this draft or add it to the queue.</string>
-    <string name="voice_delivery_turn_changed">The Codex turn changed. Your draft is ready to edit.</string>
+    <string name="voice_delivery_queue_occupied">A message is already queued. You can add yours to the queue.</string>
+    <string name="voice_delivery_queue_busy">The queue is awaiting confirmation. Check it in CloudCLI.</string>
+    <string name="voice_delivery_turn_changed">The Codex turn changed. Try sending again or add your draft to the queue.</string>
+    <string name="voice_delivery_busy">Codex is busy. Try sending again or add your draft to the queue.</string>
     <string name="voice_delivery_saving_queue">Saving message to the queue…</string>
     <string name="voice_delivery_queued">Message saved to the queue.</string>
     <string name="voice_delivery_awaiting">Waiting for Codex to confirm your message…</string>

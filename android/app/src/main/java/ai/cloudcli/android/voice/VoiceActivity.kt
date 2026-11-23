@@ -64,6 +64,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
     private lateinit var hint: TextView
     private lateinit var web: Button
     private lateinit var recovery: Button
+    private lateinit var recordRecovery: Button
     private lateinit var stopReply: Button
     private lateinit var records: ScrollView
     private lateinit var recordStatus: TextView
@@ -470,7 +471,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         }
         val queued = current.queuedCount
         val hintText = when {
-            draft.text.isNotBlank() -> getString(R.string.voice_hint_draft)
+            draft.text.isNotBlank() -> current.draftNotice ?: getString(R.string.voice_hint_draft)
             statusRes == R.string.voice_status_mic_permission -> getString(
                 if (micAccess == MicAccess.SETTINGS) R.string.voice_hint_mic_settings else R.string.voice_hint_mic_permission,
             )
@@ -483,13 +484,16 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
             else -> null
         }
         hint.showText(hintText)
-        val reconnecting = current.connection == VoiceConnection.RECONNECTING
-        recovery.visibility = if (reconnecting || current.unknown || current.queueUnavailable) View.VISIBLE else View.GONE
-        recovery.setText(when {
+        val recoveryAction = when {
             current.unknown -> R.string.voice_check_delivery
             current.queueUnavailable -> R.string.voice_retry
-            else -> R.string.voice_reconnect
-        })
+            current.connection == VoiceConnection.RECONNECTING -> R.string.voice_reconnect
+            else -> null
+        }
+        for (button in listOf(recovery, recordRecovery)) {
+            button.visibility = if (recoveryAction == null) View.GONE else View.VISIBLE
+            if (recoveryAction != null) button.setText(recoveryAction)
+        }
         val webRequired = current.connection == VoiceConnection.SIGN_IN || current.connection == VoiceConnection.UNSUPPORTED
         web.visibility = if (webReason != null || current.unknown || webRequired) {
             View.VISIBLE
@@ -537,16 +541,16 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         }
 
         val queued = current.queuedCount
+        val hasDraft = draft.text.isNotBlank()
         note.showText(listOfNotNull(
-            current.note,
+            current.draftNotice?.takeIf { hasDraft } ?: current.note,
             captureError?.takeIf { it.isNotBlank() },
             playbackError?.takeIf { it.isNotBlank() },
             if (queued > 0) resources.getQuantityString(R.plurals.voice_queued_count, queued, queued) else null,
         ).joinToString("\n"))
         composer.visibility = if (current.opened) View.VISIBLE else View.GONE
         pending.showText(current.pendingText?.let { getString(R.string.voice_pending, it) })
-        val hasDraft = draft.text.isNotBlank()
-        send.isEnabled = current.route != null && hasDraft
+        send.isEnabled = current.canSend && hasDraft
         send.setText(if (current.route == SendRoute.STEER) R.string.voice_steer else R.string.voice_send)
         enqueue.isEnabled = current.canQueue && hasDraft
     }
@@ -570,6 +574,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         hint = findViewById(R.id.voice_hint)
         web = findViewById<Button>(R.id.voice_web).apply { setOnClickListener { openWeb() } }
         recovery = findViewById<Button>(R.id.voice_recovery).apply { setOnClickListener { session?.check() } }
+        recordRecovery = findViewById<Button>(R.id.voice_records_recovery).apply { setOnClickListener { session?.check() } }
         stopReply = findViewById<Button>(R.id.voice_stop_reply).apply { setOnClickListener { silence() } }
         records = findViewById(R.id.voice_records)
         recordStatus = findViewById(R.id.voice_records_status)

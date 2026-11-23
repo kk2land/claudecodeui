@@ -27,7 +27,7 @@ internal class VoiceSession(
     restored: VoiceSubmission? = null,
 ) {
     private enum class Stage { PREPARING, SENDING, APPENDING, STEERING, UNKNOWN }
-    private data class Pending(val message: VoiceSubmission, var stage: Stage, val route: SendRoute? = null)
+    private data class Pending(val message: VoiceSubmission, var stage: Stage, var sentDirectly: Boolean = false)
 
     private val main = Handler(Looper.getMainLooper())
     private val reconnect = ReconnectPolicy()
@@ -52,6 +52,7 @@ internal class VoiceSession(
     private var historyMessage: String? = null
     private var queueMessage: String? = null
     private var deliveryMessage: String? = restored?.let { strings.getString(R.string.voice_delivery_checking) }
+    private var draftIssue: String? = null
 
     var connection = VoiceConnection.CONNECTING
         private set
@@ -66,16 +67,32 @@ internal class VoiceSession(
         state?.phase == "running" || state?.goalActive == true
     val queuedCount: Int get() = queue?.entries?.size ?: 0
     val note: String? get() = deliveryMessage ?: historyMessage ?: queueMessage ?: state?.error
-    val route: SendRoute? get() = if (connected && pending == null) routeNow() else null
-    val canAutoSubmit: Boolean get() = route != null && !waitingForWeb && state?.queueHeld != true && queue?.status != "held"
-    val canQueue: Boolean get() = connected && pending == null && sendRoute(state, processing, true, enqueue = true) != null
+    // This labels Send while the queue snapshot may be out of date.
+    val route: SendRoute? get() = sendRoute(state, processing, queueEmpty = true, enqueue = false)
+    val canQueue: Boolean get() = connected && pending == null && state?.modelRequired != true
+    val canSend: Boolean get() = canQueue && !waitingForWeb
+    val canAutoSubmit: Boolean get() = canSend && route != null && queue?.empty == true &&
+        state?.queueHeld != true && queue?.status != "held"
     val webReason: Int? get() = when {
         !connected -> null
         waitingForWeb -> R.string.voice_web_input
         state?.modelRequired == true -> R.string.voice_web_model
         queue?.status == "unknown" -> R.string.voice_web_delivery
+        queue?.status == "steering" -> R.string.voice_delivery_queue_busy
         state?.queueHeld == true || queue?.status == "held" -> R.string.voice_web_queue
         state?.error != null -> R.string.voice_web_error
+        else -> null
+    }
+    val draftNotice: String? get() = when {
+        !connected -> null
+        unknown -> strings.getString(R.string.voice_delivery_verify_web)
+        pending != null -> deliveryMessage
+        waitingForWeb -> strings.getString(R.string.voice_hint_web_input)
+        queueUnavailable -> strings.getString(R.string.voice_hint_queue_retry)
+        draftIssue != null -> draftIssue
+        webReason != null -> null
+        queuedCount > 0 -> strings.getString(R.string.voice_delivery_queue_occupied)
+        route == null -> strings.getString(R.string.voice_delivery_busy)
         else -> null
     }
 
@@ -319,6 +336,7 @@ internal class VoiceSession(
 
     private fun refreshQueue() {
         val ws = socket?.takeIf { connected } ?: return
+        if (pending?.stage == Stage.PREPARING) return // Submission reads the queue before choosing a route.
         val request = ++queueRead
         api.queue(id) { result ->
             if (socket !== ws || queueRead != request) return@queue
@@ -336,14 +354,17 @@ internal class VoiceSession(
         }
     }
 
-    private fun routeNow(): SendRoute? = sendRoute(state, processing, queue?.empty == true, enqueue = false)
-
     fun submit(text: String, enqueue: Boolean, automatic: Boolean, permissions: ((String?) -> Unit) -> Unit): Boolean {
-        if (automatic && !canAutoSubmit) return false
+        val allowed = when {
+            enqueue -> canQueue
+            automatic -> canAutoSubmit
+            else -> canSend
+        }
+        if (!allowed) return false
         val ws = socket?.takeIf { connected } ?: return false
-        val route = (if (enqueue && canQueue) SendRoute.QUEUE else if (!enqueue) route else null) ?: return false
-        val message = VoiceSubmission(text, UUID.randomUUID().toString(), state?.turnId.takeIf { route == SendRoute.STEER })
-        val staged = Pending(message, Stage.PREPARING, route)
+        val target = state?.turnId.takeIf { !enqueue && route == SendRoute.STEER }
+        val message = VoiceSubmission(text, UUID.randomUUID().toString(), target)
+        val staged = Pending(message, Stage.PREPARING)
         pending = staged
         silence()
         stopPlayback()
@@ -366,42 +387,58 @@ internal class VoiceSession(
                 }
                 readState(ws) read@{ native ->
                     if (pending !== staged || socket !== ws) return@read
-                    if (native?.runtime != "app-server") {
+                    if (native == null) {
+                        settle(strings.getString(R.string.voice_delivery_state_unavailable), restore = true)
+                        return@read
+                    }
+                    if (native.runtime != "app-server") {
                         unavailable()
                         return@read
                     }
                     state = native
                     val options = JSONObject().put("clientMessageId", message.clientId).put("permissionMode", mode)
                         .put("model", native.model ?: model.string("model")).put("effort", model.string("effort"))
-                    when {
-                        native.modelRequired -> settle(strings.getString(R.string.voice_web_model), restore = true)
-                        route == SendRoute.QUEUE -> append(staged, ws, options)
-                        else -> checkQueueBeforeSend(staged, ws, options, automatic)
-                    }
+                    checkQueueBeforeSend(staged, ws, options, enqueue, automatic)
                 }
             }
         }
         return true
     }
 
-    private fun checkQueueBeforeSend(staged: Pending, ws: WebSocket, options: JSONObject, automatic: Boolean) {
-        val request = ++queueRead
+    private fun checkQueueBeforeSend(staged: Pending, ws: WebSocket, options: JSONObject, enqueue: Boolean, automatic: Boolean) {
+        ++queueRead
         api.queue(id) { result ->
             if (pending !== staged || socket !== ws) return@queue
-            val snapshot = result.getOrElse {
-                settle(strings.getString(R.string.voice_queue_unavailable, it.message.orEmpty()), restore = true)
+            queue = result.getOrNull()
+            queueMessage = result.exceptionOrNull()?.let { strings.getString(R.string.voice_queue_unavailable, it.message.orEmpty()) }
+            val snapshot = queue ?: run {
+                settle(strings.getString(R.string.voice_hint_queue_retry), restore = true)
                 return@queue
             }
-            if (request == queueRead) queue = snapshot
-            when {
-                automatic && waitingForWeb -> settle(strings.getString(R.string.voice_web_input), restore = true)
-                automatic && (state?.queueHeld == true || snapshot.status == "held") ->
-                    settle(strings.getString(R.string.voice_web_queue), restore = true)
-                !snapshot.empty -> settle(strings.getString(R.string.voice_delivery_queue_occupied), restore = true)
-                routeNow() != staged.route || staged.route == SendRoute.STEER && state?.turnId != staged.message.expectedTurnId ->
-                    settle(strings.getString(R.string.voice_delivery_turn_changed), restore = true)
-                staged.route == SendRoute.DIRECT -> send(staged, ws, options)
-                else -> append(staged, ws, options)
+            val target = staged.message.expectedTurnId
+            val native = state
+            val route = sendRoute(native, processing, snapshot.empty, enqueue)
+            val reason = when {
+                !enqueue && waitingForWeb -> R.string.voice_hint_web_input
+                native?.modelRequired == true -> R.string.voice_web_model
+                snapshot.status == "unknown" -> R.string.voice_web_delivery
+                snapshot.status == "steering" -> R.string.voice_delivery_queue_busy
+                snapshot.status == "held" -> R.string.voice_web_queue
+                !enqueue && !snapshot.empty -> R.string.voice_delivery_queue_occupied
+                (automatic || target != null) && native?.queueHeld == true -> R.string.voice_web_queue
+                // A manual send may start the next turn. A steer stays tied to the selected turn.
+                route == SendRoute.STEER && native?.turnId != target ||
+                    route == SendRoute.DIRECT && automatic && target != null -> R.string.voice_delivery_turn_changed
+                else -> null
+            }
+            if (reason != null) {
+                settle(strings.getString(reason), restore = true)
+                return@queue
+            }
+            when (route) {
+                SendRoute.DIRECT -> send(staged, ws, options)
+                SendRoute.STEER, SendRoute.QUEUE -> append(staged, ws, options)
+                null -> settle(strings.getString(R.string.voice_delivery_busy), restore = true)
             }
         }
     }
@@ -409,8 +446,10 @@ internal class VoiceSession(
     private fun send(staged: Pending, ws: WebSocket, options: JSONObject) {
         val frame = JSONObject().put("type", "chat.send").put("sessionId", id)
             .put("content", staged.message.text).put("options", options)
-        if (ws.send(frame.toString())) awaitEcho(staged, Stage.SENDING)
-        else settle(strings.getString(R.string.voice_delivery_connection_lost), restore = true)
+        if (ws.send(frame.toString())) {
+            staged.sentDirectly = true
+            awaitEcho(staged, Stage.SENDING)
+        } else settle(strings.getString(R.string.voice_delivery_connection_lost), restore = true)
     }
 
     private fun append(staged: Pending, ws: WebSocket, options: JSONObject) {
@@ -424,17 +463,20 @@ internal class VoiceSession(
             if (closed || pending !== staged) return@append
             val receipt = result.getOrElse {
                 if (it is VoiceHttpError && it.status in 400..499 && it.status != 408) {
-                    val error = if (it.status == 409 && it.code == "QUEUE_NOT_EMPTY") {
-                        strings.getString(R.string.voice_delivery_queue_occupied)
-                    } else it.message.orEmpty()
+                    val error = when (it.code) {
+                        "QUEUE_NOT_EMPTY" -> strings.getString(R.string.voice_delivery_queue_occupied)
+                        "QUEUE_BUSY" -> strings.getString(R.string.voice_delivery_queue_busy)
+                        else -> it.message.orEmpty()
+                    }
                     settle(error, restore = true)
                     refreshQueue()
                 } else uncertain(strings.getString(R.string.voice_delivery_checking), refresh = connected)
                 return@append
             }
             message.queueId = receipt.id
-            if (target == null || receipt.appended || socket !== ws || state?.phase != "running" || state?.turnId != target) {
-                settle(strings.getString(R.string.voice_delivery_queued))
+            if (target == null || receipt.appended || socket !== ws || waitingForWeb || state?.queueHeld == true ||
+                state?.phase != "running" || state?.turnId != target) {
+                settle(strings.getString(if (state?.queueHeld == true) R.string.voice_delivery_held else R.string.voice_delivery_queued))
                 refreshQueue()
                 return@append
             }
@@ -478,17 +520,23 @@ internal class VoiceSession(
     }
 
     private fun protocolError(frame: JSONObject) {
-        val staged = pending?.takeIf { it.route == SendRoute.DIRECT && (it.stage == Stage.SENDING || it.stage == Stage.UNKNOWN) } ?: return
+        val staged = pending?.takeIf { it.sentDirectly && (it.stage == Stage.SENDING || it.stage == Stage.UNKNOWN) } ?: return
         val client = frame.string("clientMessageId")
         if (client != null && client != staged.message.clientId) return
-        when (frame.string("code")) {
-            "MESSAGE_ALREADY_SENT" -> uncertain(strings.getString(R.string.voice_delivery_checking), refresh = true)
-            "RUN_IN_PROGRESS", "CODEX_MODEL_REQUIRED", "SESSION_NOT_FOUND", "UNSUPPORTED_PROVIDER",
-            "QUEUE_REJECTED", "QUEUE_LIMIT_REACHED", "QUEUE_BUSY", "CONTENT_REQUIRED", "INVALID_TODO_IDS" -> {
-                settle(frame.string("error") ?: strings.getString(R.string.voice_delivery_refused), restore = true)
-                refreshQueue()
+        val error = when (frame.string("code")) {
+            "MESSAGE_ALREADY_SENT" -> {
+                uncertain(strings.getString(R.string.voice_delivery_checking), refresh = true)
+                return
             }
+            "RUN_IN_PROGRESS" -> strings.getString(R.string.voice_delivery_busy)
+            "CODEX_MODEL_REQUIRED" -> strings.getString(R.string.voice_web_model)
+            "QUEUE_BUSY" -> strings.getString(R.string.voice_delivery_queue_busy)
+            "SESSION_NOT_FOUND", "UNSUPPORTED_PROVIDER", "QUEUE_REJECTED", "QUEUE_LIMIT_REACHED", "CONTENT_REQUIRED",
+            "INVALID_TODO_IDS" -> frame.string("error") ?: strings.getString(R.string.voice_delivery_refused)
+            else -> return
         }
+        settle(error, restore = true)
+        refreshQueue()
     }
 
     private fun settle(message: String, restore: Boolean = false) {
@@ -496,6 +544,7 @@ internal class VoiceSession(
         main.removeCallbacks(deliveryDeadline)
         pending = null
         deliveryMessage = message
+        draftIssue = message.takeIf { restore }
         if (restore) {
             if (speechTicket === staged.message) silence()
             returnDraft(staged.message.text)

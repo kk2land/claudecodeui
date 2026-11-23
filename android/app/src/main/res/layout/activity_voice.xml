@@ -207,6 +207,14 @@
                 </LinearLayout>
 
                 <Button
+                    android:id="@+id/voice_records_recovery"
+                    style="@style/Widget.CloudCLI.Voice.Button"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:layout_gravity="center_horizontal"
+                    android:visibility="gone" />
+
+                <Button
                     android:id="@+id/voice_records_web"
                     style="@style/Widget.CloudCLI.Voice.Button"
                     android:layout_width="wrap_content"

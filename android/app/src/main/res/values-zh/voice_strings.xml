@@ -45,6 +45,8 @@
     <string name="voice_hint_speak">说完停一下，消息会自动发送。</string>
     <string name="voice_hint_interrupt">开口可打断播报。</string>
     <string name="voice_hint_draft">草稿已保留在文字记录中。</string>
+    <string name="voice_hint_web_input">请到 CloudCLI 网页回复或审批。</string>
+    <string name="voice_hint_queue_retry">无法核对队列，请重试。</string>
     <string name="voice_hint_review">可以在文字记录里确认识别内容。</string>
     <string name="voice_hint_playback_error">播报失败，可在文字记录中查看回复。</string>
     <string name="voice_hint_mic_settings">请在 Android 设置中允许麦克风访问。</string>
@@ -56,7 +58,8 @@
     <string name="voice_web_delivery">请在 CloudCLI 网页中确认送达</string>
     <string name="voice_web_error">会话需要处理</string>
     <string name="voice_delivery_checking">正在核对历史记录和队列…</string>
-    <string name="voice_delivery_settings_timeout">读取会话设置超时，可以继续编辑草稿。</string>
+    <string name="voice_delivery_settings_timeout">读取会话设置超时，请重试。</string>
+    <string name="voice_delivery_state_unavailable">无法确认会话状态，请重试。</string>
     <string name="voice_delivery_connection_lost">连接中断，可以继续编辑草稿。</string>
     <string name="voice_delivery_reconnect">连接恢复后将核对消息送达情况。</string>
     <string name="voice_delivery_sent">消息已送达。</string>
@@ -66,8 +69,10 @@
     <string name="voice_delivery_verify_web">再次发送前，请在 CloudCLI 网页中检查会话。</string>
     <string name="voice_delivery_preparing">正在准备消息…</string>
     <string name="voice_delivery_permission_settings">请在 CloudCLI 网页中打开会话以加载权限设置。</string>
-    <string name="voice_delivery_queue_occupied">已有消息在队列中。你可以编辑草稿或将它加入队列。</string>
-    <string name="voice_delivery_turn_changed">Codex 的当前轮次已变更，可以继续编辑草稿。</string>
+    <string name="voice_delivery_queue_occupied">已有消息在队列中，可以把草稿加入队列。</string>
+    <string name="voice_delivery_queue_busy">队列正在等待确认，请到 CloudCLI 网页核对。</string>
+    <string name="voice_delivery_turn_changed">Codex 的当前轮次已变更，请重试或加入队列。</string>
+    <string name="voice_delivery_busy">Codex 正忙，请稍后重试或加入队列。</string>
     <string name="voice_delivery_saving_queue">正在加入队列…</string>
     <string name="voice_delivery_queued">消息已加入队列。</string>
     <string name="voice_delivery_awaiting">正在等待 Codex 确认消息…</string>
