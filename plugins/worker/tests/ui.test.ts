@@ -230,17 +230,6 @@ function run(overrides: RunOverrides = {}) {
   };
 }
 const CONFIG_DEFAULTS = {
-  DSH: {
-    id: "dsh-default",
-    name: "DSH default",
-    type: "dsh",
-    enabled: true,
-    roles: [],
-    concurrency: 3,
-    hardTimeoutSeconds: 300,
-    model: null,
-    effort: null,
-  },
   PI: {
     id: "pi-default",
     name: "Pi default",
@@ -271,11 +260,7 @@ const CONFIG_DEFAULTS = {
 };
 
 function configDefaults() {
-  return structuredClone([
-    CONFIG_DEFAULTS.DSH,
-    CONFIG_DEFAULTS.PI,
-    CONFIG_DEFAULTS.CODEX,
-  ]);
+  return structuredClone([CONFIG_DEFAULTS.PI, CONFIG_DEFAULTS.CODEX]);
 }
 
 function worker(overrides: Record<string, unknown> = {}) {
@@ -314,13 +299,12 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     settings: {
       schemaVersion: 2,
       configs: configDefaults(),
-      defaultConfigId: "dsh-default",
-      concurrency: { dsh: 3, pi: 3, codex: 3, agy: 1 },
-      defaultWorkerType: "dsh",
-      enabled: { dsh: true, pi: true, codex: true },
-      roles: { dsh: [], pi: [], codex: [], agy: [] },
+      defaultConfigId: "pi-default",
+      concurrency: { pi: 3, codex: 3, agy: 1 },
+      defaultWorkerType: "pi",
+      enabled: { pi: true, codex: true, agy: true },
+      roles: { pi: [], codex: [], agy: [] },
       defaults: {
-        dsh: { model: null, effort: null },
         pi: { model: null, effort: null },
         codex: { model: null, effort: null },
       },
@@ -362,8 +346,7 @@ type Mode = {
   /** Installs the optional host conversation view capability. */
   conversation?: boolean;
   settings?: (body: unknown) => unknown;
-  models?: (provider: "codex" | "dsh") => Promise<unknown>;
-  dshCatalog?: () => Promise<unknown>;
+  models?: () => Promise<unknown>;
   codexProviders?: () => Promise<unknown>;
   codexProviderModels?: (modelProvider: string) => Promise<unknown>;
   piCatalog?: () => Promise<unknown>;
@@ -377,22 +360,6 @@ type ConversationViewRecord = {
   disposed: boolean;
 };
 
-// The plugin serves this directory from `$DSH_HOME`; routes keep the full `provider/model` form.
-const DSH_CATALOG = {
-  models: [
-    {
-      route: "magpie/auto/deepseek-v4.1-flash",
-      label: "DeepSeek V4.1 Flash",
-      efforts: ["low", "high"],
-    },
-    {
-      route: "magpie-responses/openai/gpt-6-astra",
-      label: "GPT-6 Astra",
-      efforts: ["off", "high"],
-    },
-  ],
-  effortLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-};
 const CODEX_MODELS = {
   DEFAULT: "gpt-6-sol",
   OPTIONS: [
@@ -442,11 +409,7 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
   const views: ConversationViewRecord[] = [];
   let context = mode.context ?? DEFAULT_CONTEXT;
   const host: Record<string, unknown> = {
-    // The host serves no DSH catalog: reaching it for DSH is a regression.
-    models: mode.models ?? (async (provider: "codex" | "dsh") => {
-      if (provider !== "codex") throw new Error("宿主未提供 DSH 模型目录");
-      return CODEX_MODELS;
-    }),
+    models: mode.models ?? (async () => CODEX_MODELS),
     codexModelProviders: mode.codexProviders ?? (async () => CODEX_DIRECTORY),
     codexModelProviderModels:
       mode.codexProviderModels ??
@@ -481,10 +444,6 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         return { prompt: null };
       }
       if (pathAndQuery === "/cancel") return { workerIds: ["worker-1"] };
-      if (pathAndQuery === "/catalog/dsh") {
-        if (mode.dshCatalog) return mode.dshCatalog();
-        return DSH_CATALOG;
-      }
       if (pathAndQuery === "/catalog/pi") {
         if (mode.piCatalog) return mode.piCatalog();
         return PI_CATALOG;
@@ -755,7 +714,7 @@ async function openSettings(mounted: Mounted) {
   }, "设置入口");
   button(mounted.container, "Worker 设置").click();
   await waitFor(
-    () => Boolean(byLabel(mounted.container, "新增 DSH 配置")),
+    () => Boolean(byLabel(mounted.container, "新增 Pi 配置")),
     "配置编辑器",
   );
 }
@@ -766,46 +725,46 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     await openSettings(mounted);
 
     // A not-yet-saved config can always be deleted again without touching the server.
-    (byLabel(mounted.container, "新增 DSH 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增配置");
-    assert.equal(configCards(mounted.container)[3]!.open, false);
+    (byLabel(mounted.container, "新增 Codex 配置") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 名称")), "新增配置");
+    assert.equal(configCards(mounted.container)[2]!.open, false);
     assert.equal(
-      (byLabel(mounted.container, "配置 4 名称") as HTMLInputElement).value,
-      "dsh#1",
+      (byLabel(mounted.container, "配置 3 名称") as HTMLInputElement).value,
+      "codex#1",
     );
     await typeInto(
-      byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
+      byLabel(mounted.container, "配置 3 名称") as HTMLInputElement,
       "临时配置",
     );
-    (byLabel(mounted.container, "配置 4 删除") as HTMLButtonElement).click();
-    await waitFor(() => !byLabel(mounted.container, "配置 4 名称"), "删除未保存配置");
+    (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).click();
+    await waitFor(() => !byLabel(mounted.container, "配置 3 名称"), "删除未保存配置");
     assert.equal(callsTo(mounted, "/settings").length, 0);
 
     // Duplicating copies env and legacy extra args but assigns a fresh id and name.
     (byLabel(mounted.container, "新增 Pi 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增 Pi 配置");
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 名称")), "新增 Pi 配置");
     await typeInto(
-      byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
+      byLabel(mounted.container, "配置 3 名称") as HTMLInputElement,
       "后备 Pi",
     );
-    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 名称")), "复制 Codex 配置");
-    assert.equal(configCards(mounted.container)[4]!.open, false);
+    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "复制 Codex 配置");
+    assert.equal(configCards(mounted.container)[3]!.open, false);
     assert.equal(
-      (byLabel(mounted.container, "配置 5 名称") as HTMLInputElement).value,
+      (byLabel(mounted.container, "配置 4 名称") as HTMLInputElement).value,
       "codex#1",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 5 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement).value,
       "CODEX_PROXY_BYPASS=1",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 5 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement).value,
       "",
     );
 
     // The copy becomes the explicit default and the whole document is saved atomically.
-    (byLabel(mounted.container, "配置 5 设为默认") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 4 设为默认") as HTMLButtonElement).click();
     const defaultSelect = byLabel(
       mounted.container,
       "默认 Worker 配置",
@@ -827,10 +786,10 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     assert.equal(body.retentionDays, 1);
     assert.deepEqual(
       body.configs.map((config) => config.name),
-      ["DSH default", "Pi default", "Codex default", "后备 Pi", "codex#1"],
+      ["Pi default", "Codex default", "后备 Pi", "codex#1"],
     );
-    assert.equal(new Set(body.configs.map((config) => config.id)).size, 5);
-    const copied = body.configs[4]!;
+    assert.equal(new Set(body.configs.map((config) => config.id)).size, 4);
+    const copied = body.configs[3]!;
     assert.notEqual(copied.id, "codex-default");
     assert.equal(body.defaultConfigId, copied.id);
     assert.deepEqual(copied.codex, {
@@ -838,7 +797,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       env: { CODEX_PROXY_BYPASS: "1" },
       legacyExtraArgs: ["-c", "model_provider=magpie"],
     });
-    const added = body.configs[3]!;
+    const added = body.configs[2]!;
     assert.deepEqual(
       { ...added, id: undefined },
       {
@@ -867,8 +826,8 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       body.configs.map((config) => config.id),
     );
     assert.equal(second.defaultConfigId, body.defaultConfigId);
-    assert.deepEqual(second.configs[4]!.codex, copied.codex);
-    assert.equal(second.configs[4]!.model, null);
+    assert.deepEqual(second.configs[3]!.codex, copied.codex);
+    assert.equal(second.configs[3]!.model, null);
   } finally {
     mounted.unmount();
   }
@@ -877,20 +836,38 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
 test("DOM: usage locks the engine, active runs block deletion, and disabling the default moves it", async () => {
   const usage = {
     "codex-default": { referenced: true, activeRuns: 1 },
-    "pi-default": { referenced: true, activeRuns: 0 },
+    "agy-default": { referenced: true, activeRuns: 0 },
+  };
+  const baseSettings = snapshot().settings as Record<string, any>;
+  const settings = {
+    ...baseSettings,
+    configs: [
+      ...configDefaults(),
+      {
+        id: "agy-default",
+        name: "AGY default",
+        type: "agy",
+        enabled: true,
+        roles: [],
+        concurrency: 3,
+        hardTimeoutSeconds: 300,
+        model: null,
+        effort: null,
+      },
+    ],
   };
   const mounted = await mountPlugin({
-    state: () => snapshot({ configUsage: usage }),
+    state: () => snapshot({ settings, configUsage: usage }),
   });
   try {
     await openSettings(mounted);
 
     assert.equal(
-      (byLabel(mounted.container, "配置 3 执行引擎") as HTMLSelectElement).disabled,
+      (byLabel(mounted.container, "配置 2 执行引擎") as HTMLSelectElement).disabled,
       true,
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 2 删除") as HTMLButtonElement).disabled,
       true,
     );
     assert.equal(
@@ -899,12 +876,12 @@ test("DOM: usage locks the engine, active runs block deletion, and disabling the
     );
     // A referenced config without active runs can still be deleted; history is kept.
     assert.equal(
-      (byLabel(mounted.container, "配置 2 删除") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).disabled,
       false,
     );
     assert.ok(textOf(mounted.container).includes("删除只移除配置"));
-    (byLabel(mounted.container, "配置 2 删除") as HTMLButtonElement).click();
-    await waitFor(() => !byLabel(mounted.container, "配置 3 名称"), "删除 Pi 配置");
+    (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).click();
+    await waitFor(() => !byLabel(mounted.container, "配置 3 名称"), "删除 AGY 配置");
 
     // Disabling the default selects the next enabled config as the new default.
     (byLabel(mounted.container, "配置 1 启用") as HTMLInputElement).click();
@@ -928,8 +905,8 @@ test("DOM: usage locks the engine, active runs block deletion, and disabling the
     );
     (byLabel(mounted.container, "配置 1 设为默认") as HTMLButtonElement).click();
     await waitFor(
-      () => (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value === "dsh-default",
-      "默认切回 DSH",
+      () => (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value === "pi-default",
+      "默认切回 Pi",
     );
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "停用后保存");
@@ -939,16 +916,16 @@ test("DOM: usage locks the engine, active runs block deletion, and disabling the
     };
     assert.deepEqual(
       body.configs.map((config) => config.id),
-      ["dsh-default", "codex-default"],
+      ["pi-default", "codex-default"],
     );
     assert.deepEqual(
       body.configs.map((config) => [config.id, config.enabled]),
       [
-        ["dsh-default", true],
+        ["pi-default", true],
         ["codex-default", false],
       ],
     );
-    assert.equal(body.defaultConfigId, "dsh-default");
+    assert.equal(body.defaultConfigId, "pi-default");
   } finally {
     mounted.unmount();
   }
@@ -966,12 +943,12 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     await openSettings(mounted);
     const codexProvider = byLabel(
       mounted.container,
-      "配置 3 Codex 模型服务",
+      "配置 2 Codex 模型服务",
     ) as HTMLSelectElement;
-    const codexModel = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
+    const codexModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
     const codexReasoning = byLabel(
       mounted.container,
-      "配置 3 reasoning",
+      "配置 2 reasoning",
     ) as HTMLSelectElement;
     assert.equal(codexProvider.value, "");
     assert.equal(codexProvider.options[0]!.textContent, "使用默认模型服务");
@@ -1020,51 +997,11 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     assert.deepEqual(optionValues(codexReasoning), [""]);
     assert.deepEqual(requested, ["magpie", "openai"]);
 
-    // DSH keeps a typable full `provider/model` field with the static directory as suggestions.
-    const dshModel = byLabel(mounted.container, "配置 1 模型") as HTMLInputElement;
-    const dshReasoning = byLabel(
-      mounted.container,
-      "配置 1 reasoning",
-    ) as HTMLSelectElement;
-    assert.equal(dshModel.tagName, "INPUT");
-    assert.deepEqual(datalistValues(dshModel), [
-      "magpie/auto/deepseek-v4.1-flash",
-      "magpie-responses/openai/gpt-6-astra",
-    ]);
-    assert.deepEqual(optionValues(dshReasoning), [""]);
-    await typeInto(dshModel, "magpie/auto/deepseek-v4.1-flash");
-    await waitFor(
-      () => optionValues(dshReasoning).includes("high"),
-      "DSH reasoning",
-    );
-    assert.deepEqual(optionValues(dshReasoning), ["", "low", "high"]);
-    await typeInto(dshReasoning, "high");
-    // The directory is partial: an unlisted full route stays settable and uses the engine levels.
-    await typeInto(dshModel, "magpie/local/unlisted");
-    await waitFor(
-      () => optionValues(dshReasoning).includes("xhigh"),
-      "未列出路由的 reasoning",
-    );
-    assert.deepEqual(optionValues(dshReasoning), [
-      "",
-      "off",
-      "minimal",
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-    ]);
-    await typeInto(dshReasoning, "high");
-    await typeInto(dshModel, "magpie/auto/deepseek-v4.1-flash");
-    await waitFor(() => optionValues(dshReasoning).includes("low"), "回到目录路由");
-    assert.equal(callsTo(mounted, "/catalog/dsh").length, 1);
-
     // Pi keeps provider/model identity; a non-reasoning model does not claim thinking levels.
-    const piModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
+    const piModel = byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement;
     const piReasoning = byLabel(
       mounted.container,
-      "配置 2 reasoning",
+      "配置 1 reasoning",
     ) as HTMLSelectElement;
     assert.deepEqual(optionValues(piModel), [
       "",
@@ -1098,8 +1035,6 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     assert.equal(byName["Codex default"].model, "magpie-1");
     assert.equal(byName["Codex default"].effort, null);
     assert.equal(byName["Codex default"].codex.modelProvider, null);
-    assert.equal(byName["DSH default"].model, "magpie/auto/deepseek-v4.1-flash");
-    assert.equal(byName["DSH default"].effort, "high");
     assert.equal(byName["Pi default"].model, "openrouter/claude-sonnet");
     assert.equal(byName["Pi default"].effort, null);
   } finally {
@@ -1154,14 +1089,14 @@ test("DOM: Codex service errors stay on their own card and late responses never 
     await openSettings(mounted);
     const card3 = byLabel(
       mounted.container,
-      "配置 3 Codex 模型服务",
+      "配置 2 Codex 模型服务",
     )!.closest("details")!;
     const card4 = byLabel(
       mounted.container,
-      "配置 4 Codex 模型服务",
+      "配置 3 Codex 模型服务",
     )!.closest("details")!;
-    const model3 = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
-    const model4 = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    const model3 = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
+    const model4 = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
 
     // The default-service card resolves magpie; the explicit openai card is still pending.
     pending.get("magpie")!.resolve({ modelProvider: "magpie", models: ["magpie-1"] });
@@ -1172,7 +1107,7 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
     // Leaving the pending openai service shows the cached magpie menu with no error.
     await typeInto(
-      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
       "",
     );
     await waitFor(() => optionValues(model4).includes("magpie-1"), "切回默认服务");
@@ -1186,7 +1121,7 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
     // Re-entering openai shows only that card's cached failure; retry recovers it.
     await typeInto(
-      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
       "openai",
     );
     await waitFor(() => textOf(card4).includes("openai down"), "当前服务错误");
@@ -1201,11 +1136,11 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
     // Repeatedly switching to an already-loaded id does not request it again.
     await typeInto(
-      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
       "",
     );
     await typeInto(
-      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
       "openai",
     );
     await waitFor(() => optionValues(model4).includes("openai-ok"), "缓存复用");
@@ -1218,8 +1153,8 @@ test("DOM: Codex service errors stay on their own card and late responses never 
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[2]!.codex.modelProvider, null);
-    assert.equal(body.configs[3]!.codex.modelProvider, "openai");
+    assert.equal(body.configs[1]!.codex.modelProvider, null);
+    assert.equal(body.configs[2]!.codex.modelProvider, "openai");
   } finally {
     mounted.unmount();
   }
@@ -1227,17 +1162,16 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
 test("DOM: catalog failures stay local, keep stored values and retry in place", async () => {
   let modelsFail = true;
-  let dshFail = true;
   let piFail = true;
   const settings = snapshot().settings as Record<string, any>;
   settings.configs = configDefaults();
   settings.configs[0] = {
     ...settings.configs[0],
-    model: "dsh-legacy",
-    effort: "high",
+    model: "anthropic/legacy-model",
+    effort: "low",
   };
-  settings.configs[2] = {
-    ...settings.configs[2],
+  settings.configs[1] = {
+    ...settings.configs[1],
     model: "legacy-codex",
     effort: "ultra",
     codex: {
@@ -1246,20 +1180,11 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
       legacyExtraArgs: ["-c", "model_provider=magpie"],
     },
   };
-  settings.configs[1] = {
-    ...settings.configs[1],
-    model: "anthropic/legacy-model",
-    effort: "low",
-  };
   const mounted = await mountPlugin({
     state: () => snapshot({ settings }),
-    models: async (provider) => {
-      if (modelsFail) throw new Error("catalog down " + provider);
+    models: async () => {
+      if (modelsFail) throw new Error("catalog down codex");
       return CODEX_MODELS;
-    },
-    dshCatalog: async () => {
-      if (dshFail) throw new Error("dsh catalog down");
-      return DSH_CATALOG;
     },
     piCatalog: async () => {
       if (piFail) throw new Error("pi catalog down");
@@ -1280,28 +1205,20 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
     );
     // Stored values are still selected and only saving edits must not drop them.
     assert.equal(
-      (byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).value,
       "legacy-codex",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 3 reasoning") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 2 reasoning") as HTMLSelectElement).value,
       "ultra",
     );
-    // The DSH field is always typable: the stored route survives a directory failure.
-    const dshModel = byLabel(mounted.container, "配置 1 模型") as HTMLInputElement;
-    assert.equal(dshModel.value, "dsh-legacy");
-    assert.deepEqual(datalistValues(dshModel), []);
     assert.equal(
-      (byLabel(mounted.container, "配置 1 reasoning") as HTMLSelectElement).value,
-      "high",
-    );
-    assert.equal(
-      (byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
       "anthropic/legacy-model",
     );
     await typeInto(
       byLabel(mounted.container, "配置 1 名称") as HTMLInputElement,
-      "DSH 改名",
+      "Pi 改名",
     );
     await waitFor(() => !button(mounted.container, "保存设置").disabled, "目录失败仍可保存");
     button(mounted.container, "保存设置").click();
@@ -1309,88 +1226,36 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[0]!.model, "dsh-legacy");
-    assert.equal(body.configs[0]!.effort, "high");
-    assert.equal(body.configs[2]!.model, "legacy-codex");
-    assert.equal(body.configs[2]!.effort, "ultra");
-    assert.equal(body.configs[2]!.codex.modelProvider, "magpie");
-    assert.equal(body.configs[1]!.model, "anthropic/legacy-model");
+    assert.equal(body.configs[0]!.name, "Pi 改名");
+    assert.equal(body.configs[0]!.model, "anthropic/legacy-model");
+    assert.equal(body.configs[0]!.effort, "low");
+    assert.equal(body.configs[1]!.model, "legacy-codex");
+    assert.equal(body.configs[1]!.effort, "ultra");
+    assert.equal(body.configs[1]!.codex.modelProvider, "magpie");
 
     // Retrying recovers the catalogs without clearing any stored selection.
     modelsFail = false;
-    dshFail = false;
     piFail = false;
     const retries = retryButtons(mounted.container);
-    assert.ok(retries.length >= 4);
+    assert.ok(retries.length >= 3);
     for (const retry of retries) retry.click();
     await waitFor(
       () =>
-        datalistValues(byLabel(mounted.container, "配置 1 模型") as HTMLInputElement).includes(
-          "magpie/auto/deepseek-v4.1-flash",
-        ),
-      "DSH 目录恢复",
+        optionLabels(
+          byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement,
+        ).includes("anthropic/claude-sonnet"),
+      "Pi 目录恢复",
     );
     // Recovering suggestions never rewrites the stored route into a listed one.
     assert.equal(
-      (byLabel(mounted.container, "配置 1 模型") as HTMLInputElement).value,
-      "dsh-legacy",
+      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
+      "anthropic/legacy-model",
     );
     assert.ok(
-      optionLabels(byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).includes(
-        "anthropic/legacy-model（当前已保存）",
-      ),
+      optionLabels(
+        byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement,
+      ).includes("anthropic/legacy-model（当前已保存）"),
     );
-    await waitFor(
-      () =>
-        retryButtons(mounted.container).length === 0 ||
-        optionLabels(byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).includes(
-          "anthropic/claude-sonnet",
-        ),
-      "Pi 目录恢复",
-    );
-    assert.equal(
-      (byLabel(mounted.container, "配置 1 模型") as HTMLInputElement).value,
-      "dsh-legacy",
-    );
-  } finally {
-    mounted.unmount();
-  }
-});
-
-test("DOM: a DSH route outside the directory stays typable and uses the engine levels", async () => {
-  const mounted = await mountPlugin({
-    dshCatalog: async () => ({
-      models: [],
-      effortLevels: ["off", "minimal", "low", "medium", "high", "xhigh", "max"],
-    }),
-  });
-  try {
-    await openSettings(mounted);
-    const model = byLabel(mounted.container, "配置 1 模型") as HTMLInputElement;
-    assert.equal(model.tagName, "INPUT");
-    assert.equal(model.value, "");
-    // An empty directory offers no suggestions but never blocks a valid full route.
-    assert.deepEqual(datalistValues(model), []);
-    const reasoning = byLabel(
-      mounted.container,
-      "配置 1 reasoning",
-    ) as HTMLSelectElement;
-    // DSH applies reasoning only to an explicit model, so the empty route offers no level.
-    assert.deepEqual(optionValues(reasoning), [""]);
-    await typeInto(model, "magpie/local/deepseek-v4-pro");
-    await waitFor(
-      () => optionValues(reasoning).includes("xhigh"),
-      "手工路由的 reasoning",
-    );
-    await typeInto(reasoning, "xhigh");
-    await waitFor(() => !button(mounted.container, "保存设置").disabled, "可保存");
-    button(mounted.container, "保存设置").click();
-    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存手工路由");
-    const body = callsTo(mounted, "/settings")[0]!.body as {
-      configs: Array<Record<string, unknown>>;
-    };
-    assert.equal(body.configs[0]!.model, "magpie/local/deepseek-v4-pro");
-    assert.equal(body.configs[0]!.effort, "xhigh");
   } finally {
     mounted.unmount();
   }
@@ -1416,7 +1281,7 @@ test("DOM: an older service without configs shows an upgrade notice and recovers
         ),
       "旧版设置提示",
     );
-    assert.equal(byLabel(mounted.container, "新增 DSH 配置"), null);
+    assert.equal(byLabel(mounted.container, "新增 Pi 配置"), null);
     assert.equal(findButton(mounted.container, "保存设置"), undefined);
     assert.equal(callsTo(mounted, "/settings").length, 0);
 
@@ -1433,7 +1298,7 @@ test("DOM: an older service without configs shows an upgrade notice and recovers
     await waitFor(() => Boolean(findButton(mounted.container, "返回列表")), "再次打开旧版设置");
     upgraded = true;
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "新增 DSH 配置")),
+      () => Boolean(byLabel(mounted.container, "新增 Pi 配置")),
       "新版设置恢复",
       5000,
     );
@@ -1447,9 +1312,9 @@ test("DOM: an older service without configs shows an upgrade notice and recovers
     };
     assert.deepEqual(
       saved.configs.map((config) => config.id),
-      ["dsh-default", "pi-default", "codex-default"],
+      ["pi-default", "codex-default"],
     );
-    assert.equal(saved.defaultConfigId, "dsh-default");
+    assert.equal(saved.defaultConfigId, "pi-default");
   } finally {
     mounted.unmount();
   }
@@ -1524,6 +1389,8 @@ test("DOM: all four worker types have distinct labels and aggregate counts", asy
     worker({
       id: "worker-pi",
       type: "pi",
+      configId: "pi-default",
+      configName: "Pi default",
       taskName: "Pi 任务",
       latestRun: run({ id: "run-pi", workerId: "worker-pi", status: "queued" }),
     }),
@@ -1587,10 +1454,10 @@ test("DOM: all four worker types have distinct labels and aggregate counts", asy
     );
     assert.ok(
       textOf(mounted.container).includes(
-        "DSH default 3 / Pi default 3 / Codex default 3",
+        "Pi default 3 / Codex default 3",
       ),
     );
-    assert.ok(textOf(mounted.container).includes("配置 DSH default"));
+    assert.ok(textOf(mounted.container).includes("配置 Pi default"));
     assert.ok(textOf(mounted.container).includes("4 个 worker · 4 个状态记录"));
   } finally {
     mounted.unmount();
@@ -2004,16 +1871,16 @@ test("DOM: each config edits its timeout, validates it, and copies it on duplica
     await typeInto(first, "600");
     await typeInto(second, "");
     (byLabel(mounted.container, "新增 Codex 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 硬超时（秒）")), "新增默认超时");
-    assert.equal((byLabel(mounted.container, "配置 4 硬超时（秒）") as HTMLInputElement).value, "600");
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 硬超时（秒）")), "新增默认超时");
+    assert.equal((byLabel(mounted.container, "配置 3 硬超时（秒）") as HTMLInputElement).value, "600");
     (byLabel(mounted.container, "配置 1 复制") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 硬超时（秒）")), "复制超时配置");
-    assert.equal((byLabel(mounted.container, "配置 5 硬超时（秒）") as HTMLInputElement).value, "600");
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 硬超时（秒）")), "复制超时配置");
+    assert.equal((byLabel(mounted.container, "配置 4 硬超时（秒）") as HTMLInputElement).value, "600");
     await waitFor(() => !button(mounted.container, "保存设置").disabled, "可保存超时配置");
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存各配置超时");
     const body = callsTo(mounted, "/settings")[0]!.body as { configs: Array<{ hardTimeoutSeconds: number | null }> };
-    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 300, 600, 600]);
+    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 600, 600]);
   } finally {
     mounted.unmount();
   }
@@ -2036,10 +1903,10 @@ test("DOM: config ids fall back to UUID v4 without randomUUID and stay stable on
   const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
-    (byLabel(mounted.container, "新增 DSH 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增配置");
-    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 名称")), "复制配置");
+    (byLabel(mounted.container, "新增 Pi 配置") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 名称")), "新增配置");
+    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "复制配置");
     await waitFor(() => {
       const saveButton = findButton(mounted.container, "保存设置");
       return saveButton !== undefined && !saveButton.disabled;
@@ -2050,19 +1917,18 @@ test("DOM: config ids fall back to UUID v4 without randomUUID and stay stable on
     const first = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<{ id: string }>;
     };
-    assert.equal(first.configs.length, 5);
-    assert.deepEqual(first.configs.slice(0, 3).map((config) => config.id), [
-      "dsh-default",
+    assert.equal(first.configs.length, 4);
+    assert.deepEqual(first.configs.slice(0, 2).map((config) => config.id), [
       "pi-default",
       "codex-default",
     ]);
+    assert.match(first.configs[2]!.id, uuid);
     assert.match(first.configs[3]!.id, uuid);
-    assert.match(first.configs[4]!.id, uuid);
-    assert.equal(new Set(first.configs.map((config) => config.id)).size, 5);
+    assert.equal(new Set(first.configs.map((config) => config.id)).size, 4);
 
     // A rerender and another save must not mint new ids for the same configs.
     await typeInto(
-      byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
+      byLabel(mounted.container, "配置 3 名称") as HTMLInputElement,
       "重命名配置",
     );
     await waitFor(() => {
@@ -2088,16 +1954,16 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
     await openSettings(mounted);
     const originalEnv = byLabel(
       mounted.container,
-      "配置 3 Codex 环境变量",
+      "配置 2 Codex 环境变量",
     ) as HTMLTextAreaElement;
     await typeInto(originalEnv, "BROKEN");
-    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "配置 4 Codex 环境变量")),
+      () => Boolean(byLabel(mounted.container, "配置 3 Codex 环境变量")),
       "复制 Codex 配置",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement).value,
       "BROKEN",
     );
     await waitFor(
@@ -2109,17 +1975,17 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
 
     // Fix the copy, clear the source, then duplicate the now-empty draft.
     await typeInto(
-      byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement,
+      byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement,
       "A=1",
     );
     await typeInto(originalEnv, "");
-    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "配置 5 Codex 环境变量")),
+      () => Boolean(byLabel(mounted.container, "配置 4 Codex 环境变量")),
       "复制空环境变量",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 5 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement).value,
       "",
     );
     await waitFor(() => {
@@ -2131,9 +1997,9 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.deepEqual(body.configs[2]!.codex.env, {});
-    assert.deepEqual(body.configs[3]!.codex.env, { A: "1" });
-    assert.deepEqual(body.configs[4]!.codex.env, {});
+    assert.deepEqual(body.configs[1]!.codex.env, {});
+    assert.deepEqual(body.configs[2]!.codex.env, { A: "1" });
+    assert.deepEqual(body.configs[3]!.codex.env, {});
     assert.deepEqual(
       body.configs[3]!.codex.legacyExtraArgs,
       body.configs[2]!.codex.legacyExtraArgs,
@@ -2143,22 +2009,20 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
   }
 });
 
-test("DOM: Pi's default model accepts thinking effort while DSH still needs an explicit model", async () => {
+test("DOM: Pi's default model accepts thinking effort and only Codex exposes service/env blocks", async () => {
   const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
-    // Only Codex exposes a service/env block; Pi and DSH have neither.
+    // Only Codex exposes a service/env block; Pi has neither.
     assert.equal(byLabel(mounted.container, "配置 1 Codex 模型服务"), null);
-    assert.equal(byLabel(mounted.container, "配置 2 Codex 模型服务"), null);
     assert.equal(byLabel(mounted.container, "配置 1 Codex 环境变量"), null);
-    assert.equal(byLabel(mounted.container, "配置 2 Codex 环境变量"), null);
-    assert.ok(byLabel(mounted.container, "配置 3 Codex 模型服务"));
-    assert.ok(byLabel(mounted.container, "配置 3 Codex 环境变量"));
+    assert.ok(byLabel(mounted.container, "配置 2 Codex 模型服务"));
+    assert.ok(byLabel(mounted.container, "配置 2 Codex 环境变量"));
 
-    const piModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
+    const piModel = byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement;
     const piReasoning = byLabel(
       mounted.container,
-      "配置 2 reasoning",
+      "配置 1 reasoning",
     ) as HTMLSelectElement;
     assert.deepEqual(optionValues(piReasoning), ["", "off", "low", "high"]);
     await typeInto(piReasoning, "high");
@@ -2176,8 +2040,8 @@ test("DOM: Pi's default model accepts thinking effort while DSH still needs an e
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[1]!.model, null);
-    assert.equal(body.configs[1]!.effort, "high");
+    assert.equal(body.configs[0]!.model, null);
+    assert.equal(body.configs[0]!.effort, "high");
   } finally {
     mounted.unmount();
   }
@@ -2211,10 +2075,10 @@ test("DOM: agy models are a real select and reasoning is fixed to the model defa
   const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
   try {
     await openSettings(mounted);
-    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
-      "配置 4 reasoning",
+      "配置 3 reasoning",
     ) as HTMLSelectElement;
     assert.equal(model.tagName, "SELECT");
     assert.deepEqual(optionValues(model), [
@@ -2246,8 +2110,8 @@ test("DOM: agy models are a real select and reasoning is fixed to the model defa
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[3]!.model, "gemini-pro-orchestrator-neon");
-    assert.equal(body.configs[3]!.effort, null);
+    assert.equal(body.configs[2]!.model, "gemini-pro-orchestrator-neon");
+    assert.equal(body.configs[2]!.effort, null);
   } finally {
     mounted.unmount();
   }
@@ -2271,9 +2135,9 @@ test("DOM: agy runs the directory only for an agy config and fills the select fr
     // `agy models` is a network-backed CLI command: no agy card, no request.
     assert.equal(calls, 0);
     (byLabel(mounted.container, "新增 Antigravity 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 模型")), "新增 agy 配置");
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 模型")), "新增 agy 配置");
     await waitFor(() => calls === 1, "首个 agy 配置触发目录");
-    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
     await waitFor(
       () => optionValues(model).includes("gemini-3.8-flash-low"),
       "agy 目录加载",
@@ -2286,8 +2150,8 @@ test("DOM: agy runs the directory only for an agy config and fills the select fr
     ]);
     await typeInto(model, "gemini-3.8-flash-low");
     // Deleting the only agy config removes the need and never re-runs the CLI.
-    (byLabel(mounted.container, "配置 4 删除") as HTMLButtonElement).click();
-    await waitFor(() => !byLabel(mounted.container, "配置 4 模型"), "删除 agy 配置");
+    (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).click();
+    await waitFor(() => !byLabel(mounted.container, "配置 3 模型"), "删除 agy 配置");
     assert.equal(calls, 1);
   } finally {
     mounted.unmount();
@@ -2307,11 +2171,11 @@ test("DOM: a failing agy directory keeps the saved id and retries in place", asy
   });
   try {
     await openSettings(mounted);
-    const card = byLabel(mounted.container, "配置 4 模型")!.closest("details")!;
-    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    const card = byLabel(mounted.container, "配置 3 模型")!.closest("details")!;
+    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
-      "配置 4 reasoning",
+      "配置 3 reasoning",
     ) as HTMLSelectElement;
     await waitFor(() => textOf(card).includes("agy catalog down"), "agy 目录失败");
     assert.equal(model.value, "gemini-3.8-flash-low");
@@ -2339,8 +2203,8 @@ test("DOM: a failing agy directory keeps the saved id and retries in place", asy
 
 test("DOM: a stale stored agy effort is not shown, cleared on save and never blocks", async () => {
   const settings = agySettings();
-  settings.configs[3] = {
-    ...settings.configs[3],
+  settings.configs[2] = {
+    ...settings.configs[2],
     model: "gemini-3.8-flash-low",
     effort: "high",
   };
@@ -2348,14 +2212,14 @@ test("DOM: a stale stored agy effort is not shown, cleared on save and never blo
   try {
     await openSettings(mounted);
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "配置 4 reasoning")),
+      () => Boolean(byLabel(mounted.container, "配置 3 reasoning")),
       "agy reasoning",
     );
     // The obsolete UI conflict warning is gone; the old level never blocks the save.
     assert.equal(textOf(mounted.container).includes("固定使用 low reasoning"), false);
     const reasoning = byLabel(
       mounted.container,
-      "配置 4 reasoning",
+      "配置 3 reasoning",
     ) as HTMLSelectElement;
     assert.deepEqual(optionValues(reasoning), [""]);
     assert.deepEqual(optionLabels(reasoning), ["默认（随模型）"]);
@@ -2368,35 +2232,8 @@ test("DOM: a stale stored agy effort is not shown, cleared on save and never blo
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[3]!.model, "gemini-3.8-flash-low");
-    assert.equal(body.configs[3]!.effort, null);
-  } finally {
-    mounted.unmount();
-  }
-});
-
-test("DOM: DSH effort still requires an explicit model", async () => {
-  const settings = snapshot().settings as Record<string, unknown> & {
-    configs: Array<Record<string, any>>;
-  };
-  settings.configs = configDefaults();
-  settings.configs[0] = { ...settings.configs[0], model: null, effort: "high" };
-  const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
-  try {
-    await openSettings(mounted);
-    await waitFor(
-      () =>
-        textOf(mounted.container).includes(
-          "DSH reasoning 需要同时配置 DSH 模型",
-        ),
-      "DSH 需要模型",
-    );
-    assert.equal(button(mounted.container, "保存设置").disabled, true);
-    assert.equal(
-      (byLabel(mounted.container, "配置 1 reasoning") as HTMLSelectElement).value,
-      "high",
-    );
-    assert.equal(callsTo(mounted, "/settings").length, 0);
+    assert.equal(body.configs[2]!.model, "gemini-3.8-flash-low");
+    assert.equal(body.configs[2]!.effort, null);
   } finally {
     mounted.unmount();
   }
@@ -2407,11 +2244,11 @@ test("DOM: Codex directory loading/failure is shown on an explicit-service card 
     configs: Array<Record<string, any>>;
   };
   settings.configs = configDefaults();
-  settings.configs[2] = {
-    ...settings.configs[2],
+  settings.configs[1] = {
+    ...settings.configs[1],
     model: "magpie-1",
     effort: "high",
-    codex: { ...settings.configs[2].codex, modelProvider: "magpie" },
+    codex: { ...settings.configs[1].codex, modelProvider: "magpie" },
   };
   let directoryCalls = 0;
   let resolveDirectory: (value: unknown) => void = () => {};
@@ -2437,17 +2274,17 @@ test("DOM: Codex directory loading/failure is shown on an explicit-service card 
     await openSettings(mounted);
     const card = byLabel(
       mounted.container,
-      "配置 3 Codex 模型服务",
+      "配置 2 Codex 模型服务",
     )!.closest("details")!;
     await waitFor(() => textOf(card).includes("正在读取模型目录"), "目录加载中");
     const provider = byLabel(
       mounted.container,
-      "配置 3 Codex 模型服务",
+      "配置 2 Codex 模型服务",
     ) as HTMLSelectElement;
-    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
+    const model = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
-      "配置 3 reasoning",
+      "配置 2 reasoning",
     ) as HTMLSelectElement;
     assert.equal(provider.value, "magpie");
     assert.equal(model.value, "magpie-1");
@@ -2485,7 +2322,7 @@ test("DOM: config summaries follow draft roles and settings reopen closed", asyn
   try {
     await openSettings(mounted);
     const cards = configCards(mounted.container);
-    assert.deepEqual(cards.map((card) => card.open), [false, false, false]);
+    assert.deepEqual(cards.map((card) => card.open), [false, false]);
     const card = cards[0]!;
     const summary = card.querySelector("summary")!;
     assert.equal(textOf(summary.querySelector(".worker-type-roles")), "未设置角色");
@@ -2498,7 +2335,7 @@ test("DOM: config summaries follow draft roles and settings reopen closed", asyn
       "角色摘要实时更新并按目录排序",
     );
     assert.equal(card.open, true);
-    (byLabel(card, "配置 1 下移 DSH default") as HTMLButtonElement).click();
+    (byLabel(card, "配置 1 下移 Pi default") as HTMLButtonElement).click();
     await waitFor(() => configCards(mounted.container)[1] === card, "移动已展开配置");
     assert.equal(card.open, true);
     summary.click();
@@ -2513,7 +2350,7 @@ test("DOM: config summaries follow draft roles and settings reopen closed", asyn
     );
     button(mounted.container, "返回列表").click();
     await openSettings(mounted);
-    assert.deepEqual(configCards(mounted.container).map((item) => item.open), [false, false, false]);
+    assert.deepEqual(configCards(mounted.container).map((item) => item.open), [false, false]);
     assert.equal(callsTo(mounted, "/settings").length, 0);
   } finally {
     mounted.unmount();
@@ -2549,54 +2386,50 @@ test("DOM: reorder buttons keep id-keyed drafts and save the new config order", 
   const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
-    assert.deepEqual(configCardNames(mounted.container), [
-      "DSH default",
-      "Pi default",
-      "Codex default",
-    ]);
+    assert.deepEqual(configCardNames(mounted.container), ["Pi default", "Codex default"]);
     configCards(mounted.container)[0]!.querySelector("summary")!.click();
 
     // Draft edits stay attached to their config id, not to a list position.
     await typeInto(
       byLabel(mounted.container, "配置 1 名称") as HTMLInputElement,
-      "DSH 首选",
+      "Pi 首选",
     );
     await typeInto(
-      byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement,
+      byLabel(mounted.container, "配置 2 Codex 环境变量") as HTMLTextAreaElement,
       "SORT_KEEP=1",
     );
 
     assert.equal(
-      (byLabel(mounted.container, "配置 1 上移 DSH 首选") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 1 上移 Pi 首选") as HTMLButtonElement).disabled,
       true,
     );
-    (byLabel(mounted.container, "配置 3 上移 Codex default") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 2 上移 Codex default") as HTMLButtonElement).click();
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "DSH 首选|Codex default|Pi default",
+        "Codex default|Pi 首选",
       "按钮上移",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 3 下移 Pi default") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 2 下移 Pi 首选") as HTMLButtonElement).disabled,
       true,
     );
 
     // The moved card keeps its name input, env text, default id and open state.
     assert.equal(
-      (byLabel(mounted.container, "配置 2 名称") as HTMLInputElement).value,
+      (byLabel(mounted.container, "配置 1 名称") as HTMLInputElement).value,
       "Codex default",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 2 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 1 Codex 环境变量") as HTMLTextAreaElement).value,
       "SORT_KEEP=1",
     );
     assert.equal(
       (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
-      "dsh-default",
+      "pi-default",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 1 DSH 首选")!.closest("details") as HTMLDetailsElement)
+      (byLabel(mounted.container, "配置 2 Pi 首选")!.closest("details") as HTMLDetailsElement)
         .open,
       true,
     );
@@ -2609,20 +2442,20 @@ test("DOM: reorder buttons keep id-keyed drafts and save the new config order", 
     };
     assert.deepEqual(
       body.configs.map((config) => config.id),
-      ["dsh-default", "codex-default", "pi-default"],
+      ["codex-default", "pi-default"],
     );
     assert.deepEqual(
       body.configs.map((config) => config.name),
-      ["DSH 首选", "Codex default", "Pi default"],
+      ["Codex default", "Pi 首选"],
     );
-    assert.equal(body.configs[1]!.codex!.env.SORT_KEEP, "1");
-    assert.equal(body.defaultConfigId, "dsh-default");
+    assert.equal(body.configs[0]!.codex!.env.SORT_KEEP, "1");
+    assert.equal(body.defaultConfigId, "pi-default");
 
     // The saved order is what the reloaded editor shows.
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "DSH 首选|Codex default|Pi default",
+        "Codex default|Pi 首选",
       "保存后顺序一致",
     );
   } finally {
@@ -2635,7 +2468,7 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
   try {
     await openSettings(mounted);
     const initialOrder = configCardNames(mounted.container);
-    assert.deepEqual(initialOrder, ["DSH default", "Pi default", "Codex default"]);
+    assert.deepEqual(initialOrder, ["Pi default", "Codex default"]);
     configCards(mounted.container)[0]!.querySelector("summary")!.click();
 
     await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
@@ -2643,19 +2476,19 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
       () => configCards(mounted.container)[0]!.getAttribute("data-dragging") === "true",
       "拖动反馈",
     );
-    await fireDrag(configCards(mounted.container)[2]!, "dragover");
+    await fireDrag(configCards(mounted.container)[1]!, "dragover");
     await waitFor(
-      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
+      () => configCards(mounted.container)[1]!.getAttribute("data-drop-target") === "true",
       "目标反馈",
     );
-    await fireDrag(configCards(mounted.container)[2]!, "drop");
+    await fireDrag(configCards(mounted.container)[1]!, "drop");
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Pi default|Codex default|DSH default",
+        "Codex default|Pi default",
       "拖放排序",
     );
-    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(configCards(mounted.container).length, 2);
     assert.equal(
       configCards(mounted.container).some((card) => card.getAttribute("data-dragging")),
       false,
@@ -2664,9 +2497,9 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     // Dragging the default config away keeps its id as default and keeps its card open.
     assert.equal(
       (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
-      "dsh-default",
+      "pi-default",
     );
-    const defaultCard = byLabel(mounted.container, "配置 3 DSH default")!.closest(
+    const defaultCard = byLabel(mounted.container, "配置 2 Pi default")!.closest(
       "details",
     ) as HTMLDetailsElement;
     assert.equal(defaultCard.open, true);
@@ -2675,11 +2508,10 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
     await fireDrag(dragHandles(mounted.container)[0]!, "dragend");
     assert.deepEqual(configCardNames(mounted.container), [
-      "Pi default",
       "Codex default",
-      "DSH default",
+      "Pi default",
     ]);
-    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(configCards(mounted.container).length, 2);
     assert.equal(
       configCards(mounted.container).some(
         (card) => card.getAttribute("data-dragging") === "true",
@@ -2688,24 +2520,24 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     );
 
     // The handle never toggles the card, and the move buttons cover keyboard/mobile use.
-    (dragHandles(mounted.container)[2]!).click();
+    (dragHandles(mounted.container)[1]!).click();
     await delay(0);
     assert.equal(defaultCard.open, true);
     assert.equal(
       (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
-      "dsh-default",
+      "pi-default",
     );
-    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(configCards(mounted.container).length, 2);
 
-    (byLabel(mounted.container, "配置 1 下移 Pi default") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 1 下移 Codex default") as HTMLButtonElement).click();
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Codex default|Pi default|DSH default",
+        "Pi default|Codex default",
       "按钮下移",
     );
     assert.equal(defaultCard.open, true);
-    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(configCards(mounted.container).length, 2);
   } finally {
     mounted.unmount();
   }
@@ -2752,27 +2584,28 @@ test("DOM: crossing cards keeps the drop outline and only leaving the list clear
     await waitFor(() => !hasTarget(), "离开列表清空目标");
 
     // Re-entering a card restores the outline, and the drop still applies the order.
-    await fireDrag(configCards(mounted.container)[2]!, "dragover");
+    await fireDrag(configCards(mounted.container)[1]!, "dragover");
     await waitFor(
-      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
+      () => configCards(mounted.container)[1]!.getAttribute("data-drop-target") === "true",
       "重新进入目标",
     );
-    await fireDrag(configCards(mounted.container)[2]!, "drop");
+    await fireDrag(configCards(mounted.container)[1]!, "drop");
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Pi default|Codex default|DSH default",
+        "Codex default|Pi default",
       "拖放排序",
     );
     assert.equal(hasTarget(), false);
-    assert.equal(configCards(mounted.container).length, 3);
+    assert.equal(configCards(mounted.container).length, 2);
   } finally {
     mounted.unmount();
   }
 });
 
 test("DOM: dragenter moves the target outline before any dragover", async () => {
-  const mounted = await mountPlugin();
+  const settings = agySettings();
+  const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
   try {
     await openSettings(mounted);
     const list = mounted.container.querySelector(
@@ -2831,7 +2664,7 @@ test("DOM: dragenter moves the target outline before any dragover", async () => 
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Pi default|Codex default|DSH default",
+        "Codex default|agy#1|Pi default",
       "拖放排序",
     );
     assert.equal(configCards(mounted.container).length, 3);

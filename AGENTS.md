@@ -37,8 +37,12 @@ or deleted without touching their native files.
 
 Two independent DSH paths remain and must keep working:
 
-- The bundled Worker plugin launches `dsh` child runs with its own engine, session
-  patch and model patch; its `dsh` worker type and settings stay intact.
+- The bundled Worker plugin keeps `dsh` only as a historical record type. Its
+  workers, runs, notifications and native data stay in SQLite/disk untouched,
+  but are hidden from every Worker list, history page and notification view.
+  Queued DSH runs are skipped by admission and recovery, while new dispatch and
+  resume are rejected with `WORKER_TYPE_UNSUPPORTED`. Executable Worker engines
+  are Pi, Codex and agy.
 - The project-scheduler plugin keeps `dsh` agent configuration readable. Native
   scheduled prompt sessions and resident tasks are Codex-only, so the host
   refuses a `dsh` job explicitly instead of starting a session it cannot read.

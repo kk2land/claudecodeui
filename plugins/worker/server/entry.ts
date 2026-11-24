@@ -63,14 +63,39 @@ app.get(
       typeof req.query.parentSessionId === "string"
         ? req.query.parentSessionId
         : undefined;
+    const view =
+      typeof req.query.view === "string" ? req.query.view : undefined;
+    if (view === "overview")
+      return service.overview({ projectId, parentSessionId });
+    if (view === "activity")
+      return service.activity({ projectId, parentSessionId });
+    // The omitted view keeps the pre-existing full snapshot for older clients.
     return service.state({ projectId, parentSessionId });
   }),
 );
 
 app.get(
-  "/catalog/dsh",
+  "/history",
   uiOnly,
-  route(() => service.dshCatalog()),
+  route((req) => {
+    const kind = req.query.kind;
+    if (kind !== "finished" && kind !== "notifications")
+      throw new WorkerFailure(
+        "INVALID_INPUT",
+        "kind 必须是 finished 或 notifications",
+      );
+    return service.history({
+      kind,
+      cursor:
+        typeof req.query.cursor === "string" ? req.query.cursor : undefined,
+      projectId:
+        typeof req.query.projectId === "string" ? req.query.projectId : undefined,
+      parentSessionId:
+        typeof req.query.parentSessionId === "string"
+          ? req.query.parentSessionId
+          : undefined,
+    });
+  }),
 );
 
 app.get(

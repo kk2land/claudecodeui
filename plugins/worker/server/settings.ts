@@ -3,6 +3,7 @@ import type {
   WorkerCodexConfig,
   WorkerConfig,
   WorkerDefault,
+  SupportedWorkerType,
   WorkerSettings,
   WorkerSettingsRecord,
   WorkerTaskRole,
@@ -11,26 +12,26 @@ import type {
 import { AGY_EFFORT_LEVELS, agyEffortConflict } from "../shared/agy.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 
-/** Fixed ids of the legacy configs the schema-2 migration creates. */
-export const INITIAL_CONFIG_IDS: Record<WorkerType, string> = {
-  dsh: "dsh-default",
+/** Fixed ids of the executable configs the schema-2 migration creates. */
+export const INITIAL_CONFIG_IDS: Record<SupportedWorkerType, string> = {
   pi: "pi-default",
   codex: "codex-default",
   agy: "agy-default",
 };
 
 /** Display names of the fixed initial configs; renaming them keeps the id unchanged. */
-export const INITIAL_CONFIG_NAMES: Record<WorkerType, string> = {
-  dsh: "dsh#1",
+export const INITIAL_CONFIG_NAMES: Record<SupportedWorkerType, string> = {
   pi: "pi#1",
   codex: "codex#1",
   agy: "agy#1",
 };
 
 /** Engines the schema-2 migration and legacy settings input still cover. */
-export const LEGACY_WORKER_TYPES: LegacyWorkerType[] = ["dsh", "pi", "codex"];
-/** Every engine the current canonical config list can project. */
+export const LEGACY_WORKER_TYPES: LegacyWorkerType[] = ["pi", "codex"];
+/** Every engine a stored worker/run may name, including historical DSH records. */
 export const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex", "agy"];
+/** Engines that may appear in a new executable config and accept starts/resumes. */
+export const SUPPORTED_WORKER_TYPES: SupportedWorkerType[] = ["pi", "codex", "agy"];
 const DEFAULT_CODEX_ENV = { CODEX_PROXY_BYPASS: "1" };
 const DEFAULT_CODEX_ARGS = ["-c", "model_provider=magpie"];
 const DEFAULT_CONCURRENCY = 3;
@@ -122,7 +123,7 @@ function codexConfig(
  * effort rules. Pi accepts only its thinking levels; DSH needs an explicit model.
  */
 export function validateConfigEffort(
-  type: WorkerType,
+  type: SupportedWorkerType,
   model: string | null,
   effort: string | null,
 ): string | null {
@@ -132,8 +133,6 @@ export function validateConfigEffort(
     const conflict = agyEffortConflict(model, effort);
     if (conflict) return conflict;
   }
-  if (type === "dsh" && effort && !model)
-    return "DSH 配置的 effort 需要同时配置 model";
   return null;
 }
 
@@ -224,19 +223,22 @@ export function migrateLegacySettings(
     return config;
   });
 
-  const configuredDefault = stored.defaultWorkerType;
-  const defaultType: LegacyWorkerType = LEGACY_WORKER_TYPES.includes(
-    configuredDefault as LegacyWorkerType,
+  const requested = SUPPORTED_WORKER_TYPES.includes(
+    stored.defaultWorkerType as SupportedWorkerType,
   )
-    ? (configuredDefault as LegacyWorkerType)
-    : "dsh";
-  const defaultConfig =
-    configs.find((config) => config.type === defaultType) ?? configs[0]!;
-  // The stored row may predate validation; keep the invariant the service guarantees.
-  if (!configs.some((config) => config.enabled)) defaultConfig.enabled = true;
-  const chosen = defaultConfig.enabled
-    ? defaultConfig
-    : configs.find((config) => config.enabled) ?? defaultConfig;
+    ? (stored.defaultWorkerType as SupportedWorkerType)
+    : null;
+  // A stored DSH (or unknown) default, or an all-disabled map, falls back to the first enabled
+  // supported config; when none is enabled the usable Pi default is restored.
+  let chosen =
+    (requested
+      ? configs.find((config) => config.type === requested && config.enabled)
+      : undefined) ?? configs.find((config) => config.enabled);
+  if (!chosen) {
+    const pi = configs.find((config) => config.type === "pi")!;
+    pi.enabled = true;
+    chosen = pi;
+  }
 
   return {
     schemaVersion: 2,
@@ -254,6 +256,50 @@ export function isCanonicalSettings(value: unknown): boolean {
     value.schemaVersion === 2 &&
     Array.isArray(value.configs)
   );
+}
+
+/**
+ * Repairs a canonical record read from storage. DSH configs are dropped because the engine is no
+ * longer executable; a default that no longer names an enabled supported config falls back to the
+ * first enabled supported config, and when none is enabled a usable Pi default is restored.
+ * This is an in-memory projection only: hidden DSH rows are never migrated or persisted by reads.
+ */
+export function normalizeSettingsRecord(record: WorkerSettingsRecord): WorkerSettingsRecord {
+  let configs = record.configs.filter((config) =>
+    SUPPORTED_WORKER_TYPES.includes(config.type),
+  );
+  let chosen = configs.find(
+    (config) => config.id === record.defaultConfigId && config.enabled,
+  ) ?? configs.find((config) => config.enabled);
+  if (!chosen) {
+    // Restore the fixed Pi default rather than enabling an arbitrary custom Pi config.
+    const existing = configs.find(
+      (config) => config.id === INITIAL_CONFIG_IDS.pi && config.type === "pi",
+    );
+    const pi: WorkerConfig = existing
+      ? { ...existing, enabled: true }
+      : {
+          id: INITIAL_CONFIG_IDS.pi,
+          name: INITIAL_CONFIG_NAMES.pi,
+          type: "pi",
+          enabled: true,
+          roles: [],
+          concurrency: DEFAULT_CONCURRENCY,
+          hardTimeoutSeconds: 600,
+          model: null,
+          effort: null,
+        };
+    configs = existing
+      ? configs.map((config) => (config.id === pi.id ? pi : config))
+      : [pi, ...configs];
+    chosen = pi;
+  }
+  const next: WorkerSettingsRecord = {
+    ...record,
+    configs,
+    defaultConfigId: chosen.id,
+  };
+  return next;
 }
 
 function configForType(

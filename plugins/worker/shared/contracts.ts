@@ -14,16 +14,22 @@ export type { WorkerTaskRole };
 //----------------- WORKER IDENTITY AND STATUS ------------
 
 /**
- * Native worker runner implemented by the CloudCLI Worker plugin: DSH headless, Pi print/JSON,
- * `codex exec`, or the Google Antigravity CLI in print/stream-json mode.
+ * Historical worker runner stored on records and runs. `dsh` is retained only so old worker
+ * records, logs, and notifications remain readable; it is no longer executable or configurable.
  */
 export type WorkerType = "dsh" | "pi" | "codex" | "agy";
 
 /**
- * Engine names that predate agy. The legacy full-map settings input still edits only these
- * fixed initial configs; agy is configured through the canonical `configs` list.
+ * Native runner that may appear in an executable `WorkerConfig` and accept new starts/resumes.
+ * Pi print/JSON, `codex exec`, and the Google Antigravity CLI in print/stream-json mode.
  */
-export type LegacyWorkerType = "dsh" | "pi" | "codex";
+export type SupportedWorkerType = "pi" | "codex" | "agy";
+
+/**
+ * Engine names the legacy full-map settings input still edits. DSH was removed from executable
+ * configuration, so the legacy shape no longer creates or updates a DSH config.
+ */
+export type LegacyWorkerType = "pi" | "codex";
 
 /**
  * Lifecycle of one run. `queued` waits in FIFO order; `starting`, `running`, `stopping`, and
@@ -465,7 +471,7 @@ export type WorkerNotification = {
 export type WorkerConfig = {
   id: string;
   name: string;
-  type: WorkerType;
+  type: SupportedWorkerType;
   enabled: boolean;
   roles: WorkerTaskRole[];
   concurrency: number;
@@ -586,24 +592,24 @@ export type WorkerSettingsUpdate = {
  * since been deleted the whole update is rejected; user-added configs are never editable through
  * this input.
  *
- * Concurrency and defaults stay compatible with older clients: `dsh`/`pi` are required while
+ * Concurrency and defaults stay compatible with older clients: `pi` is required while
  * `codex` is optional and keeps its existing value when omitted. A supplied `defaults` must
- * contain both `dsh` and `pi`; a supplied `codex` object must include both `env` and `extraArgs`
+ * contain `pi`; a supplied `codex` object must include both `env` and `extraArgs`
  * and replaces the whole Codex launch block: `modelProvider` is re-extracted from the new
  * `extraArgs` and cleared when they no longer name one. Blank or null model/effort values clear
  * that configured default. `retentionDays` must be a positive integer.
  *
- * `enabled` and `roles` are whole-setting optional: when a map is supplied it must contain all
- * three of `dsh`, `pi`, and `codex`; when omitted the stored value is kept. A supplied
+ * `enabled` and `roles` are whole-setting optional: when a map is supplied it must contain both
+ * `pi` and `codex`; when omitted the stored value is kept. A supplied
  * `defaultWorkerType` must reference an initial config that is enabled afterwards. agy is not
  * part of this legacy shape; it is configured only through the canonical `configs` list.
  */
 export type WorkerLegacySettingsInput = {
-  concurrency: { dsh: number; pi: number } & { codex?: number };
+  concurrency: { pi: number } & { codex?: number };
   defaultWorkerType?: LegacyWorkerType;
   enabled?: Record<LegacyWorkerType, boolean>;
   roles?: Record<LegacyWorkerType, WorkerTaskRole[]>;
-  defaults?: { dsh: WorkerDefault; pi: WorkerDefault } & { codex?: WorkerDefault };
+  defaults?: { pi: WorkerDefault } & { codex?: WorkerDefault };
   codex?: WorkerCodexSettings;
   retentionDays?: number;
 };
@@ -706,34 +712,13 @@ export type AgyModelCatalog = {
   models: AgyModelOption[];
 };
 
-/** One model declared by the DSH headless profile's static patch. */
-export type DshModelOption = {
-  /** The full `provider/model` route persisted as a Worker config's `model`. */
-  route: string;
-  label: string;
-  /** Reasoning levels the declaration lists; an empty list means the model declares none. */
-  efforts: string[];
-};
-
-/**
- * `GET /catalog/dsh` response, read from `$DSH_HOME/profiles/headless/cordis.patch.yml`.
- * DSH is a Worker execution engine only: its app provider was removed, so the plugin serves this
- * directory itself instead of asking the host. `effortLevels` are the DSH effort names offered for
- * a route typed when the static patch declares no models.
- */
-export type DshModelCatalog = {
-  models: DshModelOption[];
-  effortLevels: string[];
-};
-
 /**
  * Optional authenticated host catalog capabilities. The Worker client adds these as optional
  * `models` / `codexModelProviders` / `codexModelProviderModels` members of `WorkerHost` in
- * `client/api.ts`; a missing capability must read as "catalog unavailable". DSH uses its own
- * plugin route (`GET /catalog/dsh`) because the host no longer serves a DSH catalog.
+ * `client/api.ts`; a missing capability must read as "catalog unavailable".
  */
 export type WorkerHostCatalogCapabilities = {
-  models?(provider: "codex" | "dsh"): Promise<WorkerModelCatalog>;
+  models?(provider: "codex"): Promise<WorkerModelCatalog>;
   codexModelProviders?(): Promise<CodexModelsDirectory>;
   codexModelProviderModels?(modelProvider: string): Promise<CodexServiceModelCatalog>;
 };
@@ -776,6 +761,51 @@ export type WorkerStateSnapshot = {
   /** Per-config usage for `settings.configs`, computed from the whole store. */
   configUsage: Record<string, WorkerConfigUsage>;
   notifications: WorkerNotification[];
+};
+
+/** One keyset page of Worker history. `nextCursor` is opaque and null on the last page. */
+export type WorkerHistoryPage<T> = {
+  items: T[];
+  nextCursor: string | null;
+};
+
+/** History collections exposed by the Worker REST API. */
+export type WorkerHistoryKind = "finished" | "notifications";
+
+/** A notification row with the owning worker's task name resolved for the same page. */
+export type WorkerHistoryNotification = WorkerNotification & { taskName: string };
+
+/**
+ * `GET /state?view=overview` payload. `workers` are the occupied and queued workers; terminal
+ * history is paged separately. `agyCooldownUntil` is the global ISO deadline for new agy starts,
+ * or null when no cooldown is active.
+ */
+export type WorkerOverviewSnapshot = {
+  workers: WorkerRecord[];
+  settings: WorkerSettings;
+  configUsage: Record<string, WorkerConfigUsage>;
+  agyCooldownUntil: string | null;
+  finished: WorkerHistoryPage<WorkerRecord>;
+  notifications: WorkerHistoryPage<WorkerHistoryNotification>;
+};
+
+/** Minimal active-worker row used by the existing UI activity check. */
+export type WorkerActivityWorker = {
+  id: string;
+  projectId: string;
+  parentSessionId: string;
+  latestRun: { status: WorkerStatus };
+};
+
+/** `GET /state?view=activity` payload. */
+export type WorkerActivitySnapshot = {
+  workers: WorkerActivityWorker[];
+};
+
+/** Query parameters for `GET /history`; `cursor` is opaque plugin-issued state. */
+export type WorkerHistoryQuery = WorkerStateQuery & {
+  kind: WorkerHistoryKind;
+  cursor?: string;
 };
 
 /**

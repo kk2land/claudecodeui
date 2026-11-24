@@ -13,7 +13,6 @@ import {
 import type {
   AgyModelCatalog,
   CodexModelsDirectory,
-  DshModelCatalog,
   PiModelCatalog,
   WorkerConfig,
   WorkerConfigUsage,
@@ -21,14 +20,13 @@ import type {
   WorkerSettings,
   WorkerSettingsUpdate,
   WorkerTaskRole,
-  WorkerType,
+  SupportedWorkerType,
 } from "../shared/contracts.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerHost } from "./api.js";
 import type { workerApi } from "./api.js";
 import {
   DEFAULT_EFFORT_LABEL,
-  dshEffortLevels,
   effortOptionsFor,
   modelOptionsFor,
   readCodexProviderModels,
@@ -38,7 +36,7 @@ import {
 } from "./catalog.js";
 import { TASK_ROLE_LABELS, TYPE_LABELS } from "./format.js";
 
-const WORKER_TYPES: WorkerType[] = ["dsh", "pi", "codex", "agy"];
+const WORKER_TYPES: SupportedWorkerType[] = ["pi", "codex", "agy"];
 
 /** Result of one optional host catalog read; a stale value stays visible while retrying. */
 type Loadable<T> = {
@@ -111,7 +109,7 @@ function parseEnv(text: string): {
  * Default name for a new config of `type`: `type#1` when no canonical name exists yet, else
  * one past the highest `type#<n>` in the current list.
  */
-function nextConfigName(configs: WorkerConfig[], type: WorkerType): string {
+function nextConfigName(configs: WorkerConfig[], type: SupportedWorkerType): string {
   let highest = 0;
   for (const config of configs) {
     if (config.type !== type) continue;
@@ -150,7 +148,7 @@ function cloneConfig(
   };
 }
 
-function blankConfig(type: WorkerType, name: string, id: string): WorkerConfig {
+function blankConfig(type: SupportedWorkerType, name: string, id: string): WorkerConfig {
   return {
     id,
     name,
@@ -202,33 +200,30 @@ function fallbackDefault(
 /** One local catalog failure rendered on the card that depends on it, with its own retry. */
 type CatalogProblem = {
   message: string;
-  source: "agy" | "dsh" | "pi" | "codex" | "codexDirectory" | "codexProvider";
+  source: "agy" | "pi" | "codex" | "codexDirectory" | "codexProvider";
   provider?: string;
 };
 
 type CatalogView = {
   agy: AgyModelCatalog | null;
-  dsh: DshModelCatalog | null;
   codex: WorkerModelCatalog | null;
   pi: PiModelCatalog | null;
   codexDirectory: CodexModelsDirectory | null;
   codexModels: Record<string, Loadable<string[]>>;
   errors: {
     agy?: string;
-    dsh?: string;
     pi?: string;
     codex?: string;
     codexDirectory?: string;
   };
   loading: {
     agy: boolean;
-    dsh: boolean;
     pi: boolean;
     codex: boolean;
     codexDirectory: boolean;
   };
   retry(
-    source: "agy" | "dsh" | "pi" | "codex" | "codexDirectory" | "codexProvider",
+    source: "agy" | "pi" | "codex" | "codexDirectory" | "codexProvider",
     provider?: string,
   ): void;
 };
@@ -273,7 +268,6 @@ export function SettingsView({
   // pointer. Only the drag handle is draggable; the order only changes on drop (or a move button).
   const [dragState, setDragState] = useState<{ id: string; overId: string | null } | null>(null);
 
-  const [dshCatalog, setDshCatalog] = useState<Loadable<DshModelCatalog>>(loading());
   const [agyCatalog, setAgyCatalog] = useState<Loadable<AgyModelCatalog>>(loading());
   const [codexCatalog, setCodexCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
   const [piCatalog, setPiCatalog] = useState<Loadable<PiModelCatalog>>(loading());
@@ -284,7 +278,6 @@ export function SettingsView({
   // the result of a later explicit retry.
   const codexModelsRef = useRef<Record<string, Loadable<string[]>>>({});
   const providerRequestTokens = useRef<Record<string, number>>({});
-  const [dshAttempt, setDshAttempt] = useState(0);
   const [agyAttempt, setAgyAttempt] = useState(0);
   const [codexAttempt, setCodexAttempt] = useState(0);
   const [piAttempt, setPiAttempt] = useState(0);
@@ -292,20 +285,8 @@ export function SettingsView({
   const [providerAttempt, setProviderAttempt] = useState(0);
   const inFlightProviders = useRef(new Set<string>());
 
-  // Catalogs are optional capabilities: a failure only affects that engine's selects. DSH and Pi
-  // are served by this plugin; Codex metadata and its service directory come from the host.
-  useEffect(() => {
-    let live = true;
-    setDshCatalog((current) => loading(current.value));
-    api
-      .dshCatalog()
-      .then((value) => live && setDshCatalog({ status: "ready", value, error: "" }))
-      .catch((error) => live && setDshCatalog({ status: "error", value: null, error: String(error) }));
-    return () => {
-      live = false;
-    };
-  }, [api, dshAttempt]);
-
+  // Catalogs are optional capabilities: a failure only affects that engine's selects. Pi is
+  // served by this plugin; Codex metadata and its service directory come from the host.
   // `agy models` hits the network, so the directory is only requested once the draft actually
   // uses agy: opening settings that contain an agy config, or adding/retargeting one. Collapsing
   // away the last agy config performs no request.
@@ -413,14 +394,12 @@ export function SettingsView({
 
   const catalogView: CatalogView = {
     agy: agyCatalog.value,
-    dsh: dshCatalog.value,
     codex: codexCatalog.value,
     pi: piCatalog.value,
     codexDirectory: codexDirectory.value,
     codexModels,
     errors: {
       agy: agyCatalog.status === "error" ? agyCatalog.error : undefined,
-      dsh: dshCatalog.status === "error" ? dshCatalog.error : undefined,
       pi: piCatalog.status === "error" ? piCatalog.error : undefined,
       codex: codexCatalog.status === "error" ? codexCatalog.error : undefined,
       codexDirectory:
@@ -428,14 +407,12 @@ export function SettingsView({
     },
     loading: {
       agy: agyCatalog.status === "loading",
-      dsh: dshCatalog.status === "loading",
       pi: piCatalog.status === "loading",
       codex: codexCatalog.status === "loading",
       codexDirectory: codexDirectory.status === "loading",
     },
     retry(source, provider) {
       if (source === "agy") setAgyAttempt((value) => value + 1);
-      else if (source === "dsh") setDshAttempt((value) => value + 1);
       else if (source === "pi") setPiAttempt((value) => value + 1);
       else if (source === "codex") setCodexAttempt((value) => value + 1);
       else if (source === "codexDirectory") setDirectoryAttempt((value) => value + 1);
@@ -484,12 +461,7 @@ export function SettingsView({
                 (!Number.isSafeInteger(config.hardTimeoutSeconds) || config.hardTimeoutSeconds < 1),
             )
           ? "硬超时必须是大于 0 的整数，留空表示不限时。"
-        : draft.configs.find(
-              (config) =>
-                config.type === "dsh" && config.effort && !config.model,
-            )
-          ? "DSH reasoning 需要同时配置 DSH 模型。"
-          : codexNameWithEnvError
+        : codexNameWithEnvError
           ? "配置 " +
             codexNameWithEnvError.name +
             "：" +
@@ -529,7 +501,7 @@ export function SettingsView({
       return { ...current, configs };
     });
 
-  const addConfig = (type: WorkerType) => {
+  const addConfig = (type: SupportedWorkerType) => {
     const id = newConfigId();
     if (type === "codex") setEnvDraft((current) => ({ ...current, [id]: "" }));
     setDraft((current) => ({
@@ -598,7 +570,6 @@ export function SettingsView({
       { ...config, model: value || null },
       {
         agy: catalogView.agy,
-        dsh: catalogView.dsh,
         codex: catalogView.codex,
         pi: catalogView.pi,
         codexProviderModels:
@@ -744,11 +715,7 @@ export function SettingsView({
           // for a provider this card has left can never surface here.
           const catalogProblems: CatalogProblem[] = [];
           let catalogLoading = false;
-          if (config.type === "dsh") {
-            if (catalogView.errors.dsh)
-              catalogProblems.push({ message: catalogView.errors.dsh, source: "dsh" });
-            catalogLoading = catalogView.loading.dsh;
-          } else if (config.type === "pi") {
+          if (config.type === "pi") {
             if (catalogView.errors.pi)
               catalogProblems.push({ message: catalogView.errors.pi, source: "pi" });
             catalogLoading = catalogView.loading.pi;
@@ -775,30 +742,13 @@ export function SettingsView({
               modelsEntry?.status === "loading" ||
               catalogView.loading.codexDirectory;
           }
-          // DSH's static directory is only partial information: every DSH card keeps a typable
-          // `provider/model` field with the directory as suggestions. A listed route offers its
-          // declared levels; a typed route offers the engine's levels.
           const models: ModelSelectOption[] = modelOptionsFor(config, {
             agy: catalogView.agy,
-            dsh: catalogView.dsh,
             codex: catalogView.codex,
             pi: catalogView.pi,
             codexProviderModels: modelsEntry?.value ?? null,
           });
-          const efforts =
-            config.type === "dsh"
-              ? effortOptionsFor(
-                  [
-                    {
-                      value: config.model ?? "",
-                      label: config.model ?? "",
-                      effort: dshEffortLevels(catalogView.dsh, config.model),
-                    },
-                  ],
-                  config.model,
-                  config.effort,
-                )
-              : effortOptionsFor(models, config.model, config.effort);
+          const efforts = effortOptionsFor(models, config.model, config.effort);
           const isDefault = draft.defaultConfigId === config.id;
           // Highlight this card as soon as a drag enters it (dragenter fires before the first
           // dragover); dragover then keeps the highlight and allows the drop.
@@ -930,7 +880,7 @@ export function SettingsView({
                     disabled={engineLocked}
                     title={engineLocked ? "该配置已被任务历史引用，执行引擎不可更改。" : undefined}
                     onChange={(event) => {
-                      const type = event.target.value as WorkerType;
+                      const type = event.target.value as SupportedWorkerType;
                       update(config.id, {
                         type,
                         model: null,
@@ -1032,48 +982,22 @@ export function SettingsView({
                 ) : null}
                 <label>
                   模型
-                  {config.type === "dsh" ? (
-                    <>
-                      <input
-                        type="text"
-                        aria-label={"配置 " + position + " 模型"}
-                        placeholder="provider/model"
-                        spellCheck={false}
-                        list={"worker-dsh-models-" + config.id}
-                        value={config.model ?? ""}
-                        onChange={(event) => setModel(config, event.target.value)}
-                      />
-                      <datalist id={"worker-dsh-models-" + config.id}>
-                        {(catalogView.dsh?.models ?? []).map((option) => (
-                          <option key={option.route} value={option.route}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </datalist>
-                      <small>
-                        可选用目录建议，或直接填写完整 provider/model 路由；留空表示沿用执行器自身默认。
-                      </small>
-                    </>
-                  ) : (
-                    <>
-                      <select
-                        aria-label={"配置 " + position + " 模型"}
-                        value={config.model ?? ""}
-                        onChange={(event) => setModel(config, event.target.value)}
-                      >
-                        {models.map((option) => (
-                          <option key={option.value} value={option.value}>
-                            {option.label}
-                          </option>
-                        ))}
-                      </select>
-                      {config.type === "agy" ? (
-                        <small>
-                          模型列表来自本机 agy models；留空沿用执行器自身默认。
-                        </small>
-                      ) : null}
-                    </>
-                  )}
+                  <select
+                    aria-label={"配置 " + position + " 模型"}
+                    value={config.model ?? ""}
+                    onChange={(event) => setModel(config, event.target.value)}
+                  >
+                    {models.map((option) => (
+                      <option key={option.value} value={option.value}>
+                        {option.label}
+                      </option>
+                    ))}
+                  </select>
+                  {config.type === "agy" ? (
+                    <small>
+                      模型列表来自本机 agy models；留空沿用执行器自身默认。
+                    </small>
+                  ) : null}
                 </label>
                 <label>
                   Reasoning

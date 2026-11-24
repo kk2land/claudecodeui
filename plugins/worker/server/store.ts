@@ -3,6 +3,7 @@ import path from "node:path";
 import Database from "better-sqlite3";
 import type {
   WorkerConfigUsage,
+  WorkerHistoryNotification,
   WorkerNotification,
   WorkerNotificationDelivery,
   WorkerOwner,
@@ -19,6 +20,7 @@ import {
   defaultSettingsRecord,
   isCanonicalSettings,
   migrateLegacySettings,
+  normalizeSettingsRecord,
   projectSettings,
 } from "./settings.js";
 
@@ -28,6 +30,18 @@ export const DEFAULT_SETTINGS = projectSettings(defaultSettingsRecord());
 type WorkerRow = { body: string; cleaned_at: string | null };
 type RunRow = { body: string };
 type OwnerRow = { body: string };
+type HistoryRow = { worker_body: string; run_body: string };
+type NotificationHistoryRow = { body: string; worker_body: string | null };
+type ActiveWorkerRow = { worker_body: string; run_body: string };
+type ConfigUsageRow = {
+  configId: string;
+  referenced: number;
+  activeRuns: number | null;
+};
+
+/** Keyset position for Worker history pages; serialized opaquely by the service. */
+export type WorkerHistoryCursor = { time: string; id: string };
+export type WorkerHistoryPageResult<T> = { items: T[]; hasMore: boolean };
 
 /** SQLite persistence for workers, runs, plans, settings, idempotency keys, and the notification outbox. */
 export class WorkerStore {
@@ -82,6 +96,10 @@ export class WorkerStore {
         content TEXT NOT NULL,
         updated_at TEXT NOT NULL,
         PRIMARY KEY(parent_session_id, project_id)
+      );
+      CREATE TABLE IF NOT EXISTS cooldowns (
+        engine TEXT PRIMARY KEY,
+        until INTEGER NOT NULL
       );
     `);
     const requestColumns = new Set(
@@ -146,6 +164,7 @@ export class WorkerStore {
       const { hardTimeoutSeconds, ...record } = stored as unknown as WorkerSettingsRecord & {
         hardTimeoutSeconds?: number | null;
       };
+      let changed = false;
       if (
         hardTimeoutSeconds !== undefined ||
         record.configs.some((config) => config.hardTimeoutSeconds === undefined)
@@ -156,9 +175,11 @@ export class WorkerStore {
             ? hardTimeoutSeconds ?? 600
             : config.hardTimeoutSeconds,
         }));
-        this.saveSettings(record);
+        changed = true;
       }
-      return projectSettings(record);
+      // Persist only independent schema/timeout repairs. DSH removal is a read-only projection.
+      if (changed) this.saveSettings(record);
+      return projectSettings(normalizeSettingsRecord(record));
     }
     const record = migrateLegacySettings(stored);
     this.transaction(() => {
@@ -183,22 +204,24 @@ export class WorkerStore {
    * blocks deletion until every accepted run reaches a terminal state.
    */
   configUsage(): Record<string, WorkerConfigUsage> {
+    const rows = this.db
+      .prepare(
+        `SELECT json_extract(w.body,'$.configId') AS configId,
+                COUNT(DISTINCT w.id) AS referenced,
+                SUM(CASE WHEN r.status IN ('queued','starting','running','stopping','unknown')
+                         THEN 1 ELSE 0 END) AS activeRuns
+           FROM workers w
+           LEFT JOIN runs r ON r.worker_id=w.id
+          WHERE json_extract(w.body,'$.configId') IS NOT NULL
+          GROUP BY configId`,
+      )
+      .all() as ConfigUsageRow[];
     const usage: Record<string, WorkerConfigUsage> = {};
-    for (const worker of this.workers()) {
-      const entry = (usage[worker.configId] ??= {
-        referenced: true,
-        activeRuns: 0,
-      });
-      entry.referenced = true;
-    }
-    for (const run of this.activeRuns()) {
-      const worker = this.worker(run.workerId);
-      if (!worker) continue;
-      const entry = (usage[worker.configId] ??= {
-        referenced: true,
-        activeRuns: 0,
-      });
-      entry.activeRuns++;
+    for (const row of rows) {
+      usage[row.configId] = {
+        referenced: row.referenced > 0,
+        activeRuns: row.activeRuns ?? 0,
+      };
     }
     return usage;
   }
@@ -210,18 +233,25 @@ export class WorkerStore {
    */
   private backfillLegacyRecords(record: WorkerSettingsRecord): void {
     for (const worker of this.workers()) {
+      // Retired DSH rows stay byte-for-byte as stored; no config or run backfill.
+      if (worker.type === "dsh") continue;
       let workerChanged = false;
       if (!worker.configId || !worker.configName) {
         const config =
           record.configs.find(
             (candidate) =>
-              candidate.id === INITIAL_CONFIG_IDS[worker.type] &&
+              candidate.id === INITIAL_CONFIG_IDS[worker.type as keyof typeof INITIAL_CONFIG_IDS] &&
               candidate.type === worker.type,
           ) ?? record.configs.find((candidate) => candidate.type === worker.type);
-        worker.configId =
-          config?.id ?? INITIAL_CONFIG_IDS[worker.type] ?? "dsh-default";
-        worker.configName =
-          config?.name ?? INITIAL_CONFIG_NAMES[worker.type] ?? "DSH default";
+        // Historical DSH workers keep a readable config identity even though no config exists.
+        const fallbackId =
+          INITIAL_CONFIG_IDS[worker.type as keyof typeof INITIAL_CONFIG_IDS] ??
+          worker.type + "-default";
+        const fallbackName =
+          INITIAL_CONFIG_NAMES[worker.type as keyof typeof INITIAL_CONFIG_NAMES] ??
+          worker.type + "#1";
+        worker.configId = config?.id ?? fallbackId;
+        worker.configName = config?.name ?? fallbackName;
         workerChanged = true;
       }
       for (const run of this.runs(worker.id)) {
@@ -269,6 +299,125 @@ export class WorkerStore {
       changed = true;
     }
     return changed;
+  }
+
+  /** Global cooldown deadline in epoch milliseconds; null when this engine has none. */
+  cooldown(engine: string): number | null {
+    const row = this.db
+      .prepare("SELECT until FROM cooldowns WHERE engine=?")
+      .get(engine) as { until: number } | undefined;
+    return row?.until ?? null;
+  }
+
+  /** Stores the latest known deadline; an older deadline never shortens an active cooldown. */
+  setCooldown(engine: string, until: number): number {
+    const current = this.cooldown(engine);
+    const next = Math.max(until, current ?? 0);
+    this.db
+      .prepare(`
+        INSERT INTO cooldowns(engine,until) VALUES(?,?)
+        ON CONFLICT(engine) DO UPDATE SET until=excluded.until
+      `)
+      .run(engine, next);
+    return next;
+  }
+
+  /**
+   * One page of terminal workers ordered by the latest run's finish time (created time for old
+   * rows without one) and id. The query applies the keyset bound and LIMIT in SQLite; one extra
+   * row only signals that another page exists.
+   */
+  finishedPage(
+    query: WorkerStateQuery,
+    cursor: WorkerHistoryCursor | null,
+    limit: number,
+  ): WorkerHistoryPageResult<WorkerRecord> {
+    const clauses = [
+      "r.status IN ('completed','failed','cancelled','interrupted')",
+      "json_extract(w.body,'$.type') <> 'dsh'",
+    ];
+    const values: Array<string | number> = [];
+    if (query.projectId) {
+      clauses.push("w.project_id=?");
+      values.push(query.projectId);
+    }
+    if (query.parentSessionId) {
+      clauses.push("w.parent_session_id=?");
+      values.push(query.parentSessionId);
+    }
+    const sort =
+      "COALESCE(NULLIF(json_extract(r.body,'$.finishedAt'),''), json_extract(w.body,'$.createdAt'), '')";
+    if (cursor) {
+      clauses.push(`(${sort} < ? OR (${sort} = ? AND w.id < ?))`);
+      values.push(cursor.time, cursor.time, cursor.id);
+    }
+    values.push(limit + 1);
+    const rows = this.db
+      .prepare(`
+        SELECT w.body AS worker_body, r.body AS run_body
+        FROM workers w
+        JOIN runs r ON r.rowid = (
+          SELECT rowid FROM runs WHERE worker_id=w.id ORDER BY rowid DESC LIMIT 1
+        )
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY ${sort} DESC, w.id DESC
+        LIMIT ?
+      `)
+      .all(...values) as HistoryRow[];
+    const items = rows.slice(0, limit).map((row) => {
+      const worker = JSON.parse(row.worker_body) as WorkerRecord;
+      return { ...worker, latestRun: JSON.parse(row.run_body) as WorkerRun };
+    });
+    return { items, hasMore: rows.length > limit };
+  }
+
+  /**
+   * One page of notifications ordered by generation time and id. Task names are resolved from the
+   * same page's worker join so a page needs no follow-up queries; historical notifications whose
+   * worker is gone stay readable with an empty task name.
+   */
+  notificationsPage(
+    query: WorkerStateQuery,
+    cursor: WorkerHistoryCursor | null,
+    limit: number,
+  ): WorkerHistoryPageResult<WorkerHistoryNotification> {
+    const clauses = [
+      "COALESCE(json_extract(w.body,'$.type'),'') <> 'dsh'",
+    ];
+    const values: Array<string | number> = [];
+    if (query.projectId) {
+      clauses.push("w.project_id=?");
+      values.push(query.projectId);
+    }
+    if (query.parentSessionId) {
+      clauses.push("w.parent_session_id=?");
+      values.push(query.parentSessionId);
+    }
+    const sort =
+      "COALESCE(NULLIF(json_extract(n.body,'$.createdAt'),''),'')";
+    if (cursor) {
+      clauses.push(`(${sort} < ? OR (${sort} = ? AND n.id < ?))`);
+      values.push(cursor.time, cursor.time, cursor.id);
+    }
+    values.push(limit + 1);
+    const rows = this.db
+      .prepare(`
+        SELECT n.body AS body, w.body AS worker_body
+        FROM notifications n
+        LEFT JOIN workers w ON w.id = n.worker_id
+        WHERE ${clauses.join(" AND ")}
+        ORDER BY ${sort} DESC, n.id DESC
+        LIMIT ?
+      `)
+      .all(...values) as NotificationHistoryRow[];
+    const items = rows.slice(0, limit).map((row) => {
+      const notification = JSON.parse(row.body) as WorkerHistoryNotification;
+      const worker = row.worker_body
+        ? (JSON.parse(row.worker_body) as WorkerRecord)
+        : null;
+      return { ...notification, taskName: worker?.taskName ?? "" };
+    });
+    return { items, hasMore: rows.length > limit };
   }
 
   saveOwner(owner: WorkerOwner): void {
@@ -436,6 +585,39 @@ export class WorkerStore {
     ).map((row) => this.record(JSON.parse(row.body) as WorkerRecord));
   }
 
+  /**
+   * Workers whose latest run is still referenced by admission or activity, in one query.
+   * Retired DSH rows are filtered in SQL before any body is deserialized.
+   */
+  activeWorkers(query: WorkerStateQuery = {}): WorkerRecord[] {
+    const clauses = ["json_extract(w.body,'$.type') <> 'dsh'"];
+    const values: string[] = [];
+    if (query.projectId) {
+      clauses.push("w.project_id=?");
+      values.push(query.projectId);
+    }
+    if (query.parentSessionId) {
+      clauses.push("w.parent_session_id=?");
+      values.push(query.parentSessionId);
+    }
+    const rows = this.db
+      .prepare(
+        `SELECT w.body AS worker_body, r.body AS run_body
+           FROM workers w
+           JOIN runs r ON r.rowid=(
+             SELECT rowid FROM runs WHERE worker_id=w.id ORDER BY rowid DESC LIMIT 1
+           )
+          WHERE r.status IN ('queued','starting','running','stopping','unknown')
+            AND ${clauses.join(" AND ")}
+          ORDER BY w.rowid`,
+      )
+      .all(...values) as ActiveWorkerRow[];
+    return rows.map((row) => ({
+      ...(JSON.parse(row.worker_body) as WorkerRecord),
+      latestRun: JSON.parse(row.run_body) as WorkerRun,
+    }));
+  }
+
   workerCleanedAt(id: string): string | null {
     const row = this.db
       .prepare("SELECT cleaned_at FROM workers WHERE id=?")
@@ -545,11 +727,20 @@ export class WorkerStore {
     const rows = ownerId
       ? (this.db
           .prepare(
-            "SELECT body FROM notifications WHERE owner_id=? ORDER BY rowid",
+            `SELECT n.body FROM notifications n
+               LEFT JOIN workers w ON w.id=n.worker_id
+              WHERE n.owner_id=?
+                AND COALESCE(json_extract(w.body,'$.type'),'') <> 'dsh'
+              ORDER BY n.rowid`,
           )
           .all(ownerId) as RunRow[])
       : (this.db
-          .prepare("SELECT body FROM notifications ORDER BY rowid")
+          .prepare(
+            `SELECT n.body FROM notifications n
+               LEFT JOIN workers w ON w.id=n.worker_id
+              WHERE COALESCE(json_extract(w.body,'$.type'),'') <> 'dsh'
+              ORDER BY n.rowid`,
+          )
           .all() as RunRow[]);
     return rows.map((row) => JSON.parse(row.body) as WorkerNotification);
   }

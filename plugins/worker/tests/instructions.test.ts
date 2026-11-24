@@ -10,18 +10,16 @@ const pluginDirectory = fileURLToPath(new URL('..', import.meta.url));
 const start = '<!-- cloudcli-workers:start -->';
 const end = '<!-- cloudcli-workers:end -->';
 
-for (const provider of ['codex', 'dsh']) {
-  test(`${provider} instructions install once and update only the managed block after relocation`, { skip: process.platform === 'win32' }, (t) => {
+test('Codex instructions install once and update only the managed block after relocation', { skip: process.platform === 'win32' }, (t) => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'worker instructions-'));
     t.after(() => rmSync(root, { recursive: true, force: true }));
-    const targetDirectory = path.join(root, `${provider} home`);
+    const targetDirectory = path.join(root, 'codex home');
     const agentsFile = path.join(targetDirectory, 'AGENTS.md');
     const environment = {
       ...process.env,
       CODEX_HOME: path.join(root, 'codex home'),
-      DSH_HOME: path.join(root, 'dsh home'),
     };
-    const entry = `install-${provider}-instructions.sh`;
+    const entry = 'install-codex-instructions.sh';
     execFileSync('sh', [path.join(pluginDirectory, entry)], { env: environment });
     const installed = readFileSync(agentsFile, 'utf8');
     assert.ok(installed.includes(path.join(pluginDirectory, 'CLOUDCLI-WORKERS.md')));
@@ -45,17 +43,16 @@ for (const provider of ['codex', 'dsh']) {
     assert.equal(updated.split(end).length - 1, 1);
   });
 
-  test(`${provider} instructions leave a malformed existing block untouched`, { skip: process.platform === 'win32' }, (t) => {
+test('Codex instructions leave a malformed existing block untouched', { skip: process.platform === 'win32' }, (t) => {
     const root = mkdtempSync(path.join(os.tmpdir(), 'worker-instructions-'));
     t.after(() => rmSync(root, { recursive: true, force: true }));
     const agentsFile = path.join(root, 'AGENTS.md');
     const original = `# Keep my rules\n${start}\nUnclosed reference\n`;
     writeFileSync(agentsFile, original);
-    const result = spawnSync('sh', [path.join(pluginDirectory, `install-${provider}-instructions.sh`)], {
-      env: { ...process.env, CODEX_HOME: root, DSH_HOME: root }, encoding: 'utf8',
+    const result = spawnSync('sh', [path.join(pluginDirectory, 'install-codex-instructions.sh')], {
+      env: { ...process.env, CODEX_HOME: root }, encoding: 'utf8',
     });
     assert.equal(result.status, 1);
     assert.match(result.stderr, /start marker without end marker/);
     assert.equal(readFileSync(agentsFile, 'utf8'), original);
   });
-}

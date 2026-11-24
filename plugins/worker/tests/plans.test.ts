@@ -56,7 +56,7 @@ test("existing databases gain plan storage and retain it across restart and owne
   const originalOwner = owner(root);
   service.registerOwner(originalOwner, "first-token");
   service.updateSettings(migrateLegacySettings({}));
-  service.updateSettings({ concurrency: { dsh: 2, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 1 } });
   await service.close();
 
   // An existing installation has all its previous tables, but no plans table yet.
@@ -66,7 +66,7 @@ test("existing databases gain plan storage and retain it across restart and owne
   service = new WorkerService(options);
   service.recoverFromDisk();
   service.registerOwner(originalOwner, "second-token");
-  assert.deepEqual(service.settings().concurrency, { dsh: 2, pi: 1, codex: 3, agy: 1 });
+  assert.deepEqual(service.settings().concurrency, { dsh: 1, pi: 1, codex: 3, agy: 1 });
   assert.equal(service.context(originalOwner.id).plan, null);
   const saved = service.savePlan(originalOwner.id, "# 已验收\n\nW1 的验证通过；W2 仍需确认产物位置。\n");
   await service.close();
@@ -77,6 +77,6 @@ test("existing databases gain plan storage and retain it across restart and owne
   assert.deepEqual(service.context("new-owner").plan, saved);
   const revised = service.savePlan("new-owner", saved.content + "\nW2 产物已进入工作区。\n");
   assert.deepEqual(service.context("new-owner").plan, revised);
-  assert.deepEqual(service.settings().concurrency, { dsh: 2, pi: 1, codex: 3, agy: 1 });
+  assert.deepEqual(service.settings().concurrency, { dsh: 1, pi: 1, codex: 3, agy: 1 });
   assert.deepEqual(service.state().workers, []);
 });

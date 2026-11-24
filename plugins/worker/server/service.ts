@@ -25,18 +25,18 @@ import {
 import type { ProgressTracker } from "./native.js";
 import { readLogPage } from "./logs.js";
 import { readAgyCatalog } from "./agy-catalog.js";
-import { readDshCatalog } from "./dsh-catalog.js";
 import { readPiCatalog } from "./pi-catalog.js";
 import { sweepNativeSessions } from "./native-retention.js";
 import {
   INITIAL_CONFIG_IDS,
   LEGACY_WORKER_TYPES,
-  WORKER_TYPES,
+  SUPPORTED_WORKER_TYPES,
   configById,
   extractCodexLaunch,
   projectSettings,
   validateConfigEffort,
 } from "./settings.js";
+import type { WorkerHistoryCursor } from "./store.js";
 import type {
   AgyModelCatalog,
   GuardianEvidence,
@@ -53,8 +53,13 @@ import type {
   WorkerMcpSettings,
   WorkerNotification,
   WorkerNotificationDelivery,
-  DshModelCatalog,
+  WorkerActivitySnapshot,
+  WorkerHistoryNotification,
+  WorkerHistoryPage,
+  WorkerHistoryQuery,
+  WorkerOverviewSnapshot,
   PiModelCatalog,
+  SupportedWorkerType,
   WorkerOwner,
   WorkerPlan,
   WorkerRecord,
@@ -114,6 +119,17 @@ const TASK_ROLE_PROMPTS: Record<WorkerTaskRole, string> = {
 const TASK_ROLE_REPORT =
   "回报首句给结论或需主代理决定的具体问题。随后只给最少可核验证据。";
 
+/** Tool activity must survive the progress-save throttle so reminders see the active tool. */
+const TOOL_PROGRESS_PHASES = new Set([
+  "tool_execution_start",
+  "tool_execution_end",
+  "tool_call",
+  "tool_result",
+  "item.started",
+  "item.completed",
+  "step_update",
+]);
+
 const TERMINAL: WorkerStatus[] = [
   "completed",
   "failed",
@@ -148,11 +164,10 @@ type RunHandle = {
 export type WorkerServiceOptions = {
   dataDirectory: string;
   environment?: NodeJS.ProcessEnv;
-  /** Tests inject fixture executables; production resolves `dsh`/`pi` from PATH. */
+  /** Tests inject fixture executables; production resolves `pi`/`codex`/`agy` from PATH. */
   executablePaths?: Partial<Record<WorkerType, string>>;
   /** Tests inject a source guardian invocation; production uses compiled guardian.mjs. */
   guardianCommand?: string[];
-  dshPatch?: string;
   now?: () => number;
   /** Test/diagnostic hook mirroring IPC events; never exposes tokens. */
   onEvent?: (event: unknown) => void;
@@ -171,6 +186,7 @@ export class WorkerService {
   private readonly pendingAdmissions = new Set<string>();
   private readonly reminderTimer: NodeJS.Timeout;
   private readonly retentionTimer: NodeJS.Timeout;
+  private cooldownTimer: NodeJS.Timeout | null = null;
   private nativeRetentionTimer: NodeJS.Timeout | null = null;
   private nativeRetentionSweep: Promise<void> | null = null;
   private dispatching = false;
@@ -189,6 +205,7 @@ export class WorkerService {
     this.reminderTimer.unref?.();
     this.retentionTimer = setInterval(() => this.pruneHistory(), 60_000);
     this.retentionTimer.unref?.();
+    this.scheduleAgyWake();
   }
 
   //------------------ OWNERS AND SETTINGS ----------------
@@ -244,16 +261,6 @@ export class WorkerService {
 
   settings(): WorkerSettings {
     return this.store.settings();
-  }
-
-  /**
-   * Reads the DSH headless profile's static model declarations. The plugin owns this directory:
-   * the host serves no DSH catalog after the app provider was removed.
-   */
-  async dshCatalog(): Promise<DshModelCatalog> {
-    const environment = this.guardianEnvironment(this.environment);
-    const { home } = nativeHome("dsh", this.options.dataDirectory, environment);
-    return readDshCatalog(home);
   }
 
   /** Reads the Pi agent home's configured models without starting the native CLI. */
@@ -329,18 +336,12 @@ export class WorkerService {
    * silently creating a replacement.
    */
   private updateLegacySettings(input: WorkerLegacySettingsInput): WorkerSettings {
-    const dsh = input.concurrency?.dsh;
     const pi = input.concurrency?.pi;
     const codexConcurrency = input.concurrency?.codex;
-    if (
-      !Number.isSafeInteger(dsh) ||
-      (dsh as number) < 1 ||
-      !Number.isSafeInteger(pi) ||
-      (pi as number) < 1
-    )
+    if (!Number.isSafeInteger(pi) || (pi as number) < 1)
       throw new WorkerFailure(
         "INVALID_SETTINGS",
-        "concurrency.dsh 和 concurrency.pi 必须是正整数",
+        "concurrency.pi 必须是正整数",
       );
     if (
       codexConcurrency !== undefined &&
@@ -356,7 +357,7 @@ export class WorkerService {
     )
       throw new WorkerFailure(
         "INVALID_SETTINGS",
-        "defaultWorkerType 必须是 dsh、pi 或 codex",
+        "defaultWorkerType 必须是 pi 或 codex",
       );
     if (
       input.retentionDays !== undefined &&
@@ -366,14 +367,14 @@ export class WorkerService {
     if (input.enabled !== undefined) {
       const value = input.enabled;
       if (!value || typeof value !== "object" || Array.isArray(value))
-        throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 dsh、pi、codex 的布尔值");
+        throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 pi、codex 的布尔值");
       if (LEGACY_WORKER_TYPES.some((type) => typeof value[type] !== "boolean"))
-        throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 dsh、pi、codex 的布尔值");
+        throw new WorkerFailure("INVALID_SETTINGS", "enabled 必须包含 pi、codex 的布尔值");
     }
     if (input.roles !== undefined) {
       const value = input.roles;
       if (!value || typeof value !== "object" || Array.isArray(value))
-        throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 dsh、pi、codex 的 role 数组");
+        throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 pi、codex 的 role 数组");
       for (const type of LEGACY_WORKER_TYPES) {
         const entries = value[type];
         if (
@@ -384,7 +385,7 @@ export class WorkerService {
               !WORKER_TASK_ROLES.some((item) => item.value === role),
           )
         )
-          throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 dsh、pi、codex 的 role 数组");
+          throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 pi、codex 的 role 数组");
       }
     }
     const current = this.store.settings();
@@ -409,7 +410,7 @@ export class WorkerService {
       return copy;
     });
     const byId = new Map(configs.map((config) => [config.id, config]));
-    const initial = (type: WorkerType): WorkerConfig => {
+    const initial = (type: SupportedWorkerType): WorkerConfig => {
       const config = byId.get(INITIAL_CONFIG_IDS[type]);
       if (!config)
         throw new WorkerFailure(
@@ -418,7 +419,6 @@ export class WorkerService {
         );
       return config;
     };
-    initial("dsh").concurrency = dsh as number;
     initial("pi").concurrency = pi as number;
     if (codexConcurrency !== undefined)
       initial("codex").concurrency = codexConcurrency;
@@ -506,9 +506,12 @@ export class WorkerService {
     const name = clean(entry.name as string | undefined);
     if (!id) throw new WorkerFailure("INVALID_SETTINGS", "配置 id 不能为空");
     if (!name) throw new WorkerFailure("INVALID_SETTINGS", "配置 name 不能为空");
-    const type = entry.type as WorkerType;
-    if (!WORKER_TYPES.includes(type))
-      throw new WorkerFailure("INVALID_SETTINGS", "配置 type 必须是 dsh、pi、codex 或 agy");
+    const type = entry.type as SupportedWorkerType;
+    if (!SUPPORTED_WORKER_TYPES.includes(type))
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "配置 type 必须是 pi、codex 或 agy；DSH 已停止支持",
+      );
     if (typeof entry.enabled !== "boolean")
       throw new WorkerFailure("INVALID_SETTINGS", "配置 enabled 必须是布尔值");
     if (!Array.isArray(entry.roles) || entry.roles.some(
@@ -627,7 +630,7 @@ export class WorkerService {
         );
   }
 
-  /** Validates the legacy dsh/pi/codex defaults and normalizes blank strings to null. */
+  /** Validates the legacy pi/codex defaults and normalizes blank strings to null. */
   private validateDefaults(
     value: NonNullable<WorkerLegacySettingsInput["defaults"]>,
     currentCodex: WorkerDefaults["codex"],
@@ -635,7 +638,7 @@ export class WorkerService {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new WorkerFailure(
         "INVALID_SETTINGS",
-        "defaults 必须包含 dsh 和 pi 两个配置对象",
+        "defaults 必须包含 pi 和 codex 配置对象",
       );
     const result = {} as Record<LegacyWorkerType, WorkerDefaults["codex"]>;
     for (const type of LEGACY_WORKER_TYPES) {
@@ -671,11 +674,6 @@ export class WorkerService {
         throw new WorkerFailure(
           "INVALID_SETTINGS",
           "defaults.pi.effort 必须是受支持的 Pi thinking 级别",
-        );
-      if (type === "dsh" && normalizedEffort && !normalizedModel)
-        throw new WorkerFailure(
-          "INVALID_SETTINGS",
-          "defaults.dsh.effort 需要同时配置 defaults.dsh.model",
         );
       result[type] = { model: normalizedModel, effort: normalizedEffort };
     }
@@ -819,6 +817,11 @@ export class WorkerService {
       return this.resultOf(existing.workerId, existing.runId);
     }
     const worker = this.ownedWorker(ownerId, input.workerId);
+    if (worker.type === "dsh")
+      throw new WorkerFailure(
+        "WORKER_TYPE_UNSUPPORTED",
+        "DSH Worker 已停止支持；历史记录仍可读取，但不能续接",
+      );
     const settings = this.store.settings();
     const config = configById(settings, worker.configId);
     if (!config || !config.enabled)
@@ -839,7 +842,7 @@ export class WorkerService {
         "NATIVE_SESSION_UNKNOWN",
         "上一次运行没有可核实的原生会话身份，不能续接",
       );
-    const selection = this.resumeSelection(worker.type, input, previous, worker.id);
+    const selection = this.resumeSelection(worker.type, input, previous);
     this.validateSelection(worker.type, selection);
     const runId = randomUUID();
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
@@ -908,9 +911,12 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_INPUT", "taskName 不能为空");
     if (
       input.type !== undefined &&
-      !WORKER_TYPES.includes(input.type)
+      !SUPPORTED_WORKER_TYPES.includes(input.type as SupportedWorkerType)
     )
-      throw new WorkerFailure("INVALID_INPUT", "type 必须是 dsh、pi、codex 或 agy");
+      throw new WorkerFailure(
+        "INVALID_INPUT",
+        "type 必须是 pi、codex 或 agy；DSH 已停止支持",
+      );
     if (typeof input.prompt !== "string" || !input.prompt.trim())
       throw new WorkerFailure("INVALID_INPUT", "prompt 不能为空");
     if (typeof input.requestId !== "string" || !input.requestId.trim())
@@ -1095,13 +1101,12 @@ export class WorkerService {
 
   /**
    * Resume uses the recorded run plus explicit overrides; it never re-applies current config
-   * models. Old Pi/DSH independent providers are folded into a full model id for this new run.
+   * models. Old Pi independent providers are folded into a full model id for this new run.
    */
   private resumeSelection(
     type: WorkerType,
     input: { model?: string; provider?: string; effort?: string },
     previous: WorkerRun,
-    workerId: string,
   ): NativeSelection {
     const explicitModel = clean(input.model);
     const effort = clean(input.effort) ?? previous.effort;
@@ -1124,22 +1129,7 @@ export class WorkerService {
       return { model, provider: null, effort };
     }
     // agy model ids are native CLI ids (for example `gemini-3.8-flash-low`) and never carry an
-    // independent provider; a bare id must not be mistaken for a legacy DSH route.
-    if (type === "agy") return { model, provider: null, effort };
-    if (model && previous.provider) {
-      // Historical DSH routes are already provider/model; do not deduplicate the prefix.
-      model = previous.provider + "/" + model;
-    } else if (model && !model.includes("/")) {
-      // A bare old model may have used the removed environment provider; only its own generated
-      // patch is valid evidence, and a full id already carries its route.
-      const recovered = this.readDshModelRoute(workerId, previous.id);
-      if (!recovered)
-        throw new WorkerFailure(
-          "MODEL_REQUIRED",
-          "无法确认旧 DSH 模型路由，请显式提供完整 model 后继续",
-        );
-      model = recovered.provider + "/" + recovered.model;
-    }
+    // independent provider.
     return { model, provider: null, effort };
   }
 
@@ -1151,43 +1141,14 @@ export class WorkerService {
     if (type !== "codex" && clean(provider))
       throw new WorkerFailure(
         "PROVIDER_UNSUPPORTED",
-        "provider 仅 Codex 支持；Pi/DSH/agy 请使用完整 model",
+        "provider 仅 Codex 支持；Pi/agy 请使用完整 model",
       );
   }
 
-  /**
-   * Reads only the historical route generated into this run directory. It is used to preserve a
-   * pre-cleanup DSH environment route on resume, never as a new provider input.
-   */
-  private readDshModelRoute(
-    workerId: string,
-    runId: string,
-  ): { provider: string; model: string } | null {
-    const file = path.join(this.runDirectory(workerId, runId), "model.patch.yml");
-    try {
-      const patches = JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
-      if (!Array.isArray(patches)) return null;
-      for (const patch of patches) {
-        if (!patch || typeof patch !== "object" || Array.isArray(patch)) continue;
-        const record = patch as Record<string, unknown>;
-        if (record.id !== "agent-default-model") continue;
-        const config =
-          record.config && typeof record.config === "object" && !Array.isArray(record.config)
-            ? (record.config as Record<string, unknown>)
-            : null;
-        const provider = clean(config?.provider as string | undefined);
-        const model = clean(config?.model as string | undefined);
-        if (provider && model) return { provider, model };
-      }
-    } catch {
-      return null;
-    }
-    return null;
-  }
-
-  private validateSelection(type: WorkerType, selection: NativeSelection): void {
-    if (type === "dsh" && selection.effort && !selection.model)
-      throw new WorkerFailure("MODEL_REQUIRED", "DSH effort 需要同时选择模型");
+  private validateSelection(
+    type: SupportedWorkerType,
+    selection: NativeSelection,
+  ): void {
     if (
       type === "pi" &&
       selection.effort &&
@@ -1231,12 +1192,23 @@ export class WorkerService {
           const key = [worker.parentSessionId, worker.projectId, worker.configId].join("\u0000");
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
+        const agyBlocked = this.agyCooldownActive();
         let selected: WorkerRun | null = null;
         for (const run of queued) {
           // Worktree admission is still resolving; never spawn from a placeholder cwd.
           if (this.pendingAdmissions.has(run.id)) continue;
           const worker = this.store.worker(run.workerId);
           if (!worker) {
+            skipped.add(run.id);
+            continue;
+          }
+          if (worker.type === "dsh") {
+            // Retired DSH rows stay untouched and never occupy admission.
+            skipped.add(run.id);
+            continue;
+          }
+          // A global agy cooldown blocks every agy config; other engines keep their own queues.
+          if (worker.type === "agy" && agyBlocked) {
             skipped.add(run.id);
             continue;
           }
@@ -1319,7 +1291,6 @@ export class WorkerService {
         run.provider === null
           ? config?.codex?.modelProvider ?? null
           : null,
-      dshPatch: this.dshPatch(),
     });
     // Pi names its transcript before spawn; persist it so cleanup can protect the file.
     if (!run.nativeSessionFile && launch.sessionFile) {
@@ -1424,13 +1395,6 @@ export class WorkerService {
     return resolveExecutable(type, environment);
   }
 
-  private dshPatch(): string {
-    return (
-      this.options.dshPatch ??
-      fileURLToPath(new URL("../patches/dsh-session.patch.yml", import.meta.url))
-    );
-  }
-
   private onEventLine(handle: RunHandle, line: string): void {
     if (this.storeClosed) return;
     const run = this.store.run(handle.runId);
@@ -1496,6 +1460,7 @@ export class WorkerService {
     const timestamp = this.now();
     const important =
       identityChanged ||
+      TOOL_PROGRESS_PHASES.has(handle.progress.phase ?? "") ||
       handle.progress.phase === "turn_end" ||
       handle.progress.phase === "turn.completed" ||
       handle.progress.phase === "turn.failed" ||
@@ -1618,6 +1583,9 @@ export class WorkerService {
     run.progress.phase = status;
     run.progress.currentTool = null;
     this.store.saveRun(run);
+    // Settle a rate-limit cooldown before dispatch can release the next queued item.
+    if (worker.type === "agy" && status === "failed")
+      this.registerAgyCooldown(worker, run);
     if (handle) {
       clearTimeout(handle.stopTimer);
       this.handles.delete(runId);
@@ -1724,7 +1692,9 @@ export class WorkerService {
   //------------------ QUERIES ----------------
 
   state(query: WorkerStateQuery = {}): WorkerStateSnapshot {
-    const workers = this.store.workers(query);
+    const workers = this.store
+      .workers(query)
+      .filter((worker) => worker.type !== "dsh");
     const counts = {
       dsh: Object.fromEntries(STATUSES.map((status) => [status, 0])),
       pi: Object.fromEntries(STATUSES.map((status) => [status, 0])),
@@ -1750,6 +1720,161 @@ export class WorkerService {
       configUsage: this.store.configUsage(),
       notifications,
     };
+  }
+
+  /**
+   * Active overview: occupied and queued workers plus the first page of terminal history and
+   * notifications. Terminal workers move out of `workers` so callers never have to filter the
+   * two lists themselves.
+   */
+  overview(query: WorkerStateQuery = {}): WorkerOverviewSnapshot {
+    const workers = this.store.activeWorkers(query);
+    return {
+      workers,
+      settings: this.store.settings(),
+      configUsage: this.store.configUsage(),
+      agyCooldownUntil: this.agyCooldownUntil(),
+      finished: this.finishedHistory(query),
+      notifications: this.notificationHistory(query),
+    };
+  }
+
+  /** Minimal activity rows used by the existing UI; `queued` stays visible for client checks. */
+  activity(query: WorkerStateQuery = {}): WorkerActivitySnapshot {
+    const workers = this.store.activeWorkers(query).map((worker) => ({
+      id: worker.id,
+      projectId: worker.projectId,
+      parentSessionId: worker.parentSessionId,
+      latestRun: { status: worker.latestRun!.status },
+    }));
+    return { workers };
+  }
+
+  /** One history page; cursors are opaque and pages hold at most 20 items. */
+  history(
+    query: WorkerHistoryQuery,
+  ): WorkerHistoryPage<WorkerRecord | WorkerHistoryNotification> {
+    const cursor = this.decodeCursor(query.cursor);
+    if (query.kind === "finished") {
+      const page = this.store.finishedPage(query, cursor, 20);
+      const last = page.items[page.items.length - 1];
+      return {
+        items: page.items,
+        nextCursor:
+          page.hasMore && last
+            ? this.encodeCursor(
+                last.latestRun?.finishedAt ?? last.createdAt ?? "",
+                last.id,
+              )
+            : null,
+      };
+    }
+    if (query.kind === "notifications") {
+      const page = this.store.notificationsPage(query, cursor, 20);
+      const last = page.items[page.items.length - 1];
+      return {
+        items: page.items,
+        nextCursor:
+          page.hasMore && last
+            ? this.encodeCursor(last.createdAt ?? "", last.id)
+            : null,
+      };
+    }
+    throw new WorkerFailure(
+      "INVALID_INPUT",
+      "kind 必须是 finished 或 notifications",
+    );
+  }
+
+  private finishedHistory(
+    query: WorkerStateQuery,
+  ): WorkerHistoryPage<WorkerRecord> {
+    return this.history({ ...query, kind: "finished" }) as WorkerHistoryPage<WorkerRecord>;
+  }
+
+  private notificationHistory(
+    query: WorkerStateQuery,
+  ): WorkerHistoryPage<WorkerHistoryNotification> {
+    return this.history({
+      ...query,
+      kind: "notifications",
+    }) as WorkerHistoryPage<WorkerHistoryNotification>;
+  }
+
+  private decodeCursor(cursor?: string): WorkerHistoryCursor | null {
+    if (!cursor) return null;
+    try {
+      const value = JSON.parse(
+        Buffer.from(cursor, "base64url").toString("utf8"),
+      ) as { t?: unknown; i?: unknown };
+      if (typeof value.t === "string" && value.t && typeof value.i === "string" && value.i)
+        return { time: value.t, id: value.i };
+    } catch {
+      /* fall through to the validation failure */
+    }
+    throw new WorkerFailure("INVALID_CURSOR", "cursor 无效");
+  }
+
+  private encodeCursor(time: string, id: string): string {
+    return Buffer.from(JSON.stringify({ t: time, i: id })).toString("base64url");
+  }
+
+  //------------------ AGY COOLDOWN ----------------
+
+  /** Active global agy cooldown as an ISO deadline, or null when new agy starts may proceed. */
+  agyCooldownUntil(): string | null {
+    const until = this.store.cooldown("agy");
+    return until !== null && until > this.now()
+      ? new Date(until).toISOString()
+      : null;
+  }
+
+  private agyCooldownActive(): boolean {
+    return this.agyCooldownUntil() !== null;
+  }
+
+  /** Wakes dispatch exactly when the stored deadline expires so queued agy runs resume. */
+  private scheduleAgyWake(): void {
+    if (this.closing || this.storeClosed) return;
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
+    const until = this.store.cooldown("agy");
+    if (until === null || until <= this.now()) return;
+    const timer = setTimeout(() => {
+      this.cooldownTimer = null;
+      if (!this.closing && !this.storeClosed) void this.dispatch();
+    }, until - this.now());
+    timer.unref?.();
+    this.cooldownTimer = timer;
+  }
+
+  /**
+   * Detects the two agy rate-limit shapes in the failed run's own logs and extends the global
+   * SQLite deadline. The run itself stays failed and resumable; the stored maximum survives
+   * restarts and is shared by every CloudCLI instance using this data directory.
+   */
+  private registerAgyCooldown(worker: WorkerRecord, run: WorkerRun): void {
+    const text = this.agyFailureText(worker, run);
+    if (!agyRateLimited(text)) return;
+    const delay = agyResetDelay(text) ?? 60_000;
+    this.store.setCooldown("agy", this.now() + delay);
+    this.scheduleAgyWake();
+    this.emitChanged(worker.id);
+  }
+
+  private agyFailureText(worker: WorkerRecord, run: WorkerRun): string {
+    const directory = this.runDirectory(worker.id, run.id);
+    let text = "";
+    for (const name of ["stderr.log", "events.log"]) {
+      try {
+        text += "\n" + fs.readFileSync(path.join(directory, name), "utf8").slice(-200_000);
+      } catch {
+        /* a missing stream is not rate-limit evidence */
+      }
+    }
+    return text;
   }
 
   get(workerId: string, ownerId?: string): { worker: WorkerRecord; runs: WorkerRun[] } {
@@ -2005,7 +2130,7 @@ export class WorkerService {
       (!input.projectId || worker.projectId === input.projectId) &&
       (!input.parentSessionId ||
         worker.parentSessionId === input.parentSessionId);
-    const workers = this.store.workers();
+    const workers = this.store.workers().filter((worker) => worker.type !== "dsh");
     if (input.all) return workers.filter(matches);
     if (input.workerIds !== undefined) {
       if (!Array.isArray(input.workerIds) || input.workerIds.some((id) => typeof id !== "string"))
@@ -2021,11 +2146,18 @@ export class WorkerService {
     return workers.filter(matches);
   }
 
-  private finalizeQueued(run: WorkerRun, hold: boolean): void {
+  private finalizeQueued(
+    run: WorkerRun,
+    hold: boolean,
+    reason: { code: string; message: string } = {
+      code: "CANCELLED",
+      message: "排队中的运行已取消",
+    },
+  ): void {
     const worker = this.store.worker(run.workerId);
     run.status = "cancelled";
     run.finishedAt = new Date(this.now()).toISOString();
-    run.error = { code: "CANCELLED", message: "排队中的运行已取消" };
+    run.error = { ...reason };
     run.progress.phase = "cancelled";
     this.store.saveRun(run);
     this.prompts.delete(run.id);
@@ -2074,6 +2206,7 @@ export class WorkerService {
       const workers = this.store.workers().filter((worker) => worker.ownerId === ownerId);
       const stops: Promise<void>[] = [];
       for (const worker of workers) {
+        if (worker.type === "dsh") continue;
         const run = this.store.latestRun(worker.id);
         if (!run || TERMINAL.includes(run.status)) continue;
         if (run.status === "queued") {
@@ -2189,8 +2322,11 @@ export class WorkerService {
         .workers()
         .filter((worker) => worker.ownerId === ownerId);
       for (const worker of workers) {
+        if (worker.type === "dsh") continue;
         const run = this.store.latestRun(worker.id);
         if (!run || TERMINAL.includes(run.status)) continue;
+        // Shutdown and instance retirement leave an unstarted agy run for its cooldown.
+        if (run.status === "queued" && worker.type === "agy") continue;
         ids.push(worker.id);
         if (run.status === "queued") this.finalizeQueued(run, true);
         else stops.push(this.stopForHost(worker.id, run));
@@ -2253,6 +2389,7 @@ export class WorkerService {
       throw new WorkerFailure("ALREADY_CLEANED", "worktree 已清理");
     const target = realPath(worker.cwd);
     for (const other of this.store.workers()) {
+      if (other.type === "dsh") continue;
       if (other.id === worker.id || realPath(other.cwd) !== target) continue;
       const otherRun = this.store.latestRun(other.id);
       if (
@@ -2277,6 +2414,7 @@ export class WorkerService {
     const owner = this.requireOwner(ownerId);
     return this.store
       .workers({ projectId: owner.projectId, parentSessionId: owner.parentSessionId })
+      .filter((worker) => worker.type !== "dsh")
       .some((worker) => worker.ownerId === ownerId
         && Boolean(worker.latestRun && ACTIVE_REFERENCES.includes(worker.latestRun.status)));
   }
@@ -2364,7 +2502,12 @@ export class WorkerService {
     this.recovering = true;
     try {
       for (const run of this.store.activeRuns()) {
+        const activeWorker = this.store.worker(run.workerId);
+        // Retired DSH rows are never recovered, finalized, or rewritten.
+        if (!activeWorker || activeWorker.type === "dsh") continue;
         if (run.status === "queued") {
+          // An unstarted agy run waits for its persisted cooldown instead of being cancelled.
+          if (activeWorker.type === "agy") continue;
           this.finalizeQueued(run, true);
           continue;
         }
@@ -2373,8 +2516,7 @@ export class WorkerService {
           this.finalizeRun(run.id, evidence, null);
           continue;
         }
-        const worker = this.store.worker(run.workerId);
-        if (!worker) continue;
+        const worker = activeWorker;
         // Recovery always re-reads statistics, even when the native identity is already known.
         const parsed = this.parseRun(worker, run, run.nativeSessionId);
         run.nativeSessionId = parsed?.nativeSessionId ?? run.nativeSessionId;
@@ -2398,6 +2540,8 @@ export class WorkerService {
     }
     this.pruneHistory();
     this.startNativeSessionCleanup();
+    // A persisted agy queue may become runnable immediately when its deadline already passed.
+    void this.dispatch();
   }
 
   /** Starts one immediate sweep and a per-instance 24-hour timer, once per service. */
@@ -2477,6 +2621,10 @@ export class WorkerService {
   async close(): Promise<void> {
     if (this.closing) return;
     this.closing = true;
+    if (this.cooldownTimer) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = null;
+    }
     clearInterval(this.reminderTimer);
     clearInterval(this.retentionTimer);
     if (this.nativeRetentionTimer) {
@@ -2506,6 +2654,8 @@ export class WorkerService {
     // A guardian from the previous plugin generation may finish writing evidence after restart.
     for (const unknown of this.store.activeRuns()) {
       if (unknown.status !== "unknown" || this.handles.has(unknown.id)) continue;
+      const unknownWorker = this.store.worker(unknown.workerId);
+      if (!unknownWorker || unknownWorker.type === "dsh") continue;
       const evidence = this.readEvidence(unknown.id);
       if (evidence) this.finalizeRun(unknown.id, evidence, null);
     }
@@ -2663,4 +2813,50 @@ function realPath(value: string): string {
 
 function clean(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/**
+ * agy reports rate limiting either as a stderr `AGY_ERROR` object with `error_code: 429` or as a
+ * structured failure result whose status is `RESOURCE_EXHAUSTED` with `code: 429`.
+ */
+function agyRateLimited(text: string): boolean {
+  if (
+    text
+      .split("\n")
+      .some(
+        (line) =>
+          line.includes("AGY_ERROR") &&
+          /"error_code"\s*:\s*"?429"?(?!\d)/.test(line),
+      )
+  )
+    return true;
+  return (
+    text.includes("RESOURCE_EXHAUSTED") &&
+    /\bcode"?\s*[:=]?\s*\(?\s*"?429"?(?!\d)/i.test(text)
+  );
+}
+
+/** Reads `Resets in 2h2m18s` (or a colon duration) into milliseconds. */
+function agyResetDelay(text: string): number | null {
+  const match = /resets?\s+in\s+([^\n,;]+)/i.exec(text);
+  if (!match) return null;
+  const value = match[1]!;
+  const colon = /(\d+):(\d+):(\d+)/.exec(value);
+  if (colon)
+    return (
+      (Number(colon[1]) * 3600 + Number(colon[2]) * 60 + Number(colon[3])) *
+      1000
+    );
+  let seconds = 0;
+  let found = false;
+  const unit = /(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)/gi;
+  for (let part = unit.exec(value); part; part = unit.exec(value)) {
+    found = true;
+    const amount = Number(part[1]);
+    const scale = part[2]!.toLowerCase();
+    if (scale.startsWith("h")) seconds += amount * 3600;
+    else if (scale.startsWith("m")) seconds += amount * 60;
+    else seconds += amount;
+  }
+  return found && seconds > 0 ? seconds * 1000 : null;
 }

@@ -112,7 +112,7 @@ test("real Codex exec starts, reconnects, resumes the same thread, and honors ex
     `model="config-model"\nmodel_provider="first"\n${provider("first")}${provider("second")}`,
   );
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3, codex: 1 },
+    concurrency: { pi: 3, codex: 1 },
     codex: {
       env: { CODEX_PROXY_BYPASS: "1" },
       extraArgs: [

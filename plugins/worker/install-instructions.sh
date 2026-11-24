@@ -1,14 +1,13 @@
 #!/bin/sh
-# Shared installer for the Codex and DSH global AGENTS.md entry points.
+# Installer for the Codex global AGENTS.md entry point.
 set -eu
 
 if [ "$#" -ne 1 ]; then
-  printf 'usage: %s codex|dsh\n' "$0" >&2
+  printf 'usage: %s codex\n' "$0" >&2
   exit 1
 fi
 case "$1" in
   codex) worker_agents_dir=${CODEX_HOME:-${HOME:?HOME is not set}/.codex} ;;
-  dsh) worker_agents_dir=${DSH_HOME:-${HOME:?HOME is not set}/.dsh} ;;
   *) printf 'unsupported provider: %s\n' "$1" >&2; exit 1 ;;
 esac
 

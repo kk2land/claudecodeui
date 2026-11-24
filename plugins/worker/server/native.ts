@@ -42,7 +42,6 @@ type PrepareInput = {
   codexExtraArgs?: string[] | null;
   /** Current config service for a migrated run that had no reliable recorded provider. */
   codexLegacyProvider?: string | null;
-  dshPatch: string;
 };
 
 /** Resolves an executable on PATH before any cwd change; explicit paths are made absolute. */
@@ -129,70 +128,6 @@ export function nativeHome(
   return {
     home: home(environment, "PI_CODING_AGENT_DIR", path.join(".pi", "agent")),
     sessionsRoot: path.join(dataDirectory, "sessions", "pi"),
-  };
-}
-
-/** Builds the DSH headless launch and its run-level model patch. */
-function prepareDsh(input: PrepareInput): NativeLaunch {
-  const previous = input.previous;
-  const defaults = nativeHome("dsh", input.dataDirectory, input.baseEnvironment);
-  const resolvedHome = previous ? previous.home : defaults.home;
-  const sessionsRoot = previous ? previous.sessionsRoot : defaults.sessionsRoot;
-  const model = nonBlank(input.run.model);
-  const effort = nonBlank(input.run.effort);
-  if (effort && !model)
-    throw new WorkerFailure(
-      "MODEL_REQUIRED",
-      "DSH 设置 effort 前必须显式选择模型",
-    );
-  // Required Worker mechanisms: persistence patch, then the model route patch when selected.
-  const patches: string[] = [];
-  const sessionPatch = path.join(input.runDirectory, "dsh-session.patch.yml");
-  fs.copyFileSync(input.dshPatch, sessionPatch);
-  patches.push(sessionPatch);
-  if (model) {
-    let routeProvider = "deepseek-official";
-    let routeModel = model;
-    const slash = model.indexOf("/");
-    if (slash > 0) {
-      routeProvider = model.slice(0, slash);
-      routeModel = model.slice(slash + 1);
-    }
-    const file = path.join(input.runDirectory, "model.patch.yml");
-    fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(
-      file,
-      JSON.stringify([
-        {
-          id: "agent-default-model",
-          config: {
-            provider: routeProvider,
-            model: routeModel,
-            ...(effort ? { reasoningEffort: effort } : {}),
-          },
-        },
-      ]),
-      { mode: 0o600 },
-    );
-    patches.push(file);
-  }
-  const argv = [input.executable, "--profile", "headless"];
-  for (const patch of patches) argv.push("--patch", patch);
-  argv.push("--json");
-  const sessionId = previous?.nativeSessionId ?? null;
-  if (sessionId) argv.push("--session-id", sessionId);
-  argv.push("-");
-  return {
-    argv,
-    cwd: input.cwd,
-    env: {
-      ...input.baseEnvironment,
-      DSH_HOME: resolvedHome,
-      CODEX_DSH_SESSIONS_ROOT: sessionsRoot,
-    },
-    prompt: input.prompt,
-    expectedSessionId: sessionId,
-    sessionFile: previous?.nativeSessionFile ?? null,
   };
 }
 
@@ -315,7 +250,12 @@ function prepareCodex(input: PrepareInput): NativeLaunch {
 }
 
 export function prepareLaunch(input: PrepareInput): NativeLaunch {
-  if (input.type === "dsh") return prepareDsh(input);
+  // DSH is a historical record type only; new launches are rejected before admission.
+  if (input.type === "dsh")
+    throw new WorkerFailure(
+      "WORKER_TYPE_UNSUPPORTED",
+      "DSH Worker 已停止支持，不能启动新运行",
+    );
   if (input.type === "codex") return prepareCodex(input);
   if (input.type === "agy") return prepareAgy(input);
   return preparePi(input);

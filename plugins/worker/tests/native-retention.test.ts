@@ -514,31 +514,6 @@ test("recovery without identity protects its sessionsRoot but not unrelated root
   assert.equal(fs.existsSync(piFile), false);
 });
 
-test("DSH session events persist the native identity before finalize", async (t) => {
-  const root = temporaryRoot("worker-native-dsh-live-");
-  const { service } = createService(
-    t,
-    root,
-    { TEST_SCENARIO: "sleep", TEST_DELAY_MS: "2000" },
-    { now: () => NOW },
-  );
-  const started = await service.start(
-    "owner-1",
-    startInput({ type: "dsh", requestId: "dsh-live-retention" }),
-  );
-  const running = await waitStatus(service, started.worker.id, [
-    "starting",
-    "running",
-  ]);
-  const run = await waitFor(
-    () => service.store.run(running.latestRun!.id),
-    (value) => value?.nativeSessionId === "session-fixture-1",
-  );
-  assert.equal(run?.nativeSessionId, "session-fixture-1");
-  assert.ok(run?.nativeSessionFile === null);
-  await waitStatus(service, started.worker.id, ["completed"]);
-});
-
 test("Pi launch persists its session file before finalize and cleanup protects it", async (t) => {
   const root = temporaryRoot("worker-native-pi-launch-");
   const { service, data, env } = createService(
@@ -580,7 +555,7 @@ test("Pi launch persists its session file before finalize and cleanup protects i
   await waitStatus(service, started.worker.id, ["completed"]);
 });
 
-test("invalid DSH event values do not crash live identity tracking", async (t) => {
+test("invalid Pi protocol values do not crash live identity tracking", async (t) => {
   const root = temporaryRoot("worker-native-invalid-event-");
   const { service, env } = createService(t, root, { TEST_SCENARIO: "null-before-session" });
   const started = await service.start("owner-1", startInput({ requestId: "invalid-event" }));

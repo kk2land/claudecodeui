@@ -22,11 +22,9 @@ const service = new WorkerService({
     TEST_PID_FILE: path.join(root, "child.pid"),
   },
   executablePaths: {
-    dsh: path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs"),
     pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"),
   },
   guardianCommand: [process.execPath, "--import", tsxLoader, path.join(pluginRoot, "server/guardian.ts")],
-  dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
 });
 service.updateSettings(migrateLegacySettings({}));
 service.registerOwner(
@@ -43,7 +41,7 @@ service.registerOwner(
 );
 const started = await service.start("harness-owner", {
   taskName: "harness",
-  type: "dsh",
+  type: "pi",
   prompt: "run until killed",
   workspace: { mode: "existing" },
   writePaths: [],

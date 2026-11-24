@@ -72,7 +72,7 @@ test("new Codex thread starts from known zero, persists usage, and replay does n
 test("Codex resume reads the launch-time baseline, including changes while queued", async (t) => {
   const root = temporaryRoot("worker-usage-service-resume-");
   const { service, env } = createService(t, root);
-  service.updateSettings({ concurrency: { dsh: 3, pi: 3, codex: 1 } });
+  service.updateSettings({ concurrency: { pi: 3, codex: 1 } });
   const started = await service.start(
     "owner-1",
     startInput({ type: "codex", requestId: "usage-baseline-start" }),

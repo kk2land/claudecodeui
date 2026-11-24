@@ -13,11 +13,11 @@ import {
   waitStatus,
 } from "./helpers.js";
 
-function dsh(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+function piNamed(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
   return {
     id: "dsh-default",
-    name: "DSH default",
-    type: "dsh",
+    name: "Pi default (legacy id)",
+    type: "pi",
     enabled: true,
     roles: [],
     concurrency: 3,
@@ -67,7 +67,7 @@ test("canonical settings persist only canonical fields and project per-engine de
   const root = temporaryRoot("worker-configs-canonical-");
   const { service, data } = createService(t, root);
   const configs = [
-    dsh({ name: "Fast DSH", concurrency: 2, roles: ["development"], model: "dsh-m", effort: "high" }),
+    piNamed({ name: "Fast DSH", concurrency: 2, roles: ["development"], model: "dsh-m", effort: "high" }),
     pi({ id: "cfg-pi-openrouter", name: "OpenRouter", concurrency: 1, model: "openrouter/fast", effort: "low" }),
     pi({ enabled: false }),
     codex(),
@@ -78,15 +78,15 @@ test("canonical settings persist only canonical fields and project per-engine de
     retentionDays: 4,
   });
   assert.equal(saved.schemaVersion, 2);
-  assert.equal(saved.defaultWorkerType, "dsh");
+  assert.equal(saved.defaultWorkerType, "pi");
   assert.equal(saved.defaultConfigId, "dsh-default");
-  assert.deepEqual(saved.concurrency, { dsh: 2, pi: 1, codex: 3, agy: 1 });
-  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: true, agy: false });
-  assert.deepEqual(saved.roles, { dsh: ["development"], pi: [], codex: [], agy: [] });
+  assert.deepEqual(saved.concurrency, { dsh: 1, pi: 2, codex: 3, agy: 1 });
+  assert.deepEqual(saved.enabled, { dsh: false, pi: true, codex: true, agy: false });
+  assert.deepEqual(saved.roles, { dsh: [], pi: ["development"], codex: [], agy: [] });
   assert.deepEqual(saved.defaults, {
-    dsh: { model: "dsh-m", effort: "high" },
-    // The default engine has no Pi config, so Pi projects its first list entry.
-    pi: { model: "openrouter/fast", effort: "low" },
+    dsh: { model: null, effort: null },
+    // The default config is Pi, so it supplies the Pi projection.
+    pi: { model: "dsh-m", effort: "high" },
     codex: { model: null, effort: null },
     agy: { model: null, effort: null },
   });
@@ -121,8 +121,8 @@ test("config timeouts apply independently to starts and resumes with per-run ove
   const root = temporaryRoot("worker-configs-timeout-");
   const { service } = createService(t, root);
   const configs = [
-    dsh({ hardTimeoutSeconds: 60 }),
-    dsh({ id: "dsh-unlimited", hardTimeoutSeconds: null }),
+    piNamed({ hardTimeoutSeconds: 60 }),
+    piNamed({ id: "dsh-unlimited", hardTimeoutSeconds: null }),
   ];
   service.updateSettings({ configs, defaultConfigId: "dsh-default" });
   assert.deepEqual(
@@ -140,7 +140,7 @@ test("config timeouts apply independently to starts and resumes with per-run ove
   await waitStatus(service, overridden.worker.id, ["completed"]);
 
   service.updateSettings({
-    configs: [dsh({ hardTimeoutSeconds: 600 }), configs[1]!],
+    configs: [piNamed({ hardTimeoutSeconds: 600 }), configs[1]!],
     defaultConfigId: "dsh-default",
   });
   assert.equal(service.get(first.worker.id).worker.latestRun?.timeoutSeconds, 60);
@@ -163,14 +163,14 @@ test("config timeouts apply independently to starts and resumes with per-run ove
 test("config timeout defaults to 600 and rejects invalid values atomically", (t) => {
   const root = temporaryRoot("worker-configs-timeout-validation-");
   const { service } = createService(t, root);
-  const config = dsh();
+  const config = piNamed();
   delete (config as Partial<WorkerConfig>).hardTimeoutSeconds;
   const saved = service.updateSettings({ configs: [config], defaultConfigId: config.id });
   assert.equal(saved.configs[0]!.hardTimeoutSeconds, 600);
   for (const hardTimeoutSeconds of [0, -1, 1.5, "300", Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(
       () => service.updateSettings({
-        configs: [dsh({ hardTimeoutSeconds: hardTimeoutSeconds as number })],
+        configs: [piNamed({ hardTimeoutSeconds: hardTimeoutSeconds as number })],
         defaultConfigId: config.id,
       }),
       /hardTimeoutSeconds 必须是正整数或 null/,
@@ -183,7 +183,7 @@ test("config routing filters by enabled configs, type, role, then default and li
   const root = temporaryRoot("worker-configs-routing-");
   const { service } = createService(t, root);
   const configs = [
-    dsh({ roles: ["testing"], concurrency: 1 }),
+    piNamed({ roles: ["testing"], concurrency: 1 }),
     pi({ roles: ["testing"], concurrency: 1 }),
     codex(),
     pi({ id: "pi-plan", name: "Pi plan", roles: ["plan_review"], concurrency: 1 }),
@@ -196,7 +196,7 @@ test("config routing filters by enabled configs, type, role, then default and li
     return result.worker;
   };
 
-  // Both DSH and Pi accept `testing`; the first list entry is selected, which here is also the
+  // Both Pi configs accept `testing`; the first list entry is selected, which here is also the
   // default config.
   assert.equal((await start({ type: undefined, taskRole: "testing" })).configId, "dsh-default");
   // Only the matching config for the role.
@@ -209,7 +209,7 @@ test("config routing filters by enabled configs, type, role, then default and li
   assert.equal((await start({ configId: "pi-plan", type: undefined })).configId, "pi-plan");
 
   await assert.rejects(
-    () => start({ configId: "pi-plan", type: "dsh" }),
+    () => start({ configId: "pi-plan", type: "codex" }),
     /configId 与 type 不一致/,
   );
   await assert.rejects(
@@ -221,7 +221,7 @@ test("config routing filters by enabled configs, type, role, then default and li
     configs: configs.map((config) =>
       config.type === "pi" ? { ...config, enabled: false } : config,
     ),
-    defaultConfigId: "dsh-default",
+    defaultConfigId: "codex-default",
   });
   await assert.rejects(
     () => start({ configId: "pi-plan", type: undefined }),
@@ -240,7 +240,7 @@ test("role routing follows persisted config order instead of the default config"
   const root = temporaryRoot("worker-configs-order-");
   const { service, data } = createService(t, root);
   const piA = pi({ id: "pi-a", name: "Pi A", roles: ["testing"], concurrency: 1 });
-  const dshDefault = dsh({ roles: ["testing"], concurrency: 1 });
+  const dshDefault = piNamed({ roles: ["testing"], concurrency: 1 });
   // The default config is deliberately after another config that accepts the same role.
   service.updateSettings({
     configs: [piA, dshDefault],
@@ -262,9 +262,8 @@ test("role routing follows persisted config order instead of the default config"
   assert.equal((await start()).worker.configId, "dsh-default");
   // An unmatched role falls back to the default, not to the first candidate.
   assert.equal((await start({ taskRole: "code_review" })).worker.configId, "dsh-default");
-  // Explicit type narrows the candidates before the role match, in either direction.
+  // Explicit type narrows the candidates before the role match.
   assert.equal((await start({ type: "pi", taskRole: "testing" })).worker.configId, "pi-a");
-  assert.equal((await start({ type: "dsh", taskRole: "testing" })).worker.configId, "dsh-default");
 
   // A disabled earlier entry is skipped in favour of the next match.
   service.updateSettings({
@@ -309,7 +308,7 @@ test("role routing follows persisted config order instead of the default config"
 test("worker records snapshot config identity and rename keeps the id", async (t) => {
   const root = temporaryRoot("worker-configs-identity-");
   const { service } = createService(t, root);
-  const configs = [dsh({ name: "Before rename" }), pi(), codex()];
+  const configs = [piNamed({ name: "Before rename" }), pi(), codex()];
   service.updateSettings({ configs, defaultConfigId: "dsh-default" });
   const started = await service.start(
     "owner-1",
@@ -344,9 +343,9 @@ test("configUsage is global, active runs block deletion, history locks engine an
     TEST_DELAY_MS: "400",
   });
   const configs = [
-    dsh({ concurrency: 1 }),
-    dsh({ id: "dsh-alt", name: "Alt DSH", concurrency: 1 }),
-    dsh({ id: "dsh-unused", name: "Unused DSH", concurrency: 1 }),
+    piNamed({ concurrency: 1 }),
+    piNamed({ id: "dsh-alt", name: "Alt DSH", concurrency: 1 }),
+    piNamed({ id: "dsh-unused", name: "Unused DSH", concurrency: 1 }),
     pi(),
     codex(),
   ];
@@ -395,7 +394,7 @@ test("configUsage is global, active runs block deletion, history locks engine an
       service.updateSettings({
         configs: [
           ...configs.filter((config) => config.id !== "dsh-alt"),
-          dsh({ id: "dsh-alt", name: "Reused" }),
+          piNamed({ id: "dsh-alt", name: "Reused" }),
         ],
         defaultConfigId: "dsh-default",
       }),
@@ -405,7 +404,7 @@ test("configUsage is global, active runs block deletion, history locks engine an
     () =>
       service.updateSettings({
         configs: configs.map((config) =>
-          config.id === "dsh-default" ? pi({ id: "dsh-default" }) : config,
+          config.id === "dsh-default" ? codex({ id: "dsh-default" }) : config,
         ),
         defaultConfigId: "dsh-default",
       }),
@@ -416,13 +415,13 @@ test("configUsage is global, active runs block deletion, history locks engine an
     configs: configs
       .filter((config) => config.id !== "dsh-alt")
       .map((config) =>
-        config.id === "dsh-unused" ? { ...config, type: "pi" as const } : config,
+        config.id === "dsh-unused" ? codex({ id: "dsh-unused", name: "Unused" }) : config,
       ),
     defaultConfigId: "dsh-default",
   });
   assert.equal(
     changedEngine.configs.find((config) => config.id === "dsh-unused")?.type,
-    "pi",
+    "codex",
   );
 });
 
@@ -430,24 +429,24 @@ test("legacy PUT edits renamed initial configs by id and rejects missing ones", 
   const root = temporaryRoot("worker-configs-legacy-");
   const { service } = createService(t, root);
   service.updateSettings({
-    configs: [dsh({ name: "Renamed DSH" }), pi(), codex()],
+    configs: [piNamed({ name: "Renamed DSH" }), pi(), codex()],
     defaultConfigId: "dsh-default",
   });
   const updated = service.updateSettings({
-    concurrency: { dsh: 5, pi: 2 },
-    roles: { dsh: ["testing"], pi: [], codex: [] },
+    concurrency: { pi: 2 },
+    roles: { pi: [], codex: [] },
   });
   assert.equal(updated.configs.find((config) => config.id === "dsh-default")?.name, "Renamed DSH");
-  assert.equal(updated.concurrency.dsh, 5);
+  assert.equal(updated.concurrency.pi, 3);
 
   service.updateSettings({
-    configs: [dsh(), pi(), codex()].filter((config) => config.id !== "codex-default"),
+    configs: [piNamed(), pi(), codex()].filter((config) => config.id !== "codex-default"),
     defaultConfigId: "dsh-default",
   });
   assert.throws(
     () =>
       service.updateSettings({
-        concurrency: { dsh: 1, pi: 1 },
+        concurrency: { pi: 1 },
         codex: { env: {}, extraArgs: [] },
       }),
     /初始配置 codex-default 已不存在/,
@@ -458,7 +457,7 @@ test("legacy Codex launch blocks extract the service and keep a consistent proje
   const root = temporaryRoot("worker-configs-codex-launch-");
   const { service, data } = createService(t, root);
   const saved = service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
+    concurrency: { pi: 3 },
     codex: {
       env: { CUSTOM: "value" },
       extraArgs: ["--sandbox", "read-only", "-c", "model_provider=args-provider", "--search"],
@@ -495,7 +494,7 @@ test("legacy Codex launch blocks extract the service and keep a consistent proje
   assert.ok(spec.argv.includes('model_provider="args-provider"'));
 
   const cleared = service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
+    concurrency: { pi: 3 },
     codex: { env: {}, extraArgs: [] },
   });
   assert.equal(
@@ -510,7 +509,7 @@ test("replays survive config disable and deletion while new requests still route
   const root = temporaryRoot("worker-configs-replay-");
   const { service } = createService(t, root);
   const configs = [
-    dsh({ roles: ["testing"] }),
+    piNamed({ roles: ["testing"] }),
     pi({ id: "pi-alt", name: "Pi alt", roles: ["testing"] }),
     codex(),
   ];
@@ -561,8 +560,8 @@ test("concurrency is keyed by config id, not by worker type", async (t) => {
     TEST_DELAY_MS: "500",
   });
   const configs = [
-    dsh({ concurrency: 1 }),
-    dsh({ id: "dsh-b", name: "DSH B", concurrency: 1 }),
+    piNamed({ concurrency: 1 }),
+    piNamed({ id: "dsh-b", name: "DSH B", concurrency: 1 }),
     pi(),
     codex(),
   ];
@@ -588,7 +587,7 @@ test("Pi passes the full configured model id through and ignores env services", 
     CODEX_PI_PROVIDER: "env-provider",
   });
   const configs = [
-    dsh(),
+    piNamed(),
     pi({ model: "config-provider/sub/config-model", effort: "medium" }),
     codex(),
   ];
@@ -649,14 +648,14 @@ test("Pi passes the full configured model id through and ignores env services", 
 test("canonical settings reject invalid configs atomically", async (t) => {
   const root = temporaryRoot("worker-configs-validation-");
   const { service } = createService(t, root);
-  const base = [dsh(), pi(), codex()];
+  const base = [piNamed(), pi(), codex()];
   service.updateSettings({ configs: base, defaultConfigId: "dsh-default" });
   const before = service.settings();
 
   assert.throws(
     () =>
       service.updateSettings({
-        configs: [dsh({ id: "same" }), dsh({ id: "same" })],
+        configs: [piNamed({ id: "same" }), piNamed({ id: "same" })],
         defaultConfigId: "same",
       }),
     /不能重复/,

@@ -40,7 +40,7 @@ function alive(pid: number): boolean {
   }
 }
 
-test("losing the host IPC channel stops active DSH and its TERM-resistant tree", { timeout: 60_000 }, async (t) => {
+test("losing the host IPC channel stops the active Pi tree and its TERM-resistant child", { timeout: 60_000 }, async (t) => {
   ensureBuiltEntry();
   const root = temporaryRoot("worker-entry-disconnect-");
   const project = path.join(root, "project");
@@ -51,8 +51,8 @@ test("losing the host IPC channel stops active DSH and its TERM-resistant tree",
   const cliPidFile = path.join(root, "cli.pid");
   const groupPidFile = path.join(root, "group.pid");
   fs.writeFileSync(
-    path.join(bin, "dsh"),
-    `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs")}" "$@"\n`,
+    path.join(bin, "pi"),
+    `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-pi.mjs")}" "$@"\n`,
     { mode: 0o755 },
   );
   const initialStore = new WorkerStore(data);
@@ -63,6 +63,7 @@ test("losing the host IPC channel stops active DSH and its TERM-resistant tree",
     env: {
       PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
       HOME: path.join(root, "home"),
+      PI_CODING_AGENT_DIR: path.join(root, "pi-home"),
       TMPDIR: process.env.TMPDIR,
       LANG: process.env.LANG,
       DSH_HOME: path.join(root, "dsh-home"),
@@ -139,7 +140,7 @@ test("losing the host IPC channel stops active DSH and its TERM-resistant tree",
     name: "worker_start",
     arguments: {
       taskName: "disconnect cleanup",
-      type: "dsh",
+      type: "pi",
       prompt: "run until the host disconnects",
       workspace: { mode: "existing" },
       writePaths: [],

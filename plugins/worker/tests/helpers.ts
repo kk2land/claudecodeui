@@ -73,9 +73,8 @@ export function createService(
   const service = new WorkerService({
     dataDirectory: data,
     environment: env,
-    executablePaths: { dsh: dshFixture, pi: piFixture, codex: codexFixture, agy: agyFixture },
+    executablePaths: { pi: piFixture, codex: codexFixture, agy: agyFixture },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
-    dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
     ...extraOptions,
   });
   t.after(async () => {
@@ -93,7 +92,7 @@ export function startInput(
 ): WorkerStartInput {
   return {
     taskName: "fixture task",
-    type: "dsh",
+    type: "pi",
     prompt: "do the fixture work",
     workspace: { mode: "existing" },
     writePaths: [],

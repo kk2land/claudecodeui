@@ -1,10 +1,11 @@
 # CloudCLI Worker 插件
 
 > **父会话范围：** CloudCLI 的 DSH app provider 已移除，因此宿主只接入 Codex app-server 父会话。
-> 插件自身仍以 DSH、Pi、Codex、Antigravity（`agy`）四种引擎执行子任务（DSH 与 agy 由插件直接启动 CLI，
-> 不依赖 app provider）；DSH 作为父会话时所需的 ACP 会话注入已随该 provider 一并删除，历史说明保留在下方。
+> 插件自身以 Pi、Codex、Antigravity（`agy`）三种引擎执行子任务（agy 由插件直接启动 CLI，不依赖 app provider）。
+> DSH 已停止作为 Worker 执行引擎：旧的 DSH Worker、运行、通知、日志与原生数据保留在 SQLite/磁盘原位，
+> 但不再出现在任何 Worker 列表、历史分页或通知视图里，也不能新建配置、派发或续接。
 
-支持 Codex app-server 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 DSH、Pi、Codex 或
+支持 Codex app-server 父会话，插件在现有「插件」页签中运行，把父会话拆出的任务交给 Pi、Codex 或
 Antigravity（`agy`）子任务执行，
 并在独立进程中记录运行、原始事件与结果。插件负责执行与记录；任务拆分、review 和 Git 集成仍由父会话
 与用户授权的主代理负责。插件保存主会话维护的计划与依赖记录，不提供自动依赖调度或 Git 集成。
@@ -21,15 +22,14 @@ Antigravity（`agy`）子任务执行，
     ln -s /absolute/path/to/cloudcli/plugins/worker/skills/cloudcli-workers \
       "${CODEX_HOME:-$HOME/.codex}/skills/cloudcli-workers"
 
-DSH 可将同一个 skill 软链到 `${DSH_HOME:-$HOME/.dsh}/skills/cloudcli-workers`，或项目的
-`.agents/skills/cloudcli-workers`；已有目录或链接也应先核对，避免覆盖。
+Pi 或 agy 可将同一个 skill 软链到项目 `.agents/skills/cloudcli-workers`；已有目录或链接也应先核对，
+避免覆盖。DSH 的 skill 与全局指令安装入口已随 Worker 执行引擎移除。
 
 宿主不会自动注入、复制或安装这个 skill。目标已存在时保留它，部署时核对并手动处理旧链接或目录。
 分流、回退与角色要求见 `plugins/worker/CLOUDCLI-WORKERS.md`。计划、派发和合并后
 清理见 `plugins/worker/skills/cloudcli-workers/SKILL.md`。运行对应脚本安装全局引用块：
 
 - Codex：`plugins/worker/install-codex-instructions.sh`，写入 `${CODEX_HOME:-$HOME/.codex}/AGENTS.md`。
-- DSH：`plugins/worker/install-dsh-instructions.sh`，写入 `${DSH_HOME:-$HOME/.dsh}/AGENTS.md`。
 
 脚本只维护 `<!-- cloudcli-workers:start -->` 与 `<!-- cloudcli-workers:end -->` 之间的内容，保留块外原文，
 重复运行不重复添加；目录或文件缺失时创建，脚本或文档搬移后重新运行会更新引用路径。脚本仅依赖 POSIX sh，
@@ -37,13 +37,12 @@ DSH 可将同一个 skill 软链到 `${DSH_HOME:-$HOME/.dsh}/skills/cloudcli-wor
 
 使用 skill 前的正常门槛是上面的全局引用块。通过入口检查后加载 `cloudcli-workers` 技能，
 技能只写通过门槛后的做法。仅软链 skill 而没有引用块时按技能内的简短回退处理，
-无需先补装引用块。DSH 默认加载全局及项目 `AGENTS.md`，如需仅对某个项目生效，
+无需先补装引用块。Pi/agy 默认加载全局及项目 `AGENTS.md`，如需仅对某个项目生效，
 也可在项目 `AGENTS.md` 中添加对上述文档的引用。
 
 MCP 连接由运行时临时注入，不在用户配置中预置：Codex app-server 通过 CLI `-c` 临时声明 Worker MCP URL
 并设 `enabled=false`，无需在 `config.toml` 预置；`thread/start` 与 `resume` 注入专属 owner 凭证，预测线程
-不启用 Worker MCP。若父会话由 DSH ACP 提供，只在 ACP 启动时由临时 patch 挂载 HTTP Worker MCP，headless 不注入
-（该 ACP 父会话注入属于已移除的 app provider，当前不会发生）。
+不启用 Worker MCP。DSH ACP 父会话注入已随 app provider 一并移除，当前不会发生。
 Codex 原生预测 fork 会继承父线程 MCP 且拒绝配置覆盖；启用 Worker 工具的会话明确显示预测暂不可用，
 避免预测线程获得父会话的 Worker 凭证。未启用 Worker 的会话继续使用原生预测。
 当前服务的 Codex 配置中显式禁用 `cloudcli-workers` 后，宿主不再为该项目会话接入 Worker MCP；
@@ -52,7 +51,7 @@ Codex 原生预测 fork 会继承父线程 MCP 且拒绝配置覆盖；启用 Wo
 已有任务仍可在 Worker 页签查看和管理。
 决定委派前，若 skill 未启用，或当前会话的 Worker MCP 未启用、未连接、缺少所需工具，主代理应跳过
 该 skill 并用普通工具直接完成原任务，不要以「请连接 MCP 后重试」为前提报告阻塞。只有已进入 Worker
-委派流程后的持续调用失败才报告具体阻塞；任何情况下都不要绕到 shell、`dsh`/`pi` 或复制 runner
+委派流程后的持续调用失败才报告具体阻塞；任何情况下都不要绕到 shell、`pi`/`agy` 或复制 runner
 启动/管理 worker。
 
 ## 使用
@@ -114,7 +113,7 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 每个 run 首次达到软预算（默认 600 秒或 20 步）时生成运行提醒，以 `status: running` 写入 outbox；
 此后每隔 `softReminderSeconds`（默认 600 秒）继续提醒，即使 Worker 正在等待没有新事件的长命令。
 此前提醒已投递后才能生成下一条，避免忙碌、暂停或投递不确定时堆积通知；运行记录中的 `softReminderSentAt`
-表示最近一次提醒时间。父会话空闲且用户队列处理完后，Codex 或 DSH 主代理会收到提醒，提醒本身不会取消任务。
+表示最近一次提醒时间。父会话空闲且用户队列处理完后，Codex 主代理会收到提醒，提醒本身不会取消任务。
 主代理先核对当前 run，再对比上次的交付物、diff 和验证结果；有新有效产出则等待下一次自动提醒。持续无进展、重复检查或方向偏离时，
 可在原授权范围内 `worker_cancel` 指定该 Worker、`pause: false`，确认停止后用明确的新提示词 `worker_resume`
 同一个 `workerId`，保留原会话、cwd 与已有修改。取消未确认或状态为 `unknown` 时不能续接；反复纠偏无进展时
@@ -125,7 +124,7 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 交接提示词须约定命令预算：长命令后台执行，单次同步等待不超过 60 秒；测试已报超时但进程未退出时，
 停止该任务自己的进程并保留日志。同一失败已在未修改基线上复现后，记录限制并继续剩余交付，不再重复完整测试。
 
-父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 DSH/Pi/Codex/Antigravity 占额与排队数、阶段、耗时、软提醒、
+父会话页面提供「当前会话 / 当前项目 / 全部」三种视图，显示 Pi/Codex/Antigravity 占额与排队数、阶段、耗时、软提醒、
 模型、cwd/worktree、真实原生 ID、结果和分页事件/stderr 日志。列表与详情显示任务记录的角色，历史记录缺少
 角色时详情显示未指定，列表不额外展示。设置页按每个 Worker 配置管理启用开关、并发、硬超时和倾向任务；配置
 停用后保留模型、角色等内容，重新启用后继续使用。页面只读状态并执行取消、暂停、恢复、清理和
@@ -191,10 +190,11 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 
 ## Worker 配置：引擎、启用、角色、并发、硬超时、模型与 Codex 服务
 
-执行引擎为 `dsh`、`pi`、`codex`、`agy` 四种。用户可以管理多个具名 Worker 配置；首次使用只创建并启用
-`pi-default`（pi default），`defaultConfigId` 为 `pi-default`。DSH、Codex 与 agy 配置由用户按需添加。
-从旧设置迁移时仍生成三个初始配置并保留原 `defaultWorkerType`，映射为对应初始配置的
-`defaultConfigId`；只有旧值缺失或无效时才回退 `dsh-default`，迁移结果不会一律改成 DSH。每个配置包含
+可执行引擎为 `pi`、`codex`、`agy` 三种；`dsh` 仅作为历史存储类型保留，旧的 DSH 行不会显示，也不能再创建
+配置或运行。用户可以管理多个具名 Worker 配置；首次使用只创建并启用 `pi-default`（pi default），
+`defaultConfigId` 为 `pi-default`。Codex 与 agy 配置由用户按需添加。读取旧设置时只投影受支持引擎：
+若原默认是 DSH 或没有可用配置，则使用首个已启用的受支持配置，否则恢复或创建固定的 `pi-default`；
+不会为 DSH 单独写库、转换配置或回填历史。每个配置包含
 `id`、`name`、`type`、`enabled`、`roles`、`concurrency`、`hardTimeoutSeconds`、`model`、
 `effort`；Codex 配置另有 `codex.modelProvider`、`codex.env` 和保留的 `codex.legacyExtraArgs`。`id` 在创建时
 生成，重命名保持不变；只要该配置已被任何 worker 或 run 历史引用，就不能修改其 `type`。模型的真实能力以
@@ -250,10 +250,22 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
       "hardTimeoutSeconds": 300
     }
 
+### 状态与历史分页接口
+
+`GET /state?view=overview` 返回 `{ workers, settings, configUsage, agyCooldownUntil, finished, notifications }`：
+`workers` 是完整的 `WorkerRecord`，只含 `queued`/`starting`/`running`/`stopping`/`unknown`；`agyCooldownUntil`
+是 ISO 截止时间或 `null`；`finished` 是 `{ items: WorkerRecord[], nextCursor }`，`notifications` 是
+`{ items: (WorkerNotification & { taskName })[], nextCursor }`。两页各 20 项，分别按结束时间/生成时间与
+`id` 降序，`nextCursor` 是不透明字符串或 `null`。`GET /state?view=activity` 仅返回
+`{ workers: [{ id, projectId, parentSessionId, latestRun: { status } }] }` 供现有 UI 判定活动状态。
+省略 `view` 的旧调用保持原 `WorkerStateSnapshot` 形状。`GET /history?kind=finished|notifications&cursor=...`
+返回与 overview 相同的页；两个接口都接受 `projectId`、`parentSessionId` 范围过滤。分页在 SQLite 中按
+`LIMIT 21` 的 keyset 查询执行，旧记录缺少时间字段时仍可读取。
+
 规范的 `PUT /settings` 整份替换 `configs`，并在保存前原子校验：`id` 唯一且非空、`name` 非空、`type` 合法、
 `enabled` 为布尔值、`roles` 只含任务角色目录中的值、`concurrency` 为正整数、`defaultConfigId` 引用已启用
 配置；每项 `hardTimeoutSeconds` 为正整数或 `null`，省略时补为 300 秒。
-Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同时配置模型，agy 的 effort 必须是 CLI
+Pi 的 effort 必须是受支持的 thinking 级别，agy 的 effort 必须是 CLI
 `--help` 公布的 `low`/`medium`/`high`/`xhigh`/`max`；若 agy 模型 ID 以 `agy models` 实际公布的
 `-low`/`-medium`/`-high`/`-xhigh` 变体结尾，则 effort 必须是同一档或留空，否则保存被拒绝并指出模型与
 支持档位。没有这些后缀的 ID 不按名称猜约束，仍可带原生支持的 effort；最终由 CLI 校验。Codex 配置必须带 `codex`
@@ -261,17 +273,18 @@ Pi 的 effort 必须是受支持的 thinking 级别，DSH 的 effort 必须同�
 都会让整次更新失败且不保存任何字段。`retentionDays` 为正整数，省略时保留原值；`schemaVersion` 由服务端
 管理，客户端不提供。
 
-旧版映射更新仍兼容：`concurrency.dsh`、`concurrency.pi` 必填且为正整数，`concurrency.codex` 可省略并保留
-原值；`defaultWorkerType` 选择对应初始配置为默认；`enabled` 与 `roles` 若提供必须同时包含 `dsh`、`pi`、
-`codex`，省略则保留；`defaults` 若提供必须含 `dsh` 与 `pi`，可含 `codex`，空白字符串按清除处理；`codex`
+旧版映射更新仍兼容：`concurrency.pi` 必填且为正整数，`concurrency.codex` 可省略并保留原值，`dsh` 键被忽略；
+`defaultWorkerType` 只接受受支持引擎；`enabled` 与 `roles` 若提供必须同时包含 `pi`、`codex`，省略则保留；
+`defaults` 若提供必须含 `pi`，可含 `codex`，空白字符串按清除处理；`codex`
 对象若提供必须同时含 `env` 与 `extraArgs`。旧版 `extraArgs` 中的 `-c model_provider=<id>`（或
 `--config=model_provider=<id>`）会被提取为 `modelProvider`，不再留在 `legacyExtraArgs` 中。
 
-旧设置 JSON 在读取时一次性迁移为 schema 2：由旧 `concurrency`、`enabled`、`roles`、`defaults` 生成三个
-初始配置；旧 `codex.env` 与 `extraArgs` 生成 `codex-default` 的 env、`modelProvider` 与
+旧设置 JSON 在读取时一次性升级为 schema 2：由旧 `concurrency`、`enabled`、`roles`、`defaults` 生成 Pi 与
+Codex 初始配置（DSH 配置不参与投影，旧 DSH worker 行原样保留且不显示）；旧 `codex.env` 与 `extraArgs` 生成
+`codex-default` 的 env、`modelProvider` 与
 `legacyExtraArgs`；旧 `defaultWorkerType` 映射为对应初始配置的 `defaultConfigId`，并补齐提醒、保留天数与
-硬超时默认值。迁移同时为旧 worker 回填 `configId`/`configName`，并按 run 自己记录的 `spec.json` argv
-补齐缺失的 model/provider/effort；没有证据时保留原 null 而不从当前设置猜测。旧 Codex run 没有可靠
+硬超时默认值。通用升级仍为受支持引擎的旧 worker 回填 `configId`/`configName`，并按 run 自己记录的
+`spec.json` argv 补齐缺失的 model/provider/effort；DSH 行不参与回填、不被重写；没有证据时保留原 null 而不从当前设置猜测。旧 Codex run 没有可靠
 provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配置的 `modelProvider`。迁移只执行一次，
 之后不会重建已被删除的配置，也不会重写历史 run 记录。
 
@@ -280,13 +293,8 @@ provider 证据时标记 `legacyCodexProvider`，续接时可回退到当前配�
 
 ### 模型选择界面
 
-模型与 reasoning 按引擎读取真实目录，并只把目录当作可选建议而不是白名单。DSH 通过插件
-`GET /catalog/dsh` 只读 `${DSH_HOME:-$HOME/.dsh}/profiles/headless/cordis.patch.yml`（headless 静态 patch
-层）中声明的 `providers.*.models[]`，路由为完整 `provider/model`；只取模型 `id`、`name` 与
-`reasoningEfforts` 的键，忽略凭据环境变量、base URL 等其余字段，既不执行也不解析 `!!js` 表达式，不启动 CLI，
-也不写数据库。静态组合沿用 DSH 加载器语义：`insert` 列表新增条目，同 `id` 的后续 patch 整段替换目标的
-`config`/`disabled`/`group`（不与旧值合并，旧模型和旧 provider 随之消失），`name` 不同则不替换，禁用状态由
-最后一条 patch 单独决定；因此被替换或禁用的条目不会留在目录里。
+模型与 reasoning 按引擎读取真实目录，并只把目录当作可选建议而不是白名单。DSH 的模型目录与
+`GET /catalog/dsh` 接口已随引擎移除，DSH 配置不能再创建。
 Codex 使用宿主模型目录；Codex 先从宿主读取模型服务目录，再按服务读取模型列表；Pi 通过插件
 `GET /catalog/pi` 直接读取 `PI_CODING_AGENT_DIR`（或 `~/.pi/agent`）下 `models.json` 中 providers 配置的
 完整 provider/model 与 reasoning 布尔值；不启动 Pi，不使用凭据，也不执行 `!command`。文件缺失时目录为空。
@@ -297,12 +305,6 @@ Codex 卡片顺序为先模型服务、再模型、再 reasoning：切换模型�
 不在目录中时以“（当前已保存）”选项保留，普通保存不会清掉它们。留空表示沿用执行器自身默认。Codex 模型服务
 目录与模型列表由宿主全局 Codex home（`CODEX_HOME` 或 `~/.codex`）和环境读取，不随单个配置的 `codex.env`
 或运行 home 变化，这是已知范围限制。
-
-DSH 的模型字段始终是一个可手填完整 `provider/model` 路由的输入框，并用 `<datalist>` 列出目录建议，因此
-目录只声明了部分模型、甚至完全没有模型（文件缺失或 profile 只用 bundle 默认配置）时仍能设置有效路由；
-不会出现无法填写的目录、虚构模型或永远失败的重试。目录中的路由沿用其自己声明的 reasoning 级别（未声明级别
-的模型只保留“默认（沿用执行器）”）；手填的未列出路由改用执行器已有的 effort 名称列表，因此目录外但有效的
-完整路由仍可带 reasoning。最终合法性仍由运行时在发送前校验。
 
 agy 的模型目录来自 `agy models`，该命令会访问网络，因此目录只在确实需要时请求：打开已包含 agy 配置的
 设置页，或新增/切换出首个 agy 配置；没有 agy 配置时不会启动 CLI。目录按需在 Worker 环境中执行，沿用与
@@ -331,28 +333,26 @@ Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名
 配置（按 `configs` 列表顺序，默认配置不覆盖前面的匹配项）。无角色匹配或未提供 `taskRole` 时回退到类型
 候选中的默认配置，不在候选中则取首个配置。`worker_start`
 在接受请求时把最终 `configId`、`type`、model、provider、effort 快照到 worker/run；之后修改设置不会改变已
-排队 run 已接受的值，原生 argv 与 DSH 模型 patch 都使用该快照。
+排队 run 已接受的值，原生 argv 使用该快照。
 
 新任务的 model/effort 优先级为：请求显式值 > 所选配置的 `model`/`effort` > 执行器原生默认。provider 只有
 Codex 支持：请求显式 provider > 所选配置的 `codex.modelProvider` > Codex 原生默认；非 Codex 类型若显式
 传入非空 provider，会在幂等重放检查之后以 `PROVIDER_UNSUPPORTED` 拒绝，旧请求的幂等重放仍返回原结果。
-Pi 把完整模型 ID 直接传给 `--model`，不再接受 `--provider`；DSH 的 provider/model 由运行模型 patch 表达；
-agy 把模型 ID 原样传给 `--model`，provider 同样不支持。配置保存、创建和续接都在现有服务边界校验已知的
+Pi 把完整模型 ID 直接传给 `--model`，不再接受 `--provider`；agy 把模型 ID 原样传给 `--model`，provider 同样不支持。配置保存、创建和续接都在现有服务边界校验已知的
 变体/effort 冲突，拒绝时不写入新 worker 或 run；续接继承的旧记录若与当前模型冲突也会明确报错，必须显式
 改用兼容 effort。
 
 `worker_resume` 保持原 worker 类型与 `configId`、cwd、home 和原生会话身份，默认沿用上一次 run 记录的
 model/provider/effort，不套用当前配置；显式 model/effort（Codex 还包括 provider）仍可覆盖。旧 Pi 的独立
-provider 会折叠进完整模型 ID，并按大小写不敏感的前缀去重；旧 DSH 的独立 provider 与原始 model 直接拼接为
-provider/model；旧 DSH 裸 model 只从该 run 自己生成的 `model.patch.yml` 恢复路由证据，完整 ID 不依赖旧
-patch；没有证据时续接要求显式提供完整 model（`MODEL_REQUIRED`）。agy 的模型 ID 原样沿用上一次 run 的记录，
-不拼接 provider。历史记录不重写，续接创建新的 runId。
+provider 会折叠进完整模型 ID，并按大小写不敏感的前缀去重。DSH 历史记录不再展示且只读，续接请求明确以
+`WORKER_TYPE_UNSUPPORTED` 拒绝。agy 的模型 ID 原样沿用上一次 run 的记录，不拼接 provider。历史记录不重写，
+续接创建新的 runId。
 原类型或配置已停用时，续接请求保留原配置但按启用规则拒绝。Codex 续接使用记录的 `thread_id` 执行
 `codex exec resume --json`，每次仍读取当前配置的 Codex env 与保留的启动参数。
 
 ## 原生会话保留与清理
 
-原生 DSH/Pi 会话文件独立保留 3 天，按文件修改时间计算；插件启动时清理一次，之后每 24 小时清理一次。
+原生 DSH/Pi 会话文件按既有规则独立保留 3 天，按文件修改时间计算；插件启动时清理一次，之后每 24 小时清理一次。旧的 DSH 数据库行不会因列表隐藏而被改写或删除。
 范围包括 `CODEX_DSH_SESSIONS_ROOT`（默认 `$HOME/tmp/codex-dsh-sessions`）、`$HOME/.pi/agent/sessions`，
 以及插件数据目录下的 `sessions/dsh`、`sessions/pi`。DSH 的历史 generation 和 `.zstd` 文件也参与清理。
 Codex 原生 session 目录不纳入这一 DSH/Pi 批量 retention 删除，不会按上述 3 天规则被清扫；其保留由固定
@@ -377,24 +377,9 @@ start/resume 都要求调用方提供 `requestId` 作为幂等键；相同操作
 执行器在 PATH 中解析绝对路径后才切换 cwd；以 argv 数组、`shell=false` 启动，不拼接 shell 字符串。
 认证沿用现有 CLI 配置，不写入日志、不持久化密钥。
 
-DSH：
-
-    dsh --profile headless --patch <运行目录>/dsh-session.patch.yml \
-      [--patch <运行模型 patch>] --json [--session-id <真实会话 ID>] -
-
-- stdin 传 UTF-8 提示词，末尾参数 `-` 表示从 stdin 读取。
-- 必需的会话 patch 由插件从打包文件原样复制到每次运行的目录，并以绝对路径传入；原生执行器读取运行副本，
-  续接也为新 run 准备独立副本。运行 patch 与 Worker 持久化的 home/session 隔离继续保留。
-- `DSH_HOME` 使用原环境值或 `~/.dsh`；会话根由插件显式设为实例数据目录下的 `sessions/dsh`。模型目录
-  也从同一个 `DSH_HOME` 的 headless patch 读取（见“模型选择界面”），因此该变量同时决定运行与可选模型。
-- 模型与 effort 通过运行级 `agent-default-model` patch 注入，不伪造 CLI flags：完整 model ID 按第一个 `/`
-  解析为 provider/model；裸 model 的 provider 固定为 `deepseek-official`；effort 必须同时有模型。
-- 用户没有独立的 DSH provider 或环境配置；`CLOUDCLI_DSH_PROVIDER`、`CLOUDCLI_DSH_PATCHES`、
-  `CLOUDCLI_DSH_BIN`、`CLOUDCLI_DSH_SESSIONS_DIR` 不再作为 Worker 运行配置：Worker 只从 PATH 解析
-  `dsh`/`pi`（测试通过注入路径替代），并把 `CLOUDCLI_DSH_SMOKE_BIN` 仅当作测试入口。
-- 成功要求：exit 0、事件完整合法、`session.cwd` 与 ID 匹配、出现 final，且最后一个 turn_end 的
-  `reason.kind=completed`。已确认 CLI 退出但事件协议非法（例如缺少或错误的原生会话身份）是 `failed`，
-  不会据此猜测原生身份，也不能续接；只有进程存活/退出证据本身缺失时才是 `unknown`。
+DSH 已停止执行：`prepareLaunch` 对新 DSH 运行返回 `WORKER_TYPE_UNSUPPORTED`，HTTP/MCP 的新派发与已知
+ID 的续接也明确拒绝。遗留的排队 DSH 运行不会再进入调度或恢复流程，而是原样留在数据库中；其 Worker、
+运行、通知、日志与原生会话不会出现在列表/历史/通知视图，也不会被迁移、回填或补写失败通知。
 
 Pi：
 
@@ -432,7 +417,7 @@ Antigravity（`agy`）：
   `invalid model selection … conflicts with --effort=high`。本机 `gemini-pro-orchestrator-neon` 配 high 返回
   `--effort is not supported for model`，但插件没有动态能力目录，不能据此把所有无后缀或自定义 ID 都判为
   不支持 effort；无固定后缀的 ID 保留原生 effort 选择，由 CLI 返回实际支持结果。agy 没有独立 provider，
-  `provider` 会像 Pi/DSH 一样被拒绝。
+  `provider` 会像 Pi 一样被拒绝。
 - 成功要求：exit 0、恰好一个合法 `init`、匹配预期身份的 `conversation_id` 与 cwd、收到 `result` 且
   status 为 `SUCCESS`、没有 `denied_actions`。`result.error` 或 `ERROR` 状态按失败保存，错误文本直接来自 CLI。
 - `result.usage` 在续接时是会话累计，因此本次运行用量由本次日志内已完成的 `agent_response` step 累加；
@@ -495,16 +480,13 @@ Codex app-server 在队列没有任何待发消息、且接受新的显式用户
 Codex 运行时会清理所属 worker，CloudCLI 退出清理全部。关闭浏览器或切换页面不取消任务。主停止或退出
 触发的取消不会自动唤醒父会话。
 CloudCLI 的 Codex runtime 在所属父会话仍有活动 Worker 时，每 30 秒向现存 app-server/proxy 发送一次
-thread/loaded/list RPC 保持其活跃，不因空闲超时退出；没有活动 Worker 时才按原阈值正常空闲回收。DSH ACP 的
-所属 owner 仍有活动 Worker 时同样延后空闲回收并重新计时，Worker 结束后的下一次检查恢复回收，其它 owner 的
-Worker 不影响本 owner。
+thread/loaded/list RPC 保持其活跃，不因空闲超时退出；没有活动 Worker 时才按原阈值正常空闲回收。
 
 只有正常空闲退出/回收保留 Worker owner 与临时凭证，结果到达后按原生会话 ID 恢复父会话；用户 Stop、切换
 headless 或宿主关闭仍立即释放传输与计时器，并沿用前述规则取消相应 Worker。原生回合中途异常退出仍报告失败
 并暂停其队列，不重发该回合。
 代理已退出但仍有 Worker 时，停止 app-server 入口仍可取消任务。
-Codex 与 DSH 的设置按钮都提示当前会话的 Worker 活动，切到其他工作区页签时暂停活动轮询，回到聊天时立即刷新。
-DSH 停止未获确认时，即使 ACP 已退出，停止入口仍可重试；普通进程状态轮询不会清除 Worker 清理错误，重试成功后清除。
+Codex 的设置按钮提示当前会话的 Worker 活动，切到其他工作区页签时暂停活动轮询，回到聊天时立即刷新。
 Codex 的进程停止同样等待 Worker 清理确认；失败时保留暂停的 owner 并回报错误，代理已退出或活动查询失败时仍可重试。
 停止也会取消尚在解析模型或注册 Worker 的旧回合初始化，避免空闲代理退出后，旧初始化在停止操作之后重新启动它。
 
@@ -535,7 +517,7 @@ worker 记录。原生会话、分支和工作目录不会被自动删除；记�
 ## 数据与边界
 
 插件数据位于宿主分配的插件数据目录（通常为 `CLOUDCLI_PLUGIN_DATA_DIR`，按宿主数据库路径隔离），包含
-运行记录、计划、outbox 与实例会话目录 `sessions/dsh`、`sessions/pi`。日志与结果可能含敏感内容，只能通过
+运行记录、计划、outbox 与实例会话目录 `sessions/pi`（`sessions/dsh` 仅保留历史数据，不参与列表展示）。日志与结果可能含敏感内容，只能通过
 受保护的 UI REST 与 MCP 读取；`worker_logs` 可传 `tail: true`：无 cursor 时从末尾读取默认 4 KiB 小窗口，
 显式 cursor 优先，运行中继续读时用返回的 `nextCursor`。计划仅通过所属父会话的 MCP 读取与保存。MCP token 不进入 CLI 环境，
 host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自动改写用户全局配置与认证
@@ -551,9 +533,10 @@ host UI token 不能调用 MCP 或 IPC 控制操作。宿主运行时不会自�
 ## 验收限制
 
 自动化回归使用模拟 CLI 和临时会话，覆盖原生参数、状态与进程清理；模型目录回归在临时 fixture 中检查
-DSH headless patch、Pi `models.json` 的静态解析（含凭据不外泄与 `!!js` 不执行）以及 agy 在 Worker 环境中
-运行 `models` 的 `ID<TAB>显示名` 解析（含执行失败、无法解析的错误路径、环境继承与 stderr 不外泄），不读取真实配置；另有真实 Codex app-server 与 DSH ACP
-连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 测试通过 `CLOUDCLI_DSH_SMOKE_BIN` 指定真实 CLI 后启用；它只是测试入口，不是 Worker 运行配置。
+Pi `models.json` 的静态解析（含凭据不外泄与 `!!js` 不执行）以及 agy 在 Worker 环境中运行 `models` 的
+`ID<TAB>显示名` 解析（含执行失败、无法解析的错误路径、环境继承与 stderr 不外泄），不读取真实配置；另有
+真实 Codex app-server 连接本地 HTTP MCP、模型夹具的测试，不需要调用真实模型。DSH 仅保留历史解析与数据
+读取用例，并有 fixture 验证其从列表、历史与通知中隐藏且 SQLite 行不被改写；不再有执行、目录或 ACP 测试入口。
 Codex 版本按包分别锁定：app-server 经 compat alias（`@openai/codex-app-server-compat`）使用官方 CLI `0.169.0`
 （app-server 锁定该版本；旧线程不支持跨 provider resume，因此换服务改为带历史分支，并确认新 child 线程关闭后再应用新 Worker 配置）；根包 `@openai/codex` 与会话交接使用的 `@openai/codex-sdk` 仍为 `0.166.0`
 （SDK 依赖范围 `^0.166.0`，lock 固定 `0.166.0`），各自版本由 package 声明与锁文件确定。本地启动器被有意覆盖时，用

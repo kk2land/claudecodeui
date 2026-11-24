@@ -11,7 +11,6 @@ import {
   environment,
   guardianSource,
   owner,
-  pluginRoot,
   temporaryRoot,
   tsxLoader,
   waitStatus,
@@ -90,7 +89,7 @@ test("legacy Codex resume keeps its old provider fallback without fabricating hi
 
   const store = new WorkerStore(data);
   store.saveSettings({
-    concurrency: { dsh: 3, pi: 3 },
+    concurrency: { pi: 3 },
     defaultWorkerType: "dsh",
     codex: {
       env: { CODEX_PROXY_BYPASS: "1" },
@@ -153,7 +152,6 @@ test("legacy Codex resume keeps its old provider fallback without fabricating hi
     environment: env,
     executablePaths: { codex: codexFixture },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
-    dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
   });
   t.after(async () => {
     await service.close();

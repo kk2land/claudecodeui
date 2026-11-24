@@ -40,12 +40,12 @@ function seed(
 ) {
   const data = service.store.directory;
   const cwd = path.join(data, "worktrees", workerId);
-  const sessionsRoot = path.join(data, "sessions", "dsh");
+  const sessionsRoot = path.join(data, "sessions", "pi");
   const worker: WorkerRecord = {
     id: workerId,
-    type: "dsh",
-    configId: "dsh-default",
-    configName: "DSH default",
+    type: "pi",
+    configId: "pi-default",
+    configName: "pi default",
     taskName: id,
     ownerId: "owner-1",
     parentSessionId: "parent-1",
@@ -156,14 +156,14 @@ test("default daily retention expires terminal history at the boundary and prote
 
 test("shortening retention prunes immediately while preserving a worker's newer run", (t) => {
   const service = setup(t);
-  service.updateSettings({ concurrency: { dsh: 3, pi: 3 }, retentionDays: 7 });
+  service.updateSettings({ concurrency: { pi: 3 }, retentionDays: 7 });
   const old = seed(service, "old", NOW - 3 * DAY, "completed", "shared-worker");
   const recent = seed(service, "new", NOW - DAY / 2, "completed", "shared-worker");
-  service.updateSettings({ concurrency: { dsh: 2, pi: 2 } });
+  service.updateSettings({ concurrency: { pi: 2 } });
   assert.equal(service.settings().retentionDays, 7);
   assert.equal(service.get(old.worker.id).runs.length, 2);
 
-  service.updateSettings({ concurrency: { dsh: 2, pi: 2 }, retentionDays: 1 });
+  service.updateSettings({ concurrency: { pi: 2 }, retentionDays: 1 });
   assert.equal(service.get(old.worker.id).worker.latestRun?.id, recent.run.id);
   assert.deepEqual(service.get(old.worker.id).runs.map((run) => run.id), [recent.run.id]);
   assert.equal(fs.existsSync(old.logs), false);
@@ -175,7 +175,7 @@ test("shortening retention prunes immediately while preserving a worker's newer 
 
 test("startup recovery applies retention to existing history using the persisted setting", (t) => {
   const service = setup(t);
-  service.updateSettings({ concurrency: { dsh: 3, pi: 3 }, retentionDays: 2 });
+  service.updateSettings({ concurrency: { pi: 3 }, retentionDays: 2 });
   const expired = seed(service, "expired", NOW - 2 * DAY);
   const kept = seed(service, "kept", NOW - DAY);
   const unknown = seed(service, "unknown", null, "unknown");
@@ -188,12 +188,12 @@ test("startup recovery applies retention to existing history using the persisted
   assert.ok(fs.existsSync(unknown.logs));
 });
 
-for (const type of ["dsh", "pi"] as const) {
+for (const type of ["pi"] as const) {
   test(`queued ${type} resume preserves its native session after previous history expires`, async (t) => {
     let now = Date.now();
     const root = temporaryRoot("worker-retention-resume-");
     const { service, data, env } = createService(t, root, {}, { now: () => now });
-    service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+    service.updateSettings({ concurrency: { pi: 1 } });
     const original = await service.start("owner-1", startInput({ type }));
     const first = (await waitStatus(service, original.worker.id, ["completed"])).latestRun!;
 
@@ -212,7 +212,7 @@ for (const type of ["dsh", "pi"] as const) {
     delete env.TEST_SCENARIO;
     delete env.TEST_DELAY_MS;
     now += DAY;
-    service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+    service.updateSettings({ concurrency: { pi: 1 } });
     assert.equal(service.store.run(first.id), null);
 
     await waitStatus(service, original.worker.id, ["running", "completed", "failed"]);
@@ -220,11 +220,11 @@ for (const type of ["dsh", "pi"] as const) {
       path.join(data, "logs", original.worker.id, resumed.run.id, "spec.json"),
       "utf8",
     )) as { argv: string[] };
-    const flag = type === "dsh" ? "--session-id" : "--session";
+    const flag = "--session";
     assert.ok(spec.argv.includes(flag));
     assert.equal(
       spec.argv[spec.argv.indexOf(flag) + 1],
-      type === "dsh" ? first.nativeSessionId : first.nativeSessionFile,
+      first.nativeSessionFile,
     );
     const completed = await waitStatus(service, original.worker.id, ["completed"]);
     assert.equal(completed.latestRun?.id, resumed.run.id);

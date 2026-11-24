@@ -114,13 +114,12 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
     extraArgs: ["-c", "model_provider=magpie", "--token", codexArgSecret],
   };
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "dsh",
-    enabled: { dsh: true, pi: true, codex: true },
-    roles: { dsh: [], pi: ["code_review"], codex: [] },
+    concurrency: { pi: 3 },
+    defaultWorkerType: "pi",
+    enabled: { pi: true, codex: true },
+    roles: { pi: ["code_review"], codex: [] },
     defaults: {
-      dsh: { model: "mcp-default-model", effort: "medium" },
-      pi: { model: null, effort: null },
+      pi: { model: "mcp-default-model", effort: "medium" },
     },
     codex,
   });
@@ -141,7 +140,7 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   assert.deepEqual(
     (context as { settings: { defaultWorkerType: string; defaults: unknown } })
       .settings.defaultWorkerType,
-    "dsh",
+    "pi",
   );
   const contextSettings = (context as {
     settings: {
@@ -152,14 +151,14 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
       codex?: unknown;
     };
   }).settings;
-  assert.deepEqual(contextSettings.concurrency, { dsh: 3, pi: 3, codex: 3, agy: 1 });
+  assert.deepEqual(contextSettings.concurrency, { dsh: 1, pi: 3, codex: 3, agy: 1 });
   assert.deepEqual(contextSettings.defaults, {
-    dsh: { model: "mcp-default-model", effort: "medium" },
-    pi: { model: null, effort: null },
+    dsh: { model: null, effort: null },
+    pi: { model: "mcp-default-model", effort: "medium" },
     codex: { model: null, effort: null },
     agy: { model: null, effort: null },
   });
-  assert.deepEqual(contextSettings.enabled, { dsh: true, pi: true, codex: true, agy: false });
+  assert.deepEqual(contextSettings.enabled, { dsh: false, pi: true, codex: true, agy: false });
   assert.deepEqual(contextSettings.roles, {
     dsh: [],
     pi: ["code_review"],
@@ -199,7 +198,7 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
     }),
   ) as { worker: { id: string }; run: { id: string } };
   assert.ok(started.worker.id);
-  assert.equal(service.get(started.worker.id).worker.type, "dsh");
+  assert.equal(service.get(started.worker.id).worker.type, "pi");
   assert.equal(service.get(started.worker.id).worker.latestRun?.model, "mcp-explicit-model");
   assert.equal(service.get(started.worker.id).worker.latestRun?.effort, "low");
   const waited = text(
@@ -288,7 +287,7 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   assert.equal(defaultWaited.run.status, "completed");
   assert.equal(defaultWaited.run.model, "mcp-default-model");
   assert.equal(defaultWaited.run.effort, "medium");
-  assert.equal(service.get(defaulted.worker.id).worker.type, "dsh");
+  assert.equal(service.get(defaulted.worker.id).worker.type, "pi");
 
   const roleStarted = text(
     await client.callTool({
@@ -357,7 +356,7 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   await assert.rejects(unauthorized.connect(badTransport));
 });
 
-for (const type of ["dsh", "pi", "codex"] as const) test(`MCP corrects a slow ${type} task by cancelling and resuming its original session`, async (t) => {
+for (const type of ["pi", "codex"] as const) test(`MCP corrects a slow ${type} task by cancelling and resuming its original session`, async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   let now = Date.now();
   const { service, env, data } = createService(t, temporaryRoot("worker-mcp-correction-"), {
@@ -516,7 +515,7 @@ test("compact view is opt-in, scoped, and keeps only the current run", async (t)
   };
   assert.deepEqual(Object.keys(fullGet).sort(), ["notifications", "runs", "worker"]);
   assert.equal(fullGet.runs.length, 1);
-  assert.match(fullGet.worker.latestRun?.finalText ?? "", /fixture answer/);
+  assert.match(fullGet.worker.latestRun?.finalText ?? "", /pi answer/);
   assert.equal(fullGet.notifications.length, 1);
 
   const compactGetRaw = raw(
@@ -538,7 +537,7 @@ test("compact view is opt-in, scoped, and keeps only the current run", async (t)
   );
   assert.equal(compactGet.worker.latestRun?.id, started.runId);
   assert.equal(
-    JSON.stringify(compactGet.worker).match(/fixture answer/g)?.length,
+    JSON.stringify(compactGet.worker).match(/pi answer/g)?.length,
     1,
     "the terminal text is carried once, in the current run only",
   );
@@ -582,7 +581,7 @@ test("compact view is opt-in, scoped, and keeps only the current run", async (t)
     "compact list workers carry only run locators",
   );
   assert.equal(
-    JSON.stringify(compactList.workers).includes("fixture answer"),
+    JSON.stringify(compactList.workers).includes("pi answer"),
     false,
     "compact list workers carry no terminal text",
   );

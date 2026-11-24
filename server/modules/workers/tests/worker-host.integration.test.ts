@@ -126,7 +126,6 @@ test('worker entry, host IPC and MCP proxy deliver and hold real results for Cod
   });
 
   for (const [name, fixture] of [
-    ['dsh', path.join(pluginRoot, 'tests/fixtures/fake-dsh.mjs')],
     ['pi', path.join(pluginRoot, 'tests/fixtures/fake-pi.mjs')],
   ] as const) {
     const wrapper = path.join(bin, name);
@@ -139,7 +138,6 @@ test('worker entry, host IPC and MCP proxy deliver and hold real results for Cod
       HOME: path.join(root, 'home'),
       TMPDIR: process.env.TMPDIR,
       LANG: process.env.LANG,
-      DSH_HOME: path.join(root, 'dsh-home'),
       PI_CODING_AGENT_DIR: path.join(root, 'pi-home'),
       TEST_SCENARIO: 'sleep',
       TEST_DELAY_MS: '4000',
@@ -276,51 +274,22 @@ test('worker entry, host IPC and MCP proxy deliver and hold real results for Cod
     assert.deepEqual(await host.bridge.prepareSession(codexInput), config);
   }
 
-  // A fresh plugin install ships only `pi-default`, while every case below starts a
-  // DSH-type child. Seed the missing canonical config through the entry's authenticated
-  // settings API instead of changing plugin defaults or the fixture data directory.
+  // A fresh plugin install ships an enabled Pi config, which is all this path needs.
   const freshState = await (await fetch(`http://127.0.0.1:${ready}/state`, {
     headers: { authorization: 'Bearer plugin-ui-token' },
-  })).json() as { settings: { configs: Record<string, unknown>[]; defaultConfigId: string } };
+  })).json() as { settings: { configs: Array<{ type: string }>; defaultConfigId: string } };
   assert.deepEqual(freshState.settings.configs.map((item) => item.type), ['pi'],
     'a fresh entry data directory only ships the Pi config');
-  const seededResponse = await fetch(`http://127.0.0.1:${ready}/settings`, {
-    method: 'PUT',
-    headers: { authorization: 'Bearer plugin-ui-token', 'content-type': 'application/json' },
-    body: JSON.stringify({
-      configs: [
-        ...freshState.settings.configs,
-        {
-          id: 'dsh-default',
-          name: 'DSH default',
-          type: 'dsh',
-          enabled: true,
-          roles: [],
-          concurrency: 3,
-          model: null,
-          effort: null,
-        },
-      ],
-      defaultConfigId: freshState.settings.defaultConfigId,
-    }),
-  });
-  assert.equal(seededResponse.status, 200, 'the entry must accept the seeded canonical configs');
-  const seededSettings = await seededResponse.json() as {
-    defaultConfigId: string;
-    enabled: Record<string, boolean>;
-  };
-  assert.equal(seededSettings.enabled.dsh, true);
-  assert.equal(seededSettings.defaultConfigId, freshState.settings.defaultConfigId);
 
   const started = toolResult(await client.callTool({
     name: 'worker_start',
     arguments: {
-      taskName: 'e2e dsh',
-      type: 'dsh',
+      taskName: 'e2e pi',
+      type: 'pi',
       prompt: 'fixture e2e',
       workspace: { mode: 'existing' },
       writePaths: [],
-      requestId: 'e2e-dsh-1',
+      requestId: 'e2e-first-pi',
     },
   })) as { worker: { id: string }; run: { id: string } };
   // Recreating the parent's transport while its child is running must keep
@@ -369,7 +338,7 @@ test('worker entry, host IPC and MCP proxy deliver and hold real results for Cod
   // CLI is still running, then gets a separate result through the same outbox.
   const resumed = toolResult(await client.callTool({
     name: 'worker_resume',
-    arguments: { workerId: started.worker.id, prompt: 'Continue the targeted fixture check.', requestId: 'e2e-dsh-reminder' },
+    arguments: { workerId: started.worker.id, prompt: 'Continue the targeted fixture check.', requestId: 'e2e-first-pi-reminder' },
   })) as { run: { id: string } };
   await waitFor(() => wakeCalls.length, (count) => count === 2, 8_000);
   assert.match(String(wakeCalls[1]!.content), /progress reminder/);
@@ -392,7 +361,7 @@ test('worker entry, host IPC and MCP proxy deliver and hold real results for Cod
       prompt: 'fixture pi e2e',
       workspace: { mode: 'existing' },
       writePaths: [],
-      requestId: 'e2e-pi-1',
+      requestId: 'e2e-stop-pi',
     },
   })) as { worker: { id: string }; run: { id: string } };
   await waitFor(async () => {

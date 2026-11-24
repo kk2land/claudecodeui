@@ -1,6 +1,5 @@
 import type {
   AgyModelCatalog,
-  DshModelCatalog,
   PiModelCatalog,
   WorkerConversationMessage,
   WorkerHostCatalogCapabilities,
@@ -126,8 +125,6 @@ export function workerApi(host: WorkerHost) {
     },
     cancel: (input: WorkerCancelInput) =>
       request<{ workerIds?: string[] }>("POST", "/cancel", input),
-    /** DSH model directory served by this plugin from `DSH_HOME`; the host serves none. */
-    dshCatalog: () => request<DshModelCatalog>("GET", "/catalog/dsh"),
     /** Pi model directory served by this plugin; the host catalog has no Pi entry. */
     piCatalog: () => request<PiModelCatalog>("GET", "/catalog/pi"),
     /** Real `agy models` directory from the Worker environment, read on demand. */

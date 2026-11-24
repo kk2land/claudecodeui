@@ -6,11 +6,9 @@ import { WorkerService } from "../server/service.js";
 import { migrateLegacySettings } from "../server/settings.js";
 import type { WorkerOwner } from "../shared/contracts.js";
 import {
-  dshFixture,
   environment,
   guardianSource,
   piFixture,
-  pluginRoot,
   startInput,
   temporaryRoot,
   tsxLoader,
@@ -43,9 +41,8 @@ test("historical parent+project keeps read and resume after owner generation cha
   const options = {
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { dsh: dshFixture, pi: piFixture },
+    executablePaths: { pi: piFixture },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
-    dshPatch: path.join(pluginRoot, "patches/dsh-session.patch.yml"),
   };
   const first = new WorkerService(options);
   first.updateSettings(migrateLegacySettings({}));
@@ -69,7 +66,7 @@ test("historical parent+project keeps read and resume after owner generation cha
   // A replay of the same start request deduplicates across the generation change.
   const replay = await second.start(
     "generation-2",
-    startInput({ requestId: "shared-request", type: "dsh" }),
+    startInput({ requestId: "shared-request", type: "pi" }),
   );
   assert.equal(replay.worker.id, done.id);
   assert.equal(second.state().workers.length, 1);

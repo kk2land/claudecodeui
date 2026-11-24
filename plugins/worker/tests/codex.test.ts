@@ -5,7 +5,6 @@ import test from "node:test";
 import {
   codexFixture,
   createService,
-  dshFixture,
   piFixture,
   startInput,
   temporaryRoot,
@@ -95,7 +94,7 @@ test("Codex settings replace env/args, explicit selection wins, and secrets stay
     TEST_CAPTURE_FILE: captureFile,
   });
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3, codex: 3 },
+    concurrency: { pi: 3, codex: 3 },
     codex: {
       env: {
         CODEX_PROXY_BYPASS: "0",
@@ -175,7 +174,7 @@ test("Codex admission resolves CODEX_HOME from the merged settings environment",
   const { service } = createService(t, root);
   const home = path.join(root, "settings-codex-home");
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
+    concurrency: { pi: 3 },
     codex: {
       env: { CODEX_HOME: home },
       extraArgs: ["-c", "model_provider=magpie"],
@@ -197,11 +196,9 @@ test("Codex is selectable as the default and accepts provider without a model", 
   const root = temporaryRoot("worker-codex-default-selection-");
   const { service } = createService(t, root);
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
+    concurrency: { pi: 3 },
     defaultWorkerType: "codex",
-    defaults: {
-      dsh: { model: null, effort: null },
-      pi: { model: null, effort: null },
+    defaults: { pi: { model: null, effort: null },
       codex: { model: "codex-default-model", effort: "high" },
     },
   });
@@ -233,7 +230,7 @@ test("Codex resume keeps the recorded thread, home, cwd, and re-reads settings",
   const first = await waitStatus(service, started.worker.id, ["completed"], 15000);
   const firstRun = first.latestRun!;
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3, codex: 3 },
+    concurrency: { pi: 3, codex: 3 },
     codex: {
       env: { CODEX_PROXY_BYPASS: "1", TEST_CODEX_CUSTOM: "resume-value" },
       extraArgs: ["--sandbox", "read-only"],
@@ -337,10 +334,10 @@ test("Codex concurrency is isolated and PATH from settings is used for the execu
     t,
     root,
     { TEST_SCENARIO: "sleep", TEST_DELAY_MS: "300" },
-    { executablePaths: { dsh: dshFixture, pi: piFixture } },
+    { executablePaths: { pi: piFixture } },
   );
   service.updateSettings({
-    concurrency: { dsh: 3, pi: 3, codex: 1 },
+    concurrency: { pi: 3, codex: 1 },
     codex: {
       env: {
         PATH: pathDir + path.delimiter + path.dirname(process.execPath),

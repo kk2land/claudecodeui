@@ -20,7 +20,39 @@ import {
   waitStatus,
 } from "./helpers.js";
 
-test("starts, records, logs, and deduplicates one DSH run", async (t) => {
+type ConfigureSpec = {
+  default: "pi" | "codex" | "agy";
+  enabled?: Partial<Record<"pi" | "codex" | "agy", boolean>>;
+  roles?: Partial<Record<"pi" | "codex" | "agy", NonNullable<WorkerStartInput["taskRole"]>[]>>;
+  concurrency?: Partial<Record<"pi" | "codex" | "agy", number>>;
+  defaults?: Partial<Record<"pi" | "codex" | "agy", { model: string | null; effort: string | null }>>;
+};
+
+function configure(
+  service: ReturnType<typeof createService>["service"],
+  spec: ConfigureSpec,
+): void {
+  const configs = (["pi", "codex", "agy"] as const).map((type) => ({
+    id: type + "-default",
+    name: type + " default",
+    type,
+    enabled: spec.enabled?.[type] ?? true,
+    roles: [...(spec.roles?.[type] ?? [])],
+    concurrency: spec.concurrency?.[type] ?? 3,
+    hardTimeoutSeconds: 600,
+    model: spec.defaults?.[type]?.model ?? null,
+    effort: spec.defaults?.[type]?.effort ?? null,
+    ...(type === "codex"
+      ? { codex: { modelProvider: "magpie", env: { CODEX_PROXY_BYPASS: "1" }, legacyExtraArgs: [] } }
+      : {}),
+  }));
+  service.updateSettings({
+    configs,
+    defaultConfigId: spec.default + "-default",
+  });
+}
+
+test("starts, records, logs, and deduplicates one Pi run", async (t) => {
   const root = temporaryRoot("worker-start-");
   const { service } = createService(t, root);
   const input = startInput({ requestId: "  dedupe-key  " });
@@ -33,17 +65,9 @@ test("starts, records, logs, and deduplicates one DSH run", async (t) => {
     worker.latestRun?.progress.hardTimeoutAt,
     new Date(Date.parse(worker.latestRun!.startedAt!) + 600_000).toISOString(),
   );
-  assert.ok(worker.latestRun?.nativeSessionFile?.endsWith("session.v4.jsonl.zstd"));
-  assert.match(worker.latestRun?.finalText ?? "", /fixture answer/);
-  assert.deepEqual(worker.latestRun?.usage, {
-    inputTokens: 10,
-    outputTokens: 5,
-    cacheReadTokens: null,
-    cacheWriteTokens: null,
-    totalTokens: 15,
-    scope: "run",
-    partial: true,
-  });
+  assert.ok(fs.existsSync(worker.latestRun!.nativeSessionFile!));
+  assert.match(worker.latestRun?.finalText ?? "", /pi answer/);
+  assert.equal(worker.latestRun?.usage, null);
   assert.equal(worker.cwd, path.join(root, "project"));
   const snapshot = service.state({ projectId: "project-1" });
   assert.equal(snapshot.counts.total.completed, 1);
@@ -93,7 +117,7 @@ test("enforces per-key FIFO concurrency", async (t) => {
     TEST_SCENARIO: "sleep",
     TEST_DELAY_MS: "400",
   });
-  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 1 } });
   const first = await service.start("owner-1", startInput({ requestId: "q1" }));
   const second = await service.start("owner-1", startInput({ requestId: "q2" }));
   await waitStatus(service, first.worker.id, ["running"]);
@@ -110,7 +134,7 @@ test("enforces per-key FIFO concurrency", async (t) => {
   );
 });
 
-test("default quotas isolate dsh/pi, parents, and projects while sharing one existing cwd", async (t) => {
+test("default quotas isolate parents and projects while sharing one existing cwd", async (t) => {
   const root = temporaryRoot("worker-concurrency-scope-");
   const { service, project } = createService(t, root, {
     TEST_SCENARIO: "sleep",
@@ -130,42 +154,33 @@ test("default quotas isolate dsh/pi, parents, and projects while sharing one exi
     },
     "owner-2-token",
   );
-  const dsh = [];
-  for (let index = 0; index < 4; index++)
-    dsh.push(await service.start("owner-1", startInput({ requestId: "dsh-" + index })));
   const pi = [];
   for (let index = 0; index < 4; index++)
-    pi.push(
-      await service.start(
-        "owner-1",
-        startInput({ type: "pi", requestId: "pi-" + index }),
-      ),
-    );
+    pi.push(await service.start("owner-1", startInput({ requestId: "pi-" + index })));
   const other = await service.start(
     "owner-2",
     startInput({ requestId: "other-1" }),
   );
-  for (const item of [...dsh.slice(0, 3), ...pi.slice(0, 3), other])
+  for (const item of [...pi.slice(0, 3), other])
     await waitStatus(service, item.worker.id, ["running"]);
-  assert.equal(service.get(dsh[3]!.worker.id).worker.latestRun?.status, "queued");
   assert.equal(service.get(pi[3]!.worker.id).worker.latestRun?.status, "queued");
   assert.equal(service.get(other.worker.id).worker.cwd, fs.realpathSync(project2));
-  assert.equal(service.get(dsh[0]!.worker.id).worker.cwd, fs.realpathSync(project));
+  assert.equal(service.get(pi[0]!.worker.id).worker.cwd, fs.realpathSync(project));
 
-  // Raising the DSH quota admits only that key's queued FIFO item; Pi and the
-  // separate parent/project remain on their own quotas.
-  service.updateSettings({ concurrency: { dsh: 4, pi: 3 } });
-  await waitStatus(service, dsh[3]!.worker.id, ["running"], 1000);
-  assert.equal(service.get(pi[3]!.worker.id).worker.latestRun?.status, "queued");
+  // Raising the Pi quota admits only that key's queued FIFO item; the
+  // separate parent/project remains on its own quota.
+  service.updateSettings({ concurrency: { pi: 4 } });
+  await waitStatus(service, pi[3]!.worker.id, ["running"], 1000);
+  assert.equal(service.get(other.worker.id).worker.latestRun?.status, "running");
 
-  for (const item of [...dsh, ...pi, other])
+  for (const item of [...pi, other])
     await waitStatus(service, item.worker.id, ["completed"], 12000);
 });
 
 test("parents in the same project have independent quotas and request ids", async (t) => {
   const root = temporaryRoot("worker-same-project-");
   const { service, project } = createService(t, root, { TEST_SCENARIO: "sleep", TEST_DELAY_MS: "1500" });
-  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 1 } });
   service.registerOwner({ ...owner(project), id: "other-owner", parentSessionId: "other-parent" }, "other-token");
   const first = await service.start("owner-1", startInput({ requestId: "same-request" }));
   const queued = await service.start("owner-1", startInput({ requestId: "next-request" }));
@@ -212,7 +227,7 @@ test("cancels a running group and holds the notification", async (t) => {
 test("stopping keeps the concurrency slot until the process group is confirmed gone", async (t) => {
   const root = temporaryRoot("worker-stopping-slot-");
   const { service } = createService(t, root, { TEST_SCENARIO: "hangtree" });
-  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 1 } });
   const first = await service.start("owner-1", startInput({ requestId: "stopping-1" }));
   await waitStatus(service, first.worker.id, ["running"]);
   const cancelling = service.cancel({ workerIds: [first.worker.id] }, "host");
@@ -316,7 +331,13 @@ for (const trigger of ["elapsed", "steps"] as const) test(`${trigger} budget ded
   }, { now: () => now });
   const started = await service.start("owner-1", startInput({ requestId: "reminder-1" }));
   await waitStatus(service, started.worker.id, ["running"]);
-  if (trigger === "elapsed") now += 600_000;
+  if (trigger === "elapsed") {
+    await waitFor(
+      () => service.get(started.worker.id).worker.latestRun?.progress.currentTool,
+      (tool) => tool === "read",
+    );
+    now += 600_000;
+  }
   else await waitFor(
     () => service.get(started.worker.id).worker.latestRun?.progress.steps ?? 0,
     (steps) => steps >= 20,
@@ -364,7 +385,7 @@ test("an early step reminder keeps timed reviews active while a tool is silent",
   }, { now: () => now });
   const started = await service.start("owner-1", startInput());
   await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
-    (log) => (log.match(/"phase":"step_end"/g) ?? []).length === 20);
+    (log) => (log.match(/"type":"turn_end"/g) ?? []).length === 20);
   // The guardian appends the event log before the parent consumes the same lines over IPC, and
   // step counting for reminders happens in the parent. Fire the one-second review interval until
   // a reminder exists instead of assuming the parent already consumed all 20 step_end lines; the
@@ -430,25 +451,6 @@ test("credentials stay in the child process and out of run records", async (t) =
   }
 });
 
-test("DSH resume needs only the recorded native identity", async (t) => {
-  const root = temporaryRoot("worker-dsh-identity-");
-  const { service } = createService(t, root);
-  const started = await service.start("owner-1", startInput({ requestId: "identity-1" }));
-  const first = await waitStatus(service, started.worker.id, ["completed"]);
-  const stored = service.store.latestRun(first.id)!;
-  assert.equal(stored.nativeSessionId, "session-fixture-1");
-  stored.nativeSessionFile = null;
-  service.store.saveRun(stored);
-  await service.resume("owner-1", {
-    workerId: first.id,
-    prompt: "resume without transcript",
-    requestId: "identity-2",
-  });
-  const resumed = await waitStatus(service, first.id, ["completed"]);
-  assert.equal(resumed.latestRun?.nativeSessionId, "session-fixture-1");
-  assert.equal(service.get(first.id).runs.length, 2);
-});
-
 test("Pi ignores removed environment model settings", async (t) => {
   const root = temporaryRoot("worker-pi-env-");
   const { service, data, env } = createService(t, root, {
@@ -510,7 +512,7 @@ test("restored unknown rejects pause as STOP_UNCONFIRMED and keeps the slot", as
   const service = new WorkerService({
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { dsh: "", pi: "" },
+    executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
   t.after(() => service.close());
@@ -539,7 +541,7 @@ test("guardian final evidence with groupExited=false stays unknown and unconfirm
   const service = new WorkerService({
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { dsh: "", pi: "" },
+    executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
   t.after(() => service.close());
@@ -585,12 +587,12 @@ test("raising concurrency immediately dispatches queued work", async (t) => {
     TEST_SCENARIO: "sleep",
     TEST_DELAY_MS: "1500",
   });
-  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 1 } });
   const first = await service.start("owner-1", startInput({ requestId: "limit-1" }));
   const second = await service.start("owner-1", startInput({ requestId: "limit-2" }));
   await waitStatus(service, first.worker.id, ["running"]);
   assert.equal(service.get(second.worker.id).worker.latestRun?.status, "queued");
-  service.updateSettings({ concurrency: { dsh: 2, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 2 } });
   const started = Date.now();
   await waitStatus(service, second.worker.id, ["running"], 1000);
   assert.ok(Date.now() - started < 1000);
@@ -599,7 +601,7 @@ test("raising concurrency immediately dispatches queued work", async (t) => {
   await waitStatus(service, second.worker.id, ["completed"]);
 });
 
-test("rejected DSH resume identity never replaces the trusted session", async (t) => {
+test("rejected Pi resume identity never replaces the trusted session", async (t) => {
   const root = temporaryRoot("worker-dsh-wrong-id-");
   const { service, env } = createService(t, root);
   const started = await service.start("owner-1", startInput({ requestId: "trusted-1" }));
@@ -626,7 +628,7 @@ test("rejected DSH resume identity never replaces the trusted session", async (t
   assert.equal(resumed.latestRun?.nativeSessionId, trustedId);
 });
 
-function emptyWorker(project: string, type: "dsh" | "pi" = "dsh"): WorkerRecord {
+function emptyWorker(project: string, type: "dsh" | "pi" = "pi"): WorkerRecord {
   return {
     id: "worker-restart",
     type,
@@ -717,9 +719,18 @@ function seed(
       "events",
       Buffer.from(
         [
-          JSON.stringify({ type: "session", sessionId: "session-fixture-1", cwd: project }),
-          JSON.stringify({ type: "status", phase: "turn_end", reason: { kind: "completed" } }),
-          JSON.stringify({ type: "final", text: "recovered answer" }),
+          JSON.stringify({ type: "session", id: "session-fixture-1", cwd: project }),
+          JSON.stringify({
+            type: "message_end",
+            message: {
+              role: "assistant",
+              stopReason: "stop",
+              content: [{ type: "text", text: "recovered answer" }],
+            },
+          }),
+          JSON.stringify({ type: "turn_end" }),
+          JSON.stringify({ type: "agent_end", willRetry: false }),
+          JSON.stringify({ type: "agent_settled", aborted: false }),
         ].join("\n") + "\n",
       ),
     );
@@ -746,7 +757,7 @@ test("restart keeps an unconfirmed run unknown and recover releases it", async (
   const service = new WorkerService({
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { dsh: "", pi: "" },
+    executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
   t.after(() => service.close());
@@ -771,7 +782,7 @@ test("restart finalizes from guardian evidence without re-running", async (t) =>
   const service = new WorkerService({
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { dsh: "", pi: "" },
+    executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
   t.after(() => service.close());
@@ -795,14 +806,14 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   const { service, data } = createService(t, root);
   // Simulate a row written before defaultWorkerType/defaults existed.
   service.store.saveSettings({
-    concurrency: { dsh: 5, pi: 2 },
+    concurrency: { pi: 5, codex: 2 },
     softReminderSeconds: 42,
     softReminderSteps: 7,
     hardTimeoutSeconds: 90,
   } as never);
   const normalized = service.settings();
-  assert.equal(normalized.defaultWorkerType, "dsh");
-  assert.deepEqual(normalized.enabled, { dsh: true, pi: true, codex: true, agy: false });
+  assert.equal(normalized.defaultWorkerType, "pi");
+  assert.deepEqual(normalized.enabled, { dsh: false, pi: true, codex: true, agy: false });
   assert.deepEqual(normalized.roles, { dsh: [], pi: [], codex: [], agy: [] });
   assert.deepEqual(normalized.defaults, {
     dsh: { model: null, effort: null },
@@ -810,7 +821,7 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     codex: { model: null, effort: null },
     agy: { model: null, effort: null },
   });
-  assert.deepEqual(normalized.concurrency, { dsh: 5, pi: 2, codex: 3, agy: 1 });
+  assert.deepEqual(normalized.concurrency, { dsh: 1, pi: 5, codex: 2, agy: 1 });
   assert.deepEqual(normalized.codex, {
     env: { CODEX_PROXY_BYPASS: "1" },
     extraArgs: ["-c", "model_provider=magpie"],
@@ -821,17 +832,12 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   assert.equal(normalized.retentionDays, 1);
 
   const saved = service.updateSettings({
-    concurrency: { dsh: 6, pi: 1, codex: 2 },
+    concurrency: { pi: 6, codex: 1 },
     retentionDays: 7,
     defaultWorkerType: "pi",
-    enabled: { dsh: true, pi: true, codex: false },
-    roles: {
-      dsh: ["testing", "development"],
-      pi: ["plan_review"],
-      codex: ["code_review"],
-    },
+    enabled: { pi: true, codex: false },
+    roles: { pi: ["plan_review"], codex: ["code_review"] },
     defaults: {
-      dsh: { model: "dsh-model", effort: "high" },
       pi: { model: "  pi-model  ", effort: "low" },
       codex: { model: "codex-model", effort: "xhigh" },
     },
@@ -841,15 +847,15 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     },
   });
   assert.equal(saved.defaultWorkerType, "pi");
-  assert.deepEqual(saved.enabled, { dsh: true, pi: true, codex: false, agy: false });
+  assert.deepEqual(saved.enabled, { dsh: false, pi: true, codex: false, agy: false });
   assert.deepEqual(saved.roles, {
-    dsh: ["testing", "development"],
+    dsh: [],
     pi: ["plan_review"],
     codex: ["code_review"],
     agy: [],
   });
   assert.deepEqual(saved.defaults, {
-    dsh: { model: "dsh-model", effort: "high" },
+    dsh: { model: null, effort: null },
     pi: { model: "pi-model", effort: "low" },
     codex: { model: "codex-model", effort: "xhigh" },
     agy: { model: null, effort: null },
@@ -864,34 +870,24 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
 
   for (const retentionDays of [0, -1, 1.5, null, "2", Number.MAX_SAFE_INTEGER + 1]) {
     assert.throws(
-      () => service.updateSettings({
-        concurrency: { dsh: 9, pi: 9 },
-        retentionDays,
-      } as never),
+      () => service.updateSettings({ concurrency: { pi: 9 }, retentionDays } as never),
       /retentionDays 必须是正整数/,
     );
     assert.deepEqual(service.settings(), saved);
   }
 
-  // An invalid field rejects the whole update: counts and defaults stay at the saved values.
   assert.throws(
     () =>
       service.updateSettings({
-        concurrency: { dsh: 9, pi: 9 },
-        defaultWorkerType: "dsh",
-        defaults: {
-          dsh: { model: null, effort: "high" },
-          pi: { model: null, effort: null },
-        },
+        concurrency: { pi: 9 },
+        defaultWorkerType: "pi",
+        defaults: { pi: { model: null, effort: "extreme" } },
       }),
-    /defaults\.dsh\.effort/,
+    /defaults\.pi\.effort/,
   );
   assert.deepEqual(service.settings(), saved);
   assert.throws(
-    () =>
-      service.updateSettings({
-        concurrency: { dsh: 0, pi: 1 },
-      }),
+    () => service.updateSettings({ concurrency: { pi: 0 } }),
     /正整数/,
   );
   assert.deepEqual(service.settings(), saved);
@@ -903,11 +899,7 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     { env: ["not-a-map"], extraArgs: [] },
   ]) {
     assert.throws(
-      () =>
-        service.updateSettings({
-          concurrency: { dsh: 9, pi: 9 },
-          codex: codex as never,
-        }),
+      () => service.updateSettings({ concurrency: { pi: 9 }, codex: codex as never }),
       (error: unknown) =>
         /codex\.(env|extraArgs)/.test(String(error)) &&
         !String(error).includes(secret),
@@ -915,30 +907,21 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     assert.deepEqual(service.settings(), saved);
   }
   assert.throws(
-    () =>
-      service.updateSettings({
-        concurrency: { dsh: 9, pi: 9, codex: 0 },
-      }),
+    () => service.updateSettings({ concurrency: { pi: 9, codex: 0 } }),
     /concurrency\.codex 必须是正整数/,
   );
   assert.deepEqual(service.settings(), saved);
 
   for (const invalid of [
-    { enabled: { dsh: true, pi: true } },
-    { enabled: { dsh: true, pi: true, codex: "false" } },
-    { roles: { dsh: [], pi: [] } },
-    { roles: { dsh: [], pi: ["unknown-role"], codex: [] } },
-    { roles: { dsh: [7], pi: [], codex: [] } },
-    { defaultWorkerType: "codex" },
-    { enabled: { dsh: true, pi: false, codex: true } },
-    { enabled: { dsh: false, pi: false, codex: false } },
+    { enabled: { pi: true } },
+    { enabled: { pi: true, codex: "false" } },
+    { roles: { pi: [] } },
+    { roles: { pi: ["unknown-role"], codex: [] } },
+    { roles: { pi: [7], codex: [] } },
+    { enabled: { pi: false, codex: false } },
   ]) {
     assert.throws(
-      () =>
-        service.updateSettings({
-          concurrency: { dsh: 9, pi: 9 },
-          ...invalid,
-        } as never),
+      () => service.updateSettings({ concurrency: { pi: 9 }, ...invalid } as never),
       /enabled|roles|defaultWorkerType/,
     );
     assert.deepEqual(service.settings(), saved);
@@ -954,11 +937,10 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
     assert.throws(
       () =>
         service.updateSettings({
-          concurrency: { dsh: 9, pi: 9, codex: 9 },
-          defaultWorkerType: "dsh",
+          concurrency: { pi: 9 },
+          defaultWorkerType: "pi",
           defaults: {
-            dsh: { model: "changed", effort: null },
-            pi: { model: null, effort: null },
+            pi: { model: "changed", effort: null },
             codex: { model: "changed", effort: null },
           },
           codex: { env: { SECRET: secret }, extraArgs },
@@ -979,28 +961,25 @@ test("settings persist configured defaults, normalize legacy rows, and validate 
   t.after(() => reopened.close());
   assert.deepEqual(reopened.settings(), saved);
 
-  // A legacy concurrency-only update preserves the new fields, including custom Codex values.
-  const updated = service.updateSettings({ concurrency: { dsh: 2, pi: 4 } });
+  const updated = service.updateSettings({ concurrency: { pi: 4 } });
   assert.equal(updated.defaultWorkerType, "pi");
   assert.deepEqual(updated.enabled, saved.enabled);
   assert.deepEqual(updated.roles, saved.roles);
   assert.deepEqual(updated.defaults, saved.defaults);
   assert.deepEqual(updated.codex, saved.codex);
-  assert.equal(updated.concurrency.codex, 2);
+  assert.equal(updated.concurrency.codex, 1);
   assert.equal(updated.retentionDays, 7);
 
-  // Explicit empty env/args clears the prefilled values instead of restoring them.
   const cleared = service.updateSettings({
-    concurrency: { dsh: 2, pi: 4 },
+    concurrency: { pi: 4 },
     codex: { env: {}, extraArgs: [] },
   });
   assert.deepEqual(cleared.codex, { env: {}, extraArgs: [] });
-  assert.deepEqual(service.updateSettings({ concurrency: { dsh: 2, pi: 4 } }).codex, {
+  assert.deepEqual(service.updateSettings({ concurrency: { pi: 4 } }).codex, {
     env: {},
     extraArgs: [],
   });
 });
-
 test("omitted type uses configured defaults ahead of Pi environment, and replay ignores later changes", async (t) => {
   const root = temporaryRoot("worker-default-selection-");
   const { service, data } = createService(t, root, {
@@ -1008,18 +987,11 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
     CODEX_PI_PROVIDER: "env-provider",
     CODEX_PI_THINKING: "low",
   });
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "pi",
-    defaults: {
-      dsh: { model: "dsh-default", effort: "high" },
-      pi: { model: "pi-default", effort: "medium" },
-    },
+  configure(service, {
+    default: "pi",
+    defaults: { pi: { model: "pi-default", effort: "medium" } },
   });
-  const input = startInput({
-    type: undefined,
-    requestId: "default-pi-1",
-  });
+  const input = startInput({ type: undefined, requestId: "default-pi-1" });
   const started = await service.start("owner-1", input);
   const first = await waitStatus(service, started.worker.id, ["completed"]);
   assert.equal(first.type, "pi");
@@ -1039,56 +1011,33 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
 
   const explicit = await service.start(
     "owner-1",
-    startInput({
-      type: "dsh",
-      model: "explicit-dsh",
-      effort: "low",
-      requestId: "explicit-dsh-1",
-    }),
+    startInput({ type: "pi", model: "explicit-pi", effort: "low", requestId: "explicit-pi-1" }),
   );
   const explicitWorker = await waitStatus(service, explicit.worker.id, ["completed"]);
-  assert.equal(explicitWorker.type, "dsh");
-  assert.equal(explicitWorker.latestRun?.model, "explicit-dsh");
+  assert.equal(explicitWorker.type, "pi");
+  assert.equal(explicitWorker.latestRun?.model, "explicit-pi");
   assert.equal(explicitWorker.latestRun?.effort, "low");
-  const dshSpec = JSON.parse(
+  const explicitSpec = JSON.parse(
     fs.readFileSync(
       path.join(data, "logs", explicitWorker.id, explicitWorker.latestRun!.id, "spec.json"),
       "utf8",
     ),
   ) as { argv: string[] };
-  const modelPatch = dshSpec.argv
-    .filter((value, index) => index > 0 && dshSpec.argv[index - 1] === "--patch")
-    .map((file) => {
-      try {
-        return JSON.parse(fs.readFileSync(file, "utf8")) as unknown;
-      } catch {
-        return null;
-      }
-    })
-    .find((value) => Array.isArray(value)) as [
-    { config: { provider: string; model: string; reasoningEffort?: string } },
-  ];
-  assert.deepEqual(modelPatch[0]!.config, {
-    provider: "deepseek-official",
-    model: "explicit-dsh",
-    reasoningEffort: "low",
-  });
+  assert.deepEqual(
+    explicitSpec.argv.slice(explicitSpec.argv.indexOf("--model")),
+    ["--model", "explicit-pi", "--thinking", "low"],
+  );
 
   // The same raw request replay returns the original Pi run even though the default changed.
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "dsh",
-    defaults: {
-      dsh: { model: "changed-dsh", effort: null },
-      pi: { model: "changed-pi", effort: null },
-    },
+  configure(service, {
+    default: "codex",
+    defaults: { pi: { model: "changed-pi", effort: null } },
   });
   const replayed = await service.start("owner-1", input);
   assert.equal(replayed.worker.id, first.id);
   assert.equal(replayed.run.id, first.latestRun?.id);
   assert.equal(service.get(first.id).runs.length, 1);
 });
-
 test("task roles route omitted types through enabled matches, config order, and default fallback", async (t) => {
   const root = temporaryRoot("worker-role-selection-");
   const { service } = createService(t, root);
@@ -1103,83 +1052,76 @@ test("task roles route omitted types through enabled matches, config order, and 
   };
 
   // The only matching enabled type wins even when it is not the configured default.
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "dsh",
-    enabled: { dsh: true, pi: true, codex: true },
-    roles: { dsh: ["testing"], pi: ["plan_review"], codex: ["testing"] },
+  configure(service, {
+    default: "agy",
+    roles: { pi: ["plan_review"], codex: ["testing"], agy: ["testing"] },
   });
   assert.equal(await start("plan_review"), "pi");
-  assert.equal(await start(undefined), "dsh");
+  assert.equal(await start(undefined), "agy");
 
   // Multiple role matches follow config order, including when a later match is the default.
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "pi",
-    roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
+  configure(service, {
+    default: "pi",
+    roles: { pi: ["testing"], codex: ["testing"] },
   });
-  assert.equal(await start("testing"), "dsh");
+  assert.equal(await start("testing"), "pi");
   assert.equal(await start(), "pi");
 
   // A default without a role match also leaves the config order unchanged.
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "codex",
-    roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
-  });
-  assert.equal(await start("testing"), "dsh");
-
-  // Disabled matches are excluded before default/order selection.
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "pi",
-    enabled: { dsh: false, pi: true, codex: true },
-    roles: { dsh: ["testing"], pi: ["testing"], codex: [] },
+  configure(service, {
+    default: "codex",
+    roles: { pi: ["testing"], codex: ["testing"] },
   });
   assert.equal(await start("testing"), "pi");
-  await assert.rejects(
-    () => start("testing", "dsh"),
-    /该 worker 类型已禁用/,
-  );
 
-  // No role match and no role both fall back to the default. An explicit enabled type wins even
-  // when the supplied role matches other types and not the explicitly selected type.
+  // Disabled matches are excluded before default/order selection.
+  configure(service, {
+    default: "pi",
+    enabled: { agy: false },
+    roles: { pi: ["testing"], agy: ["testing"] },
+  });
+  assert.equal(await start("testing"), "pi");
+  await assert.rejects(() => start("testing", "agy"), /该 worker 类型已禁用/);
+
   assert.equal(await start("code_review"), "pi");
   assert.equal(await start("testing", "codex"), "codex");
 
-  for (const workerId of started)
-    await waitStatus(service, workerId, ["completed"]);
+  for (const workerId of started) await waitStatus(service, workerId, ["completed"]);
   assert.equal(service.state().workers.length, started.length);
 });
-
 test("disabling a type keeps accepted queued work but rejects new starts and resumes", async (t) => {
   const root = temporaryRoot("worker-role-disable-");
   const { service } = createService(t, root, {
     TEST_SCENARIO: "sleep",
     TEST_DELAY_MS: "300",
   });
-  service.updateSettings({
-    concurrency: { dsh: 1, pi: 1 },
-    defaultWorkerType: "dsh",
-    enabled: { dsh: true, pi: true, codex: true },
-    roles: { dsh: ["testing"], pi: [], codex: [] },
+  configure(service, {
+    default: "agy",
+    concurrency: { agy: 1 },
+    roles: { agy: ["testing"] },
   });
-  const running = await service.start("owner-1", startInput({ requestId: "disable-running" }));
+  const running = await service.start(
+    "owner-1",
+    startInput({ type: "agy", requestId: "disable-running" }),
+  );
   await waitStatus(service, running.worker.id, ["running"]);
-  const queued = await service.start("owner-1", startInput({ requestId: "disable-queued" }));
+  const queued = await service.start(
+    "owner-1",
+    startInput({ type: "agy", requestId: "disable-queued" }),
+  );
   assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
 
-  service.updateSettings({
-    concurrency: { dsh: 1, pi: 1 },
-    defaultWorkerType: "pi",
-    enabled: { dsh: false, pi: true, codex: true },
+  configure(service, {
+    default: "pi",
+    concurrency: { agy: 1 },
+    enabled: { agy: false },
   });
   // Work accepted before the change still runs and completes.
   await waitStatus(service, running.worker.id, ["completed"]);
   await waitStatus(service, queued.worker.id, ["completed"]);
 
   await assert.rejects(
-    () => service.start("owner-1", startInput({ type: "dsh", requestId: "disable-new" })),
+    () => service.start("owner-1", startInput({ type: "agy", requestId: "disable-new" })),
     /该 worker 类型已禁用/,
   );
   // An omitted type no longer matches the disabled role type and falls back to the default.
@@ -1193,81 +1135,59 @@ test("disabling a type keeps accepted queued work but rejects new starts and res
     prompt: "continue",
     requestId: "disable-resume",
   };
-  await assert.rejects(
-    () => service.resume("owner-1", resumeInput),
-    /该 worker 类型已禁用/,
-  );
+  await assert.rejects(() => service.resume("owner-1", resumeInput), /该 worker 类型已禁用/);
   assert.equal(service.get(running.worker.id).runs.length, 1);
 
-  service.updateSettings({
-    concurrency: { dsh: 1, pi: 1 },
-    defaultWorkerType: "dsh",
-    enabled: { dsh: true, pi: true, codex: true },
+  configure(service, {
+    default: "agy",
+    concurrency: { agy: 1 },
+    roles: { agy: ["testing"] },
   });
   const resumed = await service.resume("owner-1", resumeInput);
-  assert.equal(resumed.worker.type, "dsh");
+  assert.equal(resumed.worker.type, "agy");
   await waitStatus(service, resumed.worker.id, ["completed"]);
   assert.equal(service.get(running.worker.id).runs.length, 2);
 
   // A replay of the already accepted resume returns its original run even while disabled.
-  service.updateSettings({
-    concurrency: { dsh: 1, pi: 1 },
-    defaultWorkerType: "pi",
-    enabled: { dsh: false, pi: true, codex: true },
+  configure(service, {
+    default: "pi",
+    concurrency: { agy: 1 },
+    enabled: { agy: false },
   });
   const replayedResume = await service.resume("owner-1", resumeInput);
   assert.equal(replayedResume.run.id, resumed.run.id);
   assert.equal(service.get(running.worker.id).runs.length, 2);
 });
-
 test("task roles are part of start replay identity and settings changes keep replayed work", async (t) => {
   const root = temporaryRoot("worker-role-replay-");
   const { service } = createService(t, root);
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "dsh",
-    enabled: { dsh: true, pi: true, codex: true },
-    roles: { dsh: ["code_review"], pi: [], codex: [] },
+  configure(service, {
+    default: "agy",
+    roles: { agy: ["code_review"] },
   });
-  const input = startInput({
-    type: undefined,
-    taskRole: "code_review",
-    requestId: "role-replay",
-  });
+  const input = startInput({ type: undefined, taskRole: "code_review", requestId: "role-replay" });
   const started = await service.start("owner-1", input);
-  assert.equal(started.worker.type, "dsh");
+  assert.equal(started.worker.type, "agy");
   assert.equal(started.worker.taskRole, "code_review");
 
   // Later configuration changes, including disabling the original type, never reinterpret the
   // accepted request.
-  service.updateSettings({
-    concurrency: { dsh: 3, pi: 3 },
-    defaultWorkerType: "pi",
-    enabled: { dsh: false, pi: true, codex: true },
-    roles: { dsh: [], pi: ["code_review"], codex: [] },
+  configure(service, {
+    default: "pi",
+    enabled: { agy: false },
+    roles: { pi: ["code_review"] },
   });
   const replayed = await service.start("owner-1", input);
   assert.equal(replayed.worker.id, started.worker.id);
   assert.equal(replayed.run.id, started.run.id);
-  assert.equal(replayed.worker.type, "dsh");
+  assert.equal(replayed.worker.type, "agy");
 
-  // The same requestId with a different role is a conflict, not a second worker.
   await assert.rejects(
-    () =>
-      service.start(
-        "owner-1",
-        startInput({
-          type: undefined,
-          taskRole: "testing",
-          requestId: "role-replay",
-        }),
-      ),
+    () => service.start("owner-1", startInput({ type: undefined, taskRole: "testing", requestId: "role-replay" })),
     /requestId 已用于不同的请求内容或操作/,
   );
   assert.equal(service.get(started.worker.id).runs.length, 1);
 
-  // Records created before roles existed still omit the field and replay normally on an
-  // enabled type while dsh remains disabled.
   const legacy = await service.start(
     "owner-1",
     startInput({ type: "pi", requestId: "legacy-without-role" }),
@@ -1281,20 +1201,16 @@ test("task roles are part of start replay identity and settings changes keep rep
   assert.equal(legacyReplay.worker.id, legacy.worker.id);
   assert.equal(service.get(legacy.worker.id).runs.length, 1);
 });
-
 test("queued runs keep accepted defaults and resume retains recorded selection", async (t) => {
   const root = temporaryRoot("worker-default-queue-");
   const { service, data } = createService(t, root, {
     TEST_SCENARIO: "sleep",
     TEST_DELAY_MS: "300",
   });
-  service.updateSettings({
-    concurrency: { dsh: 1, pi: 1 },
-    defaultWorkerType: "dsh",
-    defaults: {
-      dsh: { model: "accepted-model", effort: "high" },
-      pi: { model: null, effort: null },
-    },
+  configure(service, {
+    default: "pi",
+    concurrency: { pi: 1 },
+    defaults: { pi: { model: "accepted-model", effort: "high" } },
   });
   const blocker = await service.start("owner-1", startInput({ requestId: "queue-blocker" }));
   await waitStatus(service, blocker.worker.id, ["running"]);
@@ -1304,13 +1220,10 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
   );
   assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
   assert.equal(queued.run.model, "accepted-model");
-  service.updateSettings({
-    concurrency: { dsh: 1, pi: 1 },
-    defaultWorkerType: "dsh",
-    defaults: {
-      dsh: { model: "changed-model", effort: "low" },
-      pi: { model: null, effort: null },
-    },
+  configure(service, {
+    default: "pi",
+    concurrency: { pi: 1 },
+    defaults: { pi: { model: "changed-model", effort: "low" } },
   });
   const retained = service.get(queued.worker.id).worker.latestRun!;
   assert.equal(retained.model, "accepted-model");
@@ -1322,23 +1235,17 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
       "utf8",
     ),
   ) as { argv: string[] };
-  const patchFile = spec.argv
-    .filter((value, index) => index > 0 && spec.argv[index - 1] === "--patch")
-    .find((file) => file.endsWith("model.patch.yml"))!;
-  const patch = JSON.parse(fs.readFileSync(patchFile, "utf8")) as [
-    { config: { model: string; reasoningEffort?: string } },
-  ];
-  assert.equal(patch[0]!.config.model, "accepted-model");
-  assert.equal(patch[0]!.config.reasoningEffort, "high");
+  assert.deepEqual(
+    spec.argv.slice(spec.argv.indexOf("--model")),
+    ["--model", "accepted-model", "--thinking", "high"],
+  );
 
   const resumed = await service.resume("owner-1", {
     workerId: finished.id,
     prompt: "resume with recorded defaults",
     requestId: "resume-defaulted",
   });
-  // The recorded DSH run used a bare model; its generated patch is the only reliable historical
-  // route, so resume folds that provider into the full model id.
-  assert.equal(resumed.run.model, "deepseek-official/accepted-model");
+  assert.equal(resumed.run.model, "accepted-model");
   assert.equal(resumed.run.provider, null);
   assert.equal(resumed.run.effort, "high");
   await waitStatus(service, finished.id, ["completed"]);
@@ -1352,14 +1259,13 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
   assert.equal(overridden.run.model, "explicit-resume");
   assert.equal(overridden.run.effort, "medium");
 });
-
 test("active Worker queries are scoped to one runtime owner and ignore terminal runs", async (t) => {
   const root = temporaryRoot("worker-active-owner-");
   const { service, project } = createService(t, root, {
     TEST_SCENARIO: "sleep",
     TEST_DELAY_MS: "300",
   });
-  service.updateSettings({ concurrency: { dsh: 1, pi: 1 } });
+  service.updateSettings({ concurrency: { pi: 1 } });
   service.registerOwner({ ...owner(project), id: "owner-2", parentSessionId: "parent-2", appServerInstanceId: "app-2" }, "owner-2-token");
   const first = await service.start("owner-1", startInput({ requestId: "active-1" }));
   const queued = await service.start("owner-1", startInput({ requestId: "active-2" }));

@@ -50,95 +50,7 @@ function run(root: string, values: Partial<WorkerRun> = {}): WorkerRun {
   };
 }
 
-test("DSH uses headless, configured patches, persistence patch, model patch and session id", () => {
-  const root = temporaryRoot("worker-native-dsh-");
-  const runDirectory = path.join(root, "run");
-  fs.mkdirSync(runDirectory, { recursive: true });
-  const patch = path.join(root, "session.patch.yml");
-  fs.writeFileSync(patch, "[]");
-  const runPatch = path.join(runDirectory, "dsh-session.patch.yml");
-  const custom = path.join(root, "custom.patch.yml");
-  fs.writeFileSync(custom, "[]");
-  const current = run(root, {
-    model: "provider/model",
-    provider: "legacy-provider",
-    effort: "high",
-  });
-  const launch = prepareLaunch({
-    type: "dsh",
-    run: current,
-    cwd: path.join(root, "project"),
-    prompt: "hello",
-    previous: null,
-    dataDirectory: path.join(root, "data"),
-    runDirectory,
-    executable: "/bin/fake-dsh",
-    baseEnvironment: {
-      DSH_HOME: path.join(root, "dsh-home"),
-      CLOUDCLI_DSH_PATCHES: JSON.stringify([custom]),
-      CLOUDCLI_DSH_PROVIDER: "environment-provider",
-    },
-    dshPatch: patch,
-  });
-  assert.equal(launch.argv[0], "/bin/fake-dsh");
-  assert.deepEqual(launch.argv.slice(1, 5), [
-    "--profile",
-    "headless",
-    "--patch",
-    runPatch,
-  ]);
-  assert.equal(launch.argv.includes(custom), false);
-  assert.equal(fs.readFileSync(runPatch, "utf8"), fs.readFileSync(patch, "utf8"));
-  assert.ok(launch.argv.includes("--json"));
-  assert.equal(launch.argv.at(-1), "-");
-  assert.equal(launch.argv.includes("--session-id"), false);
-  const modelPatch = launch.argv[launch.argv.lastIndexOf("--patch") + 1]!;
-  assert.deepEqual(JSON.parse(fs.readFileSync(modelPatch, "utf8")), [
-    {
-      id: "agent-default-model",
-      config: { provider: "provider", model: "model", reasoningEffort: "high" },
-    },
-  ]);
-  assert.equal(launch.env.DSH_HOME, path.join(root, "dsh-home"));
-  assert.equal(
-    launch.env.CODEX_DSH_SESSIONS_ROOT,
-    path.join(root, "data", "sessions", "dsh"),
-  );
-
-  // DSH restore uses the recorded native id only; no local transcript file is required.
-  const previous = run(root, {
-    home: path.join(root, "dsh-home"),
-    nativeSessionId: "session-abc",
-    nativeSessionFile: null,
-  });
-  const resumedDirectory = path.join(root, "resumed-run");
-  fs.mkdirSync(resumedDirectory);
-  const resumed = prepareLaunch({
-    type: "dsh",
-    run: previous,
-    cwd: path.join(root, "project"),
-    prompt: "again",
-    previous,
-    dataDirectory: path.join(root, "data"),
-    runDirectory: resumedDirectory,
-    executable: "/bin/fake-dsh",
-    baseEnvironment: { DSH_HOME: "/wrong-home" },
-    dshPatch: patch,
-  });
-  const resumedPatch = path.join(resumedDirectory, "dsh-session.patch.yml");
-  assert.equal(resumed.argv[resumed.argv.indexOf("--patch") + 1], resumedPatch);
-  assert.equal(fs.readFileSync(resumedPatch, "utf8"), fs.readFileSync(patch, "utf8"));
-  assert.deepEqual(
-    resumed.argv.slice(
-      resumed.argv.indexOf("--session-id"),
-      resumed.argv.indexOf("--session-id") + 2,
-    ),
-    ["--session-id", "session-abc"],
-  );
-  assert.equal(resumed.env.DSH_HOME, path.join(root, "dsh-home"));
-});
-
-test("DSH validates patches and effort; Pi uses recorded values and print/json arguments", () => {
+test("DSH cannot launch; Pi keeps recorded model, effort and session arguments", () => {
   const root = temporaryRoot("worker-native-pi-");
   const runDirectory = path.join(root, "run");
   fs.mkdirSync(runDirectory, { recursive: true });
@@ -146,7 +58,7 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
     () =>
       prepareLaunch({
         type: "dsh",
-        run: run(root, { effort: "high" }),
+        run: run(root),
         cwd: root,
         prompt: "x",
         previous: null,
@@ -154,10 +66,10 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
         runDirectory,
         executable: "/bin/fake-dsh",
         baseEnvironment: {},
-        dshPatch: path.join(root, "patch.yml"),
       }),
-    /effort/,
+    (error: { code?: string }) => error.code === "WORKER_TYPE_UNSUPPORTED",
   );
+
   const pi = prepareLaunch({
     type: "pi",
     run: run(root, {
@@ -177,7 +89,6 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
       CODEX_PI_MODEL: "changed-environment-model",
       CODEX_PI_THINKING: "low",
     },
-    dshPatch: path.join(root, "patch.yml"),
   });
   assert.deepEqual(pi.argv.slice(0, 6), [
     "/bin/fake-pi",
@@ -187,15 +98,12 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
     "--session-dir",
     path.join(root, "data", "sessions", "pi"),
   ]);
-  assert.deepEqual(
-    pi.argv.slice(pi.argv.indexOf("--model")),
-    [
-      "--model",
-      "provider/sub/model",
-      "--thinking",
-      "high",
-    ],
-  );
+  assert.deepEqual(pi.argv.slice(pi.argv.indexOf("--model")), [
+    "--model",
+    "provider/sub/model",
+    "--thinking",
+    "high",
+  ]);
   assert.equal(pi.argv.at(-1) === "-", false);
   const configured = prepareLaunch({
     type: "pi",
@@ -207,12 +115,26 @@ test("DSH validates patches and effort; Pi uses recorded values and print/json a
     runDirectory,
     executable: "/bin/fake-pi",
     baseEnvironment: {},
-    dshPatch: path.join(root, "patch.yml"),
   });
   assert.equal(configured.argv.includes("--model"), false);
   assert.deepEqual(
     configured.argv.slice(configured.argv.indexOf("--thinking")),
     ["--thinking", "low"],
+  );
+  assert.throws(
+    () =>
+      prepareLaunch({
+        type: "pi",
+        run: run(root, { workerId: "worker-pi", id: "run-pi-3", model: null, effort: "extreme" }),
+        cwd: root,
+        prompt: "x",
+        previous: null,
+        dataDirectory: path.join(root, "data"),
+        runDirectory,
+        executable: "/bin/fake-pi",
+        baseEnvironment: {},
+      }),
+    /thinking/i,
   );
 });
 
@@ -403,7 +325,6 @@ test("Codex launch uses exec json, configured args, explicit overrides, and stdi
       "-m",
       "args-short",
     ],
-    dshPatch: "",
   });
   assert.deepEqual(launch.argv, [
     "/bin/fake-codex",
@@ -449,7 +370,6 @@ test("Codex resume keeps the thread id and places every option before resume", (
     executable: "/bin/fake-codex",
     baseEnvironment: { PATH: "/bin" },
     codexExtraArgs: ["--sandbox", "read-only"],
-    dshPatch: "",
   });
   assert.deepEqual(launch.argv.slice(1), [
     "exec",

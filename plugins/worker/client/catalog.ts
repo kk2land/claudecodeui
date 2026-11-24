@@ -2,11 +2,10 @@ import type {
   AgyModelCatalog,
   CodexModelsDirectory,
   CodexServiceModelCatalog,
-  DshModelCatalog,
   PiModelCatalog,
   WorkerModelCatalog,
   WorkerModelOption,
-  WorkerType,
+  SupportedWorkerType,
 } from "../shared/contracts.js";
 import type { WorkerHost } from "./api.js";
 
@@ -27,8 +26,7 @@ export const SAVED_SUFFIX = "（当前已保存）";
 
 /**
  * Reads the optional host Codex model catalog. A missing capability rejects so the editor shows a
- * local, retryable error instead of pretending the catalog is empty. DSH has no host entry: the
- * plugin serves its own directory from `DSH_HOME`.
+ * local, retryable error instead of pretending the catalog is empty.
  */
 export async function readHostModels(
   host: WorkerHost,
@@ -71,44 +69,6 @@ function withSavedModel(
     ...options,
     { value: model, label: model + SAVED_SUFFIX, effort: effort ? [effort] : [] },
   ];
-}
-
-/**
- * DSH model rows from the plugin's own directory. The route is the exact persisted `model` value
- * (`provider/model`); DSH applies reasoning only to an explicit model, so the default row carries
- * no levels.
- */
-export function dshModelOptions(
-  catalog: DshModelCatalog | null,
-  model: string | null,
-  effort: string | null,
-): ModelSelectOption[] {
-  const options: ModelSelectOption[] = [
-    { value: "", label: DEFAULT_MODEL_LABEL, effort: [] },
-    ...(catalog?.models ?? []).map((option) => ({
-      value: option.route,
-      label: option.label,
-      effort: option.efforts,
-    })),
-  ];
-  return withSavedModel(options, model, effort);
-}
-
-/**
- * DSH effort levels for the current route: the levels the static directory declares for a listed
- * model, the engine's levels for a route typed outside the directory, and none while no model is
- * selected because DSH applies reasoning only to an explicit model.
- */
-export function dshEffortLevels(
-  catalog: DshModelCatalog | null,
-  model: string | null,
-): string[] {
-  if (!model) return [];
-  return (
-    catalog?.models.find((option) => option.route === model)?.efforts ??
-    catalog?.effortLevels ??
-    []
-  );
 }
 
 /**
@@ -160,7 +120,7 @@ export function piModelOptions(
   const levels = catalog?.thinkingLevels ?? [];
   const options: ModelSelectOption[] = [
     // Pi may apply effort to its configured default model, so the default row carries the
-    // endpoint's thinking levels while DSH still requires an explicit model.
+    // endpoint's thinking levels.
     { value: "", label: DEFAULT_MODEL_LABEL, effort: levels },
     ...(catalog?.models ?? []).map((option) => {
       const value = option.provider + "/" + option.id;
@@ -203,17 +163,18 @@ export function agyModelOptions(
 
 /** Model rows for a draft config of any engine; unavailable catalogs yield only the default. */
 export function modelOptionsFor(
-  config: { type: WorkerType; model: string | null; effort: string | null },
+  config: {
+    type: SupportedWorkerType;
+    model: string | null;
+    effort: string | null;
+  },
   catalogs: {
     agy: AgyModelCatalog | null;
-    dsh: DshModelCatalog | null;
     codex: WorkerModelCatalog | null;
     codexProviderModels: string[] | null;
     pi: PiModelCatalog | null;
   },
 ): ModelSelectOption[] {
-  if (config.type === "dsh")
-    return dshModelOptions(catalogs.dsh, config.model, config.effort);
   if (config.type === "pi")
     return piModelOptions(catalogs.pi, config.model, config.effort);
   if (config.type === "agy")

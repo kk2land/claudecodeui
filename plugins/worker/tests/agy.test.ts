@@ -125,7 +125,6 @@ test("agy prepares print/stream-json with prompt, model, effort and native conti
     runDirectory: path.join(root, "run"),
     executable: "/bin/fake-agy",
     baseEnvironment: { PATH: "/usr/bin" },
-    dshPatch: path.join(root, "patch.yml"),
   });
   assert.deepEqual(launch.argv, [
     "/bin/fake-agy",
@@ -157,7 +156,6 @@ test("agy prepares print/stream-json with prompt, model, effort and native conti
     runDirectory: path.join(root, "run-2"),
     executable: "/bin/fake-agy",
     baseEnvironment: {},
-    dshPatch: path.join(root, "patch.yml"),
   });
   assert.deepEqual(resumed.argv.slice(-2), ["--conversation", "conversation-1"]);
   assert.equal(resumed.expectedSessionId, "conversation-1");
@@ -429,7 +427,7 @@ test("agy rejects known model/effort conflicts at config, start and resume bound
   assert.equal(saved.concurrency.agy, 3);
 
   // Legacy updates keep editing only dsh/pi/codex and never remove the agy config.
-  const legacy = service.updateSettings({ concurrency: { dsh: 2, pi: 2 } });
+  const legacy = service.updateSettings({ concurrency: { pi: 2 } });
   assert.equal(legacy.configs.some((config) => config.id === "agy-default"), true);
   assert.equal(legacy.defaultWorkerType, "agy");
 
