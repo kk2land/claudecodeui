@@ -514,6 +514,7 @@ function ChatInterface({
     setPendingPermissionRequests,
     resolvePermissionModeForProvider,
     supportsSideQuestions,
+    isVisible: isActive,
   });
 
   // On WebSocket reconnect, request a bounded persisted-tail sync (deferred
@@ -880,6 +881,7 @@ function ChatInterface({
           onInputFocusChange={handleInputFocusChange}
           placeholder={t('input.placeholder', { provider: selectedProviderLabel })}
           isTextareaExpanded={isTextareaExpanded}
+          isVisible={isActive}
           sendByCtrlEnter={sendByCtrlEnter}
           composerPrediction={provider === 'codex' && (codexControls.predictionsSupported || codexControls.predictionsUnsupported)
             ? composerPrediction : undefined}

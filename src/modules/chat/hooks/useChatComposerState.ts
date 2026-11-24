@@ -107,6 +107,13 @@ type UseChatComposerStateArgs = {
   setPendingPermissionRequests: Dispatch<SetStateAction<PendingPermissionRequest[]>>;
   /** From the capability matrix, exactly like `supportsSessionForking`; false until it has loaded. Gates the `/btw` branch. */
   supportsSideQuestions?: boolean;
+  /**
+   * Whether this chat is actually rendered. A hidden chat (another workspace tab
+   * is open) restores drafts, but must not autosize against a zero-height layout
+   * and cache that measurement; ChatComposer re-measures in a layout effect the
+   * commit this becomes true again.
+   */
+  isVisible?: boolean;
 };
 
 type MentionableFile = {
@@ -339,6 +346,7 @@ export function useChatComposerState({
   addMessage,
   setIsUserScrolledUp,
   setPendingPermissionRequests,
+  isVisible = true,
 }: UseChatComposerStateArgs) {
   const { t } = useTranslation('chat');
   // The composer text together with the chat scope it belongs to. They are one
@@ -2358,7 +2366,9 @@ export function useChatComposerState({
   }, [sessionKey]);
 
   useEffect(() => {
-    if (!textareaRef.current) {
+    if (!textareaRef.current || !isVisible) {
+      // A hidden chat has no layout: `scrollHeight` would be 0, so measuring now
+      // would cache the collapsed height and skip the real measurement later.
       return;
     }
     if (lastAutosizedInputRef.current === input) {
@@ -2367,7 +2377,7 @@ export function useChatComposerState({
     // Re-run for restored drafts and programmatic input changes. User typing is
     // already resized in onInput, so this avoids doing the same forced layout twice.
     resizeTextarea(textareaRef.current);
-  }, [input, resizeTextarea]);
+  }, [input, isVisible, resizeTextarea]);
 
   useEffect(() => {
     if (!textareaRef.current || input.trim()) {

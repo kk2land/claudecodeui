@@ -163,6 +163,8 @@ type ChatComposerProps = {
   onInputFocusChange?: (focused: boolean) => void;
   placeholder: string;
   isTextareaExpanded: boolean;
+  /** False while another workspace tab hides this chat; the autosize effect then waits for the visible commit. */
+  isVisible?: boolean;
   sendByCtrlEnter?: boolean;
   /**
    * Codex's native next-message suggestion plus its persisted switch. Optional
@@ -263,6 +265,7 @@ export default function ChatComposer({
   onInputFocusChange,
   placeholder,
   isTextareaExpanded,
+  isVisible = true,
   sendByCtrlEnter,
   composerPrediction,
 }: ChatComposerProps) {
@@ -407,6 +410,10 @@ export default function ChatComposer({
   // Re-measure with the hook's own routine when only the frame changes; typing
   // keeps its existing onInput autosize, so this is not a per-keystroke layout.
   useLayoutEffect(() => {
+    // Nothing is laid out while the chat tab is hidden; measuring here would
+    // freeze a zero-height result. Becoming visible re-runs this effect, so the
+    // same autosize and mention-overlay sync happen in the commit before paint.
+    if (!isVisible) return;
     const textarea = textareaRef.current;
     if (!textarea) return;
     if (!hasDraft) {
@@ -426,7 +433,7 @@ export default function ChatComposer({
     } finally {
       textarea.style.transition = previousTransition;
     }
-  }, [isMobile, mobileCompact, hasDraft, textareaRef, onTextareaResize, onTextareaScrollSync]);
+  }, [isMobile, mobileCompact, isVisible, hasDraft, textareaRef, onTextareaResize, onTextareaScrollSync]);
 
   // Every card renders in send order; `queuedDraft` alone is still honoured so
   // single-message callers keep working.
