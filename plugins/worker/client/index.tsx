@@ -1,22 +1,13 @@
-import React, {
-  useCallback,
-  useEffect,
-  useLayoutEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 import {
   AlertTriangle,
   ArrowLeft,
-  Bell,
   ChevronRight,
   CircleCheck,
   Clock3,
   FileText,
   PlugZap,
-  RefreshCw,
   Settings2,
   Square,
   Trash2,
@@ -24,51 +15,37 @@ import {
 } from "lucide-react";
 import {
   workerApi,
-  type WorkerConversationOutput,
   type WorkerDetail,
   type WorkerHost,
   type WorkerPluginContext,
 } from "./api.js";
+import { ConversationPane } from "./conversationPane.js";
+import { WorkerHistory, WorkerLive } from "./overviewList.js";
 import {
-  createConversationStream,
-  type ConversationStream,
-} from "./conversation.js";
+  isActiveWorker,
+  type WorkerOverviewSnapshot,
+} from "./overview.js";
 import { SettingsView } from "./settings.js";
 import {
   STATUS_LABELS,
   TYPE_LABELS,
-  DELIVERY_LABELS,
   TASK_ROLE_LABELS,
   budgetState,
   canCancel,
   canCleanup,
   canRecover,
-  canRetryNotification,
   contextSignature,
-  countStatuses,
   effectiveScope,
-  elapsedSeconds,
-  emptyCounts,
   formatDuration,
   formatTokens,
-  matchesScope,
-  occupyingCount,
-  runningCount,
   scopeQuery,
-  shortId,
-  sumCounts,
-  totalCounts,
   type WorkerScope,
 } from "./format.js";
 import type {
-  WorkerConversationMessage,
-  WorkerCountsByStatus,
   WorkerLogStream,
-  WorkerNotification,
   WorkerRecord,
   WorkerRun,
   WorkerSettings,
-  WorkerStateSnapshot,
   WorkerStatus,
   WorkerType,
 } from "../shared/contracts.js";
@@ -104,47 +81,6 @@ function StatusBadge({ status }: { status: WorkerStatus }) {
       ) : null}
       {STATUS_LABELS[status]}
     </span>
-  );
-}
-
-function CountCell({
-  label,
-  counts,
-  emphasize,
-}: {
-  label: string;
-  counts: WorkerCountsByStatus;
-  emphasize?: boolean;
-}) {
-  return (
-    <div className="worker-count-cell">
-      <strong className={emphasize ? "worker-count-strong" : undefined}>
-        {runningCount(counts)}
-      </strong>
-      <span>{label} 执行中</span>
-      <small>
-        占额 {occupyingCount(counts)} · 排队 {counts.queued}
-      </small>
-      <small>
-        启动 {counts.starting} · 停止 {counts.stopping} · 未知 {counts.unknown}
-      </small>
-      <small>
-        完成 {counts.completed} · 失败 {counts.failed} · 取消 {counts.cancelled} · 中断{" "}
-        {counts.interrupted}
-      </small>
-    </div>
-  );
-}
-
-function CountsBar({ counts }: { counts: WorkerStateSnapshot["counts"] }) {
-  return (
-    <section className="worker-counts" aria-label="按类型统计">
-      <CountCell label="DSH" counts={counts.dsh} />
-      <CountCell label="Pi" counts={counts.pi} />
-      <CountCell label="Codex" counts={counts.codex} />
-      <CountCell label="Antigravity" counts={counts.agy} />
-      <CountCell label="全部" counts={counts.total} emphasize />
-    </section>
   );
 }
 
@@ -199,104 +135,6 @@ function BudgetLine({
   );
 }
 
-function WorkerRow({
-  worker,
-  now,
-  settings,
-  onOpen,
-  onCancel,
-  busy,
-}: {
-  worker: WorkerRecord;
-  now: number;
-  settings: WorkerSettings;
-  onOpen(): void;
-  onCancel(): void;
-  busy: boolean;
-}) {
-  const run = worker.latestRun;
-  const status = run?.status ?? "queued";
-  const elapsed = run ? elapsedSeconds(run.startedAt, run.finishedAt, now) : null;
-  const budget = run
-    ? budgetState(run.startedAt, run.finishedAt, settings, run.progress, now)
-    : null;
-  return (
-    <tr>
-      <td>
-        <button className="worker-link" onClick={onOpen}>
-          {worker.taskName}
-        </button>
-        <small>
-          {worker.projectId} · 会话 {shortId(worker.parentSessionId, 8)}
-        </small>
-        {run?.nativeSessionId ? (
-          <small>原生 {shortId(run.nativeSessionId, 8)}</small>
-        ) : (
-          <small>原生会话尚未确认</small>
-        )}
-      </td>
-      <td>
-        {worker.taskRole ? (
-          <span className="worker-role">
-            {TASK_ROLE_LABELS[worker.taskRole]}
-          </span>
-        ) : (
-          <span className="worker-muted">未指定</span>
-        )}
-      </td>
-      <td>
-        <span className={"worker-type worker-type-" + worker.type}>
-          {TYPE_LABELS[worker.type]}
-        </span>
-        <small>配置 {worker.configName || "—"}</small>
-        <small>
-          {run?.model ?? "默认模型"}
-          {run?.provider ? " / " + run.provider : ""}
-          {run?.effort ? " / " + run.effort : ""}
-        </small>
-      </td>
-      <td>
-        <StatusBadge status={status} />
-        <small>
-          {elapsed === null ? "—" : formatDuration(elapsed)}
-          {run ? " · 退出码 " + (run.exitCode ?? "—") : ""}
-        </small>
-        {budget?.softDue && !budget.softSent ? (
-          <small className="worker-soft">软提醒阈值已过</small>
-        ) : null}
-      </td>
-      <td>
-        <code className="worker-path" title={worker.cwd}>
-          {worker.cwd}
-        </code>
-        <small>
-          {worker.workspace.mode === "worktree" ? "worktree" : "existing"}
-          {worker.workspace.createdByPlugin ? " · 插件创建" : ""}
-        </small>
-        {worker.writePaths.length ? (
-          <small>写入范围 {worker.writePaths.join(", ")}</small>
-        ) : (
-          <small>只读任务</small>
-        )}
-      </td>
-      <td className="worker-row-actions">
-        <button onClick={onOpen} aria-label={"查看 " + worker.taskName}>
-          查看
-        </button>
-        <button
-          className="worker-danger"
-          disabled={busy || !canCancel(status)}
-          aria-label={"取消 " + worker.taskName}
-          onClick={onCancel}
-        >
-          <Square size={13} />
-          取消
-        </button>
-      </td>
-    </tr>
-  );
-}
-
 function RunsPanel({
   detail,
   selectedRunId,
@@ -340,192 +178,6 @@ const TAB_LABELS: Record<ConsoleTab, string> = {
   stderr: "stderr",
 };
 
-/**
- * The parsed conversation of one run plus the byte window it was parsed from. Rows are produced
- * from the run's existing event pages, so switching worker/run must drop the old state instead of
- * showing it under a new header. The first request reads only the end of the log; `before` is the
- * offset where the loaded window starts and is null once the log start is included.
- */
-type ConversationState = {
-  key: string;
-  prompt: string | null;
-  messages: WorkerConversationMessage[];
-  done: boolean;
-  /** The end-of-log page arrived; only then is a prompt known to belong to the tail. */
-  started: boolean;
-  before: string | null;
-  loadingEarlier: boolean;
-  error: string;
-};
-
-const EMPTY_CONVERSATION: ConversationState = {
-  key: "",
-  prompt: null,
-  messages: [],
-  done: false,
-  started: false,
-  before: null,
-  loadingEarlier: false,
-  error: "",
-};
-
-/** Mutable pager state of one run; publishing only replaces the rows on screen. */
-type ConversationWindow = {
-  raw: string;
-  reader: ConversationStream;
-  before: string | null;
-  after: string | null;
-  done: boolean;
-  /** The first (tail) page arrived; `/input` alone never publishes a prompt row. */
-  started: boolean;
-  prompt: string | null;
-  loadingEarlier: boolean;
-};
-
-/** Distance from the top, in pixels, still counted as reading the loaded window's start. */
-const TOP_PROXIMITY_PX = 80;
-/** Downward finger travel at the top of a short panel that counts as asking for older rows. */
-const PULL_STEP_PX = 24;
-/** One message row of either renderer, and the displayed blocks inside it that stay stable. */
-const MESSAGE_SELECTOR = ".chat-message, .worker-conv-row";
-const ANCHOR_SELECTOR = "p, li, pre, h1, h2, h3, h4";
-
-/**
- * Host-rendered conversation. The host view owns "follow latest" inside this wrapper, which is the
- * plugin's scroll container for both the host view and the fallback.
- */
-function ConversationHostView({
-  host,
-  provider,
-  messages,
-  scrollRef,
-}: {
-  host: WorkerHost;
-  provider: string;
-  messages: WorkerConversationMessage[];
-  scrollRef: React.MutableRefObject<HTMLDivElement | null>;
-}) {
-  const node = useRef<HTMLDivElement | null>(null);
-  const view = useRef<WorkerConversationOutput | null>(null);
-  const attach = useCallback(
-    (element: HTMLDivElement | null) => {
-      node.current = element;
-      scrollRef.current = element;
-    },
-    [scrollRef],
-  );
-  useEffect(() => {
-    const mount = host.mountConversationOutput;
-    const element = node.current;
-    if (!mount || !element) return;
-    const current = mount(element, { provider, messages });
-    view.current = current;
-    return () => {
-      view.current = null;
-      current.dispose();
-    };
-    // Rows flow through `update`; the view itself is only recreated for another provider.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host, provider]);
-  useEffect(() => {
-    view.current?.update(messages);
-  }, [messages]);
-  return (
-    <div className="worker-conv-host" aria-label="对话内容" ref={attach} />
-  );
-}
-
-function ConversationRow({ row }: { row: WorkerConversationMessage }) {
-  const label =
-    row.role === "user"
-      ? "用户"
-      : row.role === "assistant"
-        ? row.thinking
-          ? "思考"
-          : "助手"
-        : row.role === "tool"
-          ? "工具"
-          : "错误";
-  return (
-    <li
-      className={
-        "worker-conv-row worker-conv-" +
-        row.role +
-        (row.thinking ? " worker-conv-thinking" : "")
-      }
-    >
-      <div className="worker-conv-meta">
-        <span>{label}</span>
-        {row.role === "tool" && row.toolName ? <code>{row.toolName}</code> : null}
-        {row.streaming ? <span className="worker-conv-live">生成中…</span> : null}
-      </div>
-      {row.text ? <pre>{row.text}</pre> : null}
-      {row.toolInput ? <pre>{JSON.stringify(row.toolInput, null, 2)}</pre> : null}
-      {row.toolOutput ? (
-        <pre className={row.isError ? "worker-conv-error" : undefined}>
-          {row.toolOutput}
-        </pre>
-      ) : null}
-    </li>
-  );
-}
-
-/** Basic readable conversation for a host without the optional conversation view. */
-function ConversationFallback({
-  messages,
-  loading,
-  scrollRef,
-}: {
-  messages: WorkerConversationMessage[];
-  loading: boolean;
-  scrollRef: React.MutableRefObject<HTMLDivElement | null>;
-}) {
-  const [follow, setFollow] = useState(true);
-  const attach = useCallback(
-    (element: HTMLDivElement | null) => {
-      scrollRef.current = element;
-    },
-    [scrollRef],
-  );
-  // Following only moves the reader when new output arrives at the end. It runs before the pager's
-  // mutation observer, so a prepended page is applied over it and keeps the reading position.
-  useLayoutEffect(() => {
-    const node = scrollRef.current;
-    if (!node || !follow) return;
-    node.scrollTop = node.scrollHeight;
-  }, [messages, follow, scrollRef]);
-  return (
-    <div className="worker-conv-fallback">
-      <div
-        className="worker-conv-scroll"
-        aria-label="对话内容"
-        ref={attach}
-        onScroll={(event) => {
-          const node = event.currentTarget;
-          setFollow(node.scrollHeight - node.scrollTop - node.clientHeight < 40);
-        }}
-      >
-        {messages.length ? (
-          <ol className="worker-conv-list">
-            {messages.map((row) => (
-              <ConversationRow key={row.id} row={row} />
-            ))}
-          </ol>
-        ) : (
-          <p className="worker-muted">
-            {loading ? "正在读取对话…" : "暂无可读对话"}
-          </p>
-        )}
-      </div>
-      {!follow ? (
-        <button className="worker-conv-latest" onClick={() => setFollow(true)}>
-          回到最新
-        </button>
-      ) : null}
-    </div>
-  );
-}
-
 function LogPanel({
   api,
   host,
@@ -555,8 +207,6 @@ function LogPanel({
     loading: false,
     error: "",
   });
-  const [conversation, setConversation] =
-    useState<ConversationState>(EMPTY_CONVERSATION);
   // Only a bounded tail remains in browser memory; older pages stay on the server.
   const collected = useRef("");
   useEffect(() => {
@@ -633,345 +283,6 @@ function LogPanel({
       onError(String(error));
     }
   };
-  // The conversation is read backwards from the end of the log: the first request takes the last
-  // page only, and earlier pages are read by `loadEarlier` when the reader reaches the top. Only
-  // `done` or a null cursor is terminal EOF: an empty page of a still-running run keeps the cursor.
-  const pager = useRef<ConversationWindow | null>(null);
-  // The conversation's scroll container is the plugin's wrapper in both render paths.
-  const scroller = useRef<HTMLDivElement | null>(null);
-  /** Watches the prepended page's layout so the reading position can follow it. */
-  const hold = useRef<ResizeObserver | null>(null);
-  /** Last scroll offset the conversation listener accounted for, shared with the pager. */
-  const previousTop = useRef(0);
-  useEffect(() => () => hold.current?.disconnect(), []);
-  /**
-   * Keeps the message the reader is looking at in place while older rows are inserted above it.
-   * Its screen position is recorded before the rows are published and re-applied on every later
-   * layout change of the scroller content: the host renders those rows on its own root and a
-   * row's real height settles only after the commit, so a height delta alone keeps drifting.
-   */
-  const holdScroll = useCallback((node: HTMLDivElement | null) => {
-    hold.current?.disconnect();
-    hold.current = null;
-    if (!node) return;
-    const content = node.firstElementChild;
-    if (!content) return;
-    // A tail page that fits the panel has no scroll position to keep. The host still follows the
-    // newest row, so the first page with real overflow must open at the earlier rows it loaded.
-    if (node.scrollHeight <= node.clientHeight) {
-      const observer = new ResizeObserver(() => {
-        if (node.scrollHeight <= node.clientHeight) return;
-        observer.disconnect();
-        if (hold.current === observer) hold.current = null;
-        node.scrollTop = 0;
-        previousTop.current = node.scrollTop;
-      });
-      observer.observe(content);
-      hold.current = observer;
-      return;
-    }
-    const boxTop = () => node.getBoundingClientRect().top;
-    const contentTop = (element: Element) =>
-      element.getBoundingClientRect().top - boxTop() + node.scrollTop;
-    // The visible message at the top is the one being read; its own displayed block (a paragraph,
-    // list item, code block or heading) is stable even when the message as a whole gains a prefix
-    // while the window is parsed again.
-    const top = boxTop() + 4;
-    const messages = [...node.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR)];
-    const anchor = messages
-      .filter((message) => message.textContent?.trim() && message.getBoundingClientRect().bottom > top)
-      .flatMap((message) => [
-        ...[...message.querySelectorAll<HTMLElement>(ANCHOR_SELECTOR)].filter(
-          (block) => block.textContent?.trim() && block.getBoundingClientRect().bottom > top,
-        ),
-        message,
-      ])
-      .find((block) => block.textContent?.trim());
-    if (!anchor) return;
-    const anchorText = anchor.textContent!.trim();
-    // An identical command or paragraph can occur twice in the window and again in the page
-    // inserted above, so the anchor keeps its ordinal among the equal blocks.
-    const matches = () =>
-      [...node.querySelectorAll<HTMLElement>(MESSAGE_SELECTOR + ", " + ANCHOR_SELECTOR)]
-        .filter(
-          (block) =>
-            block.tagName === anchor.tagName && block.textContent?.trim() === anchorText,
-        )
-        .reverse();
-    const anchorIndex = matches().indexOf(anchor);
-    let anchorAt = contentTop(anchor);
-    let height = node.scrollHeight;
-    const observer = new ResizeObserver(() => {
-      const found = matches()[anchorIndex];
-      if (found) {
-        // Only the change of the anchor's content position is compensated, so a reader who
-        // scrolls while the page loads keeps their own movement. The baseline moves with the
-        // block, otherwise the same insertion would be applied again on every later resize.
-        const next = contentTop(found);
-        const drift = next - anchorAt;
-        if (drift) node.scrollTop += drift;
-        anchorAt = next;
-        previousTop.current = node.scrollTop;
-      } else {
-        // A block whose text changed with the prefix cannot be matched; use the content height
-        // the insertion added above the viewport, and move the baseline by the same amount.
-        const next = node.scrollHeight;
-        if (next !== height) {
-          node.scrollTop += next - height;
-          anchorAt += next - height;
-          previousTop.current = node.scrollTop;
-        }
-      }
-      height = node.scrollHeight;
-    });
-    observer.observe(content);
-    hold.current = observer;
-  }, []);
-  const releaseScroll = useCallback(() => {
-    hold.current?.disconnect();
-    hold.current = null;
-  }, []);
-  useEffect(() => {
-    if (tab !== "conversation") return;
-    let live = true;
-    let timer: ReturnType<typeof setTimeout> | null = null;
-    let error = "";
-    const loaded: ConversationWindow = {
-      raw: "",
-      reader: createConversationStream(workerType),
-      before: null,
-      after: null,
-      done: false,
-      started: false,
-      prompt: null,
-      loadingEarlier: false,
-    };
-    pager.current = loaded;
-    const publish = () =>
-      setConversation({
-        key,
-        prompt: loaded.prompt,
-        messages: loaded.reader.messages(),
-        done: loaded.done,
-        started: loaded.started,
-        before: loaded.before,
-        loadingEarlier: loaded.loadingEarlier,
-        error,
-      });
-    const pump = async () => {
-      if (!live) return;
-      // `after` is the byte offset of the furthest output already on screen. A first request has
-      // no offset yet, so it asks for the tail window instead of the start of the log.
-      const first = loaded.after === null && !loaded.done;
-      try {
-        const page = first
-          ? await api.logs(workerId, runId, "events", null, { tail: true })
-          : await api.logs(workerId, runId, "events", loaded.after);
-        if (!live) return;
-        if (page.text) {
-          loaded.raw += page.text;
-          loaded.reader.push(page.text);
-          // Live output grows below the reading position, so it ends the prepend's hold.
-          releaseScroll();
-        }
-        if (first) {
-          loaded.before = page.prevCursor ?? null;
-          loaded.started = true;
-        }
-        loaded.after = page.nextCursor;
-        loaded.done = page.done || page.nextCursor === null;
-        if (loaded.done) loaded.reader.flush();
-        error = "";
-        publish();
-        if (!loaded.done)
-          timer = setTimeout(() => void pump(), page.text ? 0 : 1000);
-      } catch {
-        if (!live) return;
-        // A transient read failure keeps the cursor and retries on the same 1s timer while
-        // the short error stays visible; a later page clears it.
-        error = "读取失败，正在重试…";
-        publish();
-        timer = setTimeout(() => void pump(), 1000);
-      }
-    };
-    // `/input` is the only source of the user's prompt; Pi echoes of the same prompt are
-    // dropped below instead of being shown twice.
-    void api
-      .input(workerId, runId)
-      .then((value) => {
-        if (!live) return;
-        loaded.prompt = value.prompt;
-        publish();
-      })
-      .catch(() => {
-        // An older server has no `/input`; the provider's own user row is the fallback.
-      });
-    void pump();
-    return () => {
-      live = false;
-      if (timer) clearTimeout(timer);
-      if (pager.current === loaded) pager.current = null;
-      // Leaving the conversation tab or the run ends the prepend's hold with its pager.
-      releaseScroll();
-    };
-  }, [api, key, releaseScroll, workerId, runId, workerType, tab]);
-  /**
-   * Reads the page in front of the loaded window. The whole window is parsed again from its own
-   * start because a page boundary would otherwise split a streamed message or a tool call from
-   * its result into two rows. The scroll position is measured when the page arrives, so a reader
-   * who moved while the request was in flight keeps the position they are on when it inserts.
-   */
-  const loadEarlier = useCallback(() => {
-    const loaded = pager.current;
-    if (!loaded || loaded.loadingEarlier || loaded.before === null) return;
-    loaded.loadingEarlier = true;
-    setConversation((value) =>
-      value.key === key ? { ...value, loadingEarlier: true, error: "" } : value,
-    );
-    void api
-      .logs(workerId, runId, "events", null, { before: loaded.before! })
-      .then((page) => {
-        if (pager.current !== loaded) return;
-        loaded.raw = page.text + loaded.raw;
-        const reader = createConversationStream(workerType);
-        reader.push(loaded.raw);
-        if (loaded.done) reader.flush();
-        loaded.reader = reader;
-        loaded.before = page.prevCursor;
-        loaded.loadingEarlier = false;
-        // The DOM grows a moment after this publish (the host renders the rows on its own root),
-        // so the offset is restored on the first mutation that actually grew the scroller.
-        holdScroll(scroller.current);
-        setConversation({
-          key,
-          prompt: loaded.prompt,
-          messages: reader.messages(),
-          done: loaded.done,
-          started: loaded.started,
-          before: loaded.before,
-          loadingEarlier: false,
-          error: "",
-        });
-      })
-      .catch((caught) => {
-        if (pager.current !== loaded) return;
-        loaded.loadingEarlier = false;
-        setConversation((value) =>
-          value.key === key
-            ? { ...value, loadingEarlier: false, error: String(caught) }
-            : value,
-        );
-      });
-  }, [api, holdScroll, key, runId, workerId, workerType]);
-  /**
-   * Earlier pages load only when the reader really moves up to the top of the loaded window: the
-   * first placement and any downward scroll request nothing, so a run's history stays unread
-   * until it is asked for. A tail page that fits the panel has no scroll range at all, so an
-   * upward wheel or a downward finger pull at the top is the request there.
-   */
-  useEffect(() => {
-    if (tab !== "conversation") return;
-    const node = scroller.current;
-    if (!node) return;
-    let touching = false;
-    let touchY = 0;
-    previousTop.current = node.scrollTop;
-    const onScroll = () => {
-      const top = node.scrollTop;
-      // Shrinking content or a growing viewport clamps the old offset; that is not the reader
-      // moving up, so only the record of the last position follows.
-      if (previousTop.current > node.scrollHeight - node.clientHeight) {
-        previousTop.current = top;
-        return;
-      }
-      if (top < previousTop.current && top <= TOP_PROXIMITY_PX) loadEarlier();
-      previousTop.current = top;
-    };
-    const onWheel = (event: WheelEvent) => {
-      if (event.deltaY < 0 && node.scrollTop === 0) loadEarlier();
-    };
-    const onTouchStart = (event: TouchEvent) => {
-      touching = node.scrollTop === 0;
-      touchY = event.touches[0]?.clientY ?? 0;
-    };
-    const onTouchMove = (event: TouchEvent) => {
-      if (!touching) return;
-      const current = event.touches[0]?.clientY ?? touchY;
-      // A finger pulled down at the top asks for what is above, like a phone transcript.
-      if (current - touchY > PULL_STEP_PX) {
-        touchY = current;
-        loadEarlier();
-      }
-    };
-    const onTouchEnd = () => {
-      touching = false;
-    };
-    node.addEventListener("scroll", onScroll);
-    node.addEventListener("wheel", onWheel);
-    node.addEventListener("touchstart", onTouchStart);
-    node.addEventListener("touchmove", onTouchMove);
-    node.addEventListener("touchend", onTouchEnd);
-    return () => {
-      node.removeEventListener("scroll", onScroll);
-      node.removeEventListener("wheel", onWheel);
-      node.removeEventListener("touchstart", onTouchStart);
-      node.removeEventListener("touchmove", onTouchMove);
-      node.removeEventListener("touchend", onTouchEnd);
-    };
-  }, [tab, loadEarlier]);
-  const active =
-    conversation.key === key ? conversation : EMPTY_CONVERSATION;
-  const view = useMemo(() => {
-    // The prompt opens the run, so it is only shown once the window reaches the log start. A tail
-    // page of a long run would otherwise put the first prompt under a later answer.
-    // Before the tail page arrives `before` is null for lack of knowledge, not because the start
-    // is loaded; publishing the prompt there would flash the first prompt above a later answer.
-    const showPrompt =
-      active.prompt !== null && active.before === null && active.started;
-    const rows: WorkerConversationMessage[] = [];
-    if (showPrompt)
-      rows.push({ id: "__input", role: "user", text: active.prompt! });
-    for (const row of active.messages) {
-      // Pi echoes the prompt; `/input` is the single source of that row when it is shown.
-      if (
-        showPrompt &&
-        row.role === "user" &&
-        row.text.trim() === active.prompt!.trim()
-      )
-        continue;
-      rows.push(row);
-    }
-    const answered = rows.some(
-      (row) => row.role === "assistant" && !row.thinking && row.text.trim(),
-    );
-    // The stored result is only a fallback once the log really ended without an answer; it
-    // goes through the same renderer as one assistant row instead of a separate block.
-    const resultOnly = active.done && Boolean(finalText) && !answered;
-    if (resultOnly)
-      rows.push({ id: "__result", role: "assistant", text: finalText! });
-    return {
-      rows,
-      resultOnly,
-      inputUnavailable:
-        active.done &&
-        active.before === null &&
-        !active.prompt &&
-        !rows.some((row) => row.role === "user"),
-      status: active.loadingEarlier
-        ? "正在读取更早内容…"
-        : active.before !== null
-          ? active.done
-            ? "已到末尾 · 上滚加载更早内容"
-            : "等待新内容 · 上滚加载更早内容"
-          : active.done
-            ? "已到日志开头"
-            : rows.length
-              ? "等待新内容…"
-              : "正在读取…",
-    };
-  }, [active, finalText]);
-  const shown = view.rows;
-  const capability = typeof host.mountConversationOutput === "function";
   return (
     <section className="worker-console">
       <div className="worker-console-head">
@@ -990,43 +301,19 @@ function LogPanel({
         </div>
         <span className="worker-muted">
           {tab === "conversation"
-            ? view.status
+            ? "对话来自本地事件日志"
             : "每页 64 KiB" + (current.done ? " · 已到末尾" : "")}
         </span>
       </div>
       {tab === "conversation" ? (
-        <div className="worker-conv">
-          {view.resultOnly ? (
-            <p className="worker-muted">仅显示存储的运行结果。</p>
-          ) : null}
-          {view.inputUnavailable ? (
-            <p className="worker-muted">本次输入记录不可用。</p>
-          ) : null}
-          {capability ? (
-            <ConversationHostView
-              key={key}
-              host={host}
-              provider={workerType}
-              messages={shown}
-              scrollRef={scroller}
-            />
-          ) : (
-            <>
-              <p className="worker-muted">当前宿主不支持对话视图。</p>
-              <ConversationFallback
-                key={key}
-                messages={shown}
-                loading={!active.done && !shown.length}
-                scrollRef={scroller}
-              />
-            </>
-          )}
-          {active.error ? (
-            <p className="worker-error" role="alert">
-              {active.error}
-            </p>
-          ) : null}
-        </div>
+        <ConversationPane
+          api={api}
+          host={host}
+          workerType={workerType}
+          workerId={workerId}
+          runId={runId}
+          finalText={finalText}
+        />
       ) : (
         <pre
           className="worker-log"
@@ -1323,45 +610,6 @@ function DetailView({
   );
 }
 
-function NotificationList({
-  notifications,
-  onRetry,
-  busy,
-}: {
-  notifications: WorkerNotification[];
-  onRetry(eventIds: string[]): void;
-  busy: boolean;
-}) {
-  if (!notifications.length) return null;
-  return (
-    <details className="worker-notifications" open>
-      <summary>
-        <Bell size={14} /> Worker 通知（{notifications.length}）
-      </summary>
-      <p className="worker-muted">
-        运行提醒与终态通知不占用用户消息队列；手动重试只重新投递通知，不重跑任务。
-      </p>
-      {notifications.map((item) => (
-        <div className="worker-notification" key={item.id}>
-          <StatusBadge status={item.status} />
-          <span className="worker-notification-summary">{item.summary}</span>
-          <small>
-            {time(item.createdAt)} · {DELIVERY_LABELS[item.delivery]}
-            {item.batchId ? " · 批次 " + shortId(item.batchId, 6) : ""}
-          </small>
-          <button
-            disabled={busy || !canRetryNotification(item.delivery)}
-            aria-label={"重试通知 " + item.id}
-            onClick={() => onRetry([item.id])}
-          >
-            <RefreshCw size={13} /> 重试通知
-          </button>
-        </div>
-      ))}
-    </details>
-  );
-}
-
 function WorkerPanel({ host }: { host: WorkerHost }) {
   const api = useMemo(() => workerApi(host), [host]);
   const [context, setContext] = useState<WorkerPluginContext>(host.context);
@@ -1372,7 +620,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
         ? "project"
         : "all",
   );
-  const [snapshot, setSnapshot] = useState<WorkerStateSnapshot | null>(null);
+  const [overview, setOverview] = useState<WorkerOverviewSnapshot | null>(null);
   // Snapshots are tagged with the query they answered; a response for a superseded query can
   // never show its rows, even for the one render before the polling effect is cleaned up.
   const [snapshotKey, setSnapshotKey] = useState("");
@@ -1402,7 +650,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
     setDetail(null);
     setDetailError("");
     setView("list");
-    setSnapshot(null);
+    setOverview(null);
     setSnapshotKey("");
     setError("");
     setMessage("");
@@ -1421,7 +669,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
     return () => clearInterval(timer);
   }, []);
 
-  // State polling is owned by the mounted panel and tied to the exact scope query. Hiding the
+  // Overview polling is owned by the mounted panel and tied to the exact scope query. Hiding the
   // page pauses it; unmounting or switching context clears the pending timer and rejects stale
   // responses using the effect-local `live` flag.
   useEffect(() => {
@@ -1436,9 +684,9 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
       if (!live || inFlight) return;
       inFlight = true;
       try {
-        const data = await api.state(query);
+        const data = await api.overview(query);
         if (live) {
-          setSnapshot(data);
+          setOverview(data);
           setSnapshotKey(queryKey);
           setError("");
         }
@@ -1506,50 +754,23 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
     };
   }, [api, selectedId]);
 
-  const liveSnapshot = snapshotKey === queryKey ? snapshot : null;
-  const workers = useMemo(
-    () =>
-      liveSnapshot
-        ? liveSnapshot.workers
-            .filter((worker) => matchesScope(worker, query))
-            .sort((a, b) =>
-              Number(b.latestRun?.status === "starting" || b.latestRun?.status === "running")
-              - Number(a.latestRun?.status === "starting" || a.latestRun?.status === "running"),
-            )
-        : [],
-    [liveSnapshot, query],
-  );
-  const dshCounts = useMemo(
-    () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "dsh") : emptyCounts()),
-    [liveSnapshot],
-  );
-  const piCounts = useMemo(
-    () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "pi") : emptyCounts()),
-    [liveSnapshot],
-  );
-  const codexCounts = useMemo(
-    () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "codex") : emptyCounts()),
-    [liveSnapshot],
-  );
-  const agyCounts = useMemo(
-    () => (liveSnapshot ? countStatuses(liveSnapshot.workers, "agy") : emptyCounts()),
-    [liveSnapshot],
-  );
-  const counts = useMemo(
-    () => totalCounts([dshCounts, piCounts, codexCounts, agyCounts]),
-    [dshCounts, piCounts, codexCounts, agyCounts],
-  );
-  const settings = liveSnapshot?.settings ?? null;
-  const loading = !liveSnapshot && !error;
+  const liveOverview = snapshotKey === queryKey ? overview : null;
+  const settings = liveOverview?.settings ?? null;
+  const loading = !liveOverview && !error;
 
-  const operate = async (operation: () => Promise<unknown>, notice: string) => {
+  const operate = async <T,>(
+    operation: () => Promise<T>,
+    notice: string,
+  ): Promise<T | undefined> => {
     setBusy(true);
     setError("");
     try {
-      await operation();
+      const result = await operation();
       setMessage(notice);
+      return result;
     } catch (caught) {
       setError(String(caught));
+      return undefined;
     } finally {
       setBusy(false);
     }
@@ -1585,12 +806,18 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
 
   const selectedWorker =
     (detail && detail.worker.id === selectedId ? detail.worker : null) ??
-    workers.find((worker) => worker.id === selectedId) ??
+    liveOverview?.workers.find((worker) => worker.id === selectedId) ??
     null;
-
-  return (
-    <div className="worker-plugin" data-theme={context.theme} data-view={view}>
-      <style>{styles}</style>
+  const hasLiveCards = Boolean(
+    liveOverview?.workers.some((worker) => {
+      const status = worker.latestRun?.status;
+      return (
+        isActiveWorker(worker) && status !== "queued" && status !== "unknown"
+      );
+    }),
+  );
+  const notices = (
+    <>
       {error ? (
         <div className="worker-notice worker-notice-error" role="alert">
           <span>{error}</span>
@@ -1607,16 +834,23 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
           </button>
         </div>
       ) : null}
+    </>
+  );
+
+  return (
+    <div className="worker-plugin" data-theme={context.theme} data-view={view}>
+      <style>{styles}</style>
+      {view === "list" ? null : notices}
       {view === "settings" && settings ? (
         settings.schemaVersion === 2 && Array.isArray(settings.configs) ? (
           <SettingsView
             settings={settings}
-            usage={liveSnapshot?.configUsage ?? {}}
+            usage={liveOverview?.configUsage ?? {}}
             host={host}
             api={api}
             onBack={() => setView("list")}
             onSaved={(value) => {
-              setSnapshot((current) =>
+              setOverview((current) =>
                 current ? { ...current, settings: value } : current,
               );
               setMessage("Worker 设置已保存");
@@ -1670,16 +904,22 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
         )
       ) : (
         <>
+          <div
+            className={
+              "worker-first-screen" +
+              (hasLiveCards ? " worker-first-screen-fill" : "")
+            }
+          >
+          {view === "list" ? notices : null}
           <header className="worker-heading">
             <div>
               <h2>子任务 Worker</h2>
-              <p>DSH、Pi、Codex 与 Antigravity 子任务由插件执行并记录；执行成功不等于验收。</p>
+              <p>
+                Pi、Codex 与 Antigravity 子任务由插件执行并记录；执行成功不等于验收。
+              </p>
             </div>
             <div className="worker-actions">
-              <button
-                disabled={!settings}
-                onClick={() => setView("settings")}
-              >
+              <button disabled={!settings} onClick={() => setView("settings")}>
                 <Settings2 size={15} /> Worker 设置
               </button>
               <button
@@ -1702,11 +942,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
                 aria-label="范围：当前会话"
                 aria-pressed={activeScope === "session"}
                 disabled={!context.session || !context.project}
-                title={
-                  context.session
-                    ? undefined
-                    : "当前没有打开的会话"
-                }
+                title={context.session ? undefined : "当前没有打开的会话"}
                 onClick={() => setScope("session")}
               >
                 当前会话
@@ -1729,21 +965,9 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
               </button>
             </div>
             <span className="worker-muted">
-              {loading
-                ? "正在读取…"
-                : workers.length +
-                  " 个 worker · " +
-                  sumCounts(counts) +
-                  " 个状态记录 · 每 2 秒刷新"}
+              {loading ? "正在读取…" : "每 2 秒刷新"}
             </span>
           </div>
-          <CountsBar counts={liveSnapshot?.counts ?? {
-            dsh: dshCounts,
-            pi: piCounts,
-            codex: codexCounts,
-            agy: agyCounts,
-            total: counts,
-          }} />
           {!context.project ? (
             <p className="worker-hint">
               当前没有打开的项目，仅显示全部视图。打开项目后可查看本项目或会话的任务。
@@ -1753,50 +977,52 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
               当前没有打开的会话，会话视图已禁用；项目视图仍可用。
             </p>
           ) : null}
-          <table className="worker-table">
-            <thead>
-              <tr>
-                <th>任务 / 会话</th>
-                <th>任务角色</th>
-                <th>引擎 / 配置</th>
-                <th>状态 / 耗时</th>
-                <th>工作区</th>
-                <th>操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {workers.map((worker) => (
-                <WorkerRow
-                  key={worker.id}
-                  worker={worker}
-                  now={now}
-                  settings={settings!}
-                  busy={busy}
-                  onOpen={() => {
-                    setSelectedId(worker.id);
-                    setDetail(null);
-                    setView("detail");
-                  }}
-                  onCancel={() => cancelWorker(worker)}
-                />
-              ))}
-            </tbody>
-          </table>
-          {!loading && !workers.length ? (
-            <div className="worker-empty">
-              当前范围没有 Worker 任务。Worker 由主会话通过 CloudCLI Worker MCP 启动；此页面只读状态并执行取消、恢复、清理和通知重试。
-            </div>
-          ) : null}
-          {liveSnapshot ? (
-            <NotificationList
-              notifications={liveSnapshot.notifications}
+          {liveOverview ? (
+            <WorkerLive
+              api={api}
+              host={host}
+              snapshot={liveOverview}
+              now={now}
               busy={busy}
-              onRetry={(eventIds) =>
-                void operate(
+              onOpen={(workerId) => {
+                setSelectedId(workerId);
+                setDetail(null);
+                setView("detail");
+              }}
+              onCancel={cancelWorker}
+            />
+          ) : (
+            <p className="worker-empty">
+              {loading
+                ? "正在读取 Worker 状态…"
+                : "当前范围没有 Worker 任务。Worker 由主会话通过 CloudCLI Worker MCP 启动。"}
+            </p>
+          )}
+          </div>
+          {liveOverview ? (
+            <WorkerHistory
+              api={api}
+              snapshot={liveOverview}
+              now={now}
+              busy={busy}
+              query={query}
+              identity={queryKey}
+              settings={settings!}
+              onOpen={(workerId) => {
+                setSelectedId(workerId);
+                setDetail(null);
+                setView("detail");
+              }}
+              onRetry={async (eventIds) => {
+                const result = await operate(
                   () => api.retryNotifications({ eventIds }),
                   "已请求重试通知",
-                )
-              }
+                );
+                const retried = result?.retried ?? 0;
+                if (result && retried === 0)
+                  setMessage("没有可重试的通知，仍可稍后重试");
+                return retried;
+              }}
             />
           ) : null}
           <footer className="worker-footer">

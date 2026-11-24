@@ -14,6 +14,19 @@ type PluginTabContentProps = {
   pluginName: string;
   selectedProject: Project | null;
   selectedSession: ProjectSession | null;
+  /** Mirrors the app preference so a plugin conversation renders the same rows as the chat. */
+  showThinking?: boolean;
+  /** Mirrors the app preference so tool rows in a plugin conversation match the chat. */
+  showRawParameters?: boolean;
+};
+
+/** One conversation view a plugin published, portalled into the plugin's own container. */
+type MountedConversationOutput = {
+  container: HTMLElement;
+  provider: string;
+  messages: WorkerConversationMessage[];
+  /** Unique per mount, so an older controller can only ever address the view it created. */
+  key: number;
 };
 
 type PluginContext = {
@@ -90,6 +103,8 @@ export default function PluginTabContent({
   pluginName,
   selectedProject,
   selectedSession,
+  showThinking,
+  showRawParameters,
 }: PluginTabContentProps) {
   const { t } = useTranslation();
   const containerRef = useRef<HTMLDivElement>(null);
@@ -119,16 +134,12 @@ export default function PluginTabContent({
   } | null>(null);
   const sessionOutputKeyRef = useRef(0);
   /**
-   * A mounted read-only conversation view, published through `mountConversationOutput`. Like the
-   * session viewer it is portalled from this host tree, so it keeps the app's context; the plugin
-   * owns the container's styling, so its element is handed to the view as the scroll target.
+   * Mounted read-only conversation views, published through `mountConversationOutput`. Each lives
+   * in its own plugin container, so Worker panels for different runs can show a transcript at the
+   * same time. Like the session viewer they are portalled from this host tree, so they keep the
+   * app's context; the plugin owns the container's styling, so its element is the scroll target.
    */
-  const [conversationOutput, setConversationOutput] = useState<{
-    container: HTMLElement;
-    provider: string;
-    messages: WorkerConversationMessage[];
-    key: number;
-  } | null>(null);
+  const [conversationOutputs, setConversationOutputs] = useState<MountedConversationOutput[]>([]);
   const conversationOutputKeyRef = useRef(0);
   const mountedRef = useRef(true);
 
@@ -290,18 +301,25 @@ export default function PluginTabContent({
             }
             const messages = readConversationMessages(options?.messages);
             const key = ++conversationOutputKeyRef.current;
-            setConversationOutput({ container, provider, messages, key });
+            setConversationOutputs(current => [
+              // One view per container: a re-mount replaces that container's previous view, while
+              // every other container keeps its own portal.
+              ...current.filter(item => item.container !== container),
+              { container, provider, messages, key },
+            ]);
             return {
               update(nextMessages: WorkerConversationMessage[]): void {
                 const next = readConversationMessages(nextMessages);
                 if (!mountedRef.current) return;
-                setConversationOutput(current => (
-                  current?.key === key ? { ...current, messages: next } : current
+                setConversationOutputs(current => (
+                  current.some(item => item.key === key)
+                    ? current.map(item => (item.key === key ? { ...item, messages: next } : item))
+                    : current
                 ));
               },
               dispose(): void {
                 if (!mountedRef.current) return;
-                setConversationOutput(current => (current?.key === key ? null : current));
+                setConversationOutputs(current => current.filter(item => item.key !== key));
               },
             };
           },
@@ -344,7 +362,7 @@ export default function PluginTabContent({
       contextCallbacks.clear();
       moduleRef.current = null;
       setSessionOutput(null);
-      setConversationOutput(null);
+      setConversationOutputs([]);
     };
   }, [pluginName, plugin?.entry, plugin?.enabled, openSession]); // re-mount when plugin or enabled state changes
 
@@ -363,17 +381,20 @@ export default function PluginTabContent({
         />,
         sessionOutput.container,
       )}
-      {conversationOutput && createPortal(
+      {conversationOutputs.map(output => createPortal(
         // Keyed by mount, not by provider: a re-mount always starts a fresh transcript with the
-        // newest row in view, and an older controller's updates land on a state it no longer owns.
+        // newest row in view, and an older controller's updates land on a view it no longer owns.
         <ConversationOutput
-          key={conversationOutput.key}
-          provider={conversationOutput.provider}
-          messages={conversationOutput.messages}
-          scrollContainer={conversationOutput.container}
+          key={output.key}
+          provider={output.provider}
+          messages={output.messages}
+          scrollContainer={output.container}
+          showThinking={showThinking}
+          showRawParameters={showRawParameters}
         />,
-        conversationOutput.container,
-      )}
+        output.container,
+        output.key,
+      ))}
       {loadError && (
         <div className="absolute inset-0 p-4 text-[13px] text-red-600">
           {t('common:misc.pluginLoadFailed', { error: loadError })}

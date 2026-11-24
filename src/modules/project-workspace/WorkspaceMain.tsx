@@ -226,6 +226,8 @@ function WorkspaceMain({
                 pluginName={activeTab.replace('plugin:', '')}
                 selectedProject={selectedProject}
                 selectedSession={selectedSession}
+                showThinking={showThinking}
+                showRawParameters={showRawParameters}
               />
             </div>
           )}

@@ -18,6 +18,8 @@ type ToolGroupContainerProps = {
   onGrantToolPermission?: (suggestion: ClaudePermissionSuggestion) => PermissionGrantResult | null | undefined;
   showRawParameters?: boolean;
   showThinking?: boolean;
+  /** Whether each expanded child draws its timestamp; omitted keeps the main transcript's time. */
+  showTimestamp?: boolean;
   selectedProject?: Project | null;
   provider: LLMProvider | string;
 };
@@ -83,6 +85,7 @@ function ToolGroupContainer({
   onGrantToolPermission,
   showRawParameters,
   showThinking,
+  showTimestamp,
   selectedProject,
   provider,
 }: ToolGroupContainerProps) {
@@ -154,6 +157,7 @@ function ToolGroupContainer({
               onGrantToolPermission={onGrantToolPermission}
               showRawParameters={showRawParameters}
               showThinking={showThinking}
+              showTimestamp={showTimestamp}
               selectedProject={selectedProject}
               provider={provider}
             />

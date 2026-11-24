@@ -14,8 +14,12 @@ import type {
   WorkerSettingsInput,
   WorkerCancelInput,
   WorkerStateQuery,
-  WorkerStateSnapshot,
 } from "../shared/contracts.js";
+import type {
+  WorkerHistoryKind,
+  WorkerHistoryPage,
+  WorkerOverviewSnapshot,
+} from "./overview.js";
 
 /** Host context handed to every plugin tab by `PluginTabContent`. */
 export type WorkerPluginContext = {
@@ -65,25 +69,48 @@ export type WorkerDetail = {
   runs: WorkerRun[];
 };
 
-function statePath(query: WorkerStateQuery): string {
-  const params = new URLSearchParams();
+function statePath(query: WorkerStateQuery, view: "overview"): string {
+  const params = new URLSearchParams({ view });
   if (query.projectId) params.set("projectId", query.projectId);
   if (query.parentSessionId)
     params.set("parentSessionId", query.parentSessionId);
-  const suffix = params.toString();
-  return suffix ? "/state?" + suffix : "/state";
+  return "/state?" + params.toString();
+}
+
+function historyPath(
+  kind: WorkerHistoryKind,
+  cursor: string | null,
+  query: WorkerStateQuery,
+): string {
+  const params = new URLSearchParams({ kind });
+  if (cursor) params.set("cursor", cursor);
+  if (query.projectId) params.set("projectId", query.projectId);
+  if (query.parentSessionId)
+    params.set("parentSessionId", query.parentSessionId);
+  return "/history?" + params.toString();
 }
 
 /**
  * Fixed client endpoints. Paths and payloads mirror the plugin's REST contract exactly so the
  * UI cannot drift into a plugin-private shape.
  */
+export type WorkerApi = ReturnType<typeof workerApi>;
+
 export function workerApi(host: WorkerHost) {
   const request = <T>(method: string, path: string, body?: unknown) =>
     host.rpc(method, path, body) as Promise<T>;
   return {
-    state: (query: WorkerStateQuery) =>
-      request<WorkerStateSnapshot>("GET", statePath(query)),
+    overview: (query: WorkerStateQuery) =>
+      request<WorkerOverviewSnapshot>("GET", statePath(query, "overview")),
+    history: <T>(
+      kind: WorkerHistoryKind,
+      cursor: string | null,
+      query: WorkerStateQuery,
+    ) =>
+      request<WorkerHistoryPage<T>>(
+        "GET",
+        historyPath(kind, cursor, query),
+      ),
     worker: (workerId: string) =>
       request<WorkerDetail>(
         "GET",
@@ -136,6 +163,6 @@ export function workerApi(host: WorkerHost) {
     cleanup: (workerId: string) =>
       request<unknown>("POST", "/cleanup", { workerId }),
     retryNotifications: (input: WorkerNotificationRetryInput) =>
-      request<unknown>("POST", "/notifications/retry", input),
+      request<{ retried: number }>("POST", "/notifications/retry", input),
   };
 }

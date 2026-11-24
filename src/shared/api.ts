@@ -705,12 +705,12 @@ export const api = {
       parentSessionId: string,
       options: ApiRequestOptions = {},
     ) => get(
-      `/api/plugins/worker/rpc/state${query({ projectId, parentSessionId })}`,
+      `/api/plugins/worker/rpc/state${query({ view: 'activity', projectId, parentSessionId })}`,
       options,
     ),
     // Unscoped snapshot used by the session list to aggregate every parent
     // session whose Worker is still active, across projects.
-    workerStateAll: (options: ApiRequestOptions = {}) => get('/api/plugins/worker/rpc/state', options),
+    workerStateAll: (options: ApiRequestOptions = {}) => get('/api/plugins/worker/rpc/state?view=activity', options),
     /**
      * Converts an already-running foreground session into a resident task. The bundled
      * project-scheduler plugin owns resident storage and forwards only the session id to the host,

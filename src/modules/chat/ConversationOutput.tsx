@@ -2,7 +2,10 @@ import { memo, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'r
 
 import type { ChatMessage, WorkerConversationMessage } from '@/shared/types';
 import MessageComponent from '@/modules/chat/transcript/MessageComponent';
+import ToolGroupContainer from '@/modules/chat/transcript/ToolGroupContainer';
+import { getIntrinsicMessageKey } from '@/modules/chat/utils/messageKeys';
 import { createCachedDiffCalculator } from '@/modules/chat/utils/messageTransforms';
+import { groupConsecutiveTools, isToolGroupItem } from '@/modules/chat/utils/toolGrouping';
 
 /** Distance from the bottom, in pixels, still counted as reading the newest output. */
 const BOTTOM_PROXIMITY_PX = 50;
@@ -21,6 +24,13 @@ type ConversationOutputProps = {
    * scroller). Omitted keeps the view's own scroll area, which is what a standalone mount needs.
    */
   scrollContainer?: HTMLElement | null;
+  /**
+   * Whether hidden reasoning is drawn, mirroring the main conversation's setting. Omitted keeps the
+   * run's reasoning visible, because a read-only Worker transcript has nothing to switch it off for.
+   */
+  showThinking?: boolean;
+  /** Whether tool cards show their raw parameters, mirroring the main conversation's setting. */
+  showRawParameters?: boolean;
 };
 
 /**
@@ -30,20 +40,31 @@ type ConversationOutputProps = {
 const NO_TIMESTAMP = 0;
 
 /**
+ * Keys for rows inside a collapsed tool group. Module-level so the prop keeps its identity, which
+ * is what lets memo(ToolGroupContainer) skip groups a stream tick did not touch, exactly as in the
+ * main conversation's ChatMessagesPane.
+ */
+const getGroupedMessageKey = (message: ChatMessage): string =>
+  getIntrinsicMessageKey(message) ?? 'message-generated';
+
+/**
  * Projects one plugin conversation row onto the shape the main transcript renders, so a Worker
  * panel looks like the conversation it belongs to. Tool calls and their results stay one row: the
  * plugin already merges them by call id, and both halves are passed to the shared `ToolRenderer`.
  */
 function toChatMessage(message: WorkerConversationMessage): ChatMessage {
+  // The plugin's row id is the stable identity across updates, so it is kept as the transcript key
+  // rather than being re-derived from content that keeps streaming.
   if (message.role === 'user') {
-    return { type: 'user', content: message.text, timestamp: NO_TIMESTAMP };
+    return { type: 'user', id: message.id, content: message.text, timestamp: NO_TIMESTAMP };
   }
   if (message.role === 'error') {
-    return { type: 'error', content: message.text, timestamp: NO_TIMESTAMP };
+    return { type: 'error', id: message.id, content: message.text, timestamp: NO_TIMESTAMP };
   }
   if (message.role === 'assistant') {
     return {
       type: 'assistant',
+      id: message.id,
       content: message.text,
       timestamp: NO_TIMESTAMP,
       isThinking: message.thinking,
@@ -56,6 +77,7 @@ function toChatMessage(message: WorkerConversationMessage): ChatMessage {
   if (!message.toolName && !toolInput && message.toolOutput === undefined) {
     return {
       type: 'assistant',
+      id: message.id,
       content: message.text,
       timestamp: NO_TIMESTAMP,
       isStreaming: Boolean(message.streaming),
@@ -63,6 +85,7 @@ function toChatMessage(message: WorkerConversationMessage): ChatMessage {
   }
   return {
     type: 'assistant',
+    id: message.id,
     content: '',
     // Main-conversation tool rows carry their readable line here; the raw payload stays below it.
     displayText: message.text || undefined,
@@ -92,6 +115,8 @@ export const ConversationOutput = memo(function ConversationOutput({
   provider,
   messages,
   scrollContainer = null,
+  showThinking = true,
+  showRawParameters = false,
 }: ConversationOutputProps) {
   const rootRef = useRef<HTMLDivElement>(null);
   // The rendered rows, measured on their own so late layout growth is observable even when this
@@ -107,6 +132,14 @@ export const ConversationOutput = memo(function ConversationOutput({
   const followingRef = useRef(true);
 
   const chatMessages = useMemo(() => messages.map(toChatMessage), [messages]);
+
+  // The main conversation's own grouping: a run of consecutive calls to the same tool folds into
+  // one expandable row, so a tool-heavy Worker run reads like the session it belongs to instead of
+  // one card and one reasoning block at a time.
+  const groupedMessages = useMemo(
+    () => groupConsecutiveTools(chatMessages, Boolean(showThinking)),
+    [chatMessages, showThinking],
+  );
 
   const readScroller = useCallback(
     () => scrollContainer ?? rootRef.current,
@@ -126,7 +159,7 @@ export const ConversationOutput = memo(function ConversationOutput({
     const scroller = readScroller();
     if (!scroller || !following) return;
     scroller.scrollTop = scroller.scrollHeight;
-  }, [chatMessages, following, readScroller]);
+  }, [groupedMessages, following, readScroller]);
 
   // The rows can grow after the commit that drew them — a reply's layout settles, a tool row
   // expands, an image decodes, or the plugin publishes a row on its own later tick — and none of
@@ -173,23 +206,54 @@ export const ConversationOutput = memo(function ConversationOutput({
       }
     >
       <div ref={contentRef} className="space-y-3">
-        {chatMessages.length === 0 && (
+        {groupedMessages.length === 0 && (
           <p className="text-xs text-muted-foreground">还没有对话输出。</p>
         )}
-        {chatMessages.map((message, index) => (
-          <MessageComponent
-            key={messages[index]?.id ?? index}
-            message={message}
-            prevMessage={index > 0 ? chatMessages[index - 1] : null}
-            createDiff={createDiff}
-            provider={provider}
-            // A Worker transcript is read-only: no edit, fork or permission controls are possible,
-            // and thinking rows are the run's own reasoning the user came to read.
-            showThinking
-            // Rows have no native time, so the shared footer draws none rather than a placeholder.
-            showTimestamp={false}
-          />
-        ))}
+        {(() => {
+          // Mirrors ChatMessagesPane: a row's `prevMessage` is the previous rendered row, and a
+          // group hands its first child the row before the group.
+          let prevMessage: ChatMessage | null = null;
+
+          return groupedMessages.map((item) => {
+            if (isToolGroupItem(item)) {
+              const groupPrevMessage = prevMessage;
+              prevMessage = item.messages[item.messages.length - 1] ?? prevMessage;
+
+              return (
+                <ToolGroupContainer
+                  key={`tool-group-${getGroupedMessageKey(item.messages[0])}`}
+                  group={item}
+                  prevMessage={groupPrevMessage}
+                  createDiff={createDiff}
+                  getMessageKey={getGroupedMessageKey}
+                  showThinking={showThinking}
+                  showRawParameters={showRawParameters}
+                  // Worker rows carry no native time, so their expanded tools draw none either.
+                  showTimestamp={false}
+                  provider={provider}
+                />
+              );
+            }
+
+            const messagePrevMessage = prevMessage;
+            prevMessage = item;
+
+            return (
+              <MessageComponent
+                key={getGroupedMessageKey(item)}
+                message={item}
+                prevMessage={messagePrevMessage}
+                createDiff={createDiff}
+                provider={provider}
+                // A Worker transcript is read-only: no edit, fork or permission controls are possible.
+                showThinking={showThinking}
+                showRawParameters={showRawParameters}
+                // Rows have no native time, so the shared footer draws none rather than a placeholder.
+                showTimestamp={false}
+              />
+            );
+          });
+        })()}
         {/* Sticky in the flow, so the control sits at the bottom of whichever element scrolls. */}
         {!following && (
           <div className="sticky bottom-2 flex justify-end">

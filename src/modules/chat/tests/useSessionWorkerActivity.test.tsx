@@ -269,7 +269,7 @@ test('the plugin state helper encodes both scope parameters', async () => {
   vi.stubGlobal('fetch', fetchMock);
   await api.plugins.workerState('project id', 'session&1');
   expect(String(fetchMock.mock.calls[0]?.[0])).toBe(
-    '/api/plugins/worker/rpc/state?projectId=project+id&parentSessionId=session%261',
+    '/api/plugins/worker/rpc/state?view=activity&projectId=project+id&parentSessionId=session%261',
   );
   vi.unstubAllGlobals();
 });

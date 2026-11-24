@@ -230,6 +230,17 @@ function run(overrides: RunOverrides = {}) {
   };
 }
 const CONFIG_DEFAULTS = {
+  AGY: {
+    id: "agy-default",
+    name: "Agy default",
+    type: "agy",
+    enabled: true,
+    roles: [],
+    concurrency: 3,
+    hardTimeoutSeconds: 300,
+    model: null,
+    effort: null,
+  },
   PI: {
     id: "pi-default",
     name: "Pi default",
@@ -260,7 +271,11 @@ const CONFIG_DEFAULTS = {
 };
 
 function configDefaults() {
-  return structuredClone([CONFIG_DEFAULTS.PI, CONFIG_DEFAULTS.CODEX]);
+  return structuredClone([
+    CONFIG_DEFAULTS.AGY,
+    CONFIG_DEFAULTS.PI,
+    CONFIG_DEFAULTS.CODEX,
+  ]);
 }
 
 function worker(overrides: Record<string, unknown> = {}) {
@@ -289,23 +304,19 @@ function worker(overrides: Record<string, unknown> = {}) {
 function snapshot(overrides: Record<string, unknown> = {}) {
   return {
     workers: [worker()],
-    counts: {
-      dsh: counts({ running: 1 }),
-      pi: counts(),
-      codex: counts(),
-      agy: counts(),
-      total: counts({ running: 1 }),
-    },
+    finished: { items: [], nextCursor: null },
     settings: {
       schemaVersion: 2,
       configs: configDefaults(),
-      defaultConfigId: "pi-default",
-      concurrency: { pi: 3, codex: 3, agy: 1 },
-      defaultWorkerType: "pi",
+      defaultConfigId: "agy-default",
+      concurrency: { dsh: 1, pi: 3, codex: 3, agy: 3 },
+      defaultWorkerType: "agy",
       enabled: { pi: true, codex: true, agy: true },
-      roles: { pi: [], codex: [], agy: [] },
+      roles: { dsh: [], pi: [], codex: [], agy: [] },
       defaults: {
+        dsh: { model: null, effort: null },
         pi: { model: null, effort: null },
+        agy: { model: null, effort: null },
         codex: { model: null, effort: null },
       },
       codex: {
@@ -318,7 +329,8 @@ function snapshot(overrides: Record<string, unknown> = {}) {
       retentionDays: 1,
     },
     configUsage: {},
-    notifications: [],
+    agyCooldownUntil: null,
+    notifications: { items: [], nextCursor: null },
     ...overrides,
   };
 }
@@ -340,13 +352,17 @@ function counts(overrides: Record<string, number> = {}) {
 type Mode = {
   context?: TestContext;
   state?: (path: string) => Promise<unknown> | unknown;
+  /** `GET /history`; the default is an empty final page. */
+  history?: (kind: string, path: string) => Promise<unknown> | unknown;
+  /** `POST /notifications/retry`; the default queues nothing. */
+  retry?: (body: unknown) => Promise<unknown> | unknown;
   detail?: (workerId: string) => unknown;
   logs?: (workerId: string, path: string) => unknown;
   input?: (workerId: string, path: string) => unknown;
   /** Installs the optional host conversation view capability. */
   conversation?: boolean;
   settings?: (body: unknown) => unknown;
-  models?: () => Promise<unknown>;
+  models?: (provider: "codex") => Promise<unknown>;
   codexProviders?: () => Promise<unknown>;
   codexProviderModels?: (modelProvider: string) => Promise<unknown>;
   piCatalog?: () => Promise<unknown>;
@@ -409,7 +425,11 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
   const views: ConversationViewRecord[] = [];
   let context = mode.context ?? DEFAULT_CONTEXT;
   const host: Record<string, unknown> = {
-    models: mode.models ?? (async () => CODEX_MODELS),
+    // The host serves only the Codex metadata catalog; any other provider is a regression.
+    models: mode.models ?? (async (provider: "codex") => {
+      if (provider !== "codex") throw new Error("宿主未提供该模型目录");
+      return CODEX_MODELS;
+    }),
     codexModelProviders: mode.codexProviders ?? (async () => CODEX_DIRECTORY),
     codexModelProviderModels:
       mode.codexProviderModels ??
@@ -429,6 +449,13 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       if (pathAndQuery.startsWith("/state")) {
         if (mode.state) return mode.state(pathAndQuery);
         return snapshot();
+      }
+      if (pathAndQuery.startsWith("/history")) {
+        const kind = new URLSearchParams(pathAndQuery.split("?")[1] ?? "").get(
+          "kind",
+        ) ?? "";
+        if (mode.history) return mode.history(kind, pathAndQuery);
+        return { items: [], nextCursor: null };
       }
       const workerMatch = /^\/workers\/([^/?]+)$/.exec(pathAndQuery);
       if (workerMatch) {
@@ -465,8 +492,10 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       }
       if (pathAndQuery === "/recover" || pathAndQuery === "/cleanup")
         return { ok: true };
-      if (pathAndQuery === "/notifications/retry")
-        return { notifications: [] };
+      if (pathAndQuery === "/notifications/retry") {
+        if (mode.retry) return mode.retry(body);
+        return { retried: 0 };
+      }
       throw new Error("unexpected RPC " + method + " " + pathAndQuery);
     },
   };
@@ -540,7 +569,7 @@ test("DOM: switching context drops the old in-flight state response", async () =
     const firstPath = [...waiting.keys()][0]!;
     assert.equal(
       firstPath,
-      "/state?projectId=project-a&parentSessionId=session-1",
+      "/state?view=overview&projectId=project-a&parentSessionId=session-1",
     );
     mounted.emit({
       theme: "light",
@@ -551,7 +580,7 @@ test("DOM: switching context drops the old in-flight state response", async () =
     const secondPath = [...waiting.keys()][1]!;
     assert.equal(
       secondPath,
-      "/state?projectId=project-b&parentSessionId=session-2",
+      "/state?view=overview&projectId=project-b&parentSessionId=session-2",
     );
     // The new context resolves first; the superseded response must never overwrite it.
     waiting.get(secondPath)!(
@@ -593,7 +622,7 @@ test("DOM: unavailable scopes are disabled and scope switches change the query",
   });
   try {
     await waitFor(() => stateCalls(mounted).length === 1, "全部视图请求");
-    assert.equal(stateCalls(mounted)[0]!.path, "/state");
+    assert.equal(stateCalls(mounted)[0]!.path, "/state?view=overview");
     assert.equal((byLabel(mounted.container, "范围：当前会话") as HTMLButtonElement).disabled, true);
     assert.equal((byLabel(mounted.container, "范围：当前项目") as HTMLButtonElement).disabled, true);
     assert.equal(
@@ -617,12 +646,12 @@ test("DOM: unavailable scopes are disabled and scope switches change the query",
     );
     (byLabel(mounted.container, "范围：当前项目") as HTMLButtonElement).click();
     await waitFor(
-      () => stateCalls(mounted).at(-1)?.path === "/state?projectId=project-a",
+      () => stateCalls(mounted).at(-1)?.path === "/state?view=overview&projectId=project-a",
       "项目查询",
     );
     (byLabel(mounted.container, "范围：全部") as HTMLButtonElement).click();
     await waitFor(
-      () => stateCalls(mounted).at(-1)?.path === "/state",
+      () => stateCalls(mounted).at(-1)?.path === "/state?view=overview",
       "全部查询",
     );
   } finally {
@@ -671,9 +700,36 @@ test("DOM: current-session stop pauses auto wake for exactly that owner key", as
 test("DOM: per-worker cancel sends only that worker id", async () => {
   const mounted = await mountPlugin();
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "取消 任务一")), "取消按钮");
-    (byLabel(mounted.container, "取消 任务一") as HTMLButtonElement).click();
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "取消 任务一")),
+      "取消按钮",
+    );
+    const cancel = byLabel(
+      mounted.container,
+      "取消 任务一",
+    ) as HTMLButtonElement;
+    assert.equal(textOf(cancel), "取消");
+    assert.equal(cancel.querySelector("svg"), null, "取消是文字按钮");
+    cancel.click();
     await waitFor(() => callsTo(mounted, "/cancel").length === 1, "取消请求");
+    assert.deepEqual(callsTo(mounted, "/cancel")[0]!.body, {
+      workerIds: ["worker-1"],
+    });
+    await waitFor(
+      () => textOf(mounted.container).includes("已请求取消 任务一"),
+      "取消提示",
+    );
+    const firstScreen = mounted.container.querySelector(".worker-first-screen")!;
+    assert.ok(
+      firstScreen.querySelector(".worker-notice")!.textContent!.includes(
+        "已请求取消 任务一",
+      ),
+      "the notice joins the filled first screen instead of pushing it down",
+    );
+    assert.ok(
+      firstScreen.contains(mounted.container.querySelector(".worker-card")),
+      "the live card body stays in the first screen",
+    );
     assert.deepEqual(callsTo(mounted, "/cancel")[0]!.body, {
       workerIds: ["worker-1"],
     });
@@ -697,16 +753,6 @@ function optionLabels(select: HTMLSelectElement): string[] {
   return [...select.options].map((option) => textOf(option));
 }
 
-/** Suggestions of a typable model input's `<datalist>`; the input itself stays free text. */
-function datalistValues(input: HTMLInputElement): string[] {
-  const id = input.getAttribute("list");
-  const datalist = id ? input.ownerDocument.getElementById(id) : null;
-  if (!datalist) return [];
-  return [...datalist.querySelectorAll("option")].map(
-    (option) => (option as HTMLOptionElement).value,
-  );
-}
-
 async function openSettings(mounted: Mounted) {
   await waitFor(() => {
     const entry = findButton(mounted.container, "Worker 设置");
@@ -725,46 +771,46 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     await openSettings(mounted);
 
     // A not-yet-saved config can always be deleted again without touching the server.
-    (byLabel(mounted.container, "新增 Codex 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 名称")), "新增配置");
-    assert.equal(configCards(mounted.container)[2]!.open, false);
+    (byLabel(mounted.container, "新增 Antigravity 配置") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增配置");
+    assert.equal(configCards(mounted.container)[3]!.open, false);
     assert.equal(
-      (byLabel(mounted.container, "配置 3 名称") as HTMLInputElement).value,
-      "codex#1",
+      (byLabel(mounted.container, "配置 4 名称") as HTMLInputElement).value,
+      "agy#1",
     );
     await typeInto(
-      byLabel(mounted.container, "配置 3 名称") as HTMLInputElement,
+      byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
       "临时配置",
     );
-    (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).click();
-    await waitFor(() => !byLabel(mounted.container, "配置 3 名称"), "删除未保存配置");
+    (byLabel(mounted.container, "配置 4 删除") as HTMLButtonElement).click();
+    await waitFor(() => !byLabel(mounted.container, "配置 4 名称"), "删除未保存配置");
     assert.equal(callsTo(mounted, "/settings").length, 0);
 
     // Duplicating copies env and legacy extra args but assigns a fresh id and name.
     (byLabel(mounted.container, "新增 Pi 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 名称")), "新增 Pi 配置");
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增 Pi 配置");
     await typeInto(
-      byLabel(mounted.container, "配置 3 名称") as HTMLInputElement,
+      byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
       "后备 Pi",
     );
-    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "复制 Codex 配置");
-    assert.equal(configCards(mounted.container)[3]!.open, false);
+    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 名称")), "复制 Codex 配置");
+    assert.equal(configCards(mounted.container)[4]!.open, false);
     assert.equal(
-      (byLabel(mounted.container, "配置 4 名称") as HTMLInputElement).value,
+      (byLabel(mounted.container, "配置 5 名称") as HTMLInputElement).value,
       "codex#1",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 5 Codex 环境变量") as HTMLTextAreaElement).value,
       "CODEX_PROXY_BYPASS=1",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 5 模型") as HTMLSelectElement).value,
       "",
     );
 
     // The copy becomes the explicit default and the whole document is saved atomically.
-    (byLabel(mounted.container, "配置 4 设为默认") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 5 设为默认") as HTMLButtonElement).click();
     const defaultSelect = byLabel(
       mounted.container,
       "默认 Worker 配置",
@@ -786,10 +832,10 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
     assert.equal(body.retentionDays, 1);
     assert.deepEqual(
       body.configs.map((config) => config.name),
-      ["Pi default", "Codex default", "后备 Pi", "codex#1"],
+      ["Agy default", "Pi default", "Codex default", "后备 Pi", "codex#1"],
     );
-    assert.equal(new Set(body.configs.map((config) => config.id)).size, 4);
-    const copied = body.configs[3]!;
+    assert.equal(new Set(body.configs.map((config) => config.id)).size, 5);
+    const copied = body.configs[4]!;
     assert.notEqual(copied.id, "codex-default");
     assert.equal(body.defaultConfigId, copied.id);
     assert.deepEqual(copied.codex, {
@@ -797,7 +843,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       env: { CODEX_PROXY_BYPASS: "1" },
       legacyExtraArgs: ["-c", "model_provider=magpie"],
     });
-    const added = body.configs[2]!;
+    const added = body.configs[3]!;
     assert.deepEqual(
       { ...added, id: undefined },
       {
@@ -826,8 +872,8 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       body.configs.map((config) => config.id),
     );
     assert.equal(second.defaultConfigId, body.defaultConfigId);
-    assert.deepEqual(second.configs[3]!.codex, copied.codex);
-    assert.equal(second.configs[3]!.model, null);
+    assert.deepEqual(second.configs[4]!.codex, copied.codex);
+    assert.equal(second.configs[4]!.model, null);
   } finally {
     mounted.unmount();
   }
@@ -836,38 +882,20 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
 test("DOM: usage locks the engine, active runs block deletion, and disabling the default moves it", async () => {
   const usage = {
     "codex-default": { referenced: true, activeRuns: 1 },
-    "agy-default": { referenced: true, activeRuns: 0 },
-  };
-  const baseSettings = snapshot().settings as Record<string, any>;
-  const settings = {
-    ...baseSettings,
-    configs: [
-      ...configDefaults(),
-      {
-        id: "agy-default",
-        name: "AGY default",
-        type: "agy",
-        enabled: true,
-        roles: [],
-        concurrency: 3,
-        hardTimeoutSeconds: 300,
-        model: null,
-        effort: null,
-      },
-    ],
+    "pi-default": { referenced: true, activeRuns: 0 },
   };
   const mounted = await mountPlugin({
-    state: () => snapshot({ settings, configUsage: usage }),
+    state: () => snapshot({ configUsage: usage }),
   });
   try {
     await openSettings(mounted);
 
     assert.equal(
-      (byLabel(mounted.container, "配置 2 执行引擎") as HTMLSelectElement).disabled,
+      (byLabel(mounted.container, "配置 3 执行引擎") as HTMLSelectElement).disabled,
       true,
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 2 删除") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).disabled,
       true,
     );
     assert.equal(
@@ -876,12 +904,12 @@ test("DOM: usage locks the engine, active runs block deletion, and disabling the
     );
     // A referenced config without active runs can still be deleted; history is kept.
     assert.equal(
-      (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 2 删除") as HTMLButtonElement).disabled,
       false,
     );
     assert.ok(textOf(mounted.container).includes("删除只移除配置"));
-    (byLabel(mounted.container, "配置 3 删除") as HTMLButtonElement).click();
-    await waitFor(() => !byLabel(mounted.container, "配置 3 名称"), "删除 AGY 配置");
+    (byLabel(mounted.container, "配置 2 删除") as HTMLButtonElement).click();
+    await waitFor(() => !byLabel(mounted.container, "配置 3 名称"), "删除 Pi 配置");
 
     // Disabling the default selects the next enabled config as the new default.
     (byLabel(mounted.container, "配置 1 启用") as HTMLInputElement).click();
@@ -905,8 +933,8 @@ test("DOM: usage locks the engine, active runs block deletion, and disabling the
     );
     (byLabel(mounted.container, "配置 1 设为默认") as HTMLButtonElement).click();
     await waitFor(
-      () => (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value === "pi-default",
-      "默认切回 Pi",
+      () => (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value === "agy-default",
+      "默认切回 Agy",
     );
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "停用后保存");
@@ -916,16 +944,16 @@ test("DOM: usage locks the engine, active runs block deletion, and disabling the
     };
     assert.deepEqual(
       body.configs.map((config) => config.id),
-      ["pi-default", "codex-default"],
+      ["agy-default", "codex-default"],
     );
     assert.deepEqual(
       body.configs.map((config) => [config.id, config.enabled]),
       [
-        ["pi-default", true],
+        ["agy-default", true],
         ["codex-default", false],
       ],
     );
-    assert.equal(body.defaultConfigId, "pi-default");
+    assert.equal(body.defaultConfigId, "agy-default");
   } finally {
     mounted.unmount();
   }
@@ -943,12 +971,12 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     await openSettings(mounted);
     const codexProvider = byLabel(
       mounted.container,
-      "配置 2 Codex 模型服务",
+      "配置 3 Codex 模型服务",
     ) as HTMLSelectElement;
-    const codexModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
+    const codexModel = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
     const codexReasoning = byLabel(
       mounted.container,
-      "配置 2 reasoning",
+      "配置 3 reasoning",
     ) as HTMLSelectElement;
     assert.equal(codexProvider.value, "");
     assert.equal(codexProvider.options[0]!.textContent, "使用默认模型服务");
@@ -997,11 +1025,18 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     assert.deepEqual(optionValues(codexReasoning), [""]);
     assert.deepEqual(requested, ["magpie", "openai"]);
 
+    // The first card is a real agy config: its model is a select, never a DSH text route.
+    assert.equal(
+      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).tagName,
+      "SELECT",
+    );
+    assert.equal(callsTo(mounted, "/catalog/dsh").length, 0);
+
     // Pi keeps provider/model identity; a non-reasoning model does not claim thinking levels.
-    const piModel = byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement;
+    const piModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
     const piReasoning = byLabel(
       mounted.container,
-      "配置 1 reasoning",
+      "配置 2 reasoning",
     ) as HTMLSelectElement;
     assert.deepEqual(optionValues(piModel), [
       "",
@@ -1035,6 +1070,8 @@ test("DOM: default Codex service resolves defaultProvider while explicit service
     assert.equal(byName["Codex default"].model, "magpie-1");
     assert.equal(byName["Codex default"].effort, null);
     assert.equal(byName["Codex default"].codex.modelProvider, null);
+    assert.equal(byName["Agy default"].model, null);
+    assert.equal(byName["Agy default"].effort, null);
     assert.equal(byName["Pi default"].model, "openrouter/claude-sonnet");
     assert.equal(byName["Pi default"].effort, null);
   } finally {
@@ -1089,14 +1126,14 @@ test("DOM: Codex service errors stay on their own card and late responses never 
     await openSettings(mounted);
     const card3 = byLabel(
       mounted.container,
-      "配置 2 Codex 模型服务",
+      "配置 3 Codex 模型服务",
     )!.closest("details")!;
     const card4 = byLabel(
       mounted.container,
-      "配置 3 Codex 模型服务",
+      "配置 4 Codex 模型服务",
     )!.closest("details")!;
-    const model3 = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
-    const model4 = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
+    const model3 = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
+    const model4 = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
 
     // The default-service card resolves magpie; the explicit openai card is still pending.
     pending.get("magpie")!.resolve({ modelProvider: "magpie", models: ["magpie-1"] });
@@ -1107,7 +1144,7 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
     // Leaving the pending openai service shows the cached magpie menu with no error.
     await typeInto(
-      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
       "",
     );
     await waitFor(() => optionValues(model4).includes("magpie-1"), "切回默认服务");
@@ -1121,7 +1158,7 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
     // Re-entering openai shows only that card's cached failure; retry recovers it.
     await typeInto(
-      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
       "openai",
     );
     await waitFor(() => textOf(card4).includes("openai down"), "当前服务错误");
@@ -1136,11 +1173,11 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
     // Repeatedly switching to an already-loaded id does not request it again.
     await typeInto(
-      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
       "",
     );
     await typeInto(
-      byLabel(mounted.container, "配置 3 Codex 模型服务") as HTMLSelectElement,
+      byLabel(mounted.container, "配置 4 Codex 模型服务") as HTMLSelectElement,
       "openai",
     );
     await waitFor(() => optionValues(model4).includes("openai-ok"), "缓存复用");
@@ -1153,8 +1190,49 @@ test("DOM: Codex service errors stay on their own card and late responses never 
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[1]!.codex.modelProvider, null);
-    assert.equal(body.configs[2]!.codex.modelProvider, "openai");
+    assert.equal(body.configs[2]!.codex.modelProvider, null);
+    assert.equal(body.configs[3]!.codex.modelProvider, "openai");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: settings never offer DSH and the list only renders server records", async () => {
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: [
+          worker({
+            type: "pi",
+            configId: "pi-default",
+            configName: "Pi default",
+          }),
+        ],
+      }),
+  });
+  try {
+    await openSettings(mounted);
+    assert.equal(byLabel(mounted.container, "新增 DSH 配置"), null);
+    assert.equal(findButton(mounted.container, "新增 DSH 配置"), undefined);
+    for (const select of mounted.container.querySelectorAll(
+      'select[aria-label$="执行引擎"]',
+    )) {
+      assert.equal(
+        optionValues(select as HTMLSelectElement).includes("dsh"),
+        false,
+        "engine select excludes DSH",
+      );
+    }
+    assert.equal(callsTo(mounted, "/catalog/dsh").length, 0);
+
+    // The list renders exactly what the filtered server response contains: no DSH row and no
+    // client-side reconstruction of legacy records.
+    button(mounted.container, "返回列表").click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "返回列表");
+    const text = textOf(mounted.container);
+    assert.ok(text.includes("任务一"));
+    assert.equal(text.includes("DSH"), false);
+    assert.equal(mounted.container.querySelectorAll(".worker-type-dsh").length, 0);
   } finally {
     mounted.unmount();
   }
@@ -1162,16 +1240,17 @@ test("DOM: Codex service errors stay on their own card and late responses never 
 
 test("DOM: catalog failures stay local, keep stored values and retry in place", async () => {
   let modelsFail = true;
+  let agyFail = true;
   let piFail = true;
   const settings = snapshot().settings as Record<string, any>;
   settings.configs = configDefaults();
   settings.configs[0] = {
     ...settings.configs[0],
-    model: "anthropic/legacy-model",
-    effort: "low",
+    model: "gemini-legacy",
+    effort: null,
   };
-  settings.configs[1] = {
-    ...settings.configs[1],
+  settings.configs[2] = {
+    ...settings.configs[2],
     model: "legacy-codex",
     effort: "ultra",
     codex: {
@@ -1180,11 +1259,20 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
       legacyExtraArgs: ["-c", "model_provider=magpie"],
     },
   };
+  settings.configs[1] = {
+    ...settings.configs[1],
+    model: "anthropic/legacy-model",
+    effort: "low",
+  };
   const mounted = await mountPlugin({
     state: () => snapshot({ settings }),
-    models: async () => {
-      if (modelsFail) throw new Error("catalog down codex");
+    models: async (provider) => {
+      if (modelsFail) throw new Error("catalog down " + provider);
       return CODEX_MODELS;
+    },
+    agyCatalog: async () => {
+      if (agyFail) throw new Error("agy catalog down");
+      return AGY_CATALOG;
     },
     piCatalog: async () => {
       if (piFail) throw new Error("pi catalog down");
@@ -1205,20 +1293,28 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
     );
     // Stored values are still selected and only saving edits must not drop them.
     assert.equal(
-      (byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement).value,
       "legacy-codex",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 2 reasoning") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 3 reasoning") as HTMLSelectElement).value,
       "ultra",
     );
+    // An unlisted agy id stays selectable, so a failed directory never drops it.
+    const agyModel = byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement;
+    assert.equal(agyModel.value, "gemini-legacy");
+    assert.deepEqual(optionValues(agyModel), ["", "gemini-legacy"]);
     assert.equal(
-      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
+      (byLabel(mounted.container, "配置 1 reasoning") as HTMLSelectElement).value,
+      "",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).value,
       "anthropic/legacy-model",
     );
     await typeInto(
       byLabel(mounted.container, "配置 1 名称") as HTMLInputElement,
-      "Pi 改名",
+      "Agy 改名",
     );
     await waitFor(() => !button(mounted.container, "保存设置").disabled, "目录失败仍可保存");
     button(mounted.container, "保存设置").click();
@@ -1226,35 +1322,140 @@ test("DOM: catalog failures stay local, keep stored values and retry in place", 
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[0]!.name, "Pi 改名");
-    assert.equal(body.configs[0]!.model, "anthropic/legacy-model");
-    assert.equal(body.configs[0]!.effort, "low");
-    assert.equal(body.configs[1]!.model, "legacy-codex");
-    assert.equal(body.configs[1]!.effort, "ultra");
-    assert.equal(body.configs[1]!.codex.modelProvider, "magpie");
+    assert.equal(body.configs[0]!.model, "gemini-legacy");
+    assert.equal(body.configs[0]!.effort, null);
+    assert.equal(body.configs[2]!.model, "legacy-codex");
+    assert.equal(body.configs[2]!.effort, "ultra");
+    assert.equal(body.configs[2]!.codex.modelProvider, "magpie");
+    assert.equal(body.configs[1]!.model, "anthropic/legacy-model");
 
     // Retrying recovers the catalogs without clearing any stored selection.
     modelsFail = false;
+    agyFail = false;
     piFail = false;
     const retries = retryButtons(mounted.container);
-    assert.ok(retries.length >= 3);
+    assert.ok(retries.length >= 4);
     for (const retry of retries) retry.click();
     await waitFor(
       () =>
-        optionLabels(
-          byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement,
-        ).includes("anthropic/claude-sonnet"),
-      "Pi 目录恢复",
+        optionValues(byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).includes(
+          "gemini-3.8-flash-low",
+        ),
+      "agy 目录恢复",
     );
-    // Recovering suggestions never rewrites the stored route into a listed one.
+    // Recovering the directory never rewrites the stored id into a listed one.
     assert.equal(
       (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
-      "anthropic/legacy-model",
+      "gemini-legacy",
     );
     assert.ok(
-      optionLabels(
-        byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement,
-      ).includes("anthropic/legacy-model（当前已保存）"),
+      optionLabels(byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).includes(
+        "anthropic/legacy-model（当前已保存）",
+      ),
+    );
+    await waitFor(
+      () =>
+        retryButtons(mounted.container).length === 0 ||
+        optionLabels(byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement).includes(
+          "anthropic/claude-sonnet",
+        ),
+      "Pi 目录恢复",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement).value,
+      "gemini-legacy",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: equal history timestamps order by id descending like the server", async () => {
+  const at = "2026-01-01T00:00:00.000Z";
+  const a = worker({
+    id: "worker-a",
+    taskName: "任务 A",
+    latestRun: run({ status: "completed", finishedAt: at, exitCode: 0 }),
+  });
+  const b = worker({
+    id: "worker-b",
+    taskName: "任务 B",
+    taskRole: "testing",
+    latestRun: run({ status: "completed", finishedAt: at, exitCode: 0 }),
+  });
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: [],
+        finished: { items: [a, b], nextCursor: null },
+      }),
+  });
+  try {
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(
+          ".worker-history-table tbody tr",
+        ).length === 2,
+      "历史表",
+    );
+    const headers = [
+      ...mounted.container.querySelectorAll(".worker-history-table thead th"),
+    ].map((cell) => textOf(cell));
+    assert.deepEqual(headers, [
+      "任务 / 会话",
+      "任务角色",
+      "引擎 / 配置",
+      "状态 / 耗时",
+      "工作区",
+      "操作",
+    ]);
+    const rows = [
+      ...mounted.container.querySelectorAll(".worker-history-table tbody tr"),
+    ];
+    const screen = mounted.container.querySelector(".worker-first-screen")!;
+    assert.equal(
+      screen.classList.contains("worker-first-screen-fill"),
+      false,
+      "without live cards the first screen does not reserve a page",
+    );
+    assert.ok(
+      screen.nextElementSibling!.classList.contains("worker-history"),
+      "paged history follows the first screen instead of living inside it",
+    );
+    assert.equal(screen.querySelector(".worker-history"), null);
+    const names = rows.map((row) => textOf(row));
+    assert.ok(names[0]!.includes("任务 B"), "id descending breaks the timestamp tie");
+    assert.ok(names[1]!.includes("任务 A"));
+    const finished = rows[0]!;
+    const body = textOf(finished);
+    for (const text of [
+      "project-a",
+      "会话 session-1",
+      "原生 native-session-1",
+      "测试",
+      "DSH",
+      "配置 DSH default",
+      "deepseek-v4 / deepseek / high",
+      "已完成",
+      "退出码 0",
+      "结束 ",
+      "/tmp/project-a",
+      "existing",
+      "写入范围 plugins/worker/client/",
+    ])
+      assert.ok(body.includes(text), "finish row shows " + text);
+    assert.equal(
+      finished.querySelector(".worker-role")!.textContent,
+      "测试",
+    );
+    assert.equal(
+      finished.querySelector(".worker-type-dsh")!.textContent,
+      "DSH",
+    );
+    assert.equal(
+      finished.querySelectorAll("button").length,
+      2,
+      "a finished row offers view only, not cancel",
     );
   } finally {
     mounted.unmount();
@@ -1312,17 +1513,29 @@ test("DOM: an older service without configs shows an upgrade notice and recovers
     };
     assert.deepEqual(
       saved.configs.map((config) => config.id),
-      ["pi-default", "codex-default"],
+      ["agy-default", "pi-default", "codex-default"],
     );
-    assert.equal(saved.defaultConfigId, "pi-default");
+    assert.equal(saved.defaultConfigId, "agy-default");
   } finally {
     mounted.unmount();
   }
 });
 
 test("DOM: list and detail show recorded task roles and handle legacy records without a role", async () => {
-  const ui = worker({ taskRole: "ui_design", taskName: "界面任务" });
-  const legacy = worker({ id: "worker-legacy", taskName: "历史任务" });
+  const ui = worker({
+    type: "pi",
+    configId: "pi-default",
+    configName: "Pi default",
+    taskRole: "ui_design",
+    taskName: "界面任务",
+  });
+  const legacy = worker({
+    id: "worker-legacy",
+    type: "pi",
+    configId: "pi-default",
+    configName: "Pi default",
+    taskName: "历史任务",
+  });
   const mounted = await mountPlugin({
     state: () =>
       snapshot({
@@ -1348,12 +1561,8 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
       () => textOf(mounted.container).includes("界面任务"),
       "列表角色",
     );
-    const headings = [...mounted.container.querySelectorAll(".worker-table th")];
-    const roleColumn = headings.findIndex((heading) => textOf(heading) === "任务角色");
-    assert.notEqual(roleColumn, -1);
-    const rows = mounted.container.querySelectorAll(".worker-table tbody tr");
-    assert.equal(textOf(rows[0]!.children[roleColumn]), "UI设计");
-    assert.equal(textOf(rows[1]!.children[roleColumn]), "未指定");
+    assert.ok(textOf(mounted.container).includes("UI设计"));
+    assert.ok(textOf(mounted.container).includes("未指定"));
     (byLabel(mounted.container, "查看 界面任务") as HTMLButtonElement).click();
     await waitFor(
       () => Boolean(mounted.container.querySelector(".worker-detail-grid")),
@@ -1366,7 +1575,7 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
     );
     const detailText = textOf(mounted.container.querySelector(".worker-detail-grid"));
     assert.ok(detailText.includes("Worker 配置"));
-    assert.ok(detailText.includes("DSH default"));
+    assert.ok(detailText.includes("Pi default"));
     button(mounted.container, "返回列表").click();
     await waitFor(
       () => Boolean(byLabel(mounted.container, "查看 历史任务")),
@@ -1383,28 +1592,13 @@ test("DOM: list and detail show recorded task roles and handle legacy records wi
   }
 });
 
-test("DOM: all four worker types have distinct labels and aggregate counts", async () => {
+test("DOM: overview cards, queued rows and finished history use the engine labels", async () => {
   const records = [
-    worker({ id: "worker-dsh", type: "dsh", taskName: "DSH 任务" }),
     worker({
       id: "worker-pi",
       type: "pi",
-      configId: "pi-default",
-      configName: "Pi default",
       taskName: "Pi 任务",
       latestRun: run({ id: "run-pi", workerId: "worker-pi", status: "queued" }),
-    }),
-    worker({
-      id: "worker-codex",
-      type: "codex",
-      taskName: "Codex 任务",
-      latestRun: run({
-        id: "run-codex",
-        workerId: "worker-codex",
-        status: "completed",
-        finishedAt: new Date().toISOString(),
-        exitCode: 0,
-      }),
     }),
     worker({
       id: "worker-agy",
@@ -1420,45 +1614,47 @@ test("DOM: all four worker types have distinct labels and aggregate counts", asy
       }),
     }),
   ];
+  const finished = worker({
+    id: "worker-codex",
+    type: "codex",
+    taskName: "Codex 任务",
+    latestRun: run({
+      id: "run-codex",
+      workerId: "worker-codex",
+      status: "completed",
+      finishedAt: new Date().toISOString(),
+      exitCode: 0,
+    }),
+  });
   const mounted = await mountPlugin({
     state: () =>
       snapshot({
         workers: records,
-        counts: {
-          dsh: counts({ running: 1 }),
-          pi: counts({ queued: 1 }),
-          codex: counts({ completed: 1 }),
-          agy: counts({ running: 1 }),
-          total: counts({ running: 2, queued: 1, completed: 1 }),
-        },
+        finished: { items: [finished], nextCursor: null },
       }),
   });
   try {
-    await waitFor(() => textOf(mounted.container).includes("Antigravity 任务"), "四类型列表");
-    const summary = mounted.container.querySelector(
-      '[aria-label="按类型统计"]',
+    await waitFor(
+      () => textOf(mounted.container).includes("Antigravity 任务"),
+      "活跃卡片",
     );
-    assert.ok(summary);
-    assert.ok(textOf(summary).includes("1DSH 执行中"));
-    assert.ok(textOf(summary).includes("0Pi 执行中"));
-    assert.ok(textOf(summary).includes("0Codex 执行中"));
-    assert.ok(textOf(summary).includes("1Antigravity 执行中"));
-    assert.ok(textOf(summary).includes("2全部 执行中"));
+    const text = textOf(mounted.container);
+    assert.equal(text.includes("DSH 任务"), false, "no legacy DSH row is rendered");
+    assert.ok(text.includes("Antigravity"));
+    assert.ok(text.includes("Pi"));
+    assert.ok(text.includes("排队中"), "queued work is a compact row");
+    assert.ok(text.includes("Codex 任务"), "finished history is listed below");
+    assert.ok(text.includes("已结束任务"));
+    assert.ok(text.includes("通知"));
     assert.equal(
-      textOf(mounted.container.querySelector(".worker-type-codex")),
-      "Codex",
-    );
-    assert.equal(
-      textOf(mounted.container.querySelector(".worker-type-agy")),
-      "Antigravity",
+      mounted.container.querySelector('[aria-label="按类型统计"]'),
+      null,
+      "engine statistic cards are replaced by conversation cards",
     );
     assert.ok(
-      textOf(mounted.container).includes(
-        "Pi default 3 / Codex default 3",
-      ),
+      text.includes("Agy default 3 / Pi default 3 / Codex default 3"),
+      "concurrency footer stays",
     );
-    assert.ok(textOf(mounted.container).includes("配置 Pi default"));
-    assert.ok(textOf(mounted.container).includes("4 个 worker · 4 个状态记录"));
   } finally {
     mounted.unmount();
   }
@@ -1481,8 +1677,7 @@ test("DOM: recovery needs verified-stop evidence and sends the explicit confirma
     detail: () => ({ worker: record, runs: [unknownRun] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => Boolean(byLabel(mounted.container, "已核实停止的说明")),
       "恢复表单",
@@ -1526,8 +1721,7 @@ test("DOM: cleanup is offered only for a stopped plugin-created worktree", async
     detail: () => ({ worker: record, runs: [completed] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => Boolean(findButton(mounted.container, "清理 worktree")),
       "清理按钮",
@@ -1550,8 +1744,7 @@ test("DOM: queued runs show the configured timeout before its deadline starts", 
     detail: () => ({ worker: record, runs: [queued] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => textOf(mounted.container).includes("进度与预算"), "运行预算");
     assert.ok(textOf(mounted.container).includes("硬超时 120 秒"));
     assert.equal(textOf(mounted.container).includes("未设置硬超时"), false);
@@ -1569,8 +1762,7 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => Boolean(findButton(mounted.container, "原始事件")),
       "日志标签",
@@ -1578,11 +1770,7 @@ test("DOM: log pagination requests the next cursor and appends the page", async 
     // The conversation tab owns the run's first drain: its first page plus the page that
     // reaches terminal EOF here. Wait for that drain to finish so its reads cannot be
     // counted as raw-tab requests; the snapshot itself races the mounted effects.
-    await waitFor(
-      () =>
-        mounted.calls.filter((call) => call.path.includes("/logs?")).length === 2,
-      "对话首屏日志",
-    );
+    await delay(100);
     findButton(mounted.container, "原始事件")!.click();
     const before = mounted.calls.length;
     await waitFor(
@@ -1616,20 +1804,22 @@ test("DOM: retry notification sends only the selected event id", async () => {
   const mounted = await mountPlugin({
     state: () =>
       snapshot({
-        notifications: [
+        notifications: { items: [
           {
             id: "event-1",
+            taskName: "任务一",
             ownerId: "owner-1",
             workerId: "worker-1",
             runId: "run-1",
             summary: "任务一已完成",
             status: "completed",
             createdAt: new Date().toISOString(),
-            delivery: "pending",
+            delivery: "held",
             batchId: null,
           },
           {
             id: "event-2",
+            taskName: "任务一",
             ownerId: "owner-1",
             workerId: "worker-1",
             runId: "run-1",
@@ -1639,7 +1829,7 @@ test("DOM: retry notification sends only the selected event id", async () => {
             delivery: "delivered",
             batchId: "batch-1",
           },
-        ],
+        ], nextCursor: null },
       }),
   });
   try {
@@ -1647,10 +1837,8 @@ test("DOM: retry notification sends only the selected event id", async () => {
       () => Boolean(byLabel(mounted.container, "重试通知 event-1")),
       "通知列表",
     );
-    assert.equal(
-      (byLabel(mounted.container, "重试通知 event-2") as HTMLButtonElement).disabled,
-      true,
-    );
+    // Delivered notifications expose no retry entry.
+    assert.equal(byLabel(mounted.container, "重试通知 event-2"), null);
     (byLabel(mounted.container, "重试通知 event-1") as HTMLButtonElement).click();
     await waitFor(
       () => callsTo(mounted, "/notifications/retry").length === 1,
@@ -1871,16 +2059,16 @@ test("DOM: each config edits its timeout, validates it, and copies it on duplica
     await typeInto(first, "600");
     await typeInto(second, "");
     (byLabel(mounted.container, "新增 Codex 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 硬超时（秒）")), "新增默认超时");
-    assert.equal((byLabel(mounted.container, "配置 3 硬超时（秒）") as HTMLInputElement).value, "600");
-    (byLabel(mounted.container, "配置 1 复制") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 硬超时（秒）")), "复制超时配置");
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 硬超时（秒）")), "新增默认超时");
     assert.equal((byLabel(mounted.container, "配置 4 硬超时（秒）") as HTMLInputElement).value, "600");
+    (byLabel(mounted.container, "配置 1 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 硬超时（秒）")), "复制超时配置");
+    assert.equal((byLabel(mounted.container, "配置 5 硬超时（秒）") as HTMLInputElement).value, "600");
     await waitFor(() => !button(mounted.container, "保存设置").disabled, "可保存超时配置");
     button(mounted.container, "保存设置").click();
     await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存各配置超时");
     const body = callsTo(mounted, "/settings")[0]!.body as { configs: Array<{ hardTimeoutSeconds: number | null }> };
-    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 600, 600]);
+    assert.deepEqual(body.configs.map((config) => config.hardTimeoutSeconds), [600, null, 300, 600, 600]);
   } finally {
     mounted.unmount();
   }
@@ -1903,10 +2091,10 @@ test("DOM: config ids fall back to UUID v4 without randomUUID and stay stable on
   const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
-    (byLabel(mounted.container, "新增 Pi 配置") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 3 名称")), "新增配置");
-    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
-    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "复制配置");
+    (byLabel(mounted.container, "新增 Antigravity 配置") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 4 名称")), "新增配置");
+    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 名称")), "复制配置");
     await waitFor(() => {
       const saveButton = findButton(mounted.container, "保存设置");
       return saveButton !== undefined && !saveButton.disabled;
@@ -1917,18 +2105,19 @@ test("DOM: config ids fall back to UUID v4 without randomUUID and stay stable on
     const first = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<{ id: string }>;
     };
-    assert.equal(first.configs.length, 4);
-    assert.deepEqual(first.configs.slice(0, 2).map((config) => config.id), [
+    assert.equal(first.configs.length, 5);
+    assert.deepEqual(first.configs.slice(0, 3).map((config) => config.id), [
+      "agy-default",
       "pi-default",
       "codex-default",
     ]);
-    assert.match(first.configs[2]!.id, uuid);
     assert.match(first.configs[3]!.id, uuid);
-    assert.equal(new Set(first.configs.map((config) => config.id)).size, 4);
+    assert.match(first.configs[4]!.id, uuid);
+    assert.equal(new Set(first.configs.map((config) => config.id)).size, 5);
 
     // A rerender and another save must not mint new ids for the same configs.
     await typeInto(
-      byLabel(mounted.container, "配置 3 名称") as HTMLInputElement,
+      byLabel(mounted.container, "配置 4 名称") as HTMLInputElement,
       "重命名配置",
     );
     await waitFor(() => {
@@ -1954,16 +2143,16 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
     await openSettings(mounted);
     const originalEnv = byLabel(
       mounted.container,
-      "配置 2 Codex 环境变量",
+      "配置 3 Codex 环境变量",
     ) as HTMLTextAreaElement;
     await typeInto(originalEnv, "BROKEN");
-    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "配置 3 Codex 环境变量")),
+      () => Boolean(byLabel(mounted.container, "配置 4 Codex 环境变量")),
       "复制 Codex 配置",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement).value,
       "BROKEN",
     );
     await waitFor(
@@ -1975,17 +2164,17 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
 
     // Fix the copy, clear the source, then duplicate the now-empty draft.
     await typeInto(
-      byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement,
+      byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement,
       "A=1",
     );
     await typeInto(originalEnv, "");
-    (byLabel(mounted.container, "配置 2 复制") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 3 复制") as HTMLButtonElement).click();
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "配置 4 Codex 环境变量")),
+      () => Boolean(byLabel(mounted.container, "配置 5 Codex 环境变量")),
       "复制空环境变量",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 4 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 5 Codex 环境变量") as HTMLTextAreaElement).value,
       "",
     );
     await waitFor(() => {
@@ -1997,9 +2186,9 @@ test("DOM: duplicating copies the raw Codex env draft, including emptied and inv
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.deepEqual(body.configs[1]!.codex.env, {});
-    assert.deepEqual(body.configs[2]!.codex.env, { A: "1" });
-    assert.deepEqual(body.configs[3]!.codex.env, {});
+    assert.deepEqual(body.configs[2]!.codex.env, {});
+    assert.deepEqual(body.configs[3]!.codex.env, { A: "1" });
+    assert.deepEqual(body.configs[4]!.codex.env, {});
     assert.deepEqual(
       body.configs[3]!.codex.legacyExtraArgs,
       body.configs[2]!.codex.legacyExtraArgs,
@@ -2013,16 +2202,18 @@ test("DOM: Pi's default model accepts thinking effort and only Codex exposes ser
   const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
-    // Only Codex exposes a service/env block; Pi has neither.
+    // Only Codex exposes a service/env block; agy and Pi have neither.
     assert.equal(byLabel(mounted.container, "配置 1 Codex 模型服务"), null);
+    assert.equal(byLabel(mounted.container, "配置 2 Codex 模型服务"), null);
     assert.equal(byLabel(mounted.container, "配置 1 Codex 环境变量"), null);
-    assert.ok(byLabel(mounted.container, "配置 2 Codex 模型服务"));
-    assert.ok(byLabel(mounted.container, "配置 2 Codex 环境变量"));
+    assert.equal(byLabel(mounted.container, "配置 2 Codex 环境变量"), null);
+    assert.ok(byLabel(mounted.container, "配置 3 Codex 模型服务"));
+    assert.ok(byLabel(mounted.container, "配置 3 Codex 环境变量"));
 
-    const piModel = byLabel(mounted.container, "配置 1 模型") as HTMLSelectElement;
+    const piModel = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
     const piReasoning = byLabel(
       mounted.container,
-      "配置 1 reasoning",
+      "配置 2 reasoning",
     ) as HTMLSelectElement;
     assert.deepEqual(optionValues(piReasoning), ["", "off", "low", "high"]);
     await typeInto(piReasoning, "high");
@@ -2040,8 +2231,8 @@ test("DOM: Pi's default model accepts thinking effort and only Codex exposes ser
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[0]!.model, null);
-    assert.equal(body.configs[0]!.effort, "high");
+    assert.equal(body.configs[1]!.model, null);
+    assert.equal(body.configs[1]!.effort, "high");
   } finally {
     mounted.unmount();
   }
@@ -2056,8 +2247,8 @@ function agySettings(): Record<string, any> & {
   settings.configs = [
     ...configDefaults(),
     {
-      id: "agy-default",
-      name: "agy#1",
+      id: "agy-extra",
+      name: "agy#2",
       type: "agy",
       enabled: true,
       roles: [],
@@ -2075,10 +2266,10 @@ test("DOM: agy models are a real select and reasoning is fixed to the model defa
   const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
   try {
     await openSettings(mounted);
-    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
-      "配置 3 reasoning",
+      "配置 4 reasoning",
     ) as HTMLSelectElement;
     assert.equal(model.tagName, "SELECT");
     assert.deepEqual(optionValues(model), [
@@ -2110,8 +2301,8 @@ test("DOM: agy models are a real select and reasoning is fixed to the model defa
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[2]!.model, "gemini-pro-orchestrator-neon");
-    assert.equal(body.configs[2]!.effort, null);
+    assert.equal(body.configs[3]!.model, "gemini-pro-orchestrator-neon");
+    assert.equal(body.configs[3]!.effort, null);
   } finally {
     mounted.unmount();
   }
@@ -2121,7 +2312,8 @@ test("DOM: agy runs the directory only for an agy config and fills the select fr
   const settings = snapshot().settings as Record<string, unknown> & {
     configs: Array<Record<string, any>>;
   };
-  settings.configs = configDefaults();
+  // Start without an agy config so adding the first one is what triggers the directory.
+  settings.configs = configDefaults().filter((config) => config.type !== "agy");
   let calls = 0;
   const mounted = await mountPlugin({
     state: () => snapshot({ settings }),
@@ -2171,11 +2363,11 @@ test("DOM: a failing agy directory keeps the saved id and retries in place", asy
   });
   try {
     await openSettings(mounted);
-    const card = byLabel(mounted.container, "配置 3 模型")!.closest("details")!;
-    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
+    const card = byLabel(mounted.container, "配置 4 模型")!.closest("details")!;
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
-      "配置 3 reasoning",
+      "配置 4 reasoning",
     ) as HTMLSelectElement;
     await waitFor(() => textOf(card).includes("agy catalog down"), "agy 目录失败");
     assert.equal(model.value, "gemini-3.8-flash-low");
@@ -2203,8 +2395,8 @@ test("DOM: a failing agy directory keeps the saved id and retries in place", asy
 
 test("DOM: a stale stored agy effort is not shown, cleared on save and never blocks", async () => {
   const settings = agySettings();
-  settings.configs[2] = {
-    ...settings.configs[2],
+  settings.configs[3] = {
+    ...settings.configs[3],
     model: "gemini-3.8-flash-low",
     effort: "high",
   };
@@ -2212,14 +2404,14 @@ test("DOM: a stale stored agy effort is not shown, cleared on save and never blo
   try {
     await openSettings(mounted);
     await waitFor(
-      () => Boolean(byLabel(mounted.container, "配置 3 reasoning")),
+      () => Boolean(byLabel(mounted.container, "配置 4 reasoning")),
       "agy reasoning",
     );
     // The obsolete UI conflict warning is gone; the old level never blocks the save.
     assert.equal(textOf(mounted.container).includes("固定使用 low reasoning"), false);
     const reasoning = byLabel(
       mounted.container,
-      "配置 3 reasoning",
+      "配置 4 reasoning",
     ) as HTMLSelectElement;
     assert.deepEqual(optionValues(reasoning), [""]);
     assert.deepEqual(optionLabels(reasoning), ["默认（随模型）"]);
@@ -2232,8 +2424,8 @@ test("DOM: a stale stored agy effort is not shown, cleared on save and never blo
     const body = callsTo(mounted, "/settings")[0]!.body as {
       configs: Array<Record<string, any>>;
     };
-    assert.equal(body.configs[2]!.model, "gemini-3.8-flash-low");
-    assert.equal(body.configs[2]!.effort, null);
+    assert.equal(body.configs[3]!.model, "gemini-3.8-flash-low");
+    assert.equal(body.configs[3]!.effort, null);
   } finally {
     mounted.unmount();
   }
@@ -2244,11 +2436,11 @@ test("DOM: Codex directory loading/failure is shown on an explicit-service card 
     configs: Array<Record<string, any>>;
   };
   settings.configs = configDefaults();
-  settings.configs[1] = {
-    ...settings.configs[1],
+  settings.configs[2] = {
+    ...settings.configs[2],
     model: "magpie-1",
     effort: "high",
-    codex: { ...settings.configs[1].codex, modelProvider: "magpie" },
+    codex: { ...settings.configs[2].codex, modelProvider: "magpie" },
   };
   let directoryCalls = 0;
   let resolveDirectory: (value: unknown) => void = () => {};
@@ -2274,17 +2466,17 @@ test("DOM: Codex directory loading/failure is shown on an explicit-service card 
     await openSettings(mounted);
     const card = byLabel(
       mounted.container,
-      "配置 2 Codex 模型服务",
+      "配置 3 Codex 模型服务",
     )!.closest("details")!;
     await waitFor(() => textOf(card).includes("正在读取模型目录"), "目录加载中");
     const provider = byLabel(
       mounted.container,
-      "配置 2 Codex 模型服务",
+      "配置 3 Codex 模型服务",
     ) as HTMLSelectElement;
-    const model = byLabel(mounted.container, "配置 2 模型") as HTMLSelectElement;
+    const model = byLabel(mounted.container, "配置 3 模型") as HTMLSelectElement;
     const reasoning = byLabel(
       mounted.container,
-      "配置 2 reasoning",
+      "配置 3 reasoning",
     ) as HTMLSelectElement;
     assert.equal(provider.value, "magpie");
     assert.equal(model.value, "magpie-1");
@@ -2322,7 +2514,7 @@ test("DOM: config summaries follow draft roles and settings reopen closed", asyn
   try {
     await openSettings(mounted);
     const cards = configCards(mounted.container);
-    assert.deepEqual(cards.map((card) => card.open), [false, false]);
+    assert.deepEqual(cards.map((card) => card.open), [false, false, false]);
     const card = cards[0]!;
     const summary = card.querySelector("summary")!;
     assert.equal(textOf(summary.querySelector(".worker-type-roles")), "未设置角色");
@@ -2335,7 +2527,7 @@ test("DOM: config summaries follow draft roles and settings reopen closed", asyn
       "角色摘要实时更新并按目录排序",
     );
     assert.equal(card.open, true);
-    (byLabel(card, "配置 1 下移 Pi default") as HTMLButtonElement).click();
+    (byLabel(card, "配置 1 下移 Agy default") as HTMLButtonElement).click();
     await waitFor(() => configCards(mounted.container)[1] === card, "移动已展开配置");
     assert.equal(card.open, true);
     summary.click();
@@ -2350,7 +2542,7 @@ test("DOM: config summaries follow draft roles and settings reopen closed", asyn
     );
     button(mounted.container, "返回列表").click();
     await openSettings(mounted);
-    assert.deepEqual(configCards(mounted.container).map((item) => item.open), [false, false]);
+    assert.deepEqual(configCards(mounted.container).map((item) => item.open), [false, false, false]);
     assert.equal(callsTo(mounted, "/settings").length, 0);
   } finally {
     mounted.unmount();
@@ -2386,50 +2578,54 @@ test("DOM: reorder buttons keep id-keyed drafts and save the new config order", 
   const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
-    assert.deepEqual(configCardNames(mounted.container), ["Pi default", "Codex default"]);
+    assert.deepEqual(configCardNames(mounted.container), [
+      "Agy default",
+      "Pi default",
+      "Codex default",
+    ]);
     configCards(mounted.container)[0]!.querySelector("summary")!.click();
 
     // Draft edits stay attached to their config id, not to a list position.
     await typeInto(
       byLabel(mounted.container, "配置 1 名称") as HTMLInputElement,
-      "Pi 首选",
+      "Agy 首选",
     );
     await typeInto(
-      byLabel(mounted.container, "配置 2 Codex 环境变量") as HTMLTextAreaElement,
+      byLabel(mounted.container, "配置 3 Codex 环境变量") as HTMLTextAreaElement,
       "SORT_KEEP=1",
     );
 
     assert.equal(
-      (byLabel(mounted.container, "配置 1 上移 Pi 首选") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 1 上移 Agy 首选") as HTMLButtonElement).disabled,
       true,
     );
-    (byLabel(mounted.container, "配置 2 上移 Codex default") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 3 上移 Codex default") as HTMLButtonElement).click();
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Codex default|Pi 首选",
+        "Agy 首选|Codex default|Pi default",
       "按钮上移",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 2 下移 Pi 首选") as HTMLButtonElement).disabled,
+      (byLabel(mounted.container, "配置 3 下移 Pi default") as HTMLButtonElement).disabled,
       true,
     );
 
     // The moved card keeps its name input, env text, default id and open state.
     assert.equal(
-      (byLabel(mounted.container, "配置 1 名称") as HTMLInputElement).value,
+      (byLabel(mounted.container, "配置 2 名称") as HTMLInputElement).value,
       "Codex default",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 1 Codex 环境变量") as HTMLTextAreaElement).value,
+      (byLabel(mounted.container, "配置 2 Codex 环境变量") as HTMLTextAreaElement).value,
       "SORT_KEEP=1",
     );
     assert.equal(
       (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
-      "pi-default",
+      "agy-default",
     );
     assert.equal(
-      (byLabel(mounted.container, "配置 2 Pi 首选")!.closest("details") as HTMLDetailsElement)
+      (byLabel(mounted.container, "配置 1 Agy 首选")!.closest("details") as HTMLDetailsElement)
         .open,
       true,
     );
@@ -2442,20 +2638,20 @@ test("DOM: reorder buttons keep id-keyed drafts and save the new config order", 
     };
     assert.deepEqual(
       body.configs.map((config) => config.id),
-      ["codex-default", "pi-default"],
+      ["agy-default", "codex-default", "pi-default"],
     );
     assert.deepEqual(
       body.configs.map((config) => config.name),
-      ["Codex default", "Pi 首选"],
+      ["Agy 首选", "Codex default", "Pi default"],
     );
-    assert.equal(body.configs[0]!.codex!.env.SORT_KEEP, "1");
-    assert.equal(body.defaultConfigId, "pi-default");
+    assert.equal(body.configs[1]!.codex!.env.SORT_KEEP, "1");
+    assert.equal(body.defaultConfigId, "agy-default");
 
     // The saved order is what the reloaded editor shows.
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Codex default|Pi 首选",
+        "Agy 首选|Codex default|Pi default",
       "保存后顺序一致",
     );
   } finally {
@@ -2468,7 +2664,7 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
   try {
     await openSettings(mounted);
     const initialOrder = configCardNames(mounted.container);
-    assert.deepEqual(initialOrder, ["Pi default", "Codex default"]);
+    assert.deepEqual(initialOrder, ["Agy default", "Pi default", "Codex default"]);
     configCards(mounted.container)[0]!.querySelector("summary")!.click();
 
     await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
@@ -2476,19 +2672,19 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
       () => configCards(mounted.container)[0]!.getAttribute("data-dragging") === "true",
       "拖动反馈",
     );
-    await fireDrag(configCards(mounted.container)[1]!, "dragover");
+    await fireDrag(configCards(mounted.container)[2]!, "dragover");
     await waitFor(
-      () => configCards(mounted.container)[1]!.getAttribute("data-drop-target") === "true",
+      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
       "目标反馈",
     );
-    await fireDrag(configCards(mounted.container)[1]!, "drop");
+    await fireDrag(configCards(mounted.container)[2]!, "drop");
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Codex default|Pi default",
+        "Pi default|Codex default|Agy default",
       "拖放排序",
     );
-    assert.equal(configCards(mounted.container).length, 2);
+    assert.equal(configCards(mounted.container).length, 3);
     assert.equal(
       configCards(mounted.container).some((card) => card.getAttribute("data-dragging")),
       false,
@@ -2497,9 +2693,9 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     // Dragging the default config away keeps its id as default and keeps its card open.
     assert.equal(
       (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
-      "pi-default",
+      "agy-default",
     );
-    const defaultCard = byLabel(mounted.container, "配置 2 Pi default")!.closest(
+    const defaultCard = byLabel(mounted.container, "配置 3 Agy default")!.closest(
       "details",
     ) as HTMLDetailsElement;
     assert.equal(defaultCard.open, true);
@@ -2508,10 +2704,11 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     await fireDrag(dragHandles(mounted.container)[0]!, "dragstart");
     await fireDrag(dragHandles(mounted.container)[0]!, "dragend");
     assert.deepEqual(configCardNames(mounted.container), [
-      "Codex default",
       "Pi default",
+      "Codex default",
+      "Agy default",
     ]);
-    assert.equal(configCards(mounted.container).length, 2);
+    assert.equal(configCards(mounted.container).length, 3);
     assert.equal(
       configCards(mounted.container).some(
         (card) => card.getAttribute("data-dragging") === "true",
@@ -2520,24 +2717,24 @@ test("DOM: drag handle reorders with target feedback and a cancelled drag change
     );
 
     // The handle never toggles the card, and the move buttons cover keyboard/mobile use.
-    (dragHandles(mounted.container)[1]!).click();
+    (dragHandles(mounted.container)[2]!).click();
     await delay(0);
     assert.equal(defaultCard.open, true);
     assert.equal(
       (byLabel(mounted.container, "默认 Worker 配置") as HTMLSelectElement).value,
-      "pi-default",
+      "agy-default",
     );
-    assert.equal(configCards(mounted.container).length, 2);
+    assert.equal(configCards(mounted.container).length, 3);
 
-    (byLabel(mounted.container, "配置 1 下移 Codex default") as HTMLButtonElement).click();
+    (byLabel(mounted.container, "配置 1 下移 Pi default") as HTMLButtonElement).click();
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Pi default|Codex default",
+        "Codex default|Pi default|Agy default",
       "按钮下移",
     );
     assert.equal(defaultCard.open, true);
-    assert.equal(configCards(mounted.container).length, 2);
+    assert.equal(configCards(mounted.container).length, 3);
   } finally {
     mounted.unmount();
   }
@@ -2584,28 +2781,27 @@ test("DOM: crossing cards keeps the drop outline and only leaving the list clear
     await waitFor(() => !hasTarget(), "离开列表清空目标");
 
     // Re-entering a card restores the outline, and the drop still applies the order.
-    await fireDrag(configCards(mounted.container)[1]!, "dragover");
+    await fireDrag(configCards(mounted.container)[2]!, "dragover");
     await waitFor(
-      () => configCards(mounted.container)[1]!.getAttribute("data-drop-target") === "true",
+      () => configCards(mounted.container)[2]!.getAttribute("data-drop-target") === "true",
       "重新进入目标",
     );
-    await fireDrag(configCards(mounted.container)[1]!, "drop");
+    await fireDrag(configCards(mounted.container)[2]!, "drop");
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Codex default|Pi default",
+        "Pi default|Codex default|Agy default",
       "拖放排序",
     );
     assert.equal(hasTarget(), false);
-    assert.equal(configCards(mounted.container).length, 2);
+    assert.equal(configCards(mounted.container).length, 3);
   } finally {
     mounted.unmount();
   }
 });
 
 test("DOM: dragenter moves the target outline before any dragover", async () => {
-  const settings = agySettings();
-  const mounted = await mountPlugin({ state: () => snapshot({ settings }) });
+  const mounted = await mountPlugin();
   try {
     await openSettings(mounted);
     const list = mounted.container.querySelector(
@@ -2664,7 +2860,7 @@ test("DOM: dragenter moves the target outline before any dragover", async () => 
     await waitFor(
       () =>
         configCardNames(mounted.container).join("|") ===
-        "Codex default|agy#1|Pi default",
+        "Pi default|Codex default|Agy default",
       "拖放排序",
     );
     assert.equal(configCards(mounted.container).length, 3);
@@ -2734,9 +2930,8 @@ test("DOM: the conversation tab is default and the host view reads /input plus p
     detail: () => ({ worker: record, runs: [piRun] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
-    await waitFor(() => mounted.views.length === 1, "宿主对话视图");
+    await openDetail(mounted);
+    await waitFor(() => mounted.views.length >= 1, "宿主对话视图");
     await waitFor(
       () => textOf(mounted.container).includes("pi 答复"),
       "对话内容",
@@ -2745,13 +2940,15 @@ test("DOM: the conversation tab is default and the host view reads /input plus p
       findButton(mounted.container, "对话")!.getAttribute("aria-pressed"),
       "true",
     );
-    assert.deepEqual(
-      mounted.calls
-        .filter((call) => call.path.includes("/input"))
-        .map((call) => call.path),
-      ["/workers/worker-1/input?runId=run-1"],
-    );
-    const view = mounted.views[0]!;
+    // The overview card reads the same run before the detail surface opens, so the same input
+    // request appears twice; only the detail request carries every parsed event.
+    const inputCalls = mounted.calls
+      .filter((call) => call.path.includes("/input"))
+      .map((call) => call.path);
+    assert.deepEqual([...new Set(inputCalls)], [
+      "/workers/worker-1/input?runId=run-1",
+    ]);
+    const view = mounted.views.at(-1)!;
     assert.equal(view.provider, "pi");
     const rows = view.messages;
     // The prompt arrives once from `/input`; Pi's echo of the same prompt is not repeated.
@@ -2791,8 +2988,7 @@ test("DOM: an older host keeps a readable fallback and the raw/stderr pages", as
     detail: () => ({ worker: record, runs: [completed] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("dsh 答复"),
       "回退对话",
@@ -2828,15 +3024,15 @@ test("DOM: the stored result appears once, only after the log really ends", asyn
     logs: () => {
       polls += 1;
       // Still no record and still not terminal: an empty running page, then the end.
-      return polls === 1
+      // The overview card consumes the first empty page before the detail surface opens.
+      return polls <= 2
         ? { text: "", nextCursor: "1", done: false }
         : { text: "", nextCursor: null, done: true };
     },
     detail: () => ({ worker: record, runs: [completed] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => polls >= 1, "首次读取");
     assert.equal(
       textOf(mounted.container).includes("过期运行的结果"),
@@ -2875,8 +3071,7 @@ test("DOM: the conversation drains every page and retries an empty running page"
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("第一页最新答复"),
       "拉取到最新",
@@ -2927,17 +3122,20 @@ test("DOM: the conversation reads its last page first and prepends earlier pages
     detail: () => ({ worker: record, runs: [completed] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("尾页答复"),
       "尾页对话",
     );
-    // Opening a run reads only the end of its log: one tail page, no history request.
-    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
-    assert.ok(requests[0]!.includes("tail=true"), requests[0]);
-    assert.equal(requests[0]!.includes("cursor="), false);
-    assert.equal(requests[0]!.includes("before="), false);
+    // Opening a run reads only the end of its log: one tail page, no history request. The
+    // overview card already read the same tail before the detail surface opened.
+    const baseline = requests.length;
+    await delay(30);
+    assert.deepEqual(requests.length, baseline, JSON.stringify(requests));
+    const tailRequest = requests.at(-1)!;
+    assert.ok(tailRequest.includes("tail=true"), tailRequest);
+    assert.equal(tailRequest.includes("cursor="), false);
+    assert.equal(tailRequest.includes("before="), false);
     // The run's first prompt belongs to the log start, which is not loaded yet.
     assert.equal(textOf(mounted.container).includes("请执行任务"), false);
     const box = byLabel(mounted.container, "对话内容")!;
@@ -2948,7 +3146,7 @@ test("DOM: the conversation reads its last page first and prepends earlier pages
     box.dispatchEvent(new view.Event("scroll"));
     box.dispatchEvent(new view.Event("scroll"));
     await delay(60);
-    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    assert.deepEqual(requests.length, baseline, JSON.stringify(requests));
     // A real upward move to the top does. jsdom has no layout, so the offset is simulated.
     const metrics = stubScrollMetrics(box);
     metrics.clientHeight = 300;
@@ -2966,7 +3164,7 @@ test("DOM: the conversation reads its last page first and prepends earlier pages
       () => textOf(mounted.container).includes("请执行任务"),
       "日志开头的提示词",
     );
-    const rows = mounted.views[0]!.messages.map((row) => String(row.text));
+    const rows = mounted.views.at(-1)!.messages.map((row) => String(row.text));
     assert.deepEqual(rows, ["请执行任务", "更早一段", "尾页答复"]);
   } finally {
     mounted.unmount();
@@ -3006,15 +3204,16 @@ test("DOM: a short tail page pages back only on an upward wheel at the top", asy
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("唯一尾页"),
       "短尾页",
     );
-    // A tail page that fits the panel is not extended by itself.
+    // A tail page that fits the panel is not extended by itself. The overview card read the
+    // same tail once before the detail surface opened.
     await delay(80);
-    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    const baseline = requests.length;
+    assert.deepEqual(requests.length, baseline, JSON.stringify(requests));
     const box = byLabel(mounted.container, "对话内容")!;
     const view = mounted.dom.window as unknown as {
       WheelEvent: new (type: string, init: { deltaY: number }) => Event;
@@ -3022,13 +3221,13 @@ test("DOM: a short tail page pages back only on an upward wheel at the top", asy
     // A downward wheel at the top requests nothing; an upward one asks for the page above.
     box.dispatchEvent(new view.WheelEvent("wheel", { deltaY: 120 }));
     await delay(60);
-    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    assert.deepEqual(requests.length, baseline, JSON.stringify(requests));
     box.dispatchEvent(new view.WheelEvent("wheel", { deltaY: -120 }));
     await waitFor(
       () => textOf(mounted.container).includes("开头一段"),
       "主动翻页",
     );
-    assert.ok(requests[1]!.includes("before=40"), requests[1]);
+    assert.ok(requests.at(-1)!.includes("before=40"), requests.at(-1));
   } finally {
     mounted.unmount();
   }
@@ -3066,8 +3265,7 @@ test("DOM: an earlier page from a short tail replaces the followed bottom with i
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("唯一尾页"),
       "短尾页",
@@ -3085,7 +3283,7 @@ test("DOM: an earlier page from a short tail replaces the followed bottom with i
       () => textOf(mounted.container).includes("开头一段"),
       "上滚加载到更早内容",
     );
-    assert.ok(requests[1]!.includes("before=40"), requests[1]);
+    assert.ok(requests.at(-1)!.includes("before=40"), requests.at(-1));
     // The host keeps following the newest row while the rows are drawn; the earlier page must
     // still open at its own first row.
     metrics.scrollHeight = 900;
@@ -3125,33 +3323,38 @@ test("DOM: a bottom position clamped by a growing viewport is not an upward scro
   });
   const requests: string[] = [];
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => textOf(mounted.container).includes("尾页"), "尾页");
     const box = byLabel(mounted.container, "对话内容")!;
     const metrics = stubScrollMetrics(box);
     const view = mounted.dom.window as unknown as { Event: new (type: string) => Event };
+    // The overview card and the detail surface each read the tail once.
+    const baseline = requests.length;
     // 440px of text in a 400px viewport: the bottom is 40px.
     metrics.scrollHeight = 440;
     metrics.clientHeight = 400;
     metrics.scrollTop = 40;
     box.dispatchEvent(new view.Event("scroll"));
     await delay(60);
-    assert.deepEqual(requests.length, 1, JSON.stringify(requests));
+    assert.deepEqual(requests.length, baseline, JSON.stringify(requests));
     // A viewport grown to 420px leaves a 20px maximum, so the browser clamps the offset.
     metrics.clientHeight = 420;
     metrics.scrollTop = 20;
     box.dispatchEvent(new view.Event("scroll"));
     await delay(80);
-    assert.deepEqual(requests.length, 1, "夹紧到新的底部不算上滚，不应请求历史");
+    assert.deepEqual(
+      requests.length,
+      baseline,
+      "夹紧到新的底部不算上滚，不应请求历史",
+    );
     // A real upward scroll still pages.
     metrics.scrollTop = 0;
     box.dispatchEvent(new view.Event("scroll"));
     await waitFor(
-      () => requests.length === 2,
+      () => requests.length === baseline + 1,
       "真实上滚请求历史",
     );
-    assert.ok(requests[1]!.includes("before=40"), requests[1]);
+    assert.ok(requests.at(-1)!.includes("before=40"), requests.at(-1));
   } finally {
     mounted.unmount();
   }
@@ -3193,8 +3396,7 @@ test("DOM: selecting another record opens its conversation tail instead of the l
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => textOf(mounted.container).includes("run1 尾页"), "首个运行");
     findButton(mounted.container, "原始事件")!.click();
     await waitFor(
@@ -3243,12 +3445,12 @@ test("DOM: clicking the selected record again returns to its conversation end", 
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
-      () => textOf(mounted.container).includes("尾页第 1 次读取"),
+      () => /尾页第 \d+ 次读取/.test(textOf(mounted.container)),
       "首次对话",
     );
+    const firstTail = tails;
     findButton(mounted.container, "原始事件")!.click();
     await waitFor(
       () => Boolean(byLabel(mounted.container, "原始事件日志")),
@@ -3263,7 +3465,9 @@ test("DOM: clicking the selected record again returns to its conversation end", 
       "回到对话标签",
     );
     await waitFor(
-      () => textOf(mounted.container).includes("尾页第 2 次读取"),
+      () =>
+        tails > firstTail &&
+        textOf(mounted.container).includes("尾页第 " + tails + " 次读取"),
       "重新读取尾页",
     );
     const last = requests.at(-1)!;
@@ -3303,8 +3507,7 @@ test("DOM: switching runs never shows the previous run's conversation", async ()
     }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => Boolean(findButton(mounted.container, "new-model")), "运行列表");
     findButton(mounted.container, "new-model")!.click();
     await waitFor(
@@ -3333,7 +3536,8 @@ test("DOM: leaving the conversation tab stops the pump and reopening reads to th
     logs: (_id, pathAndQuery) => {
       if (!pathAndQuery.includes("cursor=")) {
         opens += 1;
-        if (opens === 1)
+        // The overview card and the detail surface each open the run once.
+        if (opens <= 2)
           return {
             text: jsonl([{ type: "text", text: "第一段" }]),
             nextCursor: "1",
@@ -3350,8 +3554,7 @@ test("DOM: leaving the conversation tab stops the pump and reopening reads to th
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => textOf(mounted.container).includes("第一段"), "首屏对话");
     await waitFor(() => cursorCalls >= 1, "游标轮询");
     findButton(mounted.container, "原始事件")!.click();
@@ -3359,7 +3562,7 @@ test("DOM: leaving the conversation tab stops the pump and reopening reads to th
     const settled = cursorCalls;
     await delay(150);
     assert.equal(cursorCalls, settled, "leaving the tab clears the pump and timer");
-    assert.equal(mounted.views[0]!.disposed, true, "the host view is disposed");
+    assert.equal(mounted.views.at(-1)!.disposed, true, "the host view is disposed");
     findButton(mounted.container, "对话")!.click();
     await waitFor(
       () => textOf(mounted.container).includes("重新打开后的最新内容"),
@@ -3375,7 +3578,8 @@ test("DOM: a transient log failure keeps retrying and resumes live updates", asy
   const mounted = await mountPlugin({
     logs: () => {
       attempts += 1;
-      if (attempts === 1) throw new Error("网络抖动");
+      // The overview card consumes one read before the detail surface starts polling.
+      if (attempts <= 2) throw new Error("网络抖动");
       return {
         text: jsonl([{ type: "text", text: "恢复后的内容" }]),
         nextCursor: null,
@@ -3384,8 +3588,7 @@ test("DOM: a transient log failure keeps retrying and resumes live updates", asy
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("读取失败，正在重试"),
       "简短错误",
@@ -3432,8 +3635,7 @@ test("DOM: a thinking-only log is not an answer, so the stored result still show
     detail: () => ({ worker: record, runs: [completed] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(() => textOf(mounted.container).includes("只想不做"), "思考行");
     await waitFor(
       () => textOf(mounted.container).includes("仅显示存储的运行结果"),
@@ -3456,8 +3658,7 @@ test("DOM: a run without an input record says so instead of inventing one", asyn
     detail: () => ({ worker: record, runs: [completed] }),
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => textOf(mounted.container).includes("本次输入记录不可用"),
       "输入记录提示",
@@ -3495,17 +3696,19 @@ test("DOM: switching runs re-mounts the host conversation view instead of reusin
     },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
-    await waitFor(() => mounted.views.length === 1, "第一个 run 的视图");
-    assert.equal(mounted.views[0]!.provider, "dsh");
+    await openDetail(mounted);
+    await waitFor(() => mounted.views.length >= 1, "第一个 run 的视图");
+    assert.equal(mounted.views.at(-1)!.provider, "dsh");
     findButton(mounted.container, "new-model")!.click();
     // Same provider, different run: the old view is disposed and a fresh one mounts, so a
     // scroll/follow state from the previous run cannot survive.
-    await waitFor(() => mounted.views.length === 2, "第二个 run 的视图");
-    assert.equal(mounted.views[0]!.disposed, true);
-    assert.equal(mounted.views[1]!.disposed, false);
-    assert.equal(mounted.views[1]!.provider, "dsh");
+    await waitFor(
+      () => mounted.views.at(-1)?.provider === "dsh" && mounted.views.length >= 2,
+      "第二个 run 的视图",
+    );
+    assert.equal(mounted.views.at(-2)!.disposed, true);
+    assert.equal(mounted.views.at(-1)!.disposed, false);
+    assert.equal(mounted.views.at(-1)!.provider, "dsh");
     await waitFor(
       () => textOf(mounted.container).includes("run2 答复"),
       "新 run 的对话",
@@ -3518,7 +3721,7 @@ test("DOM: switching runs re-mounts the host conversation view instead of reusin
     });
     await delay(50);
     assert.equal(textOf(mounted.container).includes("run1 旧答复"), false);
-    assert.equal(mounted.views[1]!.disposed, false);
+    assert.equal(mounted.views.at(-1)!.disposed, false);
   } finally {
     mounted.unmount();
   }
@@ -3545,8 +3748,7 @@ test("DOM: switching runs re-mounts the fallback conversation so its follow stat
           },
   });
   try {
-    await waitFor(() => Boolean(byLabel(mounted.container, "查看 任务一")), "列表");
-    (byLabel(mounted.container, "查看 任务一") as HTMLButtonElement).click();
+    await openDetail(mounted);
     await waitFor(
       () => Boolean(mounted.container.querySelector(".worker-conv-fallback")),
       "回退视图",
@@ -3561,6 +3763,714 @@ test("DOM: switching runs re-mounts the fallback conversation so its follow stat
       () => textOf(mounted.container).includes("run2 答复"),
       "新 run 的对话",
     );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+//----------------- OVERVIEW LIST: CARDS, PAGING, AND POLLING ---------------
+
+function finishedWorker(index: number) {
+  return worker({
+    id: "finished-" + index,
+    taskName: "已结束 " + index,
+    latestRun: run({
+      id: "run-finished-" + index,
+      workerId: "finished-" + index,
+      status: "completed",
+      finishedAt: new Date(Date.now() - index * 60_000).toISOString(),
+      exitCode: 0,
+    }),
+  });
+}
+
+function notification(index: number) {
+  return {
+    id: "event-" + index,
+    taskName: "已结束 " + index,
+    ownerId: "owner-1",
+    workerId: "finished-" + index,
+    runId: "run-finished-" + index,
+    summary: "通知 " + index,
+    status: "completed" as const,
+    createdAt: new Date(Date.now() - index * 60_000).toISOString(),
+    delivery: "delivered" as const,
+    batchId: "batch-1",
+  };
+}
+
+/** Scrolls one of the two history tables to its bottom, which requests that table's next page. */
+async function scrollHistoryToBottom(mounted: Mounted, index: 0 | 1) {
+  const box = mounted.container.querySelectorAll<HTMLElement>(
+    ".worker-history-scroll",
+  )[index]!;
+  const metrics = stubScrollMetrics(box);
+  metrics.clientHeight = 100;
+  metrics.scrollHeight = 1000;
+  metrics.scrollTop = 900;
+  const view = mounted.dom.window as unknown as {
+    Event: new (type: string) => Event;
+  };
+  box.dispatchEvent(new view.Event("scroll"));
+}
+
+test("DOM: each history table pages only itself, keeps loaded pages and resets on scope", async () => {
+  const first = Array.from({ length: 20 }, (_, index) => finishedWorker(index));
+  const older = finishedWorker(20);
+  const notifications = Array.from({ length: 20 }, (_, index) => notification(index));
+  const history: string[] = [];
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: [],
+        finished: { items: first, nextCursor: "finished-1" },
+        notifications: { items: notifications, nextCursor: "notifications-1" },
+      }),
+    history: (kind, pathAndQuery) => {
+      history.push(pathAndQuery);
+      if (kind === "finished")
+        return { items: [older], nextCursor: null };
+      return { items: [notification(20)], nextCursor: null };
+    },
+  });
+  try {
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 20 &&
+        mounted.container.querySelectorAll(".worker-notification").length === 20,
+      "两张历史表首屏各 20 行",
+    );
+    assert.equal(history.length, 0, "loading never walks history on its own");
+    const details = mounted.container.querySelector(
+      ".worker-notifications",
+    ) as HTMLDetailsElement;
+    assert.equal(details.open, true, "notifications stay an open details list");
+    assert.equal(
+      details.querySelector(".worker-history-table"),
+      null,
+      "notifications no longer render a table",
+    );
+
+    await scrollHistoryToBottom(mounted, 0);
+    await waitFor(
+      () => textOf(mounted.container).includes("已结束 20"),
+      "已结束任务下一页",
+    );
+    assert.deepEqual(
+      history.map((path) => new URLSearchParams(path.split("?")[1]).get("kind")),
+      ["finished"],
+      "the notifications table is not paged by the finished table",
+    );
+    assert.ok(history[0]!.includes("cursor=finished-1"), history[0]);
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-history-table tbody tr")
+        .length,
+      21,
+      "the loaded first page survives the next page",
+    );
+
+    await scrollHistoryToBottom(mounted, 1);
+    await waitFor(
+      () => textOf(mounted.container).includes("通知 20"),
+      "通知下一页",
+    );
+    assert.equal(history.length, 2);
+    assert.ok(history[1]!.includes("cursor=notifications-1"), history[1]);
+
+    // A scope switch clears both feeds and starts again from the overview's first page.
+    (byLabel(mounted.container, "范围：全部") as HTMLButtonElement).click();
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 20 &&
+        mounted.container.querySelectorAll(".worker-notification").length === 20,
+      "切换范围后重建",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a first page that drifts past a paged window rebuilds it and keeps results reachable", async () => {
+  const oldRows = Array.from({ length: 43 }, (_, index) => finishedWorker(index));
+  const newRows = Array.from({ length: 20 }, (_, index) =>
+    worker({
+      // Reuses a known id with a new finishedAt: id-only overlap would miss the hole below.
+      id: index === 0 ? "finished-0" : "new-" + index,
+      taskName: "新任务 " + (index + 1),
+      latestRun: run({
+        id: "run-new-" + index,
+        workerId: "new-" + index,
+        status: "completed",
+        finishedAt: new Date(Date.now() + (20 - index) * 60_000).toISOString(),
+        exitCode: 0,
+      }),
+    }),
+  );
+  const missing = worker({
+    id: "new-missing",
+    taskName: "新任务 21",
+    latestRun: run({
+      id: "run-new-missing",
+      workerId: "new-missing",
+      status: "completed",
+      finishedAt: new Date(Date.now() + 1000).toISOString(),
+      exitCode: 0,
+    }),
+  });
+  const history: string[] = [];
+  let refreshed = false;
+  const mounted = await mountPlugin({
+    state: () =>
+      refreshed
+        ? snapshot({
+            workers: [],
+            finished: { items: newRows, nextCursor: "finished-new-1" },
+          })
+        : snapshot({
+            workers: [],
+            finished: { items: oldRows.slice(0, 20), nextCursor: "finished-1" },
+          }),
+    history: (kind, pathAndQuery) => {
+      history.push(pathAndQuery);
+      const cursor = new URLSearchParams(pathAndQuery.split("?")[1]).get("cursor");
+      if (cursor === "finished-1")
+        return { items: oldRows.slice(20, 40), nextCursor: "finished-2" };
+      if (cursor === "finished-2")
+        return { items: oldRows.slice(40), nextCursor: null };
+      if (cursor === "finished-new-1")
+        return {
+          items: [missing, ...oldRows.slice(1, 20)],
+          nextCursor: "finished-new-2",
+        };
+      if (cursor === "finished-new-2")
+        return { items: oldRows.slice(20), nextCursor: null };
+      throw new Error("unexpected history cursor " + cursor);
+    },
+  });
+  try {
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 20,
+      "首屏 20 行",
+    );
+    await scrollHistoryToBottom(mounted, 0);
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 40,
+      "第二页",
+    );
+    await scrollHistoryToBottom(mounted, 0);
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 43,
+      "第三页",
+    );
+    // A normal overlapping poll keeps every loaded page and the deep cursor.
+    await new Promise((resolve) => setTimeout(resolve, 2300));
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-history-table tbody tr").length,
+      43,
+    );
+
+    // Two new pages arrived while the window sat at 43 rows: the polled first page no longer
+    // intersects it, so the table realigns instead of leaving a hole between them.
+    refreshed = true;
+    await waitFor(
+      () =>
+        textOf(mounted.container).includes("新任务 1") &&
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 20,
+      "脱节后按新首页重建",
+    );
+    assert.equal(textOf(mounted.container).includes("已结束 0"), false);
+
+    const before = history.length;
+    await scrollHistoryToBottom(mounted, 0);
+    await waitFor(
+      () => textOf(mounted.container).includes("新任务 21"),
+      "补齐中间缺失行",
+    );
+    assert.ok(history[before]!.includes("cursor=finished-new-1"), history[before]);
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-history-table tbody tr").length,
+      40,
+      "重建后从新首页的下一页继续",
+    );
+
+    await scrollHistoryToBottom(mounted, 0);
+    await waitFor(
+      () => textOf(mounted.container).includes("已结束 42"),
+      "翻到最后一页",
+    );
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-history-table tbody tr").length,
+      63,
+    );
+    // The final page's null cursor leaves no retry for old cursors.
+    await scrollHistoryToBottom(mounted, 0);
+    assert.equal(history.length, before + 2);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: retrying a loaded older notification updates that row and keeps the pages", async () => {
+  const held = {
+    ...notification(20),
+    id: "event-held",
+    summary: "第二页的暂缓通知",
+    delivery: "held" as const,
+  };
+  const attempts: Array<"fail" | "none" | "queued"> = ["fail", "none", "queued"];
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: [],
+        notifications: {
+          items: Array.from({ length: 20 }, (_, index) => notification(index)),
+          nextCursor: "notifications-1",
+        },
+      }),
+    history: () => ({ items: [held], nextCursor: null }),
+    retry: () => {
+      const attempt = attempts.shift();
+      if (attempt === "fail") throw new Error("投递服务不可用");
+      return { retried: attempt === "queued" ? 1 : 0 };
+    },
+  });
+  try {
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-notification").length === 20,
+      "通知首屏",
+    );
+    await scrollHistoryToBottom(mounted, 1);
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "重试通知 event-held")),
+      "第二页通知",
+    );
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-notification").length,
+      21,
+    );
+    assert.ok(textOf(mounted.container).includes("暂缓"));
+
+    // A failed request is not a queued retry: the row stays held and retryable.
+    (byLabel(mounted.container, "重试通知 event-held") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("投递服务不可用"),
+      "重试失败提示",
+    );
+    assert.ok(byLabel(mounted.container, "重试通知 event-held"));
+    assert.ok(textOf(mounted.container).includes("暂缓"));
+    await waitFor(
+      () => callsTo(mounted, "/notifications/retry").length === 1,
+      "失败请求完成",
+    );
+
+    // `retried: 0` also leaves the row untouched.
+    await waitFor(
+      () =>
+        !(byLabel(mounted.container, "重试通知 event-held") as HTMLButtonElement)
+          .disabled,
+      "失败后可再次重试",
+    );
+    (byLabel(mounted.container, "重试通知 event-held") as HTMLButtonElement).click();
+    await waitFor(
+      () => textOf(mounted.container).includes("没有可重试的通知"),
+      "零重试提示",
+    );
+    assert.ok(byLabel(mounted.container, "重试通知 event-held"));
+    assert.ok(textOf(mounted.container).includes("暂缓"));
+    await waitFor(
+      () => callsTo(mounted, "/notifications/retry").length === 2,
+      "零重试请求完成",
+    );
+
+    // A queued retry updates this loaded row immediately and removes the duplicate entry.
+    await waitFor(
+      () =>
+        !(byLabel(mounted.container, "重试通知 event-held") as HTMLButtonElement)
+          .disabled,
+      "零重试后可再次重试",
+    );
+    (byLabel(mounted.container, "重试通知 event-held") as HTMLButtonElement).click();
+    await waitFor(
+      () => !byLabel(mounted.container, "重试通知 event-held"),
+      "成功后移除重试入口",
+    );
+    assert.ok(textOf(mounted.container).includes("待领取"));
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-notification").length,
+      21,
+      "the loaded notification page survives the retry",
+    );
+    assert.equal(callsTo(mounted, "/notifications/retry").length, 3);
+    assert.deepEqual(callsTo(mounted, "/notifications/retry")[2]!.body, {
+      eventIds: ["event-held"],
+    });
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: an authoritative empty first page clears only its own loaded table", async () => {
+  let phase = 0;
+  const first = Array.from({ length: 20 }, (_, index) => finishedWorker(index));
+  const older = Array.from({ length: 20 }, (_, index) => finishedWorker(index + 20));
+  const notices = Array.from({ length: 20 }, (_, index) => notification(index));
+  const later = worker({
+    id: "after-clear",
+    taskName: "清空后的任务",
+    latestRun: run({
+      id: "run-after-clear",
+      workerId: "after-clear",
+      status: "completed",
+      finishedAt: new Date(Date.now() + 60_000).toISOString(),
+      exitCode: 0,
+    }),
+  });
+  const mounted = await mountPlugin({
+    state: () => {
+      if (phase === 0)
+        return snapshot({
+          workers: [],
+          finished: { items: first, nextCursor: "finished-1" },
+          notifications: { items: notices, nextCursor: null },
+        });
+      if (phase === 1)
+        return snapshot({
+          workers: [],
+          finished: { items: [], nextCursor: null },
+          notifications: { items: notices, nextCursor: null },
+        });
+      if (phase === 2)
+        return snapshot({
+          workers: [],
+          finished: { items: [], nextCursor: null },
+          notifications: { items: [], nextCursor: null },
+        });
+      return snapshot({
+        workers: [],
+        finished: { items: [later], nextCursor: null },
+        notifications: { items: [], nextCursor: null },
+      });
+    },
+    history: (_kind, path) =>
+      path.includes("cursor=finished-1")
+        ? { items: older, nextCursor: null }
+        : { items: [], nextCursor: null },
+  });
+  const section = (table: number) =>
+    mounted.container.querySelectorAll(
+      table === 0 ? ".worker-history" : ".worker-notifications",
+    )[0];
+  const rows = (table: number) =>
+    table === 0
+      ? section(0)?.querySelectorAll("tbody tr").length ?? 0
+      : mounted.container.querySelectorAll(".worker-notification").length;
+  try {
+    await waitFor(() => rows(0) === 20, "已结束首屏");
+    await scrollHistoryToBottom(mounted, 0);
+    await waitFor(() => rows(0) === 40, "已结束已翻页缓存");
+    assert.equal(rows(1), 20);
+
+    // Retention clears finished first: only that table drops its rows and its paged cursor.
+    phase = 1;
+    await waitFor(() => rows(0) === 0, "已结束表清空");
+    assert.ok(section(0)!.textContent!.includes("暂无已结束任务"));
+    assert.equal(rows(1), 20, "the notifications table keeps its rows");
+
+    phase = 2;
+    await waitFor(() => rows(1) === 0, "通知表清空");
+    assert.ok(section(1)!.textContent!.includes("暂无通知"));
+
+    // A record that arrives after the clear is still merged in normally.
+    phase = 3;
+    await waitFor(
+      () => textOf(mounted.container).includes("清空后的任务"),
+      "清空后的新记录",
+    );
+    assert.equal(rows(0), 1);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a late older page is discarded after the first page rebuilds the window", async () => {
+  let resolvePage: ((page: unknown) => void) | null = null;
+  let refreshed = false;
+  const oldRows = Array.from({ length: 25 }, (_, index) => finishedWorker(index));
+  const newRows = Array.from({ length: 20 }, (_, index) =>
+    worker({
+      id: "fresh-" + index,
+      taskName: "刷新 " + index,
+      latestRun: run({
+        id: "run-fresh-" + index,
+        workerId: "fresh-" + index,
+        status: "completed",
+        finishedAt: new Date(Date.now() + (20 - index) * 60_000).toISOString(),
+        exitCode: 0,
+      }),
+    }),
+  );
+  const mounted = await mountPlugin({
+    state: () =>
+      refreshed
+        ? snapshot({
+            workers: [],
+            finished: { items: newRows, nextCursor: "finished-fresh-1" },
+          })
+        : snapshot({
+            workers: [],
+            finished: { items: oldRows.slice(0, 20), nextCursor: "finished-1" },
+          }),
+    history: () =>
+      new Promise((resolve) => {
+        resolvePage = resolve;
+      }),
+  });
+  try {
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 20,
+      "旧首页",
+    );
+    // The first page was already read and its next page is still on the wire.
+    await scrollHistoryToBottom(mounted, 0);
+    refreshed = true;
+    await waitFor(
+      () =>
+        textOf(mounted.container).includes("刷新 0") &&
+        mounted.container.querySelectorAll(".worker-history-table tbody tr")
+          .length === 20,
+      "在途分页时仍按新首页重建",
+    );
+    resolvePage!({ items: oldRows.slice(20), nextCursor: "finished-2" });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.equal(
+      mounted.container.querySelectorAll(".worker-history-table tbody tr").length,
+      20,
+      "the retired page never overwrites the rebuilt window",
+    );
+    assert.equal(textOf(mounted.container).includes("已结束 24"), false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a retry response keeps a delivery that polling already refreshed", async () => {
+  let delivery: "held" | "delivered" = "held";
+  let resolveRetry: ((value: unknown) => void) | null = null;
+  const live = () => ({
+    ...notification(0),
+    id: "event-live",
+    summary: "刚送达的通知",
+    delivery,
+  });
+  const mounted = await mountPlugin({
+    state: () => snapshot({ workers: [], notifications: { items: [live()], nextCursor: null } }),
+    retry: () =>
+      new Promise((resolve) => {
+        resolveRetry = resolve;
+      }),
+  });
+  try {
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "重试通知 event-live")),
+      "暂缓通知",
+    );
+    (byLabel(mounted.container, "重试通知 event-live") as HTMLButtonElement).click();
+    await waitFor(
+      () => callsTo(mounted, "/notifications/retry").length === 1,
+      "重试在途",
+    );
+    // Polling observes the delivered state before the retry response arrives.
+    delivery = "delivered";
+    await waitFor(
+      () => textOf(mounted.container).includes("已送达"),
+      "轮询刷新投递状态",
+    );
+    resolveRetry!({ retried: 1 });
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(textOf(mounted.container).includes("已送达"));
+    assert.equal(byLabel(mounted.container, "重试通知 event-live"), null);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a worker that resumes leaves the finished table for a live card", async () => {
+  const resumed = finishedWorker(0);
+  resumed.taskName = "恢复任务";
+  resumed.latestRun!.status = "running";
+  resumed.latestRun!.finishedAt = null;
+  let calls = 0;
+  const mounted = await mountPlugin({
+    state: () => {
+      calls += 1;
+      return calls === 1
+        ? snapshot({
+            workers: [],
+            finished: { items: [resumed], nextCursor: null },
+          })
+        : snapshot({
+            workers: [resumed],
+            finished: { items: [], nextCursor: null },
+          });
+    },
+  });
+  try {
+    await waitFor(
+      () => Boolean(byLabel(mounted.container, "任务卡片 恢复任务")),
+      "轮询把恢复的任务重新放进活动区",
+    );
+    assert.equal(
+      textOf(mounted.container).includes("已结束任务 1"),
+      false,
+      "the stale finished row is dropped once the worker is active again",
+    );
+    assert.equal(
+      textOf(mounted.container).includes("恢复任务"),
+      true,
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: each conversation card follows its own latest rows", async () => {
+  const one = worker({
+    id: "worker-one",
+    taskName: "对话一",
+    latestRun: run({ id: "run-one", workerId: "worker-one", status: "running" }),
+  });
+  const two = worker({
+    id: "worker-two",
+    taskName: "对话二",
+    latestRun: run({ id: "run-two", workerId: "worker-two", status: "running" }),
+  });
+  const mounted = await mountPlugin({
+    state: () => snapshot({ workers: [one, two] }),
+    logs: (_id, pathAndQuery) => ({
+      text: jsonl([
+        {
+          type: "text",
+          text: pathAndQuery.includes("runId=run-two") ? "第二条对话" : "第一条对话",
+        },
+      ]),
+      nextCursor: null,
+      done: true,
+    }),
+  });
+  try {
+    await waitFor(
+      () =>
+        textOf(mounted.container).includes("第一条对话") &&
+        textOf(mounted.container).includes("第二条对话"),
+      "两张独立对话",
+    );
+    assert.equal(
+      mounted.container.querySelectorAll('[aria-label="对话内容"]').length,
+      2,
+    );
+    const first = mounted.container.querySelectorAll<HTMLElement>(
+      '[aria-label="对话内容"]',
+    )[0]!;
+    const metrics = stubScrollMetrics(first);
+    metrics.clientHeight = 100;
+    metrics.scrollHeight = 600;
+    metrics.scrollTop = 100;
+    const view = mounted.dom.window as unknown as {
+      Event: new (type: string) => Event;
+    };
+    first.dispatchEvent(new view.Event("scroll"));
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-conv-latest").length === 1,
+      "只有上翻的对话暂停跟随",
+    );
+    (mounted.container.querySelector(".worker-conv-latest") as HTMLButtonElement).click();
+    await waitFor(
+      () => mounted.container.querySelectorAll(".worker-conv-latest").length === 0,
+      "恢复跟随后隐藏回到最新",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: four cards stay one flat two-row grid and keep their panes on redraw", async () => {
+  let count = 4;
+  const workers = Array.from({ length: 6 }, (_, index) =>
+    worker({
+      id: "grid-" + index,
+      taskName: "网格 " + index,
+      latestRun: run({
+        id: "run-grid-" + index,
+        workerId: "grid-" + index,
+        status: "running",
+      }),
+    }),
+  );
+  const mounted = await mountPlugin({
+    state: () => snapshot({ workers: workers.slice(0, count) }),
+    logs: () => ({ text: "", nextCursor: null, done: false }),
+  });
+  try {
+    await waitFor(
+      () =>
+        mounted.container.querySelectorAll(".worker-card").length === 4,
+      "四张卡片",
+    );
+    const grid = mounted.container.querySelector(".worker-cards")!;
+    assert.equal(grid.getAttribute("data-count"), "4");
+    assert.equal(grid.getAttribute("data-many"), null);
+    assert.ok(
+      grid.closest(".worker-first-screen-fill"),
+      "live cards fill the measured first screen",
+    );
+    assert.equal(
+      grid.closest(".worker-first-screen")!.querySelector(".worker-history"),
+      null,
+      "history tables stay outside the first screen",
+    );
+    const firstCard = grid.querySelector(".worker-card")!;
+    const firstPane = firstCard.querySelector(".worker-conv")!;
+    count = 5;
+    await waitFor(
+      () => mounted.container.querySelectorAll(".worker-card").length === 5,
+      "轮询新增第五张",
+    );
+    assert.equal(
+      mounted.container.querySelector(".worker-cards"),
+      grid,
+      "the scroll container is reused",
+    );
+    assert.equal(grid.querySelector(".worker-card"), firstCard);
+    assert.equal(firstCard.querySelector(".worker-conv"), firstPane);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: the agy cooldown is one global deadline countdown", async () => {
+  const deadline = new Date(Date.now() + 65_000).toISOString();
+  const mounted = await mountPlugin({
+    state: () => snapshot({ agyCooldownUntil: deadline }),
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("Antigravity 冷却中"),
+      "冷却提示",
+    );
+    assert.ok(textOf(mounted.container).includes("1:0"), textOf(mounted.container));
   } finally {
     mounted.unmount();
   }

@@ -95,15 +95,32 @@ function createScroller(): HTMLDivElement {
   return scroller;
 }
 
-function renderView(messages: WorkerConversationMessage[], provider = 'pi', scrollContainer = createScroller()) {
+function renderView(
+  messages: WorkerConversationMessage[],
+  provider = 'pi',
+  scrollContainer = createScroller(),
+  options: { showThinking?: boolean; showRawParameters?: boolean } = {},
+) {
   const view = render(
     <UiPreferencesProvider>
-      <ConversationOutput provider={provider} messages={messages} scrollContainer={scrollContainer} />
+      <ConversationOutput
+        provider={provider}
+        messages={messages}
+        scrollContainer={scrollContainer}
+        showThinking={options.showThinking}
+        showRawParameters={options.showRawParameters}
+      />
     </UiPreferencesProvider>,
   );
   const rerender = (nextMessages: WorkerConversationMessage[]) => view.rerender(
     <UiPreferencesProvider>
-      <ConversationOutput provider={provider} messages={nextMessages} scrollContainer={scrollContainer} />
+      <ConversationOutput
+        provider={provider}
+        messages={nextMessages}
+        scrollContainer={scrollContainer}
+        showThinking={options.showThinking}
+        showRawParameters={options.showRawParameters}
+      />
     </UiPreferencesProvider>,
   );
   return { ...view, rerender, scroller: scrollContainer };
@@ -162,6 +179,70 @@ describe('ConversationOutput rendering', () => {
   test('a tool row that carries only text is shown as text instead of an empty card', () => {
     const view = renderView([{ id: 'tool-text', role: 'tool', text: '工具输出已被截断' }]);
     expect(view.container.textContent).toContain('工具输出已被截断');
+  });
+
+  test('consecutive calls to the same tool fold into one expandable group, each call keeping its result', () => {
+    const view = renderView([
+      { id: 'u-0', role: 'user', text: '先检查工作区，再跑测试。' },
+      {
+        id: 'b-1',
+        role: 'tool',
+        text: '',
+        toolId: 'call-1',
+        toolName: 'Bash',
+        toolInput: { command: 'git status' },
+        toolOutput: 'nothing to commit',
+      },
+      {
+        id: 'b-2',
+        role: 'tool',
+        text: '',
+        toolId: 'call-2',
+        toolName: 'Bash',
+        toolInput: { command: 'npm test' },
+        toolOutput: '42 passed',
+      },
+      { id: 'a-2', role: 'assistant', text: '两项都完成了。' },
+    ]);
+    const text = view.container.textContent ?? '';
+
+    // The run is collapsed exactly as in the main conversation: one row with the count and the
+    // calls' own summaries, not one card per call.
+    const groupButton = view.getByRole('button', { name: /Bash/ });
+    expect(groupButton.getAttribute('aria-expanded')).toBe('false');
+    expect(groupButton.textContent).toContain('x2');
+    expect(groupButton.textContent).toContain('git status');
+    // Nothing is drawn twice: the calls are only named by the collapsed summary line.
+    expect(view.queryByText('git status')).toBeNull();
+    expect(text).toContain('先检查工作区，再跑测试。');
+    expect(text).toContain('两项都完成了。');
+
+    fireEvent.click(groupButton);
+    expect(groupButton.getAttribute('aria-expanded')).toBe('true');
+    // Worker rows have no native time: an expanded child must not invent the epoch time the
+    // transcript would format from NO_TIMESTAMP, even though the group follows a user row.
+    expect(view.container.textContent).not.toContain(new Date(0).toLocaleTimeString());
+    // Each call still carries its own input, and its output stays one shared row away.
+    fireEvent.click(view.getByText('git status'));
+    expect(view.container.textContent).toContain('nothing to commit');
+    fireEvent.click(view.getByText('npm test'));
+    expect(view.container.textContent).toContain('42 passed');
+  });
+
+  test('the showThinking prop governs reasoning exactly as the main conversation setting does', () => {
+    const messages: WorkerConversationMessage[] = [
+      { id: 'think-1', role: 'assistant', text: '需要先确认端口。', thinking: true },
+      { id: 'a-1', role: 'assistant', text: '端口空闲，可以启动。' },
+    ];
+
+    const shown = renderView(messages, 'pi', createScroller(), { showThinking: true });
+    expect(shown.container.textContent).toContain('需要先确认端口。');
+    expect(shown.container.textContent).toContain('端口空闲，可以启动。');
+
+    const hidden = renderView(messages, 'pi', createScroller(), { showThinking: false });
+    expect(hidden.container.textContent).not.toContain('需要先确认端口。');
+    // Only the reasoning is governed; ordinary assistant text still reads as itself.
+    expect(hidden.container.textContent).toContain('端口空闲，可以启动。');
   });
 
   test('never requests history or a session on its own', async () => {

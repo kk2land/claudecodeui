@@ -290,7 +290,8 @@ export function canRecover(worker: {
 
 /** Notification retry is only meaningful before the host has delivered the event. */
 export function canRetryNotification(delivery: WorkerNotificationDelivery): boolean {
-  return delivery !== "delivered";
+  // A queued retry is already pending delivery; only held/unknown rows still need an action.
+  return delivery !== "delivered" && delivery !== "pending";
 }
 
 /** Cancellation applies to queued work and to runs that still hold a slot. */
