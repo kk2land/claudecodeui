@@ -150,7 +150,7 @@ test("Pi shows a running tool, its partial output, and a readable result", () =>
     }),
   );
   let tool = stream.messages().find((row) => row.role === "tool")!;
-  assert.equal(tool.toolName, "bash");
+  assert.equal(tool.toolName, "Bash");
   assert.deepEqual(tool.toolInput, { command: "ls" });
   assert.equal(tool.streaming, true);
   assert.equal(stream.messages().find((row) => row.role === "assistant")!.text, "先看一下");
@@ -165,6 +165,7 @@ test("Pi shows a running tool, its partial output, and a readable result", () =>
     }),
   );
   tool = stream.messages().find((row) => row.role === "tool")!;
+  assert.equal(tool.toolName, "Bash");
   assert.equal(tool.toolOutput, "a.txt");
   assert.equal(stream.messages().filter((row) => row.role === "tool").length, 1);
 
@@ -178,6 +179,7 @@ test("Pi shows a running tool, its partial output, and a readable result", () =>
     }),
   );
   tool = stream.messages().find((row) => row.role === "tool")!;
+  assert.equal(tool.toolName, "Bash");
   assert.equal(tool.toolOutput, "ok");
   assert.equal(tool.streaming, false);
   assert.equal(tool.isError, undefined);
@@ -204,11 +206,36 @@ test("Pi keeps toolResult messages paired with their tool call", () => {
         content: [{ type: "text", text: "not found" }],
       },
     },
+    {
+      type: "message_end",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "toolCall",
+            id: "c3",
+            name: "custom",
+            arguments: { CommandLine: "keep me" },
+          },
+        ],
+      },
+    },
+    {
+      type: "message_end",
+      message: {
+        role: "toolResult",
+        toolCallId: "c3",
+        toolName: "custom",
+        content: [{ type: "text", text: "ok" }],
+      },
+    },
   ]);
-  assert.equal(rows.length, 1);
+  assert.equal(rows.length, 2);
   assert.equal(rows[0]!.toolId, "c2");
   assert.equal(rows[0]!.toolOutput, "not found");
   assert.equal(rows[0]!.isError, true);
+  assert.equal(rows[1]!.toolName, "custom");
+  assert.deepEqual(rows[1]!.toolInput, { CommandLine: "keep me" });
 });
 
 test("DSH folds the trailing final into the last streamed step instead of adding a row", () => {
@@ -347,6 +374,7 @@ test("Codex renders every readable exec item type", () => {
   assert.equal(reasoning.thinking, true);
   assert.equal(reasoning.text, "thinking aloud");
   const command = rows.find((row) => row.id === "codex-tool-i3")!;
+  assert.equal(command.toolName, "Bash");
   assert.deepEqual(command.toolInput, { command: "ls" });
   assert.equal(command.toolOutput, "a.txt");
   assert.equal(command.isError, true);
@@ -466,8 +494,8 @@ test("agy renders streamed text once, a tool lifecycle, and the final result", (
   );
   assert.equal(rows[0]!.text, "agy answer");
   assert.equal(rows[0]!.streaming, false);
-  assert.equal(rows[1]!.toolName, "run_command");
-  assert.deepEqual(rows[1]!.toolInput, { CommandLine: "echo hi" });
+  assert.equal(rows[1]!.toolName, "Bash");
+  assert.deepEqual(rows[1]!.toolInput, { command: "echo hi" });
   assert.equal(rows[1]!.toolOutput, "hi");
   assert.equal(rows[1]!.streaming, false);
 });
@@ -583,7 +611,7 @@ test("Pi ACP suppresses startupInfo, streams thought/text, pairs tool updates, a
   assert.equal(rows[0]!.text, "先分析");
   assert.equal(rows[0]!.streaming, false);
   assert.equal(rows[1]!.role, "tool");
-  assert.equal(rows[1]!.toolName, "echo hi");
+  assert.equal(rows[1]!.toolName, "Bash");
   assert.deepEqual(rows[1]!.toolInput, { command: "echo hi" });
   assert.equal(rows[1]!.toolOutput, "hi\n");
   assert.equal(rows[1]!.streaming, false);
@@ -592,6 +620,67 @@ test("Pi ACP suppresses startupInfo, streams thought/text, pairs tool updates, a
   assert.equal(rows[2]!.streaming, false);
   assert.equal(rows[3]!.role, "error");
   assert.match(rows[3]!.text, /thought_level=max/);
+});
+
+test("ACP maps execute calls to Bash and leaves other tools on their own title", () => {
+  const rows = rowsOf("pi", [
+    {
+      protocol: "acp",
+      type: "acp_update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-fail",
+        title: "bash -lc pwd --physical",
+        kind: "execute",
+        status: "in_progress",
+        rawInput: { command: "pwd --physical" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-fail",
+        title: "pwd",
+        kind: "execute",
+        status: "failed",
+        content: [{ type: "content", content: { type: "text", text: "denied" } }],
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-read",
+        title: "Read a.ts",
+        kind: "read",
+        status: "completed",
+        rawInput: { path: "a.ts" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-read",
+        title: "Read b.ts",
+        status: "completed",
+        rawInput: { path: "b.ts" },
+      },
+    },
+  ]);
+  const failed = rows.find((row) => row.toolId === "tc-fail")!;
+  assert.equal(failed.toolName, "Bash");
+  assert.deepEqual(failed.toolInput, { command: "pwd --physical" });
+  assert.equal(failed.toolOutput, "denied");
+  assert.equal(failed.isError, true);
+  assert.equal(failed.streaming, false);
+  const read = rows.find((row) => row.toolId === "tc-read")!;
+  assert.equal(read.toolName, "Read b.ts");
+  assert.deepEqual(read.toolInput, { path: "b.ts" });
 });
 
 test("agy ACP runs reuse the ACP conversation handler while legacy history stays intact", () => {

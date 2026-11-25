@@ -1293,6 +1293,14 @@
 .worker-card .worker-conv-scroll > * {
   zoom: 0.75;
 }
+/* A compact card already owns the transcript gutter (14px above), so the hosted view must not
+   add its own: the host root's horizontal padding and the row gutter it renders both collapse,
+   leaving tool rails and command rows lined up with the card's title and status. */
+.worker-card .worker-conv-host > *,
+.worker-card .worker-conv-host .chat-message {
+  padding-left: 0;
+  padding-right: 0;
+}
 .worker-card .worker-conv-foot {
   display: flex;
   align-items: center;

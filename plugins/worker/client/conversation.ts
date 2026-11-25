@@ -47,6 +47,23 @@ function string(value: unknown): string | undefined {
   return typeof value === "string" && value ? value : undefined;
 }
 
+/** Historical Pi JSON logs name the shell tool `bash`; the chat renderer needs `Bash`. */
+function piToolName(name: string | undefined): string | undefined {
+  return name === "bash" ? "Bash" : name;
+}
+
+/** AGY legacy and ACP shell calls report the command outside `toolInput.command`. */
+function commandInput(
+  input: Record<string, unknown> | null,
+): Record<string, unknown> | undefined {
+  if (!input) return undefined;
+  if (typeof input.command === "string") return input;
+  const legacy = input.CommandLine;
+  if (typeof legacy !== "string") return undefined;
+  const { CommandLine: _legacy, ...rest } = input;
+  return { ...rest, command: legacy };
+}
+
 /** Structured payloads are already parsed JSON, so this cannot meet a cycle. */
 function flat(value: unknown): string | undefined {
   if (typeof value === "string") return value;
@@ -97,9 +114,13 @@ class Rows {
     this.list[at] = { ...this.list[at]!, ...patch };
   }
 
-  text(id: string): string {
+  get(id: string): WorkerConversationMessage | undefined {
     const at = this.offset.get(id);
-    return at === undefined ? "" : this.list[at]!.text;
+    return at === undefined ? undefined : this.list[at];
+  }
+
+  text(id: string): string {
+    return this.get(id)?.text ?? "";
   }
 
   messages(): WorkerConversationMessage[] {
@@ -231,6 +252,7 @@ function acpHandler(rows: Rows): Handler {
       closeText();
       const toolId = string(update.toolCallId);
       if (!toolId) return;
+      const rowId = "acp-tool-" + toolId;
       const status = string(update.status);
       const done =
         status === "completed" || status === "failed" || status === "cancelled";
@@ -240,14 +262,25 @@ function acpHandler(rows: Rows): Handler {
         toolId,
         streaming: !done,
       };
-      const name = string(update.title) ?? string(update.kind);
-      if (name) patch.toolName = name;
-      const input = object(update.rawInput);
-      if (input) patch.toolInput = input;
+      const title = string(update.title);
+      const kindName = string(update.kind);
+      const rawInput = object(update.rawInput);
+      if (kindName === "execute" || rows.get(rowId)?.toolName === "Bash") {
+        // Pi/AGY ACP: title is the whole command, rawInput carries the structured one.
+        patch.toolName = "Bash";
+        const command = commandInput(rawInput);
+        if (command) patch.toolInput = command;
+        else if (updateKind === "tool_call" && title)
+          patch.toolInput = { command: title };
+      } else {
+        const name = title ?? kindName;
+        if (name) patch.toolName = name;
+        if (rawInput) patch.toolInput = rawInput;
+      }
       const output = acpToolOutput(update);
       if (output !== undefined) patch.toolOutput = output;
       if (status === "failed") patch.isError = true;
-      rows.upsert("acp-tool-" + toolId, patch);
+      rows.upsert(rowId, patch);
       return;
     }
     if (updateKind === "session_info_update") {
@@ -312,7 +345,7 @@ function piHandler(rows: Rows): Handler {
       if (!toolId) return;
       const done = kind === "tool_execution_end";
       const patch: RowPatch = { role: "tool", text: "", toolId, streaming: !done };
-      const name = string(event.toolName);
+      const name = piToolName(string(event.toolName));
       if (name) patch.toolName = name;
       const input = object(event.args);
       if (input) patch.toolInput = input;
@@ -392,8 +425,9 @@ function applyPiUpdate(
       toolId,
       streaming: type === "toolcall_start",
     };
-    const name =
-      (call ? string(call.name) : undefined) ?? string(update.toolName);
+    const name = piToolName(
+      (call ? string(call.name) : undefined) ?? string(update.toolName),
+    );
     if (name) patch.toolName = name;
     const input = call ? object(call.arguments) : null;
     if (input) patch.toolInput = input;
@@ -413,7 +447,7 @@ function applyPiMessage(
   if (role === "toolResult") {
     const toolId = string(message.toolCallId) ?? string(message.toolName) ?? base;
     const patch: RowPatch = { role: "tool", text: "", toolId, streaming: false };
-    const name = string(message.toolName);
+    const name = piToolName(string(message.toolName));
     if (name) patch.toolName = name;
     const output = contentText(message.content);
     if (output !== undefined) patch.toolOutput = output;
@@ -436,7 +470,7 @@ function applyPiMessage(
         toolId,
         streaming: !final,
       };
-      const name = string(block.name);
+      const name = piToolName(string(block.name));
       if (name) patch.toolName = name;
       const input = object(block.arguments);
       if (input) patch.toolInput = input;
@@ -513,7 +547,7 @@ function codexHandler(rows: Rows): Handler {
       }
       const patch: RowPatch = { role: "tool", text: "", toolId: id, streaming };
       if (item.type === "command_execution") {
-        patch.toolName = "command_execution";
+        patch.toolName = "Bash";
         const command = string(item.command);
         if (command) patch.toolInput = { command };
         const output = string(item.aggregated_output);
@@ -737,9 +771,14 @@ function agyLegacyHandler(rows: Rows): Handler {
           toolId: "agy-" + index,
           streaming: state === "ACTIVE",
         };
-        const name = string(step.tool_name) ?? (info ? string(info.name) : undefined);
-        if (name) patch.toolName = name;
-        const input = info ? object(info.parameters) : null;
+        const rawName =
+          string(step.tool_name) ?? (info ? string(info.name) : undefined);
+        const isShell = rawName === "run_command";
+        if (rawName) patch.toolName = isShell ? "Bash" : rawName;
+        const parameters = info ? object(info.parameters) : null;
+        const input = isShell
+          ? commandInput(parameters) ?? parameters
+          : parameters;
         if (input) patch.toolInput = input;
         const output = info ? flat(info.output) : undefined;
         if (output !== undefined) patch.toolOutput = output;
