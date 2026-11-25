@@ -1275,6 +1275,9 @@
   min-height: 0;
   padding: 0 14px;
 }
+.worker-card > .worker-conv-compact {
+  background: transparent;
+}
 .worker-conv-compact .worker-conv-body {
   height: auto;
   min-height: 0;
