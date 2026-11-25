@@ -1288,6 +1288,11 @@
   height: 100%;
   min-height: 0;
 }
+/* Scale host and fallback content together, including their explicit font sizes. */
+.worker-card .worker-conv-host > *,
+.worker-card .worker-conv-scroll > * {
+  zoom: 0.75;
+}
 .worker-card .worker-conv-foot {
   display: flex;
   align-items: center;
