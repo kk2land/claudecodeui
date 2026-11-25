@@ -31,6 +31,17 @@ export function workerStatus(worker: {
   return worker.latestRun?.status ?? "queued";
 }
 
+/**
+ * Title displayed for a worker row or card: the shown run's own requirement title, falling back
+ * to the worker's original task name for runs recorded before titles were stored per run.
+ */
+export function displayTaskName(
+  worker: { taskName: string },
+  run: { taskName?: string } | null | undefined,
+): string {
+  return run?.taskName ?? worker.taskName;
+}
+
 function timestamp(value: string): number {
   const parsed = Date.parse(value);
   return Number.isFinite(parsed) ? parsed : 0;

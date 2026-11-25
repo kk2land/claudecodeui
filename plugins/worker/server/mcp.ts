@@ -25,7 +25,7 @@ const taskRoleValues = WORKER_TASK_ROLES.map((role) => role.value) as [
 ];
 
 const startShape = {
-  taskName: z.string(),
+  taskName: z.string().describe("本轮的简短任务标题，用于列表与运行卡片"),
   // Omitted routes among enabled configs: a role takes the first match in list order, otherwise
   // the default config wins.
   configId: z
@@ -78,7 +78,8 @@ function compactWorker(worker: WorkerRecord) {
   const run = worker.latestRun;
   return {
     id: worker.id,
-    taskName: worker.taskName,
+    // The current run's own requirement title, or the original name for older runs.
+    taskName: run?.taskName ?? worker.taskName,
     cwd: worker.cwd,
     latestRun: run ? { id: run.id, status: run.status } : null,
   };
@@ -236,6 +237,10 @@ export function createWorkerMcpServer(
       inputSchema: {
         workerId: z.string(),
         prompt: z.string(),
+        taskName: z
+          .string()
+          .optional()
+          .describe("本轮需求的简短标题；省略时取 prompt 首个非空行。不会重命名历史运行"),
         model: z.string().optional(),
         provider: z.string().optional().describe("独立模型服务，仅 Codex 支持；Pi/agy 请使用完整 model"),
         effort: z.string().optional(),

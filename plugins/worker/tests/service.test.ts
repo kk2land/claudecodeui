@@ -97,26 +97,48 @@ test("resumes the same native identity with a new run id", async (t) => {
   const { service } = createService(t, root);
   const started = await service.start("owner-1", startInput());
   const first = await waitStatus(service, started.worker.id, ["completed"]);
+  assert.equal(first.latestRun?.taskName, "fixture task");
   const resumed = await service.resume("owner-1", {
     workerId: first.id,
-    prompt: "continue",
+    prompt: "  第二轮需求\t细节\n\n第三行",
     requestId: "resume-1",
   });
   assert.notEqual(resumed.run.id, first.latestRun?.id);
+  // The omitted explicit title comes from the prompt's first non-blank line, whitespace collapsed.
+  assert.equal(resumed.run.taskName, "第二轮需求 细节");
   const second = await waitStatus(service, first.id, ["completed"]);
   assert.equal(second.latestRun?.nativeSessionId, "session-fixture-1");
   assert.equal(
     second.latestRun?.nativeSessionFile,
     first.latestRun?.nativeSessionFile,
   );
+  assert.equal(second.latestRun?.taskName, "第二轮需求 细节");
   assert.equal(service.get(first.id).runs.length, 2);
   const duplicate = await service.resume("owner-1", {
     workerId: first.id,
-    prompt: "continue",
+    prompt: "  第二轮需求\t细节\n\n第三行",
     requestId: "resume-1",
   });
   assert.equal(duplicate.run.id, resumed.run.id);
+  assert.equal(duplicate.run.taskName, "第二轮需求 细节");
   assert.equal(service.get(first.id).runs.length, 2);
+
+  // An explicit title names only the new run; the first run keeps its own title.
+  const explicit = await service.resume("owner-1", {
+    workerId: first.id,
+    prompt: "第三轮需求",
+    taskName: "显式第三轮",
+    requestId: "resume-2",
+  });
+  const third = await waitStatus(service, first.id, ["completed"]);
+  assert.equal(explicit.run.taskName, "显式第三轮");
+  assert.equal(third.latestRun?.taskName, "显式第三轮");
+  assert.equal(third.latestRun?.nativeSessionId, "session-fixture-1");
+  assert.deepEqual(
+    service.get(first.id).runs.map((run) => run.taskName),
+    ["fixture task", "第二轮需求 细节", "显式第三轮"],
+  );
+  assert.equal(third.taskName, "fixture task");
 });
 
 test("enforces per-key FIFO concurrency", async (t) => {

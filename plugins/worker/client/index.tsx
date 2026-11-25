@@ -22,6 +22,7 @@ import {
 import { ConversationPane } from "./conversationPane.js";
 import { WorkerHistory, WorkerLive } from "./overviewList.js";
 import {
+  displayTaskName,
   isActiveWorker,
   type WorkerOverviewSnapshot,
 } from "./overview.js";
@@ -156,6 +157,9 @@ function RunsPanel({
             onClick={() => onSelect(run.id)}
           >
             <StatusBadge status={run.status} />
+            <span className="worker-run-title" title={displayTaskName(detail.worker, run)}>
+              {displayTaskName(detail.worker, run)}
+            </span>
             <small>{time(run.startedAt)}</small>
             <small>
               {run.model ?? "默认模型"}
@@ -453,7 +457,7 @@ function DetailView({
       </button>
       <header className="worker-heading">
         <div>
-          <h2>{worker.taskName}</h2>
+          <h2>{displayTaskName(worker, run)}</h2>
           <p>
             {worker.projectId} · 父会话 {worker.parentSessionId}
           </p>
@@ -788,7 +792,7 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
     void operate(async () => {
       await api.cancel({ workerIds: [worker.id] });
       if (selectedId === worker.id) await refreshDetail(worker.id);
-    }, "已请求取消 " + worker.taskName);
+    }, "已请求取消 " + displayTaskName(worker, worker.latestRun));
 
   const stopSession = () => {
     if (!context.session || !context.project) return;

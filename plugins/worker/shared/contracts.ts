@@ -213,6 +213,11 @@ export type WorkerStartInput = {
 export type WorkerResumeInput = {
   workerId: string;
   prompt: string;
+  /**
+   * Short title for this run's requirement. Omitted derives one from the prompt's first
+   * non-blank line; it never renames earlier runs or the worker's original task name.
+   */
+  taskName?: string;
   model?: string;
   /** Independent model service, supported only for Codex; non-Codex requests reject it. */
   provider?: string;
@@ -354,6 +359,12 @@ export type WorkerRunProgress = {
 export type WorkerRun = {
   id: string;
   workerId: string;
+  /**
+   * Title for this run's requirement. A start stores its `taskName`; a resume stores the
+   * explicit `taskName` or one derived from its prompt. Absent on older runs, whose display
+   * falls back to `WorkerRecord.taskName`.
+   */
+  taskName?: string;
   /** Idempotency key from `WorkerStartInput` / `WorkerResumeInput`, or null for internal runs. */
   requestId: string | null;
   status: WorkerStatus;
@@ -803,7 +814,10 @@ export type WorkerHistoryPage<T> = {
 /** History collections exposed by the Worker REST API. */
 export type WorkerHistoryKind = "finished" | "notifications";
 
-/** A notification row with the owning worker's task name resolved for the same page. */
+/**
+ * A notification row with its run's task title resolved for the same page, falling back to the
+ * owning worker's original task name for older runs.
+ */
 export type WorkerHistoryNotification = WorkerNotification & { taskName: string };
 
 /**

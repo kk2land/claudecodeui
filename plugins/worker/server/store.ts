@@ -31,7 +31,7 @@ type WorkerRow = { body: string; cleaned_at: string | null };
 type RunRow = { body: string };
 type OwnerRow = { body: string };
 type HistoryRow = { worker_body: string; run_body: string };
-type NotificationHistoryRow = { body: string; worker_body: string | null };
+type NotificationHistoryRow = { body: string; task_name: string };
 type ActiveWorkerRow = { worker_body: string; run_body: string };
 type ConfigUsageRow = {
   configId: string;
@@ -415,9 +415,15 @@ export class WorkerStore {
     values.push(limit + 1);
     const rows = this.db
       .prepare(`
-        SELECT n.body AS body, w.body AS worker_body
+        SELECT n.body AS body,
+          COALESCE(
+            json_extract(r.body,'$.taskName'),
+            json_extract(w.body,'$.taskName'),
+            ''
+          ) AS task_name
         FROM notifications n
         LEFT JOIN workers w ON w.id = n.worker_id
+        LEFT JOIN runs r ON r.id = n.run_id
         WHERE ${clauses.join(" AND ")}
         ORDER BY ${sort} DESC, n.id DESC
         LIMIT ?
@@ -425,10 +431,7 @@ export class WorkerStore {
       .all(...values) as NotificationHistoryRow[];
     const items = rows.slice(0, limit).map((row) => {
       const notification = JSON.parse(row.body) as WorkerHistoryNotification;
-      const worker = row.worker_body
-        ? (JSON.parse(row.worker_body) as WorkerRecord)
-        : null;
-      return { ...notification, taskName: worker?.taskName ?? "" };
+      return { ...notification, taskName: row.task_name };
     });
     return { items, hasMore: rows.length > limit };
   }

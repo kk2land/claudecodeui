@@ -25,6 +25,7 @@ import {
 import {
   atScrollBottom,
   cooldownRemaining,
+  displayTaskName,
   isActiveWorker,
   useHistoryFeed,
   workerStatus,
@@ -108,19 +109,20 @@ function Card({
 }) {
   const run = worker.latestRun;
   const status = statusOf(worker);
+  const title = displayTaskName(worker, run);
   return (
-    <article className="worker-card" aria-label={"任务卡片 " + worker.taskName}>
+    <article className="worker-card" aria-label={"任务卡片 " + title}>
       <header className="worker-card-head">
         <button
           className="worker-card-title"
           title="查看详情"
           onClick={onOpen}
         >
-          {worker.taskName}
+          {title}
         </button>
         <button
           className="worker-card-open"
-          aria-label={"查看 " + worker.taskName}
+          aria-label={"查看 " + title}
           title="查看详情"
           onClick={onOpen}
         >
@@ -160,7 +162,7 @@ function Card({
               </button>
               <button
                 className="worker-card-stop"
-                aria-label={"取消 " + worker.taskName}
+                aria-label={"取消 " + title}
                 disabled={busy || !canCancel(statusOf(worker))}
                 title="取消这个任务"
                 onClick={onCancel}
@@ -190,6 +192,7 @@ function FinishedRow({
 }) {
   const run = worker.latestRun;
   const status = statusOf(worker);
+  const title = displayTaskName(worker, run);
   const elapsed = run ? elapsedSeconds(run.startedAt, run.finishedAt, now) : null;
   const budget = run
     ? budgetState(run.startedAt, run.finishedAt, settings, run.progress, now)
@@ -198,7 +201,7 @@ function FinishedRow({
     <tr>
       <td>
         <button className="worker-link" onClick={onOpen}>
-          {worker.taskName}
+          {title}
         </button>
         <small>
           {worker.projectId} · 会话 {shortId(worker.parentSessionId, 8)}
@@ -257,7 +260,7 @@ function FinishedRow({
         )}
       </td>
       <td className="worker-row-actions">
-        <button onClick={onOpen} aria-label={"查看 " + worker.taskName}>
+        <button onClick={onOpen} aria-label={"查看 " + title}>
           查看
         </button>
       </td>
@@ -279,10 +282,11 @@ function QueuedRow({
   onCancel(): void;
 }) {
   const status = statusOf(worker);
+  const title = displayTaskName(worker, worker.latestRun);
   return (
     <li className="worker-compact-row">
       <StatusPill status={status} />
-      <span className="worker-compact-name">{worker.taskName}</span>
+      <span className="worker-compact-name">{title}</span>
       <span className="worker-muted">
         {TYPE_LABELS[worker.type as WorkerType] ?? worker.type} ·{" "}
         {duration(worker, now)}
@@ -290,14 +294,14 @@ function QueuedRow({
       <span className="worker-row-actions">
         <button
           className="worker-link"
-          aria-label={"查看 " + worker.taskName}
+          aria-label={"查看 " + title}
           onClick={onOpen}
         >
           详情
         </button>
         <button
           className="worker-link"
-          aria-label={"停止 " + worker.taskName}
+          aria-label={"停止 " + title}
           disabled={busy || !canCancel(statusOf(worker))}
           onClick={onCancel}
         >

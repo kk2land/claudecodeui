@@ -839,6 +839,7 @@ export class WorkerService {
     const run: WorkerRun = {
       id: runId,
       workerId: id,
+      taskName: input.taskName.trim(),
       requestId,
       status: "queued",
       startedAt: null,
@@ -976,9 +977,13 @@ export class WorkerService {
     );
     const runId = randomUUID();
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
+    // Each resumed requirement gets its own title; the worker's original name stays the fallback
+    // so earlier runs and the native session identity are never renamed.
+    const taskName = input.taskName?.trim() ?? taskTitleFromPrompt(input.prompt);
     const run: WorkerRun = {
       id: runId,
       workerId: worker.id,
+      taskName,
       requestId,
       status: "queued",
       startedAt: null,
@@ -1092,6 +1097,11 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_INPUT", "prompt 不能为空");
     if (typeof input.requestId !== "string" || !input.requestId.trim())
       throw new WorkerFailure("INVALID_INPUT", "requestId 不能为空");
+    if (
+      input.taskName !== undefined &&
+      (typeof input.taskName !== "string" || !input.taskName.trim())
+    )
+      throw new WorkerFailure("INVALID_INPUT", "taskName 不能为空");
     if (input.timeoutSeconds !== undefined && input.timeoutSeconds !== null) {
       if (!Number.isSafeInteger(input.timeoutSeconds) || input.timeoutSeconds <= 0)
         throw new WorkerFailure("INVALID_INPUT", "timeoutSeconds 必须是正整数或 null");
@@ -1142,6 +1152,8 @@ export class WorkerService {
     return {
       workerId: input.workerId.trim(),
       prompt: input.prompt,
+      // JSON.stringify drops an undefined value, so an omitted taskName keeps legacy hashes.
+      taskName: input.taskName?.trim(),
       model: clean(input.model),
       provider: clean(input.provider),
       effort: clean(input.effort),
@@ -2558,7 +2570,7 @@ export class WorkerService {
       this.store.updateNotification(item);
     }
     const summary = reminderSummary ?? (
-      worker.taskName +
+      runTaskName(worker, run) +
       " " +
       status +
       (run.finalText
@@ -3643,7 +3655,7 @@ export class WorkerService {
         ? null
         : Math.floor((this.now() - Date.parse(run.progress.lastEventAt)) / 1000);
       this.notify(worker, run, "running", this.owners.get(worker.ownerId)?.owner.paused === true,
-        `${worker.taskName}: soft budget reached (${elapsed}s elapsed`
+        `${runTaskName(worker, run)}: soft budget reached (${elapsed}s elapsed`
         + (steps === null ? "" : `, ${steps} steps`)
         + (phase ? `, phase ${phase}` : "")
         + (tool ? `, tool ${tool}` : "")
@@ -3773,6 +3785,21 @@ function realPath(value: string): string {
 
 function clean(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Title shown for one run: its own recorded title, else the worker's original task name. */
+function runTaskName(worker: WorkerRecord, run: WorkerRun): string {
+  return run.taskName ?? worker.taskName;
+}
+
+/**
+ * Short title for a resume that supplied none: the prompt's first non-blank line, whitespace
+ * collapsed and capped at 80 Unicode characters. The prompt itself is never rewritten.
+ */
+function taskTitleFromPrompt(prompt: string): string {
+  const line =
+    prompt.split(/\r?\n/).map((item) => item.trim()).find(Boolean) ?? "";
+  return Array.from(line.replace(/\s+/g, " ")).slice(0, 80).join("");
 }
 
 /** Keeps raw JSON-RPC error data (for example a 429 RESOURCE_EXHAUSTED envelope) in evidence. */
