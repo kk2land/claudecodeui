@@ -3325,6 +3325,287 @@ test("DOM: an earlier page from a short tail replaces the followed bottom with i
   }
 });
 
+test("DOM: a tail with no readable row loads the last output without a scroll", async () => {
+  const running = run();
+  const record = worker({
+    type: "pi",
+    configId: "pi-default",
+    configName: "Pi default",
+    latestRun: running,
+  });
+  const requests: string[] = [];
+  let liveSent = false;
+  const mounted = await mountPlugin({
+    state: () => snapshot({ workers: [record] }),
+    detail: () => ({ worker: record, runs: [running] }),
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (pathAndQuery.includes("tail=true"))
+        return {
+          // The window can start inside one large ignored event; the only complete line after
+          // it is a lifecycle notice, so this page renders nothing at all.
+          text:
+            '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"很长' +
+            "\n" +
+            jsonl([{ type: "agent_settled", aborted: false }]),
+          prevCursor: "9000",
+          nextCursor: "12000",
+          done: false,
+        };
+      if (pathAndQuery.includes("before=9000"))
+        return {
+          text: jsonl([
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "已有的最近输出" }],
+              },
+            },
+          ]),
+          prevCursor: "4000",
+          nextCursor: "9000",
+          done: false,
+        };
+      if (pathAndQuery.includes("before=4000"))
+        return {
+          text: jsonl([
+            {
+              type: "message_end",
+              message: {
+                role: "assistant",
+                content: [{ type: "text", text: "开头一段" }],
+              },
+            },
+          ]),
+          prevCursor: null,
+          nextCursor: "4000",
+          done: false,
+        };
+      if (!liveSent) {
+        liveSent = true;
+        return {
+          text: jsonl([
+            {
+              type: "message_update",
+              assistantMessageEvent: {
+                type: "text_delta",
+                delta: "实时追加",
+                contentIndex: 0,
+              },
+            },
+          ]),
+          nextCursor: "12500",
+          done: false,
+        };
+      }
+      return { text: "", nextCursor: "12500", done: false };
+    },
+  });
+  try {
+    // No wheel, touch, or scroll: the opening window itself pulls the earlier output.
+    await waitFor(
+      () => textOf(mounted.container).includes("已有的最近输出"),
+      "首屏预载最近输出",
+    );
+    // One automatic page is enough once the pane has a row; the older page waits for a gesture.
+    assert.equal(
+      requests.filter((path) => path.includes("before=")).length,
+      1,
+      JSON.stringify(requests),
+    );
+    // The forward cursor still runs from the tail's end, so live output lands below.
+    await waitFor(
+      () => textOf(mounted.container).includes("实时追加"),
+      "实时追加",
+    );
+    const text = textOf(mounted.container);
+    assert.ok(
+      text.indexOf("已有的最近输出") < text.lastIndexOf("实时追加"),
+      text,
+    );
+    // Upward paging keeps working from the newly preloaded window.
+    const box = byLabel(mounted.container, "对话内容")!;
+    const metrics = stubScrollMetrics(box);
+    const view = mounted.dom.window as unknown as {
+      Event: new (type: string) => Event;
+    };
+    metrics.clientHeight = 300;
+    metrics.scrollHeight = 900;
+    metrics.scrollTop = 600;
+    box.dispatchEvent(new view.Event("scroll"));
+    metrics.scrollTop = 0;
+    box.dispatchEvent(new view.Event("scroll"));
+    await waitFor(
+      () => textOf(mounted.container).includes("开头一段"),
+      "上滚读取更早内容",
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a tail of folded tool rows preloads older history until the card scrolls", async () => {
+  const running = run();
+  const record = worker({
+    type: "pi",
+    configId: "pi-default",
+    configName: "Pi default",
+    latestRun: running,
+  });
+  const requests: string[] = [];
+  let releaseTail: () => void = () => {};
+  const tailGate = new Promise<void>((resolve) => {
+    releaseTail = resolve;
+  });
+  let releaseEarlier: () => void = () => {};
+  const earlierGate = new Promise<void>((resolve) => {
+    releaseEarlier = resolve;
+  });
+  const tail = jsonl([
+    { type: "tool_execution_start", toolCallId: "t1", toolName: "bash", args: { command: "ls" } },
+    { type: "tool_execution_end", toolCallId: "t1", toolName: "bash", result: { content: [{ type: "text", text: "a\nb" }] } },
+    { type: "tool_execution_start", toolCallId: "t2", toolName: "read", args: { path: "x" } },
+    { type: "tool_execution_end", toolCallId: "t2", toolName: "read", result: { content: [{ type: "text", text: "y" }] } },
+  ]);
+  const message = (text: string) =>
+    jsonl([
+      {
+        type: "message_end",
+        message: { role: "assistant", content: [{ type: "text", text }] },
+      },
+    ]);
+  const mounted = await mountPlugin({
+    conversation: true,
+    state: () => snapshot({ workers: [record] }),
+    detail: () => ({ worker: record, runs: [running] }),
+    logs: async (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (pathAndQuery.includes("tail=true")) {
+        await tailGate;
+        return { text: tail, prevCursor: "7000", nextCursor: "8000", done: false };
+      }
+      if (pathAndQuery.includes("before=7000")) {
+        // The older page is what gives the card a scroll range.
+        metrics.scrollHeight = 900;
+        // Held so a reader gesture can land while the opening fill is still in flight.
+        await earlierGate;
+        return { text: message("更早的回答"), prevCursor: "2000", nextCursor: "7000", done: false };
+      }
+      if (pathAndQuery.includes("before=2000"))
+        return { text: message("最开头"), prevCursor: null, nextCursor: "2000", done: false };
+      return { text: "", nextCursor: "8000", done: false };
+    },
+  });
+  // jsdom has no layout: the card is a 300px viewport whose two folded tool rows fit easily.
+  const box = await (async () => {
+    await waitFor(() => Boolean(byLabel(mounted.container, "对话内容")), "卡片对话");
+    return byLabel(mounted.container, "对话内容")!;
+  })();
+  const metrics = stubScrollMetrics(box);
+  metrics.clientHeight = 300;
+  // The folded rows overflow by a sliver: technically scrollable, but with nothing to browse.
+  metrics.scrollHeight = 340;
+  let releaseDone = false;
+  try {
+    releaseTail();
+    releaseDone = true;
+    // Without any reader gesture the card asks for the page above the folded rows.
+    await waitFor(
+      () => requests.some((path) => path.includes("before=7000")),
+      "预载请求",
+    );
+    // A reader who pushes the short list before that page arrives must not start a second read of
+    // the same cursor: the opening fill already owns it, so nothing is inserted twice.
+    const window = mounted.dom.window as unknown as {
+      Event: new (type: string) => Event;
+      WheelEvent: new (type: string, init: { deltaY: number }) => Event;
+    };
+    metrics.scrollTop = 0;
+    box.dispatchEvent(new window.Event("scroll"));
+    box.dispatchEvent(new window.WheelEvent("wheel", { deltaY: -120 }));
+    await delay(60);
+    assert.equal(
+      requests.filter((path) => path.includes("before=7000")).length,
+      1,
+      JSON.stringify(requests),
+    );
+    releaseEarlier();
+    await waitFor(
+      () => JSON.stringify(mounted.views.at(-1)?.messages ?? []).includes("更早的回答"),
+      "预载更早历史",
+    );
+    const before = requests.filter((path) => path.includes("before="));
+    assert.deepEqual(before.length, 1, JSON.stringify(requests));
+    assert.ok(before[0]!.includes("before=7000"), before[0]);
+    // The tool rows are kept, and the older answer stays above them in log order.
+    await waitFor(
+      () => (mounted.views.at(-1)?.messages.length ?? 0) === 3,
+      "折叠工具行仍在",
+    );
+    const messages = mounted.views.at(-1)!.messages;
+    assert.equal(String(messages[0]!.text), "更早的回答");
+    assert.equal(
+      messages.filter((row) => String(row.text) === "更早的回答").length,
+      1,
+      "较早的通知只应拼接一次",
+    );
+    assert.deepEqual(
+      messages.slice(1).map((row) => [row.role, row.toolName, row.streaming]),
+      [
+        ["tool", "bash", false],
+        ["tool", "read", false],
+      ],
+    );
+    // The pane now has a scroll range, so the opening fill stops for good.
+    assert.deepEqual(metrics.scrollHeight, 900);
+    await delay(60);
+    assert.equal(
+      requests.filter((path) => path.includes("before=")).length,
+      1,
+      JSON.stringify(requests),
+    );
+    const view = mounted.dom.window as unknown as {
+      Event: new (type: string) => Event;
+    };
+    // The reader lands back at the newest row: following resumes on the filled window.
+    metrics.scrollTop = 600;
+    box.dispatchEvent(new view.Event("scroll"));
+    await waitFor(
+      () => textOf(mounted.container).includes("跟随最新"),
+      "回到最新",
+    );
+    await delay(60);
+    assert.equal(
+      requests.filter((path) => path.includes("before=")).length,
+      1,
+      JSON.stringify(requests),
+    );
+    // A real upward move from the newest position still pages in what came before.
+    box.dispatchEvent(new view.Event("scroll"));
+    metrics.scrollTop = 0;
+    box.dispatchEvent(new view.Event("scroll"));
+    await waitFor(
+      () => JSON.stringify(mounted.views.at(-1)?.messages ?? []).includes("最开头"),
+      "上滚翻页",
+    );
+    assert.equal(String(mounted.views.at(-1)!.messages[0]!.text), "最开头");
+    assert.equal(
+      mounted.views.at(-1)!.messages.filter((row) => String(row.text) === "最开头").length,
+      1,
+      "较早的页只应拼接一次",
+    );
+    assert.ok(
+      requests.filter((path) => path.includes("before=2000")).length === 1,
+      JSON.stringify(requests),
+    );
+  } finally {
+    releaseEarlier();
+    if (!releaseDone) releaseTail();
+    mounted.unmount();
+  }
+});
+
 test("DOM: a bottom position clamped by a growing viewport is not an upward scroll", async () => {
   const mounted = await mountPlugin({
     logs: (_id, pathAndQuery) => {

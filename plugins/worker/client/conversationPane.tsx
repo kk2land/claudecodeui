@@ -24,6 +24,12 @@ const PULL_STEP_PX = 24;
 /** One message row of either renderer, and the displayed blocks inside it that stay stable. */
 const MESSAGE_SELECTOR = ".chat-message, .worker-conv-row";
 const ANCHOR_SELECTOR = "p, li, pre, h1, h2, h3, h4";
+/**
+ * Automatic backward pages read for the opening window. A tail page can land inside one large
+ * event (Pi's `agent_end`, a Codex output snapshot) or on a few collapsed tool rows, so the first
+ * screen fills backwards until it scrolls. The cap keeps a long log from being read in full.
+ */
+const PREFILL_PAGES = 4;
 
 /**
  * The parsed conversation of one run plus the byte window it was parsed from. Rows are produced
@@ -65,6 +71,8 @@ type ConversationWindow = {
   started: boolean;
   prompt: string | null;
   loadingEarlier: boolean;
+  /** Automatic backward pages the opening window may still read; a reader gesture ends them. */
+  prefill: number;
 };
 
 /**
@@ -353,6 +361,7 @@ export function useRunConversation({
       started: false,
       prompt: null,
       loadingEarlier: false,
+      prefill: PREFILL_PAGES,
     };
     pager.current = loaded;
     const publish = () =>
@@ -428,49 +437,68 @@ export function useRunConversation({
    * start because a page boundary would otherwise split a streamed message or a tool call from
    * its result into two rows. The scroll position is measured when the page arrives, so a reader
    * who moved while the request was in flight keeps the position they are on when it inserts.
+   *
+   * The opening fill uses the same request: one in-flight read per run, so a reader who pushes a
+   * short first screen cannot ask for a page that is already on its way and insert it twice. A
+   * reader gesture also ends the opening fill, which then never reads without a gesture again.
    */
-  const loadEarlier = useCallback(() => {
-    const loaded = pager.current;
-    if (!loaded || loaded.loadingEarlier || loaded.before === null) return;
-    loaded.loadingEarlier = true;
-    setConversation((value) =>
-      value.key === key ? { ...value, loadingEarlier: true, error: "" } : value,
-    );
-    void api
-      .logs(workerId, runId, "events", null, { before: loaded.before! })
-      .then((page) => {
-        if (pager.current !== loaded) return;
-        loaded.raw = page.text + loaded.raw;
-        const reader = createConversationStream(workerType);
-        reader.push(loaded.raw);
-        if (loaded.done) reader.flush();
-        loaded.reader = reader;
-        loaded.before = page.prevCursor;
-        loaded.loadingEarlier = false;
-        // The DOM grows a moment after this publish (the host renders the rows on its own root),
-        // so the offset is restored on the first mutation that actually grew the scroller.
-        holdScroll(scroller.current);
-        setConversation({
-          key,
-          prompt: loaded.prompt,
-          messages: reader.messages(),
-          done: loaded.done,
-          started: loaded.started,
-          before: loaded.before,
-          loadingEarlier: false,
-          error: "",
-        });
-      })
-      .catch((caught) => {
-        if (pager.current !== loaded) return;
-        loaded.loadingEarlier = false;
+  const loadEarlier = useCallback(
+    (options?: { prefilling?: boolean }) => {
+      const loaded = pager.current;
+      if (!loaded || loaded.before === null) return;
+      const prefilling = options?.prefilling === true;
+      // A gesture ends the opening fill even when it lands while that fill is already in flight:
+      // the reader now owns backward paging, so no further page is read without a gesture.
+      if (!prefilling) loaded.prefill = 0;
+      if (loaded.loadingEarlier) return;
+      if (prefilling) {
+        if (loaded.prefill <= 0) return;
+        loaded.prefill -= 1;
+      }
+      loaded.loadingEarlier = true;
+      // The opening fill stays invisible: its page is below the newest row the reader is on.
+      if (!prefilling) {
         setConversation((value) =>
-          value.key === key
-            ? { ...value, loadingEarlier: false, error: String(caught) }
-            : value,
+          value.key === key ? { ...value, loadingEarlier: true, error: "" } : value,
         );
-      });
-  }, [api, holdScroll, key, runId, workerId, workerType]);
+      }
+      void api
+        .logs(workerId, runId, "events", null, { before: loaded.before! })
+        .then((page) => {
+          if (pager.current !== loaded) return;
+          loaded.raw = page.text + loaded.raw;
+          const reader = createConversationStream(workerType);
+          reader.push(loaded.raw);
+          if (loaded.done) reader.flush();
+          loaded.reader = reader;
+          loaded.before = page.prevCursor;
+          loaded.loadingEarlier = false;
+          // Only a reader who asked for the page keeps their place; the opening fill stays at the
+          // newest row because nothing above it was on screen yet.
+          if (!prefilling) holdScroll(scroller.current);
+          setConversation({
+            key,
+            prompt: loaded.prompt,
+            messages: reader.messages(),
+            done: loaded.done,
+            started: loaded.started,
+            before: loaded.before,
+            loadingEarlier: false,
+            error: "",
+          });
+        })
+        .catch((caught) => {
+          if (pager.current !== loaded) return;
+          loaded.loadingEarlier = false;
+          setConversation((value) =>
+            value.key === key
+              ? { ...value, loadingEarlier: false, error: prefilling ? "" : String(caught) }
+              : value,
+          );
+        });
+    },
+    [api, holdScroll, key, runId, workerId, workerType],
+  );
   /**
    * Earlier pages load only when the reader really moves up to the top of the loaded window: the
    * first placement and any downward scroll request nothing, so a run's history stays unread
@@ -620,7 +648,35 @@ export function ConversationPane({
   });
   const follow = useFollowLatest(conversation.scroller);
   const capability = typeof host.mountConversationOutput === "function";
-  const { view } = conversation;
+  const { view, loadEarlier } = conversation;
+  /**
+   * A tail window with no row at all, or too few rows to browse, would open as an empty or dead
+   * first screen while earlier output already exists. Only the opening follows: once a full screen
+   * of older rows sits above the newest one (or the reader stopped following) nothing is read
+   * without a gesture.
+   */
+  useEffect(() => {
+    if (!follow.follow) return;
+    // A window with no row has nothing to measure; extend it before live output can land on top.
+    if (view.rows.length === 0) {
+      loadEarlier({ prefilling: true });
+      return;
+    }
+    // The host renders the rows it was handed on its own render pass, so a pane with rows is
+    // measured a tick later; reading immediately would keep filling while the page is not drawn.
+    const timer = setTimeout(() => {
+      const node = conversation.scroller.current;
+      if (!node) return;
+      // jsdom has no layout; without a viewport height a non-empty pane is left alone.
+      // A few folded tool rows can overflow by a sliver and still leave nothing to browse, so a
+      // window counts as filled only with a whole viewport of older rows above the newest one.
+      if (!node.clientHeight || node.scrollHeight - node.clientHeight >= node.clientHeight)
+        return;
+      loadEarlier({ prefilling: true });
+    }, 0);
+    // The pager keeps its own in-flight, budget, and cursor guards, so extra passes are no-ops.
+    return () => clearTimeout(timer);
+  }, [conversation.scroller, loadEarlier, follow.follow, view.rows]);
   return (
     <div className={"worker-conv" + (compact ? " worker-conv-compact" : "")}>
       {view.resultOnly ? (
