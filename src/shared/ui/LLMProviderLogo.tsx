@@ -35,5 +35,15 @@ export function LLMProviderLogo({
     return <Bot className={className} aria-label="Pi" />;
   }
 
+  if (provider === 'agy') {
+    return (
+      <img
+        src={`${import.meta.env?.BASE_URL ?? '/'}icons/antigravity.svg`}
+        alt="Antigravity"
+        className={className}
+      />
+    );
+  }
+
   return <ClaudeLogo className={className} />;
 }

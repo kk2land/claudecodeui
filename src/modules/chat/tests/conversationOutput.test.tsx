@@ -176,6 +176,59 @@ describe('ConversationOutput rendering', () => {
     expect(text).not.toMatch(/\d{1,2}:\d{2}:\d{2}/);
   });
 
+  test('renders Antigravity, Pi and Codex assistant headers and icons without falling back to Claude', () => {
+    const cases: Array<{ provider: string; expectedLabel: string; iconSrc?: string }> = [
+      { provider: 'agy', expectedLabel: 'Antigravity', iconSrc: '/icons/antigravity.svg' },
+      { provider: 'pi', expectedLabel: 'Pi' },
+      { provider: 'codex', expectedLabel: 'Codex' },
+    ];
+
+    for (const { provider, expectedLabel, iconSrc } of cases) {
+      const view = renderView(
+        [
+          { id: `${provider}-u-1`, role: 'user', text: '检查改动' },
+          {
+            id: `${provider}-t-1`,
+            role: 'tool',
+            text: '',
+            toolId: 'call-1',
+            toolName: 'edit_file',
+            toolInput: { Path: 'src/a.ts' },
+            toolOutput: 'ok',
+          },
+          {
+            id: `${provider}-t-2`,
+            role: 'tool',
+            text: '',
+            toolId: 'call-2',
+            toolName: 'edit_file',
+            toolInput: { Path: 'src/b.ts' },
+            toolOutput: 'ok',
+          },
+          { id: `${provider}-a-1`, role: 'assistant', text: '已完成改动。' },
+        ],
+        provider,
+        createScroller(),
+      );
+
+      // Expand the first tool group as well, since its first child also renders the assistant header.
+      fireEvent.click(view.getByRole('button', { name: /edit_file/ }));
+
+      const text = view.container.textContent ?? '';
+      expect(text).toContain(expectedLabel);
+      expect(text).not.toContain('Claude');
+      if (iconSrc) {
+        const icon = view.container.querySelector<HTMLImageElement>(`img[alt="${expectedLabel}"]`);
+        expect(icon).not.toBeNull();
+        expect(icon?.getAttribute('src')).toBe(iconSrc);
+      } else {
+        expect(view.container.querySelector(`svg[aria-label="${expectedLabel}"]`)).not.toBeNull();
+      }
+      expect(view.container.querySelector('svg[aria-label="Claude"]')).toBeNull();
+      view.unmount();
+    }
+  });
+
   test('a tool row that carries only text is shown as text instead of an empty card', () => {
     const view = renderView([{ id: 'tool-text', role: 'tool', text: '工具输出已被截断' }]);
     expect(view.container.textContent).toContain('工具输出已被截断');

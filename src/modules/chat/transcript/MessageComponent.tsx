@@ -134,8 +134,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
   const shouldRenderAssistantFooter = shouldShowAssistantCopyControl ||
     (!isGrouped && (Boolean(formattedTime) || Boolean(message.model)));
   // Header name of the provider that produced this row. Providers without a
-  // translated name fall back to their own English name, which keeps a
-  // Worker-only provider such as Pi readable without claiming native support.
+  // translated name fall back to their own English name, which keeps
+  // Worker-only providers such as Pi and Antigravity readable without claiming
+  // native support.
   const providerLabel = provider === 'cursor'
     ? t('messageTypes.cursor')
     : provider === 'codex'
@@ -144,7 +145,9 @@ const MessageComponent = memo(({ message, prevMessage, createDiff, onFileOpen, s
         ? t('messageTypes.opencode', { defaultValue: 'OpenCode' })
         : provider === 'pi'
           ? t('messageTypes.pi', { defaultValue: 'Pi' })
-          : t('messageTypes.claude');
+          : provider === 'agy'
+            ? t('messageTypes.agy', { defaultValue: 'Antigravity' })
+            : t('messageTypes.claude');
 
   if (shouldHideThinkingMessage) {
     return null;
