@@ -140,6 +140,7 @@ function Card({
       </div>
       {run ? (
         <ConversationPane
+          key={run.id}
           api={api}
           host={host}
           workerType={worker.type}

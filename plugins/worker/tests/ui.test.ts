@@ -462,12 +462,14 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         if (mode.detail) return mode.detail(workerMatch[1]!);
         return { worker: worker(), runs: [run()] };
       }
-      if (/\/workers\/[^/]+\/logs/.test(pathAndQuery)) {
-        if (mode.logs) return mode.logs("worker-1", pathAndQuery);
+      const logsMatch = /^\/workers\/([^/]+)\/logs/.exec(pathAndQuery);
+      if (logsMatch) {
+        if (mode.logs) return mode.logs(decodeURIComponent(logsMatch[1]!), pathAndQuery);
         return { text: "", nextCursor: null, done: true };
       }
-      if (/\/workers\/[^/]+\/input/.test(pathAndQuery)) {
-        if (mode.input) return mode.input("worker-1", pathAndQuery);
+      const inputMatch = /^\/workers\/([^/]+)\/input/.exec(pathAndQuery);
+      if (inputMatch) {
+        if (mode.input) return mode.input(decodeURIComponent(inputMatch[1]!), pathAndQuery);
         return { prompt: null };
       }
       if (pathAndQuery === "/cancel") return { workerIds: ["worker-1"] };
@@ -3853,8 +3855,14 @@ test("DOM: each history table pages only itself, keeps loaded pages and resets o
     );
 
     await scrollHistoryToBottom(mounted, 0);
+    // The notification rows use the same "已结束 N" names, and their clock immediately follows
+    // the name ("已结束 2" + "00:26" flattens to "已结束 200:26"), so a whole-container text
+    // match is satisfied before this table's page arrives. Wait on the finished table itself.
     await waitFor(
-      () => textOf(mounted.container).includes("已结束 20"),
+      () =>
+        [...mounted.container.querySelectorAll(".worker-history-table tbody tr")].some(
+          (row) => textOf(row).includes("已结束 20"),
+        ),
       "已结束任务下一页",
     );
     assert.deepEqual(
@@ -4471,6 +4479,271 @@ test("DOM: the agy cooldown is one global deadline countdown", async () => {
       "冷却提示",
     );
     assert.ok(textOf(mounted.container).includes("1:0"), textOf(mounted.container));
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: multiple live cards load initial and subsequent pages independently without blocking or cross-talk", async () => {
+  let runBId = "run-b-1";
+  let releaseWorkerAFirst: ((value: unknown) => void) | null = null;
+  let deliverSecondPages = false;
+  const activeWorkers = () => [
+    worker({
+      id: "worker-a",
+      type: "codex",
+      taskName: "并行 Codex",
+      latestRun: run({ id: "run-a-1", workerId: "worker-a", status: "running" }),
+    }),
+    worker({
+      id: "worker-b",
+      type: "pi",
+      taskName: "并行 Pi",
+      latestRun: run({ id: runBId, workerId: "worker-b", status: "running" }),
+    }),
+    worker({
+      id: "worker-c",
+      type: "agy",
+      taskName: "并行 Agy",
+      latestRun: run({ id: "run-c-1", workerId: "worker-c", status: "running" }),
+    }),
+  ];
+  const mounted = await mountPlugin({
+    conversation: true,
+    state: () => snapshot({ workers: activeWorkers() }),
+    input: (workerId) => ({ prompt: "输入 " + workerId }),
+    logs: (workerId, pathAndQuery) => {
+      const params = new URLSearchParams(pathAndQuery.split("?")[1] ?? "");
+      const runId = params.get("runId");
+      const cursor = params.get("cursor");
+      if (workerId === "worker-a" && runId === "run-a-1") {
+        if (!cursor) {
+          return new Promise((resolve) => {
+            releaseWorkerAFirst = resolve;
+          });
+        }
+        if (cursor === "a-1" && deliverSecondPages) {
+          return {
+            text: jsonl([
+              {
+                type: "item.completed",
+                item: { id: "a-m2", type: "agent_message", text: "A 第二页更新" },
+              },
+            ]),
+            prevCursor: null,
+            nextCursor: "a-2",
+            done: false,
+          };
+        }
+        return { text: "", prevCursor: null, nextCursor: cursor, done: false };
+      }
+      if (workerId === "worker-b" && runId === "run-b-1") {
+        if (!cursor) {
+          return {
+            text: jsonl([
+              {
+                type: "message_end",
+                message: {
+                  id: "b-m1",
+                  role: "assistant",
+                  content: [{ type: "text", text: "B 首页内容" }],
+                },
+              },
+            ]),
+            prevCursor: null,
+            nextCursor: "b-1",
+            done: false,
+          };
+        }
+        if (cursor === "b-1" && deliverSecondPages) {
+          return {
+            text: jsonl([
+              {
+                type: "message_end",
+                message: {
+                  id: "b-m2",
+                  role: "assistant",
+                  content: [{ type: "text", text: "B 第二页更新" }],
+                },
+              },
+            ]),
+            prevCursor: null,
+            nextCursor: "b-2",
+            done: false,
+          };
+        }
+        return { text: "", prevCursor: null, nextCursor: cursor, done: false };
+      }
+      if (workerId === "worker-b" && runId === "run-b-2") {
+        return {
+          text: jsonl([
+            {
+              type: "message_end",
+              message: {
+                id: "b2-m1",
+                role: "assistant",
+                content: [{ type: "text", text: "B 续跑新内容" }],
+              },
+            },
+          ]),
+          prevCursor: null,
+          nextCursor: null,
+          done: true,
+        };
+      }
+      if (workerId === "worker-c" && runId === "run-c-1") {
+        if (!cursor) {
+          return {
+            text: jsonl([
+              {
+                event: "step_update",
+                step_update: {
+                  step_index: 1,
+                  step_type: "agent_response",
+                  state: "ACTIVE",
+                  text_delta: "C 首页内容",
+                },
+              },
+            ]),
+            prevCursor: null,
+            nextCursor: "c-1",
+            done: false,
+          };
+        }
+        if (cursor === "c-1" && deliverSecondPages) {
+          return {
+            text: jsonl([
+              {
+                event: "step_update",
+                step_update: {
+                  step_index: 1,
+                  step_type: "agent_response",
+                  state: "DONE",
+                  text_delta: " + C 第二页更新",
+                },
+              },
+            ]),
+            prevCursor: null,
+            nextCursor: "c-2",
+            done: false,
+          };
+        }
+        return { text: "", prevCursor: null, nextCursor: cursor, done: false };
+      }
+      throw new Error("unexpected logs " + workerId + " " + pathAndQuery);
+    },
+  });
+  try {
+    // While worker-a's first log request is still pending, worker-b and worker-c load independently.
+    await waitFor(
+      () => {
+        const cardB = byLabel(mounted.container, "任务卡片 并行 Pi");
+        const cardC = byLabel(mounted.container, "任务卡片 并行 Agy");
+        return (
+          Boolean(releaseWorkerAFirst) &&
+          textOf(cardB).includes("B 首页内容") &&
+          textOf(cardC).includes("C 首页内容")
+        );
+      },
+      "B 和 C 不受阻塞的 A 影响",
+    );
+    const cardA = byLabel(mounted.container, "任务卡片 并行 Codex")!;
+    const cardB = byLabel(mounted.container, "任务卡片 并行 Pi")!;
+    const cardC = byLabel(mounted.container, "任务卡片 并行 Agy")!;
+    assert.equal(mounted.views.length, 3, "each card mounts its own host conversation view");
+    assert.equal(textOf(cardB).includes("C 首页内容"), false);
+    assert.equal(textOf(cardC).includes("B 首页内容"), false);
+
+    // Release worker-a's first page, then deliver subsequent pages for all three cards.
+    releaseWorkerAFirst!({
+      text: jsonl([
+        {
+          type: "item.completed",
+          item: { id: "a-m1", type: "agent_message", text: "A 首页内容" },
+        },
+      ]),
+      prevCursor: null,
+      nextCursor: "a-1",
+      done: false,
+    });
+    await waitFor(() => textOf(cardA).includes("A 首页内容"), "A 首页到达");
+    assert.ok(textOf(cardA).includes("输入 worker-a"));
+    assert.ok(textOf(cardB).includes("输入 worker-b"));
+    assert.ok(textOf(cardC).includes("输入 worker-c"));
+
+    deliverSecondPages = true;
+    await waitFor(
+      () =>
+        textOf(cardA).includes("A 第二页更新") &&
+        textOf(cardB).includes("B 第二页更新") &&
+        textOf(cardC).includes("C 第二页更新"),
+      "三张卡片持续读取各自后续日志页",
+    );
+    assert.equal(textOf(cardA).includes("B 第二页更新"), false);
+    assert.equal(textOf(cardB).includes("C 第二页更新"), false);
+    assert.equal(textOf(cardC).includes("A 第二页更新"), false);
+
+    // Carousel switching scrolls horizontally without losing or crossing any card's content.
+    const cardsEl = mounted.container.querySelector<HTMLElement>(".worker-cards")!;
+    Object.defineProperty(cardsEl, "scrollWidth", { configurable: true, value: 1116 });
+    Object.defineProperty(cardsEl, "clientWidth", { configurable: true, value: 358 });
+    Object.defineProperty(cardA, "offsetWidth", { configurable: true, value: 358 });
+    let scrollLeft = 0;
+    Object.defineProperty(cardsEl, "scrollLeft", {
+      configurable: true,
+      get: () => scrollLeft,
+      set: (value: number) => {
+        scrollLeft = value;
+      },
+    });
+    cardsEl.scrollTo = ((options?: ScrollToOptions) => {
+      if (typeof options?.left === "number") scrollLeft = options.left;
+    }) as typeof cardsEl.scrollTo;
+    (byLabel(mounted.container, "下一组卡片") as HTMLButtonElement).click();
+    assert.ok(scrollLeft > 0, "carousel shifts right to reveal the next card");
+    (byLabel(mounted.container, "上一组卡片") as HTMLButtonElement).click();
+    assert.equal(scrollLeft, 0, "carousel shifts back to the first card");
+    assert.ok(textOf(cardA).includes("A 第二页更新"));
+    assert.ok(textOf(cardB).includes("B 第二页更新"));
+    assert.ok(textOf(cardC).includes("C 第二页更新"));
+
+    // Switching one card to a new run remounts only that card's conversation host view.
+    const viewA = mounted.views[0]!;
+    const viewB = mounted.views[1]!;
+    const viewC = mounted.views[2]!;
+    runBId = "run-b-2";
+    await waitFor(() => textOf(cardB).includes("B 续跑新内容"), "B 切换新 run 后加载新内容");
+    assert.equal(viewB.disposed, true, "old run host view is disposed on run switch");
+    assert.equal(viewA.disposed, false, "sibling card A view stays mounted");
+    assert.equal(viewC.disposed, false, "sibling card C view stays mounted");
+    assert.equal(textOf(cardB).includes("B 首页内容"), false);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: overview list root scrolls vertically so its background covers history past the first screen", async () => {
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        workers: [worker()],
+        finished: { items: [finishedWorker(0)], nextCursor: null },
+      }),
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("已结束任务"),
+      "总览列表已渲染",
+    );
+    const root = mounted.container.querySelector<HTMLElement>('.worker-plugin[data-view="list"]')!;
+    const sheet = mounted.container.querySelector("style")!.textContent ?? "";
+    assert.match(
+      sheet,
+      /\.worker-plugin\[data-view="list"\]\s*\{[^}]*height:\s*100%;[^}]*overflow-y:\s*auto;/,
+      "list root owns vertical scrolling so background does not cut off across the history heading",
+    );
+    assert.ok(root.querySelector(".worker-first-screen-fill"));
+    assert.ok(root.querySelector(".worker-history h3"));
   } finally {
     mounted.unmount();
   }

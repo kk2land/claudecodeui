@@ -217,8 +217,15 @@ export function useHistoryFeed<T extends { id: string }>({
   );
 
   const ready = state.identity === identity;
+  // Exclusion also applies at render time: the mount effect below runs after the commit that
+  // makes a worker active, so relying on it alone would show one frame where a resumed worker
+  // sits in both the live list and the finished table.
+  const visible = ready ? state.items : ([] as T[]);
   return {
-    items: ready ? state.items : ([] as T[]),
+    items:
+      exclude?.size && visible.length
+        ? withoutResumedWorkers(visible, exclude)
+        : visible,
     nextCursor: ready ? state.cursor : null,
     loading: ready ? state.loading : false,
     error: ready ? state.error : "",

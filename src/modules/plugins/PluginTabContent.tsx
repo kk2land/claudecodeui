@@ -141,9 +141,6 @@ export default function PluginTabContent({
    */
   const [conversationOutputs, setConversationOutputs] = useState<MountedConversationOutput[]>([]);
   const conversationOutputKeyRef = useRef(0);
-  const mountedRef = useRef(true);
-
-  useEffect(() => () => { mountedRef.current = false; }, []);
 
   const openSession = useCallback((sessionId: string) => {
     const target = typeof sessionId === 'string' ? sessionId.trim() : '';
@@ -172,6 +169,8 @@ export default function PluginTabContent({
     setLoadError(null);
     if (!containerRef.current || !plugin?.enabled) return;
 
+    // Scoped per effect run so StrictMode remounts get a fresh live flag while stale
+    // plugin runs and their controller callbacks become no-ops on cleanup.
     let active = true;
     const container = containerRef.current;
     const entryFile = plugin?.entry ?? 'index.js';
@@ -279,7 +278,7 @@ export default function PluginTabContent({
             const key = ++sessionOutputKeyRef.current;
             setSessionOutput({ container, sessionId, pollIntervalMs, key });
             return () => {
-              if (!mountedRef.current) return;
+              if (!active) return;
               setSessionOutput(current => (current?.key === key ? null : current));
             };
           },
@@ -310,7 +309,7 @@ export default function PluginTabContent({
             return {
               update(nextMessages: WorkerConversationMessage[]): void {
                 const next = readConversationMessages(nextMessages);
-                if (!mountedRef.current) return;
+                if (!active) return;
                 setConversationOutputs(current => (
                   current.some(item => item.key === key)
                     ? current.map(item => (item.key === key ? { ...item, messages: next } : item))
@@ -318,7 +317,7 @@ export default function PluginTabContent({
                 ));
               },
               dispose(): void {
-                if (!mountedRef.current) return;
+                if (!active) return;
                 setConversationOutputs(current => current.filter(item => item.key !== key));
               },
             };

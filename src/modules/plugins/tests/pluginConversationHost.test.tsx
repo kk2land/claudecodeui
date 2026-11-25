@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { StrictMode, useEffect, useRef } from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, render, waitFor } from '@testing-library/react';
 import { MemoryRouter } from 'react-router-dom';
@@ -80,13 +80,15 @@ vi.mock('@/modules/chat', async importOriginal => {
       if (!tokenRef.current) tokenRef.current = {};
       const token = tokenRef.current;
       const container = props.scrollContainer as HTMLElement;
-      viewRegistry().set(container, { token, props });
-      // Clearing only this instance's entry keeps a stale unmount from deleting a newer view that
-      // the same plugin container now owns.
-      useEffect(() => () => {
-        const registry = viewRegistry();
-        if (registry.get(container)?.token === token) registry.delete(container);
-      }, [container, token]);
+      // Register inside the effect so StrictMode's cleanup/re-setup cycle restores the view entry,
+      // and clear only this instance's entry so a stale unmount never deletes a newer view.
+      useEffect(() => {
+        viewRegistry().set(container, { token, props });
+        return () => {
+          const registry = viewRegistry();
+          if (registry.get(container)?.token === token) registry.delete(container);
+        };
+      }, [container, token, props]);
       return null;
     },
   };
@@ -139,13 +141,14 @@ function stubAssetsAndPlugins() {
   );
 }
 
-type HostDisplayPreferences = {
+type HostRenderOptions = {
   showThinking?: boolean;
   showRawParameters?: boolean;
+  strictMode?: boolean;
 };
 
-function renderHost(preferences: HostDisplayPreferences = {}) {
-  return render(
+function renderHost(options: HostRenderOptions = {}) {
+  const tree = (
     <MemoryRouter>
       <ThemeProvider>
         <PluginsProvider>
@@ -153,21 +156,22 @@ function renderHost(preferences: HostDisplayPreferences = {}) {
             pluginName="worker"
             selectedProject={project}
             selectedSession={null}
-            showThinking={preferences.showThinking}
-            showRawParameters={preferences.showRawParameters}
+            showThinking={options.showThinking}
+            showRawParameters={options.showRawParameters}
           />
         </PluginsProvider>
       </ThemeProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+  return render(options.strictMode ? <StrictMode>{tree}</StrictMode> : tree);
 }
 
-async function mountHostAndHarness(preferences?: HostDisplayPreferences): Promise<{
+async function mountHostAndHarness(options?: HostRenderOptions): Promise<{
   host: Host;
   view: ReturnType<typeof renderHost>;
 }> {
   stubAssetsAndPlugins();
-  const view = renderHost(preferences);
+  const view = renderHost(options);
   let host: Host | null = null;
   await waitFor(() => {
     host = ((globalThis as Record<string, unknown>).__workerHost ?? null) as Host | null;
@@ -245,8 +249,8 @@ describe('PluginTabContent conversation output mount', () => {
     await waitFor(() => expect(viewFor(container)).toBeNull());
   });
 
-  it('shows simultaneous Pi, agy and Codex views in their own containers without interference', async () => {
-    const { host } = await mountHostAndHarness();
+  it('shows simultaneous Pi, agy and Codex views in their own containers under StrictMode without interference', async () => {
+    const { host } = await mountHostAndHarness({ strictMode: true });
     const piContainer = document.createElement('div');
     const agyContainer = document.createElement('div');
     const codexContainer = document.createElement('div');
