@@ -4,7 +4,7 @@ import path from "node:path";
 import test from "node:test";
 import { createService, temporaryRoot } from "./helpers.js";
 
-const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
+const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"];
 
 function writeModels(env: NodeJS.ProcessEnv, value: unknown): void {
   fs.writeFileSync(

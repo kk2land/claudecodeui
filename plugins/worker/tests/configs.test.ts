@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import test from "node:test";
 import Database from "better-sqlite3";
+import { WorkerService } from "../server/service.js";
 import { WorkerStore } from "../server/store.js";
 import type { WorkerConfig, WorkerMcpSettings } from "../shared/contracts.js";
 import {
@@ -117,9 +118,89 @@ test("canonical settings persist only canonical fields and project per-engine de
   assert.equal(reopened.settings().retentionDays, 4);
 });
 
+test("ACP idle settings default, use the env fallback, persist explicit saves, and keep omissions", async (t) => {
+  const root = temporaryRoot("worker-configs-acp-idle-");
+  const { service, data } = createService(t, root, {
+    CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS: "7",
+  });
+  assert.equal(service.settings().acpIdleTimeoutSeconds, 7);
+  const current = service.settings();
+  const base = {
+    configs: current.configs,
+    defaultConfigId: current.defaultConfigId,
+  };
+  const persisted = (): Record<string, unknown> => {
+    const database = new Database(path.join(data, "worker.db"), { readonly: true });
+    try {
+      const row = database
+        .prepare("SELECT body FROM settings WHERE id=1")
+        .get() as { body: string };
+      return JSON.parse(row.body) as Record<string, unknown>;
+    } finally {
+      database.close();
+    }
+  };
+
+  // An unrelated save keeps the env fallback available instead of materializing it.
+  const untouched = service.updateSettings({ ...base, retentionDays: 2 });
+  assert.equal(untouched.acpIdleTimeoutSeconds, 7);
+  assert.equal("acpIdleTimeoutSeconds" in persisted(), false);
+  const fallbackStore = new WorkerStore(data, { acpIdleTimeoutSeconds: 11 });
+  t.after(() => fallbackStore.close());
+  assert.equal(fallbackStore.settings().acpIdleTimeoutSeconds, 11);
+
+  const saved = service.updateSettings({ ...base, acpIdleTimeoutSeconds: 42 });
+  assert.equal(saved.acpIdleTimeoutSeconds, 42);
+  assert.equal(persisted().acpIdleTimeoutSeconds, 42);
+  const kept = service.updateSettings({ ...base, retentionDays: 3 });
+  assert.equal(kept.acpIdleTimeoutSeconds, 42);
+  const reopened = new WorkerStore(data, { acpIdleTimeoutSeconds: 5 });
+  t.after(() => reopened.close());
+  assert.equal(reopened.settings().acpIdleTimeoutSeconds, 42);
+  const serviceWithNewEnv = new WorkerService({
+    dataDirectory: data,
+    environment: {
+      ...process.env,
+      CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS: "5",
+    },
+  });
+  t.after(async () => {
+    await serviceWithNewEnv.close();
+  });
+  assert.equal(serviceWithNewEnv.settings().acpIdleTimeoutSeconds, 42);
+});
+
+test("ACP idle settings default to five minutes and reject invalid values atomically", async (t) => {
+  const root = temporaryRoot("worker-configs-acp-idle-invalid-");
+  const { service, data } = createService(t, root);
+  assert.equal(service.settings().acpIdleTimeoutSeconds, 300);
+  const current = service.settings();
+  const base = {
+    configs: current.configs,
+    defaultConfigId: current.defaultConfigId,
+  };
+  for (const value of [0, -1, 1.5, 2_147_484, "5", null]) {
+    assert.throws(
+      () =>
+        service.updateSettings({
+          ...base,
+          acpIdleTimeoutSeconds: value as unknown as number,
+        }),
+      /acpIdleTimeoutSeconds/,
+    );
+  }
+  assert.equal(service.settings().acpIdleTimeoutSeconds, 300);
+  const database = new Database(path.join(data, "worker.db"), { readonly: true });
+  t.after(() => database.close());
+  const row = database
+    .prepare("SELECT body FROM settings WHERE id=1")
+    .get() as { body: string };
+  assert.equal("acpIdleTimeoutSeconds" in JSON.parse(row.body), false);
+});
+
 test("config timeouts apply independently to starts and resumes with per-run overrides", async (t) => {
   const root = temporaryRoot("worker-configs-timeout-");
-  const { service } = createService(t, root);
+  const { service, env } = createService(t, root);
   const configs = [
     piNamed({ hardTimeoutSeconds: 60 }),
     piNamed({ id: "dsh-unlimited", hardTimeoutSeconds: null }),
@@ -137,13 +218,14 @@ test("config timeouts apply independently to starts and resumes with per-run ove
   assert.equal(unlimited.run.timeoutSeconds, null);
   assert.equal(overridden.run.timeoutSeconds, 45);
   assert.equal(disabled.run.timeoutSeconds, null);
-  await waitStatus(service, overridden.worker.id, ["completed"]);
+  const completedOverridden = await waitStatus(service, overridden.worker.id, ["completed"]);
 
   service.updateSettings({
     configs: [piNamed({ hardTimeoutSeconds: 600 }), configs[1]!],
     defaultConfigId: "dsh-default",
   });
   assert.equal(service.get(first.worker.id).worker.latestRun?.timeoutSeconds, 60);
+  env.TEST_SESSION_ID = completedOverridden.latestRun!.nativeSessionId!;
   const resumed = await service.resume("owner-1", {
     workerId: overridden.worker.id,
     prompt: "continue",
@@ -605,11 +687,12 @@ test("Pi passes the full configured model id through and ignores env services", 
       path.join(data, "logs", configuredWorker.id, configuredWorker.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { argv: string[] };
-  assert.deepEqual(
-    spec.argv.slice(spec.argv.indexOf("--model")),
-    ["--model", "config-provider/sub/config-model", "--thinking", "medium"],
-  );
+  ) as { argv: string[]; acp?: { configOptions: unknown[] } };
+  assert.deepEqual(spec.acp?.configOptions, [
+    { configId: "model", value: "config-provider/sub/config-model", match: "model" },
+    { configId: "thought_level", value: "medium", match: "exact" },
+  ]);
+  assert.equal(spec.argv.includes("--session-dir"), false);
   assert.equal(spec.argv.includes("--provider"), false);
   assert.equal(spec.argv.includes("env-provider"), false);
 
@@ -703,4 +786,100 @@ test("canonical settings reject invalid configs atomically", async (t) => {
     /thinking/,
   );
   assert.deepEqual(service.settings(), before);
+});
+
+test("stored legacy Pi/AGY max effort is preserved on unrelated saves while new max is rejected", async (t) => {
+  const root = temporaryRoot("worker-configs-legacy-max-");
+  const { service } = createService(t, root);
+  const agyLegacy: WorkerConfig = {
+    id: "agy-legacy",
+    name: "Legacy AGY",
+    type: "agy",
+    enabled: true,
+    roles: [],
+    concurrency: 2,
+    hardTimeoutSeconds: 600,
+    model: null,
+    effort: "max",
+  };
+  const persistedPi = pi({ effort: "max" });
+  // Seed pre-existing persisted configs with legacy `max` effort for both Pi and AGY.
+  service.store.saveSettings({
+    schemaVersion: 2,
+    configs: [persistedPi, agyLegacy, codex()],
+    defaultConfigId: "pi-default",
+    retentionDays: 1,
+    softReminderSeconds: 600,
+    softReminderSteps: 20,
+  });
+
+  // Changing only acpIdleTimeoutSeconds via full canonical PUT preserves both stored `max` values.
+  const current = service.settings();
+  const saved = service.updateSettings({
+    configs: current.configs,
+    defaultConfigId: current.defaultConfigId,
+    acpIdleTimeoutSeconds: 120,
+  });
+  assert.equal(saved.acpIdleTimeoutSeconds, 120);
+  assert.equal(saved.configs.find((c) => c.id === "pi-default")?.effort, "max");
+  assert.equal(saved.configs.find((c) => c.id === "agy-legacy")?.effort, "max");
+
+  // Legacy PUT also preserves the stored Pi/AGY `max` without mutating or failing.
+  const legacySaved = service.updateSettings({
+    concurrency: { pi: 2 },
+    defaults: { pi: { model: null, effort: "max" } },
+  });
+  assert.equal(legacySaved.configs.find((c) => c.id === "pi-default")?.effort, "max");
+  assert.equal(legacySaved.configs.find((c) => c.id === "agy-legacy")?.effort, "max");
+
+  // Starting a new ACP run against those legacy `max` configs still fails explicitly.
+  await assert.rejects(
+    () => service.start("owner-1", startInput({ configId: "pi-default", type: "pi", requestId: "pi-stored-max" })),
+    /max/,
+  );
+  await assert.rejects(
+    () => service.start("owner-1", startInput({ configId: "agy-legacy", type: "agy", requestId: "agy-stored-max" })),
+    /max/,
+  );
+
+  // Adding a new AGY config with `effort: "max"` or switching an existing config to `max` is rejected.
+  assert.throws(
+    () =>
+      service.updateSettings({
+        configs: [
+          ...saved.configs,
+          { ...agyLegacy, id: "agy-new", name: "New AGY", effort: "max" },
+        ],
+        defaultConfigId: saved.defaultConfigId,
+      }),
+    /AGY ACP 不支持 effort=max/,
+  );
+  assert.throws(
+    () =>
+      service.updateSettings({
+        configs: [
+          ...saved.configs,
+          pi({ id: "pi-new", name: "New Pi", effort: "max" }),
+        ],
+        defaultConfigId: saved.defaultConfigId,
+      }),
+    /thinking/,
+  );
+  // Once cleared, setting AGY back to `max` is also rejected.
+  const cleared = service.updateSettings({
+    configs: saved.configs.map((c) =>
+      c.id === "agy-legacy" ? { ...c, effort: "high" } : c,
+    ),
+    defaultConfigId: saved.defaultConfigId,
+  });
+  assert.throws(
+    () =>
+      service.updateSettings({
+        configs: cleared.configs.map((c) =>
+          c.id === "agy-legacy" ? { ...c, effort: "max" } : c,
+        ),
+        defaultConfigId: cleared.defaultConfigId,
+      }),
+    /AGY ACP 不支持 effort=max/,
+  );
 });

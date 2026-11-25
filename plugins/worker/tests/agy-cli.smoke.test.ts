@@ -51,7 +51,7 @@ test(
     const { service } = createService(t, root, {}, {
       // Use the operator's real HOME so the existing agy login and settings are inherited.
       environment: { ...process.env },
-      executablePaths: { agy: executable },
+      executablePaths: { "agy-acp": executable },
     });
     service.updateSettings({
       configs: [...service.settings().configs, agyConfig()],
@@ -66,19 +66,32 @@ test(
         requestId: "real-agy-smoke-start",
       }),
     );
-    const first = await waitStatus(service, started.worker.id, ["completed"], 120_000);
+    const first = await waitStatus(
+      service,
+      started.worker.id,
+      ["failed", "completed"],
+      55_000,
+    );
     const firstRun = first.latestRun!;
+    assert.equal(firstRun.status, "completed", firstRun.error?.message ?? "agy did not complete");
     assert.match(firstRun.nativeSessionId ?? "", /^[0-9a-f-]{36}$/);
     assert.match(firstRun.finalText ?? "", /AGY_SMOKE/);
     assert.equal(firstRun.usage?.scope, "run");
+    assert.equal(typeof firstRun.usage?.partial, "boolean");
 
     const resumed = await service.resume("owner-1", {
       workerId: first.id,
       prompt: "Reply with exactly AGY_RESUME. Do not read, create, or modify any files.",
       requestId: "real-agy-smoke-resume",
     });
-    const second = await waitStatus(service, first.id, ["completed"], 120_000);
+    const second = await waitStatus(
+      service,
+      first.id,
+      ["failed", "completed"],
+      55_000,
+    );
     const secondRun = second.latestRun!;
+    assert.equal(secondRun.status, "completed", secondRun.error?.message ?? "agy did not complete");
     assert.equal(secondRun.id, resumed.run.id);
     assert.notEqual(secondRun.id, firstRun.id);
     assert.equal(secondRun.nativeSessionId, firstRun.nativeSessionId);
@@ -90,20 +103,18 @@ test(
         path.join(data, "logs", first.id, firstRun.id, "spec.json"),
         "utf8",
       ),
-    ) as { argv: string[] };
+    ) as { argv: string[]; acp: { sessionId: string | null; configOptions: unknown[] } };
     const resumeSpec = JSON.parse(
       fs.readFileSync(
         path.join(data, "logs", first.id, secondRun.id, "spec.json"),
         "utf8",
       ),
-    ) as { argv: string[] };
-    assert.ok(startSpec.argv.some((arg) => arg.startsWith("--print=")));
-    assert.ok(startSpec.argv.includes("--dangerously-skip-permissions"));
-    assert.equal(startSpec.argv.includes("--conversation"), false);
-    assert.deepEqual(
-      resumeSpec.argv.slice(-2),
-      ["--conversation", firstRun.nativeSessionId],
-    );
+    ) as { argv: string[]; acp: { sessionId: string | null; configOptions: unknown[] } };
+    const acpArgv = [path.resolve(executable), "acp", "--dangerously-skip-permissions"];
+    assert.deepEqual(startSpec.argv, acpArgv);
+    assert.deepEqual(resumeSpec.argv, acpArgv);
+    assert.equal(startSpec.acp.sessionId, null);
+    assert.equal(resumeSpec.acp.sessionId, firstRun.nativeSessionId);
     fs.writeFileSync(
       path.join(os.tmpdir(), "worker-agy-cli-smoke-evidence.json"),
       JSON.stringify(

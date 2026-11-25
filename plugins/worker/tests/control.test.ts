@@ -130,8 +130,15 @@ test("worktree and explicit existing cwd actually launch in the selected directo
 
   const sessionCwd = (workerId: string, runId: string): string => {
     const file = path.join(root, "data", "logs", workerId, runId, "events.log");
-    const first = fs.readFileSync(file, "utf8").split("\n")[0]!;
-    return (JSON.parse(first) as { cwd: string }).cwd;
+    const lines = fs
+      .readFileSync(file, "utf8")
+      .split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as { type?: string; cwd?: string });
+    const session = lines.find(
+      (entry) => entry.type === "acp_session" || entry.type === "session",
+    );
+    return session?.cwd ?? "";
   };
 
   const created = await service.start(
@@ -182,7 +189,10 @@ test("pausing an empty owner scope fences admission before the first start", asy
     service.start("owner-1", startInput({ requestId: "empty-pause" })),
     /暂停/,
   );
-  const other = await service.start("owner-2", startInput({ requestId: "empty-pause-2" }));
+  const other = await service.start(
+    "owner-2",
+    startInput({ requestId: "empty-pause-2", prompt: "[scenario:sleep:5000] keep running" }),
+  );
   await waitStatus(service, other.worker.id, ["running"]);
   await service.cancel({ all: true, parentSessionId: "parent-2", projectId: "project-2" });
 });

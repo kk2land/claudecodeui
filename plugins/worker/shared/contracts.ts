@@ -1,15 +1,24 @@
 /**
  * Pure TypeScript contracts shared by the Worker plugin, the Codex host bridge, and the UI.
  *
- * This module contains types only: importing it must never pull in plugin runtime code. The
- * host re-exports the subset that it actually consumes from `server/shared/index.ts`; downstream
- * plugin modules should import from this file so the contract stays identical on both sides of
- * the process boundary.
+ * This module contains types and fixed contract constants only: importing it must never pull in
+ * plugin runtime code. The host re-exports the subset that it actually consumes from
+ * `server/shared/index.ts`; downstream plugin modules should import from this file so the
+ * contract stays identical on both sides of the process boundary.
  */
 
 import type { WorkerTaskRole } from "./task-roles.js";
 
 export type { WorkerTaskRole };
+
+/** Environment variable that seeds the ACP idle window when no UI value was saved. */
+export const ACP_IDLE_TIMEOUT_ENV = "CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS";
+
+/** Default ACP idle window: five minutes, shared by the Pi and AGY slots. */
+export const ACP_IDLE_TIMEOUT_DEFAULT_SECONDS = 300;
+
+/** Largest whole-second idle window whose milliseconds remain below Node's 2,147,483,647 ms timer limit. */
+export const ACP_IDLE_TIMEOUT_MAX_SECONDS = 2_147_483;
 
 //----------------- WORKER IDENTITY AND STATUS ------------
 
@@ -373,6 +382,17 @@ export type WorkerRun = {
   nativeSessionId: string | null;
   nativeSessionFile: string | null;
   /**
+   * Execution protocol recorded at admission. Absent on historical runs (which keep their
+   * legacy CLI path on resume, such as Pi `--print --mode json`); `"acp"` marks runs driven
+   * over the stdio ACP protocol.
+   */
+  nativeProtocol?: "acp";
+  /**
+   * Pi ACP transcript byte offset captured at launch time (0 for a new session, prior EOF for
+   * a resumed session) so finalization verifies only this turn's status and usage.
+   */
+  piTranscriptOffset?: number;
+  /**
    * Codex-only measurement start for session-cumulative token counters; absent for other
    * engines and for older records. See `WorkerCodexUsageBaseline`.
    */
@@ -565,6 +585,11 @@ export type WorkerSettings = {
   readonly codex: WorkerCodexSettings;
   /** Days to retain finished runs and their logs, measured from finishedAt; initially 1. */
   retentionDays: number;
+  /**
+   * Effective idle window for each shared ACP slot. A saved value wins; otherwise it comes from
+   * `ACP_IDLE_TIMEOUT_ENV` or the 300-second default. Pi and AGY keep independent clocks.
+   */
+  acpIdleTimeoutSeconds: number;
   softReminderSeconds: number;
   softReminderSteps: number;
   /** Read-only compatibility projection of the default config's hard timeout. */
@@ -576,12 +601,16 @@ export type WorkerSettings = {
  * before anything is persisted: ids are unique, `defaultConfigId` references an enabled config,
  * and an existing config keeps its `type` while referenced. Reminder values stay server-owned.
  * An omitted config timeout defaults to 600 seconds; null disables it.
- * An omitted `retentionDays` keeps the stored value.
+ * An omitted `retentionDays` keeps the stored value. An omitted
+ * `acpIdleTimeoutSeconds` keeps the saved value, or the environment/default fallback when none
+ * was saved; a supplied value must be an integer from 1 through
+ * `ACP_IDLE_TIMEOUT_MAX_SECONDS`.
  */
 export type WorkerSettingsUpdate = {
   configs: WorkerConfig[];
   defaultConfigId: string;
   retentionDays?: number;
+  acpIdleTimeoutSeconds?: number;
 };
 
 /**
@@ -612,6 +641,8 @@ export type WorkerLegacySettingsInput = {
   defaults?: { pi: WorkerDefault } & { codex?: WorkerDefault };
   codex?: WorkerCodexSettings;
   retentionDays?: number;
+  /** Optional saved idle window; omitted keeps the previous saved value or env fallback. */
+  acpIdleTimeoutSeconds?: number;
 };
 
 /** `PUT /settings` accepts either the canonical shape or the mapped legacy shape. */

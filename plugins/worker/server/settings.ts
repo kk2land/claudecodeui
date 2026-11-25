@@ -9,7 +9,16 @@ import type {
   WorkerTaskRole,
   WorkerType,
 } from "./shared/index.js";
-import { AGY_EFFORT_LEVELS, agyEffortConflict } from "../shared/agy.js";
+import {
+  ACP_IDLE_TIMEOUT_DEFAULT_SECONDS,
+  ACP_IDLE_TIMEOUT_ENV,
+  ACP_IDLE_TIMEOUT_MAX_SECONDS,
+} from "../shared/contracts.js";
+import {
+  AGY_ACP_EFFORT_LEVELS,
+  AGY_EFFORT_LEVELS,
+  agyEffortConflict,
+} from "../shared/agy.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 
 /** Fixed ids of the executable configs the schema-2 migration creates. */
@@ -48,6 +57,30 @@ function positiveInteger(value: unknown, fallback: number): number {
   return Number.isSafeInteger(value) && (value as number) > 0
     ? (value as number)
     : fallback;
+}
+
+/** Whether a value is a valid persisted/UI ACP idle window in whole seconds. */
+export function validAcpIdleTimeoutSeconds(value: unknown): value is number {
+  return (
+    Number.isSafeInteger(value) &&
+    (value as number) >= 1 &&
+    (value as number) <= ACP_IDLE_TIMEOUT_MAX_SECONDS
+  );
+}
+
+/**
+ * Reads the ACP idle fallback once at the service boundary. Missing, malformed, or out-of-range
+ * environment values keep the five-minute default; a saved UI value overrides this later.
+ */
+export function acpIdleTimeoutSecondsFromEnvironment(
+  environment: NodeJS.ProcessEnv,
+): number {
+  const raw = environment[ACP_IDLE_TIMEOUT_ENV]?.trim();
+  if (!raw || !/^\d+$/.test(raw)) return ACP_IDLE_TIMEOUT_DEFAULT_SECONDS;
+  const seconds = Number(raw);
+  return validAcpIdleTimeoutSeconds(seconds)
+    ? seconds
+    : ACP_IDLE_TIMEOUT_DEFAULT_SECONDS;
 }
 
 function parseConfigValue(value: string): string {
@@ -119,16 +152,27 @@ function codexConfig(
 }
 
 /**
- * Applies agy's documented native reasoning levels and checks the remaining engine-specific
- * effort rules. Pi accepts only its thinking levels; DSH needs an explicit model.
+ * Validates agy effort levels and known fixed-suffix conflicts. New ACP settings and runs accept
+ * only `AGY_ACP_EFFORT_LEVELS`; historical configs keeping an unchanged legacy value and legacy
+ * CLI runs opt into `allowLegacy` so `max` stays accepted there without permitting new ACP `max`.
  */
 export function validateConfigEffort(
   type: SupportedWorkerType,
   model: string | null,
   effort: string | null,
+  options: { allowLegacy?: boolean } = {},
 ): string | null {
-  if (type === "agy" && effort && !(AGY_EFFORT_LEVELS as readonly string[]).includes(effort))
-    return "agy 配置的 effort 必须是 low、medium、high、xhigh 或 max";
+  if (type === "agy" && effort) {
+    const allowed: readonly string[] = options.allowLegacy
+      ? AGY_EFFORT_LEVELS
+      : AGY_ACP_EFFORT_LEVELS;
+    if (!allowed.includes(effort))
+      return options.allowLegacy
+        ? "agy 配置的 effort 必须是 low、medium、high、xhigh 或 max"
+        : effort === "max"
+          ? "AGY ACP 不支持 effort=max；可用级别为 low、medium、high、xhigh"
+          : "agy 配置的 effort 必须是 low、medium、high 或 xhigh";
+  }
   if (type === "agy") {
     const conflict = agyEffortConflict(model, effort);
     if (conflict) return conflict;
@@ -317,7 +361,10 @@ function configForType(
  * Derives the read-only per-engine compatibility maps and Codex launch view. These values are
  * never persisted; the canonical `configs` list remains the only source of truth.
  */
-export function projectSettings(record: WorkerSettingsRecord): WorkerSettings {
+export function projectSettings(
+  record: WorkerSettingsRecord,
+  acpIdleFallbackSeconds: number = ACP_IDLE_TIMEOUT_DEFAULT_SECONDS,
+): WorkerSettings {
   const configs = record.configs;
   const defaultConfig =
     configs.find((config) => config.id === record.defaultConfigId) ?? configs[0]!;
@@ -355,6 +402,8 @@ export function projectSettings(record: WorkerSettingsRecord): WorkerSettings {
         }
       : { env: {}, extraArgs: [] },
     retentionDays: record.retentionDays,
+    acpIdleTimeoutSeconds:
+      record.acpIdleTimeoutSeconds ?? acpIdleFallbackSeconds,
     softReminderSeconds: record.softReminderSeconds,
     softReminderSteps: record.softReminderSteps,
     hardTimeoutSeconds: defaultConfig.hardTimeoutSeconds,

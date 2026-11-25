@@ -46,7 +46,12 @@ export type WorkerHistoryPageResult<T> = { items: T[]; hasMore: boolean };
 /** SQLite persistence for workers, runs, plans, settings, idempotency keys, and the notification outbox. */
 export class WorkerStore {
   private readonly db: Database.Database;
-  constructor(readonly directory: string) {
+  private readonly acpIdleFallbackSeconds: number | undefined;
+  constructor(
+    readonly directory: string,
+    options: { acpIdleTimeoutSeconds?: number } = {},
+  ) {
+    this.acpIdleFallbackSeconds = options.acpIdleTimeoutSeconds;
     fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
     this.db = new Database(path.join(directory, "worker.db"));
     fs.chmodSync(path.join(directory, "worker.db"), 0o600);
@@ -143,11 +148,11 @@ export class WorkerStore {
   }
 
   /**
-   * Loads canonical settings, migrating a pre-schema-2 row (and legacy workers/runs) exactly
-   * once in a single transaction. After that every read returns the canonical row and never
-   * recreates a config deleted by a later update.
+   * Loads the canonical settings row, migrating a pre-schema-2 row (and legacy workers/runs)
+   * exactly once in a single transaction. The service reads this record when it must preserve
+   * an absent optional value across an unrelated settings save.
    */
-  settings(): WorkerSettings {
+  settingsRecord(): WorkerSettingsRecord {
     const row = this.db
       .prepare("SELECT body FROM settings WHERE id=1")
       .get() as { body: string } | undefined;
@@ -157,7 +162,7 @@ export class WorkerStore {
         this.saveSettings(record);
         this.backfillLegacyRecords(record);
       });
-      return projectSettings(record);
+      return record;
     }
     const stored = JSON.parse(row.body) as Record<string, unknown>;
     if (isCanonicalSettings(stored)) {
@@ -179,14 +184,22 @@ export class WorkerStore {
       }
       // Persist only independent schema/timeout repairs. DSH removal is a read-only projection.
       if (changed) this.saveSettings(record);
-      return projectSettings(normalizeSettingsRecord(record));
+      return normalizeSettingsRecord(record);
     }
     const record = migrateLegacySettings(stored);
     this.transaction(() => {
       this.saveSettings(record);
       this.backfillLegacyRecords(record);
     });
-    return projectSettings(record);
+    return record;
+  }
+
+  /**
+   * Loads canonical settings and projects the read-only compatibility maps. The constructor's
+   * ACP fallback is used only while no UI value has been saved.
+   */
+  settings(): WorkerSettings {
+    return projectSettings(this.settingsRecord(), this.acpIdleFallbackSeconds);
   }
 
   /** Persists exactly the supplied body; callers only pass a canonical record in production. */

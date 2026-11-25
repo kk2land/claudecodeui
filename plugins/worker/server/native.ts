@@ -1,9 +1,12 @@
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import type {
+  AcpConfigOptionRequest,
   NativeExecution,
   NativeLaunch,
+  PiAcpSessionPlan,
   WorkerCodexUsageBaseline,
   WorkerRun,
   WorkerTokenCounters,
@@ -11,16 +14,32 @@ import type {
   WorkerUsage,
 } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
+import { trackAcpProgress } from "./acp.js";
+import {
+  parsePiAcp,
+  resolvePiAcpTranscriptFile,
+} from "./pi-acp.js";
 
-export const PI_THINKING_LEVELS = [
+export { parsePiAcp, resolvePiAcpTranscriptFile };
+
+/** Thinking levels supported by `pi-acp` (0.4.0 does not support `max`). */
+export const PI_ACP_THINKING_LEVELS = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
+] as const;
+
+/** Thinking levels supported by legacy `pi --print --mode json` continuation runs. */
+export const PI_LEGACY_THINKING_LEVELS = [
+  ...PI_ACP_THINKING_LEVELS,
   "max",
 ] as const;
+
+/** Default Pi thinking levels exposed for new configurations and catalog responses. */
+export const PI_THINKING_LEVELS = PI_ACP_THINKING_LEVELS;
 
 export type ModelSelection = {
   model: string | null;
@@ -65,6 +84,22 @@ export function resolveExecutable(
     "EXECUTABLE_MISSING",
     "PATH 中找不到可执行文件: " + name,
   );
+}
+
+/**
+ * Resolves the bundled `@geohar/pi-acp` JS entry from the application's local `node_modules`
+ * without using `npx` or global installs. Returns `null` when the dependency is unavailable.
+ */
+export function resolveBundledPiAcpEntry(
+  fromUrl: string = import.meta.url,
+): string | null {
+  try {
+    const require = createRequire(fromUrl);
+    const entry = require.resolve("@geohar/pi-acp");
+    return fs.statSync(entry).isFile() ? entry : null;
+  } catch {
+    return null;
+  }
 }
 
 function nonBlank(value: string | undefined | null): string | null {
@@ -125,22 +160,106 @@ export function nativeHome(
       sessionsRoot: path.join(dataDirectory, "sessions", "agy"),
     };
   }
+  const resolvedHome = home(
+    environment,
+    "PI_CODING_AGENT_DIR",
+    path.join(".pi", "agent"),
+  );
   return {
-    home: home(environment, "PI_CODING_AGENT_DIR", path.join(".pi", "agent")),
-    sessionsRoot: path.join(dataDirectory, "sessions", "pi"),
+    home: resolvedHome,
+    sessionsRoot: path.join(resolvedHome, "sessions"),
   };
 }
 
-/** Builds the Pi print/JSON launch with explicit session-file continuation. */
-function preparePi(input: PrepareInput): NativeLaunch {
+/**
+ * Validates and prepares per-run parameters for a Pi ACP session hosted on the shared Pi ACP
+ * process. Rejects unsupported options (`provider`, `max` thinking) and home/transcript mismatches
+ * up front without spawning anything.
+ */
+export function preparePiAcpLaunch(input: {
+  run: WorkerRun;
+  cwd: string;
+  previous: WorkerRun | null;
+  dataDirectory: string;
+  baseEnvironment: NodeJS.ProcessEnv;
+}): PiAcpSessionPlan {
   const previous = input.previous;
   const defaults = nativeHome("pi", input.dataDirectory, input.baseEnvironment);
   const resolvedHome = previous ? previous.home : defaults.home;
   const sessionsRoot = previous ? previous.sessionsRoot : defaults.sessionsRoot;
+  const model = nonBlank(input.run.model);
+  const effort = nonBlank(input.run.effort);
+  if (nonBlank(input.run.provider)) {
+    throw new WorkerFailure(
+      "PROVIDER_UNSUPPORTED",
+      "provider 仅 Codex 支持；Pi 请使用完整 model",
+    );
+  }
+  if (effort && !(PI_ACP_THINKING_LEVELS as readonly string[]).includes(effort)) {
+    throw new WorkerFailure(
+      "THINKING_INVALID",
+      effort === "max"
+        ? "Pi ACP 不支持 max thinking 级别"
+        : "不支持的 Pi thinking 级别",
+    );
+  }
+  let sessionFile: string | null = null;
+  if (previous) {
+    if (!previous.nativeSessionId) {
+      throw new WorkerFailure("NATIVE_SESSION_UNKNOWN", "缺少已核实的 Pi 会话身份");
+    }
+    if (path.resolve(previous.home) !== path.resolve(defaults.home)) {
+      throw new WorkerFailure(
+        "NATIVE_SESSION_MISMATCH",
+        "Pi ACP 共享进程目录与历史会话目录不一致",
+      );
+    }
+    const userHome =
+      nonBlank(input.baseEnvironment.HOME) ??
+      nonBlank(input.baseEnvironment.USERPROFILE) ??
+      os.homedir();
+    const resolved = resolvePiAcpTranscriptFile(
+      sessionsRoot,
+      previous.nativeSessionId,
+      input.cwd,
+      previous.nativeSessionFile,
+      userHome,
+    );
+    if (resolved.status !== "ok") {
+      throw new WorkerFailure(
+        resolved.status === "missing"
+          ? "NATIVE_SESSION_MISSING"
+          : "NATIVE_SESSION_MISMATCH",
+        resolved.reason,
+      );
+    }
+    sessionFile = resolved.file;
+  }
+  const configOptions: AcpConfigOptionRequest[] = [];
+  if (model) configOptions.push({ configId: "model", value: model, match: "model" });
+  if (effort) configOptions.push({ configId: "thought_level", value: effort, match: "exact" });
+  return {
+    cwd: input.cwd,
+    sessionId: previous?.nativeSessionId ?? null,
+    sessionFile,
+    home: resolvedHome,
+    sessionsRoot,
+    configOptions,
+  };
+}
+
+/** Builds the legacy Pi print/JSON launch for resuming pre-ACP explicit session files. */
+function preparePiLegacy(input: PrepareInput): NativeLaunch {
+  const previous = input.previous;
+  const defaults = nativeHome("pi", input.dataDirectory, input.baseEnvironment);
+  const resolvedHome = previous ? previous.home : defaults.home;
+  const sessionsRoot = previous
+    ? previous.sessionsRoot
+    : path.join(input.dataDirectory, "sessions", "pi");
   // The full native model identifier is passed through; the CLI resolves it.
   const model = nonBlank(input.run.model);
   const effort = nonBlank(input.run.effort);
-  if (effort && !(PI_THINKING_LEVELS as readonly string[]).includes(effort))
+  if (effort && !(PI_LEGACY_THINKING_LEVELS as readonly string[]).includes(effort))
     throw new WorkerFailure("THINKING_INVALID", "不支持的 Pi thinking 级别");
   const sessionFile = previous
     ? previous.nativeSessionFile
@@ -258,7 +377,7 @@ export function prepareLaunch(input: PrepareInput): NativeLaunch {
     );
   if (input.type === "codex") return prepareCodex(input);
   if (input.type === "agy") return prepareAgy(input);
-  return preparePi(input);
+  return preparePiLegacy(input);
 }
 
 function existsNonEmpty(file: string): boolean {
@@ -1340,6 +1459,10 @@ export function trackProgress(
 ): void {
   if (!event || typeof event !== "object" || Array.isArray(event)) return;
   const value = event as Record<string, unknown>;
+  if (value.protocol === "acp") {
+    trackAcpProgress(value, progress);
+    return;
+  }
   // agy wraps every event in an `event` discriminator instead of `type`.
   const kind =
     typeof value.type === "string"

@@ -327,6 +327,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
       softReminderSteps: 20,
       hardTimeoutSeconds: null,
       retentionDays: 1,
+      acpIdleTimeoutSeconds: 300,
     },
     configUsage: {},
     agyCooldownUntil: null,
@@ -485,6 +486,7 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
         if (mode.settings) return mode.settings(body);
         const input = body as Record<string, unknown>;
         return {
+          acpIdleTimeoutSeconds: 300,
           ...input,
           schemaVersion: 2,
           softReminderSeconds: 600,
@@ -811,6 +813,14 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       "",
     );
 
+    // ACP idle time uses the same form; its validated numeric edit rides the whole save.
+    const acpIdleInput = byLabel(
+      mounted.container,
+      "ACP 空闲关闭时间（秒）",
+    ) as HTMLInputElement;
+    assert.equal(acpIdleInput.value, "300");
+    await typeInto(acpIdleInput, "42");
+
     // The copy becomes the explicit default and the whole document is saved atomically.
     (byLabel(mounted.container, "配置 5 设为默认") as HTMLButtonElement).click();
     const defaultSelect = byLabel(
@@ -830,8 +840,11 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       configs: Array<Record<string, any>>;
       defaultConfigId: string;
       retentionDays: number;
+      acpIdleTimeoutSeconds?: number;
     };
     assert.equal(body.retentionDays, 1);
+    assert.equal(body.acpIdleTimeoutSeconds, 42);
+    await waitFor(() => acpIdleInput.value === "42", "ACP 空闲时间回填");
     assert.deepEqual(
       body.configs.map((config) => config.name),
       ["Agy default", "Pi default", "Codex default", "后备 Pi", "codex#1"],
@@ -874,6 +887,7 @@ test("DOM: configs can be added, cloned with hidden Codex values, deleted before
       body.configs.map((config) => config.id),
     );
     assert.equal(second.defaultConfigId, body.defaultConfigId);
+    assert.equal(second.acpIdleTimeoutSeconds, undefined);
     assert.deepEqual(second.configs[4]!.codex, copied.codex);
     assert.equal(second.configs[4]!.model, null);
   } finally {
@@ -4744,6 +4758,54 @@ test("DOM: overview list root scrolls vertically so its background covers histor
     );
     assert.ok(root.querySelector(".worker-first-screen-fill"));
     assert.ok(root.querySelector(".worker-history h3"));
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: older schema-2 backend without acpIdleTimeoutSeconds keeps other settings saveable and never fakes idle support", async () => {
+  const legacySettings = () => {
+    const base = snapshot().settings as Record<string, unknown>;
+    const { acpIdleTimeoutSeconds: _omitted, ...withoutIdle } = base;
+    return withoutIdle;
+  };
+  const mounted = await mountPlugin({
+    state: () => snapshot({ settings: legacySettings() }),
+    settings: (body) => ({
+      ...(body as Record<string, unknown>),
+      schemaVersion: 2,
+      softReminderSeconds: 600,
+      softReminderSteps: 20,
+      hardTimeoutSeconds: null,
+    }),
+  });
+  try {
+    await openSettings(mounted);
+    const acpIdleInput = byLabel(
+      mounted.container,
+      "ACP 空闲关闭时间（秒）",
+    ) as HTMLInputElement;
+    assert.equal(acpIdleInput.disabled, true);
+    assert.equal(acpIdleInput.value, "");
+    assert.ok(
+      textOf(mounted.container).includes("暂不支持配置 ACP 空闲关闭时间"),
+    );
+
+    const retentionInput = byLabel(
+      mounted.container,
+      "日志和运行记录保留天数",
+    ) as HTMLInputElement;
+    await typeInto(retentionInput, "5");
+    const saveButton = button(mounted.container, "保存设置");
+    assert.equal(saveButton.disabled, false);
+    saveButton.click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "旧后端保存其它设置");
+    const submitted = callsTo(mounted, "/settings")[0]!.body as Record<string, unknown>;
+    assert.equal(submitted.retentionDays, 5);
+    assert.equal("acpIdleTimeoutSeconds" in submitted, false);
+    await waitFor(() => textOf(mounted.container).includes("Worker 设置已保存"), "保存成功提示");
+    assert.equal(acpIdleInput.disabled, true);
+    assert.equal(acpIdleInput.value, "");
   } finally {
     mounted.unmount();
   }

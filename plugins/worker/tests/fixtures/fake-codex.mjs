@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 
 const scenario = process.env.TEST_SCENARIO || "ok";
 const args = process.argv.slice(2);
@@ -16,7 +17,9 @@ const sessionFile = path.join(sessions, sessionId + ".jsonl");
 fs.mkdirSync(sessions, { recursive: true });
 
 const prompt = fs.readFileSync(0, "utf8");
-if (process.env.TEST_PID_FILE)
+if (process.env.TEST_CLI_PID_FILE)
+  fs.writeFileSync(process.env.TEST_CLI_PID_FILE, String(process.pid));
+if (process.env.TEST_PID_FILE && scenario !== "hangtree" && scenario !== "grandchild")
   fs.writeFileSync(process.env.TEST_PID_FILE, String(process.pid));
 if (process.env.TEST_CAPTURE_FILE) {
   fs.writeFileSync(
@@ -74,7 +77,19 @@ emit({
   type: "thread.started",
   thread_id: scenario === "wrong-thread" ? "wrong-" + sessionId : sessionId,
 });
-if (scenario === "hang") {
+if (scenario === "hangtree") {
+  process.on("SIGTERM", () => {});
+  const child = spawn(
+    process.execPath,
+    ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
+    { stdio: "inherit" },
+  );
+  if (process.env.TEST_PID_FILE) {
+    fs.writeFileSync(process.env.TEST_PID_FILE, String(child.pid));
+  }
+  child.unref();
+  await wait(60000);
+} else if (scenario === "hang") {
   await wait(60000);
 } else if (scenario === "fail") {
   emit({ type: "turn.failed", error: { message: "fixture codex failure" } });
@@ -85,6 +100,15 @@ if (scenario === "hang") {
 } else {
   emit({ type: "turn.started" });
   if (scenario === "sleep") await wait(Number(process.env.TEST_DELAY_MS || 300));
+  if (scenario === "grandchild") {
+    const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
+      stdio: "inherit",
+    });
+    if (process.env.TEST_PID_FILE) {
+      fs.writeFileSync(process.env.TEST_PID_FILE, String(child.pid));
+    }
+    child.unref();
+  }
   if (scenario !== "no-message")
     emit({
       type: "item.completed",

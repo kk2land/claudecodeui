@@ -491,3 +491,139 @@ test("agy shows denied actions and result errors as error rows", () => {
   assert.match(rows[0]!.text, /write_file/);
   assert.match(rows[1]!.text, /invalid model selection/);
 });
+
+test("Pi ACP suppresses startupInfo, streams thought/text, pairs tool updates, and reports errors", () => {
+  const rows = rowsOf("pi", [
+    {
+      protocol: "acp",
+      type: "acp_session",
+      action: "new",
+      sessionId: "s-acp-1",
+      cwd: "/tmp/p",
+      configOptions: [],
+      startupInfo: "pi v1.6.0\n---\n",
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "s-acp-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "pi v1.6.0\n---\n" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "s-acp-1",
+      update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "先分析" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "s-acp-1",
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "tc-1",
+        title: "echo hi",
+        kind: "execute",
+        status: "in_progress",
+        rawInput: { command: "echo hi" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "s-acp-1",
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "tc-1",
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: "hi\n" } }],
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "s-acp-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "完成" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "s-acp-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "了" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_prompt_result",
+      sessionId: "s-acp-1",
+      stopReason: "end_turn",
+      result: { stopReason: "end_turn" },
+    },
+    {
+      protocol: "acp",
+      type: "acp_error",
+      stage: "session/set_config_option",
+      code: "ACP_CONFIG_UNSUPPORTED",
+      message: "ACP 不支持配置 thought_level=max",
+    },
+  ]);
+  assert.equal(rows.length, 4);
+  assert.equal(rows[0]!.thinking, true);
+  assert.equal(rows[0]!.text, "先分析");
+  assert.equal(rows[0]!.streaming, false);
+  assert.equal(rows[1]!.role, "tool");
+  assert.equal(rows[1]!.toolName, "echo hi");
+  assert.deepEqual(rows[1]!.toolInput, { command: "echo hi" });
+  assert.equal(rows[1]!.toolOutput, "hi\n");
+  assert.equal(rows[1]!.streaming, false);
+  assert.equal(rows[2]!.role, "assistant");
+  assert.equal(rows[2]!.text, "完成了");
+  assert.equal(rows[2]!.streaming, false);
+  assert.equal(rows[3]!.role, "error");
+  assert.match(rows[3]!.text, /thought_level=max/);
+});
+
+test("agy ACP runs reuse the ACP conversation handler while legacy history stays intact", () => {
+  const rows = rowsOf("agy", [
+    {
+      protocol: "acp",
+      type: "acp_session",
+      action: "resume",
+      sessionId: "agy-conversation-1",
+      cwd: "/tmp/agy",
+      configOptions: [],
+      startupInfo: null,
+    },
+    {
+      protocol: "acp",
+      type: "acp_update",
+      sessionId: "agy-conversation-1",
+      update: {
+        sessionUpdate: "agent_message_chunk",
+        content: { type: "text", text: "agy acp answer" },
+      },
+    },
+    {
+      protocol: "acp",
+      type: "acp_prompt_result",
+      sessionId: "agy-conversation-1",
+      stopReason: "end_turn",
+      result: { stopReason: "end_turn" },
+    },
+  ]);
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0]!.role, "assistant");
+  assert.equal(rows[0]!.text, "agy acp answer");
+  assert.equal(rows[0]!.streaming, false);
+});

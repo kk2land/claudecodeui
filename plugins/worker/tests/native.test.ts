@@ -10,6 +10,7 @@ import {
   parseDsh,
   parsePi,
   prepareLaunch,
+  preparePiAcpLaunch,
   resolveExecutable,
 } from "../server/native.js";
 import type { WorkerRun } from "../shared/contracts.js";
@@ -70,72 +71,104 @@ test("DSH cannot launch; Pi keeps recorded model, effort and session arguments",
     (error: { code?: string }) => error.code === "WORKER_TYPE_UNSUPPORTED",
   );
 
-  const pi = prepareLaunch({
-    type: "pi",
+  const pi = preparePiAcpLaunch({
     run: run(root, {
       workerId: "worker-pi",
       id: "run-pi",
       model: "provider/sub/model",
-      provider: "recorded-provider",
+      provider: null,
       effort: "high",
+      nativeProtocol: "acp",
     }),
     cwd: root,
-    prompt: "x",
     previous: null,
     dataDirectory: path.join(root, "data"),
-    runDirectory,
-    executable: "/bin/fake-pi",
     baseEnvironment: {
       CODEX_PI_MODEL: "changed-environment-model",
       CODEX_PI_THINKING: "low",
     },
   });
-  assert.deepEqual(pi.argv.slice(0, 6), [
-    "/bin/fake-pi",
-    "--print",
-    "--mode",
-    "json",
-    "--session-dir",
-    path.join(root, "data", "sessions", "pi"),
+  assert.deepEqual(pi.configOptions, [
+    { configId: "model", value: "provider/sub/model", match: "model" },
+    { configId: "thought_level", value: "high", match: "exact" },
   ]);
-  assert.deepEqual(pi.argv.slice(pi.argv.indexOf("--model")), [
-    "--model",
-    "provider/sub/model",
-    "--thinking",
-    "high",
-  ]);
-  assert.equal(pi.argv.at(-1) === "-", false);
-  const configured = prepareLaunch({
-    type: "pi",
-    run: run(root, { workerId: "worker-pi", id: "run-pi-2", effort: "low" }),
+  assert.equal(pi.sessionId, null);
+  const configured = preparePiAcpLaunch({
+    run: run(root, { workerId: "worker-pi", id: "run-pi-2", effort: "low", nativeProtocol: "acp" }),
     cwd: root,
-    prompt: "x",
     previous: null,
+    dataDirectory: path.join(root, "data"),
+    baseEnvironment: {},
+  });
+  assert.deepEqual(configured.configOptions, [
+    { configId: "thought_level", value: "low", match: "exact" },
+  ]);
+  assert.throws(
+    () =>
+      preparePiAcpLaunch({
+        run: run(root, { workerId: "worker-pi", id: "run-pi-3", model: null, effort: "max", nativeProtocol: "acp" }),
+        cwd: root,
+        previous: null,
+        dataDirectory: path.join(root, "data"),
+        baseEnvironment: {},
+      }),
+    /max/,
+  );
+  assert.throws(
+    () =>
+      preparePiAcpLaunch({
+        run: run(root, { workerId: "worker-pi", id: "run-pi-4", model: null, effort: "extreme", nativeProtocol: "acp" }),
+        cwd: root,
+        previous: null,
+        dataDirectory: path.join(root, "data"),
+        baseEnvironment: {},
+      }),
+    /thinking/i,
+  );
+
+  // Legacy pre-ACP Pi JSON sessions keep their original `--print --mode json --session-dir --session` path on resume.
+  const legacySessionsRoot = path.join(root, "data", "sessions", "pi");
+  fs.mkdirSync(legacySessionsRoot, { recursive: true });
+  const legacyFile = path.join(legacySessionsRoot, "legacy-run.jsonl");
+  fs.writeFileSync(
+    legacyFile,
+    JSON.stringify({ type: "session", id: "legacy-pi-id", cwd: root }) + "\n",
+  );
+  const previousLegacy = run(root, {
+    workerId: "worker-pi-legacy",
+    id: "legacy-run",
+    home: path.join(root, "pi-home"),
+    sessionsRoot: legacySessionsRoot,
+    nativeSessionId: "legacy-pi-id",
+    nativeSessionFile: legacyFile,
+    model: "provider/sub/model",
+    effort: "max",
+  });
+  const legacyResume = prepareLaunch({
+    type: "pi",
+    run: previousLegacy,
+    cwd: root,
+    prompt: "resume legacy",
+    previous: previousLegacy,
     dataDirectory: path.join(root, "data"),
     runDirectory,
     executable: "/bin/fake-pi",
     baseEnvironment: {},
   });
-  assert.equal(configured.argv.includes("--model"), false);
-  assert.deepEqual(
-    configured.argv.slice(configured.argv.indexOf("--thinking")),
-    ["--thinking", "low"],
-  );
-  assert.throws(
-    () =>
-      prepareLaunch({
-        type: "pi",
-        run: run(root, { workerId: "worker-pi", id: "run-pi-3", model: null, effort: "extreme" }),
-        cwd: root,
-        prompt: "x",
-        previous: null,
-        dataDirectory: path.join(root, "data"),
-        runDirectory,
-        executable: "/bin/fake-pi",
-        baseEnvironment: {},
-      }),
-    /thinking/i,
-  );
+  assert.deepEqual(legacyResume.argv, [
+    "/bin/fake-pi",
+    "--print",
+    "--mode",
+    "json",
+    "--session-dir",
+    legacySessionsRoot,
+    "--session",
+    legacyFile,
+    "--model",
+    "provider/sub/model",
+    "--thinking",
+    "max",
+  ]);
 });
 
 test("resolves relative PATH entries and expands tilde homes", () => {

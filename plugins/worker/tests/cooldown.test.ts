@@ -5,10 +5,9 @@ import test from "node:test";
 import type { WorkerConfig } from "../shared/contracts.js";
 import { WorkerService } from "../server/service.js";
 import {
-  codexFixture,
+  agyAcpFixture,
   createService,
   environment,
-  piFixture,
   startInput,
   temporaryRoot,
   waitStatus,
@@ -38,87 +37,22 @@ function configure(
   service.updateSettings({ configs, defaultConfigId: configs[0]!.id });
 }
 
-function script(root: string, name: string, stderr: string, events: string): string {
-  const file = path.join(root, name);
-  fs.writeFileSync(
-    file,
-    `#!/usr/bin/env node\nprocess.stderr.write(${JSON.stringify(stderr)});\nprocess.stdout.write(${JSON.stringify(events)});\nprocess.exit(1);\n`,
-  );
-  fs.chmodSync(file, 0o755);
-  return file;
-}
-
-function resetCase(root: string, duration: string, name = "agy-reset.mjs"): string {
-  const init = JSON.stringify({
-    event: "init",
-    conversation_id: "conversation-429",
-    init: { cwd: path.join(root, "project") },
-  });
-  return script(
-    root,
-    name,
-    'AGY_ERROR {"error_code":429,"message":"quota exceeded"}\nResets in ' + duration + "\n",
-    init + "\n",
-  );
-}
-
-function deferredCase(root: string): string {
-  const file = path.join(root, "agy-deferred.mjs");
-  const durations = { long: "2h", short: "10s" };
-  fs.writeFileSync(
-    file,
-    `#!/usr/bin/env node
-import fs from "node:fs";
-const model = process.argv[process.argv.indexOf("--model") + 1];
-const trigger = ${JSON.stringify(root)} + "/release-" + model;
-const duration = ${JSON.stringify(durations)}[model];
-console.log(JSON.stringify({
-  event: "init",
-  conversation_id: "conversation-" + model,
-  init: { cwd: ${JSON.stringify(path.join(root, "project"))} },
-}));
-while (!fs.existsSync(trigger)) await new Promise((resolve) => setTimeout(resolve, 20));
-console.error('AGY_ERROR {"error_code":429,"message":"quota exceeded"}');
-console.error("Resets in " + duration);
-process.exit(1);
-`,
-  );
-  fs.chmodSync(file, 0o755);
-  return file;
-}
-
 function modelConfig(id: string, model: string): WorkerConfig {
   return { ...config("agy", id), model };
 }
 
-function structuredCase(root: string): string {
-  const events = [
-    {
-      event: "init",
-      conversation_id: "conversation-1",
-      init: { cwd: path.join(root, "project") },
-    },
-    {
-      event: "result",
-      result: {
-        conversation_id: "conversation-1",
-        status: "RESOURCE_EXHAUSTED",
-        error: "quota exhausted: RESOURCE_EXHAUSTED (code 429)",
-      },
-    },
-  ]
-    .map((event) => JSON.stringify(event))
-    .join("\n");
-  return script(root, "agy-structured.mjs", "", events + "\n");
-}
-
-test("agy stderr 429 sets the parsed global deadline and keeps the failed run resumable", async (t) => {
+test("agy ACP 429 reset hint sets the parsed global deadline and keeps the failed run resumable", async (t) => {
   const root = temporaryRoot("worker-agy-stderr-");
   const now = Date.now();
-  const { service } = createService(t, root, {}, {
-    executablePaths: { agy: resetCase(root, "2h2m18s") },
-    now: () => now,
-  });
+  const { service } = createService(
+    t,
+    root,
+    {
+      TEST_SCENARIO: "rate-limit",
+      TEST_AGY_RESET_TEXT: "Resets in 2h2m18s",
+    },
+    { now: () => now },
+  );
   configure(service);
   const started = await service.start(
     "owner-1",
@@ -138,13 +72,15 @@ test("agy stderr 429 sets the parsed global deadline and keeps the failed run re
   assert.equal(resumed.run.status, "queued");
 });
 
-test("agy structured RESOURCE_EXHAUSTED 429 without a reset hint falls back to 60 seconds", async (t) => {
+test("agy ACP RESOURCE_EXHAUSTED 429 without a reset hint falls back to 60 seconds", async (t) => {
   const root = temporaryRoot("worker-agy-structured-");
   const now = Date.now();
-  const { service } = createService(t, root, {}, {
-    executablePaths: { agy: structuredCase(root) },
-    now: () => now,
-  });
+  const { service } = createService(
+    t,
+    root,
+    { TEST_SCENARIO: "rate-limit" },
+    { now: () => now },
+  );
   configure(service);
   const started = await service.start(
     "owner-1",
@@ -154,23 +90,27 @@ test("agy structured RESOURCE_EXHAUSTED 429 without a reset hint falls back to 6
   assert.equal(Date.parse(service.overview().agyCooldownUntil!) - now, 60_000);
 });
 
-test("cooldown blocks every agy config while Pi dispatches, and a later shorter 429 cannot shorten an active deadline", async (t) => {
+test("cooldown blocks every agy config without delaying Pi", async (t) => {
   const root = temporaryRoot("worker-agy-cross-");
   const now = Date.now();
-  const { service } = createService(t, root, {}, {
-    executablePaths: {
-      pi: piFixture,
-      codex: codexFixture,
-      agy: deferredCase(root),
+  const { service } = createService(
+    t,
+    root,
+    {
+      TEST_SCENARIO: "quota-hold",
+      TEST_AGY_RELEASE_DIR: root,
+      TEST_AGY_RESET_BY_MODEL: JSON.stringify({
+        long: "Resets in 2h",
+        short: "Resets in 10s",
+      }),
     },
-    now: () => now,
-  });
+    { now: () => now },
+  );
   configure(service, [
     config("pi"),
     modelConfig("agy-long", "long"),
     modelConfig("agy-short", "short"),
   ]);
-  // Both agy processes are running before either settles.
   const long = await service.start(
     "owner-1",
     startInput({ type: "agy", configId: "agy-long", requestId: "long" }),
@@ -182,7 +122,16 @@ test("cooldown blocks every agy config while Pi dispatches, and a later shorter 
   await waitStatus(service, long.worker.id, ["running"]);
   await waitStatus(service, short.worker.id, ["running"]);
 
-  // The earlier-finishing process stores the longer deadline.
+  // Pi has its own lazy ACP process and must not wait for active AGY turns.
+  const pi = await service.start(
+    "owner-1",
+    startInput({ type: "pi", requestId: "pi-during" }),
+  );
+  assert.equal(
+    (await waitStatus(service, pi.worker.id, ["completed"])).latestRun?.status,
+    "completed",
+  );
+
   fs.writeFileSync(path.join(root, "release-long"), "");
   await waitStatus(service, long.worker.id, ["failed"]);
   const firstDeadline = Date.parse(service.overview().agyCooldownUntil!);
@@ -194,10 +143,6 @@ test("cooldown blocks every agy config while Pi dispatches, and a later shorter 
   );
   assert.equal(blocked.run.status, "queued");
 
-  const pi = await service.start("owner-1", startInput({ type: "pi", requestId: "pi-during" }));
-  assert.equal((await waitStatus(service, pi.worker.id, ["completed"])).latestRun?.status, "completed");
-
-  // A later failure with a shorter deadline must keep the already-active latest deadline.
   fs.writeFileSync(path.join(root, "release-short"), "");
   await waitStatus(service, short.worker.id, ["failed"]);
   assert.equal(Date.parse(service.overview().agyCooldownUntil!), firstDeadline);
@@ -205,8 +150,9 @@ test("cooldown blocks every agy config while Pi dispatches, and a later shorter 
 
 test("a queued agy run resumes automatically when the deadline expires", async (t) => {
   const root = temporaryRoot("worker-agy-expiry-");
-  const { service } = createService(t, root, {}, {
-    executablePaths: { agy: resetCase(root, "1s", "agy-expiry.mjs") },
+  const { service } = createService(t, root, {
+    TEST_SCENARIO: "rate-limit",
+    TEST_AGY_RESET_TEXT: "Resets in 1s",
   });
   configure(service);
   const first = await service.start(
@@ -219,14 +165,14 @@ test("a queued agy run resumes automatically when the deadline expires", async (
     startInput({ type: "agy", configId: "agy-default", requestId: "expiry-queued" }),
   );
   assert.equal(queued.run.status, "queued");
-  // The timer releases the queued run; the fixture fails again, proving it was dispatched.
   await waitStatus(service, queued.worker.id, ["failed"], 10_000);
 });
 
 test("the stored deadline and queued agy run survive a real close and reopen", async (t) => {
   const root = temporaryRoot("worker-agy-restart-");
-  const { service, data, project } = createService(t, root, {}, {
-    executablePaths: { agy: resetCase(root, "2h", "agy-restart.mjs") },
+  const { service, data, project } = createService(t, root, {
+    TEST_SCENARIO: "rate-limit",
+    TEST_AGY_RESET_TEXT: "Resets in 2h",
   });
   configure(service);
   const started = await service.start(
@@ -245,7 +191,7 @@ test("the stored deadline and queued agy run survive a real close and reopen", a
   const reopened = new WorkerService({
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { agy: resetCase(root, "2h", "agy-restart.mjs") },
+    executablePaths: { "agy-acp": agyAcpFixture },
   });
   t.after(() => reopened.close());
   reopened.registerOwner(
@@ -263,4 +209,59 @@ test("the stored deadline and queued agy run survive a real close and reopen", a
   reopened.recoverFromDisk();
   assert.deepEqual(reopened.overview().agyCooldownUntil, deadline);
   assert.equal(reopened.get(blocked.worker.id).worker.latestRun?.status, "queued");
+});
+
+test("agy end_turn quota warning fails the run and starts the normal cooldown", async (t) => {
+  const root = temporaryRoot("worker-agy-quota-message-");
+  const now = Date.now();
+  const { service } = createService(
+    t,
+    root,
+    { TEST_SCENARIO: "quota-message" },
+    { now: () => now },
+  );
+  configure(service);
+  const started = await service.start(
+    "owner-1",
+    startInput({ type: "agy", configId: "agy-default", requestId: "quota-message-first" }),
+  );
+  const failed = await waitStatus(service, started.worker.id, ["failed"]);
+  const run = failed.latestRun!;
+  assert.equal(run.status, "failed");
+  assert.equal(run.error?.code, "AGY_QUOTA_REACHED");
+  assert.equal(
+    run.error?.message,
+    "⚠ Individual quota reached. Please upgrade your subscription to increase your limits. Resets in 1h39m16s.",
+  );
+  assert.equal(
+    Date.parse(service.overview().agyCooldownUntil!) - now,
+    ((1 * 60 + 39) * 60 + 16) * 1000,
+  );
+
+  const queued = await service.start(
+    "owner-1",
+    startInput({ type: "agy", configId: "agy-default", requestId: "quota-message-queued" }),
+  );
+  assert.equal(queued.run.status, "queued");
+  const pi = await service.start(
+    "owner-1",
+    startInput({ type: "pi", requestId: "quota-message-pi" }),
+  );
+  assert.equal(
+    (await waitStatus(service, pi.worker.id, ["completed"])).latestRun?.status,
+    "completed",
+  );
+});
+
+test("an ordinary agy reply that mentions the quota warning still succeeds", async (t) => {
+  const root = temporaryRoot("worker-agy-quota-mention-");
+  const { service } = createService(t, root, { TEST_SCENARIO: "quota-mention" });
+  configure(service);
+  const started = await service.start(
+    "owner-1",
+    startInput({ type: "agy", configId: "agy-default", requestId: "quota-mention" }),
+  );
+  const done = await waitStatus(service, started.worker.id, ["completed"]);
+  assert.equal(done.latestRun?.status, "completed");
+  assert.match(done.latestRun?.finalText ?? "", /^The warning says:/);
 });

@@ -23,6 +23,8 @@ const service = new WorkerService({
   },
   executablePaths: {
     pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"),
+    "pi-acp": path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs"),
+    codex: path.join(pluginRoot, "tests/fixtures/fake-codex.mjs"),
   },
   guardianCommand: [process.execPath, "--import", tsxLoader, path.join(pluginRoot, "server/guardian.ts")],
 });
@@ -41,7 +43,7 @@ service.registerOwner(
 );
 const started = await service.start("harness-owner", {
   taskName: "harness",
-  type: "pi",
+  type: process.argv[3] === "codex" ? "codex" : "pi",
   prompt: "run until killed",
   workspace: { mode: "existing" },
   writePaths: [],

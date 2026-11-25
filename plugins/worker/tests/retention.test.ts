@@ -192,7 +192,7 @@ for (const type of ["pi"] as const) {
   test(`queued ${type} resume preserves its native session after previous history expires`, async (t) => {
     let now = Date.now();
     const root = temporaryRoot("worker-retention-resume-");
-    const { service, data, env } = createService(t, root, {}, { now: () => now });
+    const { service, env } = createService(t, root, {}, { now: () => now });
     service.updateSettings({ concurrency: { pi: 1 } });
     const original = await service.start("owner-1", startInput({ type }));
     const first = (await waitStatus(service, original.worker.id, ["completed"])).latestRun!;
@@ -216,19 +216,66 @@ for (const type of ["pi"] as const) {
     assert.equal(service.store.run(first.id), null);
 
     await waitStatus(service, original.worker.id, ["running", "completed", "failed"]);
-    const spec = JSON.parse(fs.readFileSync(
-      path.join(data, "logs", original.worker.id, resumed.run.id, "spec.json"),
-      "utf8",
-    )) as { argv: string[] };
-    const flag = "--session";
-    assert.ok(spec.argv.includes(flag));
-    assert.equal(
-      spec.argv[spec.argv.indexOf(flag) + 1],
-      first.nativeSessionFile,
-    );
     const completed = await waitStatus(service, original.worker.id, ["completed"]);
+    const events = service
+      .logs(original.worker.id, { stream: "events", runId: resumed.run.id })
+      .text.split("\n")
+      .filter((line) => line.trim())
+      .map((line) => JSON.parse(line) as { type?: string; action?: string; sessionId?: string });
+    const sessionEvent = events.find((event) => event.type === "acp_session");
+    assert.equal(sessionEvent?.action, "resume");
+    assert.equal(sessionEvent?.sessionId, first.nativeSessionId);
     assert.equal(completed.latestRun?.id, resumed.run.id);
     assert.equal(completed.latestRun?.nativeSessionId, first.nativeSessionId);
     assert.equal(completed.latestRun?.nativeSessionFile, first.nativeSessionFile);
   });
 }
+
+test("retention prunes only expired confirmed shared ACP guardian directories", (t) => {
+  const service = setup(t);
+  const data = service.store.directory;
+  const piRoot = path.join(data, "pi-acp-guardian");
+  const agyRoot = path.join(data, "agy-acp-guardian");
+  const makeDir = (rootDir: string, name: string, finalJson: unknown | null): string => {
+    const dir = path.join(rootDir, name);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, "spec-1.json"), "{}");
+    if (finalJson !== null) {
+      fs.writeFileSync(path.join(dir, "final.json"), JSON.stringify(finalJson));
+    }
+    return dir;
+  };
+  const expiredConfirmedPi = makeDir(piRoot, "process-expired-ok", {
+    reason: "disconnect",
+    groupExited: true,
+    finishedAt: new Date(NOW - DAY).toISOString(),
+  });
+  const expiredConfirmedAgy = makeDir(agyRoot, "process-expired-agy", {
+    reason: "exit",
+    groupExited: true,
+    finishedAt: new Date(NOW - 2 * DAY).toISOString(),
+  });
+  const recentConfirmed = makeDir(piRoot, "process-recent-ok", {
+    reason: "exit",
+    groupExited: true,
+    finishedAt: new Date(NOW - DAY + 1000).toISOString(),
+  });
+  const expiredUnconfirmed = makeDir(piRoot, "process-expired-unconfirmed", {
+    reason: "timeout",
+    groupExited: false,
+    finishedAt: new Date(NOW - 5 * DAY).toISOString(),
+  });
+  const missingFinal = makeDir(piRoot, "process-live-no-final", null);
+  const nativeSession = path.join(data, "sessions", "pi", "keep-me.jsonl");
+  fs.mkdirSync(path.dirname(nativeSession), { recursive: true });
+  fs.writeFileSync(nativeSession, "native session");
+
+  service.recoverFromDisk();
+
+  assert.equal(fs.existsSync(expiredConfirmedPi), false);
+  assert.equal(fs.existsSync(expiredConfirmedAgy), false);
+  assert.equal(fs.existsSync(recentConfirmed), true);
+  assert.equal(fs.existsSync(expiredUnconfirmed), true);
+  assert.equal(fs.existsSync(missingFinal), true);
+  assert.equal(fs.readFileSync(nativeSession, "utf8"), "native session");
+});

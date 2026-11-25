@@ -124,7 +124,11 @@ test("non-Codex provider is rejected for new work while an old request replays",
   const service = new WorkerService({
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"), codex: codexFixture },
+    executablePaths: {
+      pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"),
+      "pi-acp": path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs"),
+      codex: codexFixture,
+    },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
   });
   t.after(async () => {

@@ -1,7 +1,7 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
-import type { ChildProcess } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { WorkerStore } from "./store.js";
@@ -16,15 +16,37 @@ import {
   parseAgy,
   parseDsh,
   parsePi,
+  parsePiAcp,
   prepareLaunch,
+  preparePiAcpLaunch,
+  resolveBundledPiAcpEntry,
   resolveExecutable,
+  resolvePiAcpTranscriptFile,
   trackProgress,
   zeroCodexCounters,
+  PI_LEGACY_THINKING_LEVELS,
   PI_THINKING_LEVELS,
 } from "./native.js";
 import type { ProgressTracker } from "./native.js";
-import { readLogPage } from "./logs.js";
+import {
+  ACP_SETUP_TIMEOUT_MS,
+  AcpConfigError,
+  AcpConnection,
+  AcpProtocolError,
+  AcpRpcError,
+  AcpTransportError,
+  LazyAcpProcess,
+} from "./acp.js";
+import type { AcpEvent, AcpSessionHandle } from "./acp.js";
+import { appendLog, readLogPage } from "./logs.js";
+import { readEventLines } from "./pi-acp.js";
 import { readAgyCatalog } from "./agy-catalog.js";
+import {
+  AGY_QUOTA_REACHED,
+  parseAgyAcpRun,
+  planAgyAcpConfig,
+  AgyAcpSelectionError,
+} from "./agy-acp.js";
 import { readPiCatalog } from "./pi-catalog.js";
 import { sweepNativeSessions } from "./native-retention.js";
 import {
@@ -33,14 +55,18 @@ import {
   SUPPORTED_WORKER_TYPES,
   configById,
   extractCodexLaunch,
+  acpIdleTimeoutSecondsFromEnvironment,
   projectSettings,
+  validAcpIdleTimeoutSeconds,
   validateConfigEffort,
 } from "./settings.js";
 import type { WorkerHistoryCursor } from "./store.js";
 import type {
+  AcpConfigOptionRequest,
+  AcpSessionEvidence,
   AgyModelCatalog,
-  GuardianEvidence,
   LegacyWorkerType,
+  RunEvidence,
   WorkerCancelInput,
   WorkerCleanupInput,
   WorkerCodexConfig,
@@ -124,6 +150,7 @@ const TOOL_PROGRESS_PHASES = new Set([
   "tool_execution_start",
   "tool_execution_end",
   "tool_call",
+  "tool_call_update",
   "tool_result",
   "item.started",
   "item.completed",
@@ -139,6 +166,20 @@ const TERMINAL: WorkerStatus[] = [
 const MAX_WAIT_MS = 25_000;
 
 type RegisteredOwner = { owner: WorkerOwner; token: string };
+type SharedAcpPlan = {
+  cwd: string;
+  sessionId: string | null;
+  configOptions: AcpConfigOptionRequest[];
+  sessionFile: string | null;
+};
+
+/** One guarded shared ACP process generation, identified without any host/database schema. */
+type AcpGeneration = {
+  engine: "pi" | "agy";
+  id: string;
+  directory: string;
+};
+
 type NativeSelection = {
   model: string | null;
   provider: string | null;
@@ -149,7 +190,7 @@ type RunHandle = {
   runId: string;
   workerId: string;
   ownerId: string;
-  child: ChildProcess;
+  requestStop: (reason?: "cancelled" | "timeout") => void;
   ended: Promise<void>;
   resolveEnded: () => void;
   finalized: boolean;
@@ -157,6 +198,7 @@ type RunHandle = {
   stopRequested: boolean;
   progress: ProgressTracker;
   expectedSessionId: string | null;
+  expectedAction: "new" | "resume" | null;
   lastProgressSave: number;
   stopTimer?: NodeJS.Timeout;
 };
@@ -164,8 +206,8 @@ type RunHandle = {
 export type WorkerServiceOptions = {
   dataDirectory: string;
   environment?: NodeJS.ProcessEnv;
-  /** Tests inject fixture executables; production resolves `pi`/`codex`/`agy` from PATH. */
-  executablePaths?: Partial<Record<WorkerType, string>>;
+  /** Tests inject fixture executables; production resolves `pi-acp`/`pi`/`codex`/`agy` from PATH. */
+  executablePaths?: Partial<Record<WorkerType | "pi-acp" | "agy-acp", string>>;
   /** Tests inject a source guardian invocation; production uses compiled guardian.mjs. */
   guardianCommand?: string[];
   now?: () => number;
@@ -184,6 +226,14 @@ export class WorkerService {
   private readonly handles = new Map<string, RunHandle>();
   private readonly prompts = new Map<string, string>();
   private readonly pendingAdmissions = new Set<string>();
+  private readonly acpSlots = new Map<"pi" | "agy", LazyAcpProcess>();
+  private readonly acpGenerations = new WeakMap<AcpConnection, AcpGeneration>();
+  private readonly acpBlocked = new Map<"pi" | "agy", AcpTransportError>();
+  /**
+   * Effective idle window shared by the Pi and AGY slot durations. A saved settings value wins;
+   * absent it, this starts at the environment/default fallback and is never persisted implicitly.
+   */
+  private acpIdleTimeoutSeconds: number;
   private readonly reminderTimer: NodeJS.Timeout;
   private readonly retentionTimer: NodeJS.Timeout;
   private cooldownTimer: NodeJS.Timeout | null = null;
@@ -195,12 +245,20 @@ export class WorkerService {
   private storeClosed = false;
 
   constructor(private readonly options: WorkerServiceOptions) {
-    this.store = new WorkerStore(options.dataDirectory);
-    // Complete the schema-2 settings/worker migration before any worker can be read.
-    this.store.settings();
-    this.workspace = new WorkspaceManager(options.dataDirectory);
     this.environment = options.environment ?? process.env;
+    this.acpIdleTimeoutSeconds = acpIdleTimeoutSecondsFromEnvironment(
+      this.environment,
+    );
+    this.store = new WorkerStore(options.dataDirectory, {
+      acpIdleTimeoutSeconds: this.acpIdleTimeoutSeconds,
+    });
+    // Complete the schema-2 migration before workers read settings; a saved UI value wins over
+    // the environment fallback from this point on.
+    this.acpIdleTimeoutSeconds =
+      this.store.settings().acpIdleTimeoutSeconds;
+    this.workspace = new WorkspaceManager(options.dataDirectory);
     this.now = options.now ?? Date.now;
+    // Pi and AGY each own one lazy ACP process; this constructor never spawns either.
     this.reminderTimer = setInterval(() => this.checkReminders(), 1000);
     this.reminderTimer.unref?.();
     this.retentionTimer = setInterval(() => this.pruneHistory(), 60_000);
@@ -283,6 +341,14 @@ export class WorkerService {
   updateSettings(input: WorkerSettingsInput): WorkerSettings {
     if (!input || typeof input !== "object")
       throw new WorkerFailure("INVALID_SETTINGS", "设置请求体无效");
+    if (
+      input.acpIdleTimeoutSeconds !== undefined &&
+      !validAcpIdleTimeoutSeconds(input.acpIdleTimeoutSeconds)
+    )
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "acpIdleTimeoutSeconds 必须是 1 到 2147483 之间的整数秒",
+      );
     const canonical =
       "configs" in input || "defaultConfigId" in input;
     return canonical
@@ -299,7 +365,13 @@ export class WorkerService {
       (!Number.isSafeInteger(input.retentionDays) || input.retentionDays < 1)
     )
       throw new WorkerFailure("INVALID_SETTINGS", "retentionDays 必须是正整数");
-    const configs = input.configs.map((value) => this.normalizeConfig(value));
+    const current = this.store.settingsRecord();
+    const previousById = new Map(
+      current.configs.map((config) => [config.id, config]),
+    );
+    const configs = input.configs.map((value) =>
+      this.normalizeConfig(value, previousById),
+    );
     const seen = new Set<string>();
     for (const config of configs) {
       if (seen.has(config.id))
@@ -314,7 +386,6 @@ export class WorkerService {
       throw new WorkerFailure("INVALID_SETTINGS", "defaultConfigId 必须指向已启用的配置");
     if (!configs.some((config) => config.enabled))
       throw new WorkerFailure("INVALID_SETTINGS", "至少需要一个已启用的配置");
-    const current = this.store.settings();
     this.assertConfigReferences(current.configs, configs);
     const record: WorkerSettingsRecord = {
       schemaVersion: 2,
@@ -323,11 +394,15 @@ export class WorkerService {
       retentionDays: input.retentionDays ?? current.retentionDays,
       softReminderSeconds: current.softReminderSeconds,
       softReminderSteps: current.softReminderSteps,
+      acpIdleTimeoutSeconds:
+        input.acpIdleTimeoutSeconds ?? current.acpIdleTimeoutSeconds,
     };
     this.store.saveSettings(record);
+    if (input.acpIdleTimeoutSeconds !== undefined)
+      this.applyAcpIdleTimeoutSeconds(input.acpIdleTimeoutSeconds);
     this.pruneHistory();
     void this.dispatch();
-    return projectSettings(record);
+    return projectSettings(record, this.acpIdleTimeoutSeconds);
   }
 
   /**
@@ -388,7 +463,7 @@ export class WorkerService {
           throw new WorkerFailure("INVALID_SETTINGS", "roles 必须包含 pi、codex 的 role 数组");
       }
     }
-    const current = this.store.settings();
+    const current = this.store.settingsRecord();
     const configs = current.configs.map((config): WorkerConfig => {
       const copy: WorkerConfig = {
         id: config.id,
@@ -433,7 +508,11 @@ export class WorkerService {
         model: initial("codex").model,
         effort: initial("codex").effort,
       };
-      const defaults = this.validateDefaults(input.defaults, currentCodex);
+      const defaults = this.validateDefaults(
+        input.defaults,
+        currentCodex,
+        initial("pi").effort,
+      );
       for (const type of LEGACY_WORKER_TYPES) {
         if (type === "codex" && input.defaults.codex === undefined) continue;
         initial(type).model = defaults[type].model;
@@ -490,15 +569,32 @@ export class WorkerService {
       retentionDays: input.retentionDays ?? current.retentionDays,
       softReminderSeconds: current.softReminderSeconds,
       softReminderSteps: current.softReminderSteps,
+      acpIdleTimeoutSeconds:
+        input.acpIdleTimeoutSeconds ?? current.acpIdleTimeoutSeconds,
     };
     this.store.saveSettings(record);
+    if (input.acpIdleTimeoutSeconds !== undefined)
+      this.applyAcpIdleTimeoutSeconds(input.acpIdleTimeoutSeconds);
     this.pruneHistory();
     void this.dispatch();
-    return projectSettings(record);
+    return projectSettings(record, this.acpIdleTimeoutSeconds);
+  }
+
+  /**
+   * Applies a newly saved idle window to every existing engine slot. Idle slots keep their
+   * original idle start so shortening can recycle immediately; occupied slots only store it.
+   */
+  private applyAcpIdleTimeoutSeconds(seconds: number): void {
+    this.acpIdleTimeoutSeconds = seconds;
+    for (const process of this.acpSlots.values())
+      process.setIdleTimeoutMs(seconds * 1000);
   }
 
   /** Validates one canonical config and normalizes its Codex launch view. */
-  private normalizeConfig(value: unknown): WorkerConfig {
+  private normalizeConfig(
+    value: unknown,
+    previousById?: Map<string, WorkerConfig>,
+  ): WorkerConfig {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new WorkerFailure("INVALID_SETTINGS", "configs 的每一项必须是配置对象");
     const entry = value as Record<string, unknown>;
@@ -547,9 +643,25 @@ export class WorkerService {
       model,
       effort,
     };
-    if (type === "pi" && effort && !(PI_THINKING_LEVELS as readonly string[]).includes(effort))
-      throw new WorkerFailure("INVALID_SETTINGS", "Pi 配置的 effort 必须是受支持的 thinking 级别");
-    const effortProblem = validateConfigEffort(type, model, effort);
+    const before = previousById?.get(id);
+    const preservesLegacyEffort =
+      effort !== null &&
+      before !== undefined &&
+      before.type === type &&
+      before.effort === effort;
+    if (type === "pi" && effort) {
+      const allowed: readonly string[] = preservesLegacyEffort
+        ? PI_LEGACY_THINKING_LEVELS
+        : PI_THINKING_LEVELS;
+      if (!allowed.includes(effort))
+        throw new WorkerFailure(
+          "INVALID_SETTINGS",
+          "Pi 配置的 effort 必须是受支持的 thinking 级别",
+        );
+    }
+    const effortProblem = validateConfigEffort(type, model, effort, {
+      allowLegacy: preservesLegacyEffort,
+    });
     if (effortProblem)
       throw new WorkerFailure("INVALID_SETTINGS", effortProblem);
     if (type === "codex") {
@@ -634,6 +746,7 @@ export class WorkerService {
   private validateDefaults(
     value: NonNullable<WorkerLegacySettingsInput["defaults"]>,
     currentCodex: WorkerDefaults["codex"],
+    currentPiEffort: string | null = null,
   ): Record<LegacyWorkerType, WorkerDefaults["codex"]> {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new WorkerFailure(
@@ -669,7 +782,11 @@ export class WorkerService {
       if (
         type === "pi" &&
         normalizedEffort &&
-        !(PI_THINKING_LEVELS as readonly string[]).includes(normalizedEffort)
+        !(PI_THINKING_LEVELS as readonly string[]).includes(normalizedEffort) &&
+        !(
+          currentPiEffort === normalizedEffort &&
+          (PI_LEGACY_THINKING_LEVELS as readonly string[]).includes(normalizedEffort)
+        )
       )
         throw new WorkerFailure(
           "INVALID_SETTINGS",
@@ -705,7 +822,11 @@ export class WorkerService {
     const type = config.type;
     this.rejectNonCodexProvider(type, input.provider);
     const selection = this.startSelection(type, input, config);
-    this.validateSelection(type, selection);
+    this.validateSelection(
+      type,
+      selection,
+      type === "pi" || type === "agy" ? "acp" : "legacy",
+    );
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     const id = randomUUID();
     const runId = randomUUID();
@@ -730,6 +851,9 @@ export class WorkerService {
       sessionsRoot: homes.sessionsRoot,
       nativeSessionId: null,
       nativeSessionFile: null,
+      ...(type === "pi" || type === "agy"
+        ? { nativeProtocol: "acp" as const }
+        : {}),
       exitCode: null,
       finalText: null,
       error: null,
@@ -834,16 +958,22 @@ export class WorkerService {
       throw new WorkerFailure("RUN_NOT_FOUND", "worker 尚无运行记录");
     if (!TERMINAL.includes(previous.status))
       throw new WorkerFailure("ACTIVE_RUN", "worker 仍有活动运行，不能续接");
+    const isPiAcp = worker.type === "pi" && previous.nativeProtocol === "acp";
+    const isAgyAcp = worker.type === "agy";
     if (
       !previous.nativeSessionId ||
-      (worker.type === "pi" && !previous.nativeSessionFile)
+      (worker.type === "pi" && !isPiAcp && !previous.nativeSessionFile)
     )
       throw new WorkerFailure(
         "NATIVE_SESSION_UNKNOWN",
         "上一次运行没有可核实的原生会话身份，不能续接",
       );
     const selection = this.resumeSelection(worker.type, input, previous);
-    this.validateSelection(worker.type, selection);
+    this.validateSelection(
+      worker.type,
+      selection,
+      isPiAcp || isAgyAcp ? "acp" : "legacy",
+    );
     const runId = randomUUID();
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     const run: WorkerRun = {
@@ -861,6 +991,11 @@ export class WorkerService {
       sessionsRoot: previous.sessionsRoot,
       nativeSessionId: previous.nativeSessionId,
       nativeSessionFile: previous.nativeSessionFile,
+      ...(previous.nativeProtocol
+        ? { nativeProtocol: previous.nativeProtocol }
+        : worker.type === "agy"
+          ? { nativeProtocol: "acp" as const }
+          : {}),
       legacyCodexProvider:
         worker.type === "codex" &&
         previous.legacyCodexProvider === true &&
@@ -1148,19 +1283,44 @@ export class WorkerService {
   private validateSelection(
     type: SupportedWorkerType,
     selection: NativeSelection,
+    protocol: "acp" | "legacy" = "acp",
   ): void {
-    if (
-      type === "pi" &&
-      selection.effort &&
-      !(PI_THINKING_LEVELS as readonly string[]).includes(selection.effort)
-    )
-      throw new WorkerFailure("INVALID_INPUT", "不支持的 Pi thinking 级别");
+    if (type === "pi" && selection.effort) {
+      const allowed: readonly string[] =
+        protocol === "acp" ? PI_THINKING_LEVELS : PI_LEGACY_THINKING_LEVELS;
+      if (!allowed.includes(selection.effort)) {
+        throw new WorkerFailure(
+          "INVALID_INPUT",
+          protocol === "acp" && selection.effort === "max"
+            ? "Pi ACP 不支持 max thinking 级别"
+            : "不支持的 Pi thinking 级别",
+        );
+      }
+    }
     const effortProblem = validateConfigEffort(
       type,
       selection.model,
       selection.effort,
+      { allowLegacy: protocol === "legacy" },
     );
     if (effortProblem) throw new WorkerFailure("INVALID_INPUT", effortProblem);
+    if (type === "agy" && protocol === "acp") {
+      try {
+        planAgyAcpConfig({
+          model: selection.model,
+          effort: selection.effort,
+        });
+      } catch (error) {
+        throw new WorkerFailure(
+          "INVALID_INPUT",
+          error instanceof AgyAcpSelectionError
+            ? error.message
+            : error instanceof Error
+              ? error.message
+              : String(error),
+        );
+      }
+    }
   }
 
   private timeoutFor(
@@ -1259,6 +1419,13 @@ export class WorkerService {
     const settings = this.store.settings();
     const config = configById(settings, worker.configId);
     const safeEnvironment = this.nativeEnvironment(worker.type, config);
+    const isAcp =
+      (worker.type === "pi" || worker.type === "agy") &&
+      run.nativeProtocol === "acp";
+    if (isAcp) {
+      this.launchAcp(worker, run, runDirectory, prompt, previous, safeEnvironment);
+      return;
+    }
     const executable = this.executable(worker.type, safeEnvironment);
     if (worker.type === "codex") {
       // Baseline is captured at actual launch, never while queued: a resumed thread reads the
@@ -1292,8 +1459,8 @@ export class WorkerService {
           ? config?.codex?.modelProvider ?? null
           : null,
     });
-    // Pi names its transcript before spawn; persist it so cleanup can protect the file.
     if (!run.nativeSessionFile && launch.sessionFile) {
+      // Legacy Pi JSON names its transcript before spawn; persist it so cleanup protects it.
       run.nativeSessionFile = launch.sessionFile;
       this.store.saveRun(run);
     }
@@ -1323,7 +1490,13 @@ export class WorkerService {
       runId: run.id,
       workerId: worker.id,
       ownerId: worker.ownerId,
-      child,
+      requestStop: () => {
+        try {
+          child.send?.({ type: "stop" });
+        } catch {
+          // A closed IPC channel already triggers guardian disconnect cleanup.
+        }
+      },
       ended,
       resolveEnded,
       finalized: false,
@@ -1331,6 +1504,7 @@ export class WorkerService {
       stopRequested: false,
       progress: newProgress(),
       expectedSessionId: launch.expectedSessionId,
+      expectedAction: null,
       lastProgressSave: 0,
     };
     this.handles.set(run.id, handle);
@@ -1351,6 +1525,518 @@ export class WorkerService {
       const evidence = this.readEvidence(run.id);
       this.finalizeRun(run.id, evidence, null);
     });
+  }
+
+  /**
+   * Resolves the guarded ACP command for one engine.
+   * Pi prefers an injected path or user-installed `pi-acp` on PATH, then falls back to the
+   * application's local `@geohar/pi-acp` JS entry launched with the current Node runtime.
+   * Production AGY is `agy acp ...`.
+   */
+  private acpCommand(
+    engine: "pi" | "agy",
+    environment: NodeJS.ProcessEnv,
+  ): { executable: string; args: string[] } {
+    if (engine === "pi") {
+      const injected = this.options.executablePaths?.["pi-acp"];
+      if (injected) return { executable: path.resolve(injected), args: [] };
+      try {
+        return { executable: resolveExecutable("pi-acp", environment), args: [] };
+      } catch (error) {
+        if (!(error instanceof WorkerFailure) || error.code !== "EXECUTABLE_MISSING")
+          throw error;
+      }
+      const bundled = resolveBundledPiAcpEntry();
+      if (bundled) return { executable: process.execPath, args: [bundled] };
+      throw new WorkerFailure(
+        "EXECUTABLE_MISSING",
+        "PATH 中找不到可执行文件: pi-acp，且本地依赖 @geohar/pi-acp 不可用",
+      );
+    }
+    const injected = this.options.executablePaths?.["agy-acp"];
+    return {
+      executable: injected ? path.resolve(injected) : resolveExecutable("agy", environment),
+      args: ["acp", "--dangerously-skip-permissions"],
+    };
+  }
+
+  /**
+   * Spawns one guarded ACP agent for an engine. Each engine's lazy slot calls this at most once;
+   * Pi and AGY can run independently, while owners/cwds of the same engine share the process.
+   */
+  private spawnAcpProcess(engine: "pi" | "agy"): Promise<AcpConnection> {
+    const safeEnvironment = this.guardianEnvironment(this.environment);
+    const command = this.acpCommand(engine, safeEnvironment);
+    const { home } =
+      engine === "pi"
+        ? nativeHome("pi", this.options.dataDirectory, safeEnvironment)
+        : { home: null };
+    const guardianDirectory = path.join(
+      this.options.dataDirectory,
+      `${engine}-acp-guardian`,
+      `process-${randomUUID()}`,
+    );
+    fs.mkdirSync(guardianDirectory, { recursive: true, mode: 0o700 });
+    const finalPath = path.join(guardianDirectory, "final.json");
+    const generation: AcpGeneration = {
+      engine,
+      id: path.basename(guardianDirectory),
+      directory: guardianDirectory,
+    };
+    const specPath = path.join(guardianDirectory, `spec-${randomUUID()}.json`);
+    fs.writeFileSync(
+      specPath,
+      JSON.stringify({
+        mode: "acp",
+        argv: [command.executable, ...command.args],
+        cwd: this.options.dataDirectory,
+        timeoutSeconds: null,
+        runDirectory: guardianDirectory,
+        executable: command.executable,
+      }),
+      { mode: 0o600 },
+    );
+    const [guardian, ...prefix] = this.guardianCommand();
+    const child = spawn(guardian!, [...prefix, specPath], {
+      cwd: guardianDirectory,
+      env:
+        home === null
+          ? { ...safeEnvironment }
+          : { ...safeEnvironment, PI_CODING_AGENT_DIR: home },
+      detached: process.platform !== "win32",
+      stdio: ["pipe", "pipe", "pipe", "ipc"],
+    });
+    // The guardian owns the agent's process group, so a fork-bomb of tools cannot outlive it.
+    // Its stderr stays service-level; it is never mixed into a run's logs.
+    child.stderr?.on("data", (chunk: Buffer) => process.stderr.write(chunk));
+    let stopPromise: Promise<boolean> | null = null;
+    // Stop through the guardian's IPC channel and wait for its final group evidence. This stays
+    // separate from AcpConnection's direct-child reaper: the agent is in the guardian's group.
+    const stopGuardian = (): Promise<boolean> =>
+      (stopPromise ??= (async () => {
+        try {
+          child.stdin?.end();
+        } catch {
+          /* already closed */
+        }
+        try {
+          if (child.connected) child.send({ type: "stop" });
+        } catch {
+          /* already exited */
+        }
+        const exited = await new Promise<boolean>((resolve) => {
+          if (child.exitCode !== null || child.signalCode !== null) {
+            resolve(true);
+            return;
+          }
+          const timer = setTimeout(() => {
+            child.off("exit", onExit);
+            resolve(false);
+          }, 15_000);
+          const onExit = () => {
+            clearTimeout(timer);
+            resolve(true);
+          };
+          child.once("exit", onExit);
+        });
+        if (!exited) {
+          try {
+            if (process.platform !== "win32" && child.pid) process.kill(-child.pid, "SIGKILL");
+            else child.kill("SIGKILL");
+          } catch {
+            /* already gone */
+          }
+          await new Promise<void>((resolve) => {
+            if (child.exitCode !== null || child.signalCode !== null) {
+              resolve();
+              return;
+            }
+            const timer = setTimeout(resolve, 2_000);
+            child.once("exit", () => {
+              clearTimeout(timer);
+              resolve();
+            });
+          });
+        }
+        let confirmed = false;
+        try {
+          const value = JSON.parse(fs.readFileSync(finalPath, "utf8")) as {
+            groupExited?: unknown;
+          };
+          confirmed = value.groupExited === true;
+        } catch {
+          return false;
+        }
+        if (confirmed && !this.acpGenerationInUse(generation.id)) {
+          try {
+            fs.rmSync(guardianDirectory, { recursive: true, force: true });
+          } catch (error) {
+            process.stderr.write(
+              "worker acp guardian directory cleanup failed: " + String(error) + "\n",
+            );
+          }
+        }
+        return confirmed;
+      })());
+    return AcpConnection.connect(child, {
+      clientInfo: { name: "cloudcli-worker", version: "1.0.0" },
+      initializeTimeoutMs: 15_000,
+      closeTimeoutMs: 2_000,
+      detached: process.platform !== "win32",
+      reaper: stopGuardian,
+    }).then((connection) => {
+      this.acpGenerations.set(connection, generation);
+      return connection;
+    }).catch(async (error) => {
+      // A failed handshake must reclaim the whole guarded group, not just signal the guardian.
+      const reaped = await stopGuardian();
+      if (!reaped) {
+        this.acpBlocked.set(
+          engine,
+          new AcpTransportError({
+            kind: "shutdown",
+            message: `上一个 ${engine} ACP 进程未能确认退出，拒绝启动新进程`,
+            exitCode: null,
+            signal: null,
+          }),
+        );
+      }
+      throw error;
+    });
+  }
+
+  /**
+   * Each engine owns one lazy ACP slot. All owners/cwds/configs of that engine share its single
+   * process, while Pi and AGY start, run, and idle out independently. An unconfirmed shutdown
+   * blocks only the engine whose guarded group could not be reaped.
+   */
+  private acpSlot(engine: "pi" | "agy"): LazyAcpProcess {
+    const blocked = this.acpBlocked.get(engine);
+    if (blocked) throw blocked;
+    let process = this.acpSlots.get(engine);
+    if (!process) {
+      process = new LazyAcpProcess(() => this.spawnAcpProcess(engine), {
+        idleTimeoutMs: this.acpIdleTimeoutSeconds * 1000,
+      });
+      this.acpSlots.set(engine, process);
+    }
+    return process;
+  }
+
+  /**
+   * Executes one turn on this engine's own lazy ACP slot. Cancel, hard timeout, and owner
+   * retirement only cancel & close this run's sessionId without stopping sibling sessions.
+   */
+  private launchAcp(
+    worker: WorkerRecord,
+    run: WorkerRun,
+    runDirectory: string,
+    prompt: string,
+    previous: WorkerRun | null,
+    safeEnvironment: NodeJS.ProcessEnv,
+  ): void {
+    const engine: "pi" | "agy" = worker.type === "agy" ? "agy" : "pi";
+    const command = this.acpCommand(engine, safeEnvironment);
+    let plan: SharedAcpPlan;
+    if (engine === "pi") {
+      // Validate executable, options, home consistency, and resume transcript before touching
+      // the shared process.
+      const piPlan = preparePiAcpLaunch({
+        run,
+        cwd: worker.cwd,
+        previous,
+        dataDirectory: this.options.dataDirectory,
+        baseEnvironment: safeEnvironment,
+      });
+      if (piPlan.sessionFile) run.nativeSessionFile = piPlan.sessionFile;
+      run.piTranscriptOffset = previous ? fs.statSync(piPlan.sessionFile!).size : 0;
+      plan = {
+        cwd: piPlan.cwd,
+        sessionId: piPlan.sessionId,
+        configOptions: piPlan.configOptions,
+        sessionFile: piPlan.sessionFile,
+      };
+    } else {
+      const agyPlan = planAgyAcpConfig({
+        model: run.model,
+        effort: run.effort,
+      });
+      plan = {
+        cwd: worker.cwd,
+        // Legacy AGY conversation ids become `session/resume` inputs unchanged.
+        sessionId: previous?.nativeSessionId ?? null,
+        configOptions: agyPlan.configOptions,
+        sessionFile: null,
+      };
+    }
+    this.store.saveRun(run);
+    // Persist the launch spec (same observability contract as native guardians); the ACP agent
+    // runs in the shared process, so this is the only per-run record of the prompt and choices.
+    fs.writeFileSync(
+      path.join(runDirectory, "spec.json"),
+      JSON.stringify({
+        argv: [command.executable, ...command.args],
+        cwd: plan.cwd,
+        prompt,
+        timeoutSeconds: run.timeoutSeconds,
+        runDirectory,
+        acp: { sessionId: plan.sessionId, configOptions: plan.configOptions },
+      }),
+      { mode: 0o600 },
+    );
+
+    let session: AcpSessionHandle | null = null;
+    let stopReason: AcpSessionEvidence["reason"] | null = null;
+    let stopError: string | null = null;
+    let cancelTriggered = false;
+    let promptStarted = false;
+    let leaseReleased = false;
+    let exitWatch: Promise<boolean> | null = null;
+    let hardTimer: NodeJS.Timeout | undefined;
+    let settleTimer: NodeJS.Timeout | undefined;
+    let forceSettle!: () => void;
+    // Hard timeout/cancel is bounded: an ACP server that ignores session/cancel must not keep a
+    // run "running" forever. The race below settles it unconfirmed (unknown), never as stopped.
+    const settled = new Promise<void>((resolve) => (forceSettle = resolve));
+
+    const triggerStop = (reason: "cancelled" | "timeout", error?: string): void => {
+      if (stopReason === null) {
+        stopReason = reason;
+        if (error) stopError = error;
+      }
+      if (cancelTriggered) return;
+      cancelTriggered = true;
+      if (session && !session.closed) {
+        void session.cancel({ graceMs: 1500 }).catch(() => {});
+      }
+      if (!promptStarted) {
+        // No turn exists yet: setup is interrupted, not an unconfirmable prompt. Settle now and
+        // let its late acquire/open result close only its own session when it eventually arrives.
+        forceSettle();
+      } else {
+        settleTimer = setTimeout(() => forceSettle(), 4000);
+        settleTimer.unref?.();
+      }
+    };
+
+    let resolveEnded!: () => void;
+    const ended = new Promise<void>((resolve) => (resolveEnded = resolve));
+    const handle: RunHandle = {
+      runId: run.id,
+      workerId: worker.id,
+      ownerId: worker.ownerId,
+      requestStop: (reason = "cancelled") => triggerStop(reason),
+      ended,
+      resolveEnded,
+      finalized: false,
+      holdNotification: false,
+      stopRequested: false,
+      progress: newProgress(),
+      expectedSessionId: plan.sessionId,
+      expectedAction: previous ? "resume" : "new",
+      lastProgressSave: 0,
+    };
+    this.handles.set(run.id, handle);
+
+    if (run.timeoutSeconds && run.timeoutSeconds > 0) {
+      hardTimer = setTimeout(
+        () => triggerStop("timeout", "超过硬超时 " + run.timeoutSeconds + " 秒"),
+        run.timeoutSeconds * 1000,
+      );
+      hardTimer.unref?.();
+    }
+
+    let acceptingEvents = true;
+    const emitAcpEvent = (event: AcpEvent): void => {
+      // Late setup/close results after terminal evidence must not append to an ended run.
+      if (!acceptingEvents) return;
+      try {
+        appendLog(runDirectory, "events", Buffer.from(JSON.stringify(event) + "\n", "utf8"));
+      } catch (error) {
+        if (stopReason === null) {
+          stopReason = "error";
+          stopError = "日志写入失败: " + String(error);
+        }
+        triggerStop("cancelled", stopError ?? undefined);
+        return;
+      }
+      this.onAcpEvent(handle, event);
+    };
+
+    const emitInitFailure = (error: unknown): void => {
+      emitAcpEvent({
+        protocol: "acp",
+        type: "acp_error",
+        stage:
+          error instanceof AcpTransportError && error.failure.kind === "protocol_error"
+            ? "protocol"
+            : "initialize",
+        code:
+          error instanceof AcpTransportError
+            ? error.failure.kind === "protocol_error"
+              ? "PROTOCOL_INVALID"
+              : error.errorCode
+            : error instanceof AcpProtocolError || error instanceof AcpConfigError
+              ? error.errorCode
+              : error instanceof AcpRpcError
+                ? error.rpcCode
+                : null,
+        message: acpErrorText(error),
+      });
+    };
+
+    void (async () => {
+      let slot: LazyAcpProcess | null = null;
+      let conn: AcpConnection | null = null;
+      let sessionClosed = false;
+      let exitCode: number | null = 0;
+      let signal: string | null = null;
+      let setupAbandoned = false;
+      const acquired: { conn: AcpConnection | null } = { conn: null };
+      const releaseLease = (): void => {
+        if (leaseReleased) return;
+        leaseReleased = true;
+        slot?.endTask();
+      };
+      try {
+        slot = this.acpSlot(engine);
+        const setup = (async (): Promise<AcpSessionHandle | null> => {
+          acquired.conn = await slot!.beginTask();
+          const generation = this.acpGenerations.get(acquired.conn);
+          if (generation) this.recordAcpGeneration(runDirectory, generation);
+          if (cancelTriggered) return null;
+          const opened = await acquired.conn.openSession({
+            cwd: plan.cwd,
+            sessionId: plan.sessionId,
+            configOptions: plan.configOptions,
+            onEvent: emitAcpEvent,
+            timeoutMs: ACP_SETUP_TIMEOUT_MS,
+            shouldAbort: () => cancelTriggered,
+          });
+          if (cancelTriggered) {
+            if (!opened.closed) await opened.close().catch(() => {});
+            return null;
+          }
+          return opened;
+        })();
+        const setupOutcome = await Promise.race([
+          setup.then((value) => ({ kind: "ready" as const, value })),
+          settled.then(() => ({ kind: "settled" as const })),
+        ]);
+        if (setupOutcome.kind === "settled") {
+          // The run stops now without a prompt. The late acquire/open still owns its lease and
+          // may only close its own session; it must never start the prompt or touch siblings.
+          setupAbandoned = true;
+          sessionClosed = true;
+          exitCode = 0;
+          void setup
+            .then(async (late) => {
+              if (late && !late.closed) await late.close().catch(() => {});
+            })
+            .catch(() => {})
+            .finally(releaseLease);
+          return;
+        }
+        conn = acquired.conn;
+        session = setupOutcome.value;
+        if (!session || !conn) {
+          sessionClosed = true;
+          exitCode = 0;
+          return;
+        }
+        if (cancelTriggered) {
+          await session.close().catch(() => {});
+          sessionClosed = true;
+          return;
+        }
+        promptStarted = true;
+        const outcome = await Promise.race([
+          session.prompt(prompt).then(() => "prompt" as const),
+          settled.then(() => "settled" as const),
+        ]);
+        if (outcome === "settled") {
+          // Best-effort detach; the prompt was never confirmed finished, so evidence stays false
+          // until this exact shared process generation's guardian confirms group exit.
+          await session.close().catch(() => {});
+          sessionClosed = false;
+          exitCode = 0;
+          exitWatch = conn.whenReaped();
+          return;
+        }
+        await session.close();
+        sessionClosed = true;
+        exitCode = 0;
+      } catch (error) {
+        const activeConn = acquired.conn;
+        if (error instanceof AcpTransportError) {
+          exitCode = error.failure.exitCode;
+          signal = error.failure.signal;
+          stopError = stopError ?? error.message;
+          if (!activeConn) emitInitFailure(error);
+          // Reap/confirm the broken process group exited before finalizing so replacement runs never race it.
+          sessionClosed = activeConn ? await activeConn.reap() : true;
+        } else {
+          exitCode = 0;
+          stopError = stopError ?? acpErrorText(error);
+          if (!activeConn) emitInitFailure(error);
+          if (session && !session.closed) {
+            await session.close().catch(() => {});
+          }
+          sessionClosed = true;
+        }
+      } finally {
+        acceptingEvents = false;
+        clearTimeout(hardTimer);
+        clearTimeout(settleTimer);
+        // Session cleanup is complete here; the last task starts this engine's idle clock.
+        if (!setupAbandoned) releaseLease();
+        const evidence: AcpSessionEvidence = {
+          kind: "acp_session",
+          reason: stopReason ?? "exit",
+          exitCode,
+          signal,
+          startedAt: run.startedAt,
+          finishedAt: new Date(this.now()).toISOString(),
+          sessionClosed,
+          promptStarted,
+          error: stopError,
+        };
+        try {
+          this.writeRunEvidence(runDirectory, evidence);
+        } catch (writeError) {
+          process.stderr.write(
+            "worker acp final evidence write failed: " + String(writeError) + "\n",
+          );
+        }
+        if (!this.storeClosed) {
+          this.finalizeRun(run.id, evidence, null);
+        }
+        if (exitWatch) {
+          const watch = exitWatch;
+          void watch
+            .then((reaped) => {
+              if (!reaped || this.storeClosed) return;
+              const current = this.store.run(run.id);
+              if (!current || current.status !== "unknown") return;
+              const confirmed: AcpSessionEvidence = {
+                ...evidence,
+                sessionClosed: true,
+                groupExited: true,
+              };
+              this.writeRunEvidence(runDirectory, confirmed);
+              this.finalizeRun(run.id, confirmed, null);
+            })
+            .catch(() => {});
+        }
+      }
+    })();
+  }
+
+  private writeRunEvidence(runDirectory: string, evidence: RunEvidence): void {
+    const target = path.join(runDirectory, "final.json");
+    const temporary = `${target}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(evidence), { mode: 0o600 });
+    fs.renameSync(temporary, target);
   }
 
   private guardianCommand(): string[] {
@@ -1387,12 +2073,53 @@ export class WorkerService {
   }
 
   private executable(
-    type: WorkerType,
+    type: WorkerType | "pi-acp",
     environment: NodeJS.ProcessEnv = this.environment,
   ): string {
     const injected = this.options.executablePaths?.[type];
     if (injected) return path.resolve(injected);
     return resolveExecutable(type, environment);
+  }
+
+  private userHome(): string {
+    return (
+      clean(this.environment.HOME) ??
+      clean(this.environment.USERPROFILE) ??
+      os.homedir()
+    );
+  }
+
+  /** Consumes an already-validated in-process `AcpEvent` without JSON round-tripping or re-validation. */
+  private onAcpEvent(handle: RunHandle, event: AcpEvent): void {
+    if (this.storeClosed) return;
+    const run = this.store.run(handle.runId);
+    if (!run || TERMINAL.includes(run.status)) return;
+    const worker = this.store.worker(handle.workerId);
+    trackProgress(worker?.type ?? "pi", event, handle.progress);
+    let identityChanged = false;
+    if (worker && event.type === "acp_session" && !run.nativeSessionId) {
+      run.nativeSessionId = event.sessionId;
+      identityChanged = true;
+    }
+    if (
+      worker?.type === "pi" &&
+      run.nativeSessionId &&
+      !run.nativeSessionFile &&
+      (event.type === "acp_session" || event.type === "acp_update")
+    ) {
+      const resolved = resolvePiAcpTranscriptFile(
+        run.sessionsRoot,
+        run.nativeSessionId,
+        worker.cwd,
+        null,
+        this.userHome(),
+      );
+      if (resolved.status === "ok") {
+        run.nativeSessionFile = resolved.file;
+        identityChanged = true;
+      }
+    }
+    this.recordProgress(handle, run, identityChanged);
   }
 
   private onEventLine(handle: RunHandle, line: string): void {
@@ -1408,8 +2135,8 @@ export class WorkerService {
     const worker = this.store.worker(handle.workerId);
     trackProgress(worker?.type ?? "dsh", event, handle.progress);
     let identityChanged = false;
+    const value = event as Record<string, unknown> | null;
     if (worker && !run.nativeSessionId) {
-      const value = event as Record<string, unknown> | null;
       if (worker.type === "dsh") {
         const id = value?.type === "session" ? value.sessionId : null;
         const cwd = value?.type === "session" ? value.cwd : null;
@@ -1452,6 +2179,14 @@ export class WorkerService {
         }
       }
     }
+    this.recordProgress(handle, run, identityChanged);
+  }
+
+  private recordProgress(
+    handle: RunHandle,
+    run: WorkerRun,
+    identityChanged: boolean,
+  ): void {
     run.progress.steps = handle.progress.steps ? handle.progress.steps : null;
     run.progress.phase = handle.progress.phase;
     run.progress.currentTool = handle.progress.currentTool;
@@ -1461,6 +2196,8 @@ export class WorkerService {
     const important =
       identityChanged ||
       TOOL_PROGRESS_PHASES.has(handle.progress.phase ?? "") ||
+      handle.progress.phase === "acp_session" ||
+      handle.progress.phase === "acp_prompt_result" ||
       handle.progress.phase === "turn_end" ||
       handle.progress.phase === "turn.completed" ||
       handle.progress.phase === "turn.failed" ||
@@ -1474,19 +2211,126 @@ export class WorkerService {
     }
   }
 
-  private readEvidence(runId: string): GuardianEvidence | null {
-    if (this.storeClosed) return null;
-    const run = this.store.run(runId);
-    if (!run) return null;
+  /** Persists the exact shared ACP generation in the run's existing spec before any session RPC. */
+  private recordAcpGeneration(runDirectory: string, generation: AcpGeneration): void {
+    const specPath = path.join(runDirectory, "spec.json");
+    const spec = JSON.parse(fs.readFileSync(specPath, "utf8")) as Record<string, unknown>;
+    const acp =
+      spec.acp && typeof spec.acp === "object" && !Array.isArray(spec.acp)
+        ? (spec.acp as Record<string, unknown>)
+        : {};
+    spec.acp = { ...acp, generationId: generation.id };
+    const temporary = `${specPath}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+    fs.writeFileSync(temporary, JSON.stringify(spec), { mode: 0o600 });
+    fs.renameSync(temporary, specPath);
+  }
+
+  /** Reads a run's persisted generation link; malformed or historical specs have none. */
+  private acpGenerationForRun(run: WorkerRun): AcpGeneration | null {
+    const worker = this.store.worker(run.workerId);
+    if (
+      !worker ||
+      run.nativeProtocol !== "acp" ||
+      (worker.type !== "pi" && worker.type !== "agy")
+    )
+      return null;
     try {
-      const value = JSON.parse(
-        fs.readFileSync(path.join(this.runDirectory(run.workerId, runId), "final.json"), "utf8"),
-      ) as GuardianEvidence;
-      if (typeof value?.groupExited !== "boolean") return null;
-      return value;
+      const spec = JSON.parse(
+        fs.readFileSync(path.join(this.runDirectory(run.workerId, run.id), "spec.json"), "utf8"),
+      ) as Record<string, unknown> | null;
+      const acp =
+        spec?.acp && typeof spec.acp === "object" && !Array.isArray(spec.acp)
+          ? (spec.acp as Record<string, unknown>)
+          : null;
+      const id = acp?.generationId;
+      if (
+        typeof id !== "string" ||
+        !id.startsWith("process-") ||
+        path.basename(id) !== id
+      )
+        return null;
+      return {
+        engine: worker.type,
+        id,
+        directory: path.join(this.options.dataDirectory, `${worker.type}-acp-guardian`, id),
+      };
     } catch {
       return null;
     }
+  }
+
+  private readAcpGenerationEvidence(run: WorkerRun): RunEvidence | null {
+    const generation = this.acpGenerationForRun(run);
+    if (!generation) return null;
+    try {
+      const finalFile = path.join(generation.directory, "final.json");
+      if (fs.lstatSync(finalFile).isSymbolicLink()) return null;
+      const value = JSON.parse(fs.readFileSync(finalFile, "utf8")) as Record<string, unknown> | null;
+      if (
+        !value ||
+        value.groupExited !== true ||
+        !["exit", "timeout", "cancelled", "disconnect", "error"].includes(String(value.reason))
+      )
+        return null;
+      return value as RunEvidence;
+    } catch {
+      return null;
+    }
+  }
+
+  /** True while an occupying run still needs this generation's confirmed guardian evidence. */
+  private acpGenerationInUse(generationId: string): boolean {
+    for (const run of this.store.activeRuns()) {
+      if (!OCCUPYING.includes(run.status)) continue;
+      if (this.acpGenerationForRun(run)?.id === generationId) return true;
+    }
+    return false;
+  }
+
+  private readEvidence(runId: string): RunEvidence | null {
+    if (this.storeClosed) return null;
+    const run = this.store.run(runId);
+    if (!run) return null;
+    let perRun: RunEvidence | null = null;
+    try {
+      const value = JSON.parse(
+        fs.readFileSync(path.join(this.runDirectory(run.workerId, runId), "final.json"), "utf8"),
+      ) as Record<string, unknown> | null;
+      if (value && typeof value === "object") {
+        if (value.kind === "acp_session" && typeof value.sessionClosed === "boolean")
+          perRun = value as AcpSessionEvidence;
+        else if (
+          (value.kind === undefined || value.kind === "guardian") &&
+          typeof value.groupExited === "boolean"
+        )
+          perRun = value as RunEvidence;
+      }
+    } catch {
+      /* Missing per-run evidence may still be recoverable from its persisted generation. */
+    }
+    if (perRun?.kind === "acp_session") {
+      if (perRun.sessionClosed) return perRun;
+      const generation = this.readAcpGenerationEvidence(run);
+      return generation
+        ? { ...perRun, sessionClosed: true, groupExited: true }
+        : perRun;
+    }
+    if (perRun) return perRun;
+    // A service killed during an active turn has no per-run final; its exact generation's
+    // confirmed guardian evidence supplies the existing disconnect/interrupted outcome.
+    const generation = this.readAcpGenerationEvidence(run);
+    if (!generation) return null;
+    return {
+      kind: "acp_session",
+      reason: generation.reason,
+      exitCode: generation.exitCode,
+      signal: generation.signal,
+      startedAt: generation.startedAt ?? run.startedAt,
+      finishedAt: generation.finishedAt,
+      sessionClosed: true,
+      groupExited: true,
+      error: generation.error,
+    };
   }
 
   //------------------ TERMINAL STATE ----------------
@@ -1497,7 +2341,7 @@ export class WorkerService {
    */
   private finalizeRun(
     runId: string,
-    evidence: GuardianEvidence | null,
+    evidence: RunEvidence | null,
     spawnError: string | null,
   ): void {
     if (this.storeClosed) return;
@@ -1508,17 +2352,20 @@ export class WorkerService {
     const handle = this.handles.get(runId);
     if (handle?.finalized) return;
     if (handle) handle.finalized = true;
-    // A live handle carries the exact expected identity for this launch, including an explicit
-    // null for a first run. Only recovery without a handle falls back to the recorded run id.
+    // A live handle carries the exact expected identity and action for this launch, including
+    // explicit null / "new" for a first run. Handle-less recovery passes expectedAction: null so
+    // a recovered brand-new ACP session with a persisted sessionId is never misclassified as resume.
     const expectedSessionId = handle ? handle.expectedSessionId : run.nativeSessionId;
+    const expectedAction = handle ? handle.expectedAction : null;
     const parsed =
       run.status === "queued"
         ? null
-        : this.parseRun(worker, run, expectedSessionId);
+        : this.parseRun(worker, run, expectedSessionId, expectedAction);
     let status: WorkerStatus;
     let error: WorkerFailure | null = null;
     let hold = handle?.holdNotification ?? false;
     if (this.owners.get(worker.ownerId)?.owner.paused) hold = true;
+    const evidenceConfirmed = evidence ? isEvidenceConfirmed(evidence) : false;
     if (!evidence) {
       if (spawnError) {
         status = "failed";
@@ -1530,9 +2377,14 @@ export class WorkerService {
           "未找到监护进程的最终退出证据，运行状态未知",
         );
       }
-    } else if (!evidence.groupExited) {
+    } else if (!evidenceConfirmed) {
       status = "unknown";
-      error = new WorkerFailure("STOP_UNCONFIRMED", "无法确认原生进程组已经退出");
+      error = new WorkerFailure(
+        "STOP_UNCONFIRMED",
+        evidence.kind === "acp_session"
+          ? "无法确认 ACP 会话已经结束"
+          : "无法确认原生进程组已经退出",
+      );
     } else if (evidence.reason === "cancelled") {
       status = "cancelled";
       error = new WorkerFailure("CANCELLED", "运行已取消");
@@ -1559,8 +2411,17 @@ export class WorkerService {
       status = "completed";
     } else {
       status = "failed";
+      const code =
+        parsed?.errorCode === "PROTOCOL_INVALID" ||
+        parsed?.errorCode === "ACP_CONFIG_UNSUPPORTED" ||
+        parsed?.errorCode === "PI_TRANSCRIPT_UNCONFIRMED" ||
+        parsed?.errorCode === "ACP_TRANSPORT_CLOSED"
+          ? parsed.errorCode
+          : evidence.exitCode === 0
+            ? (parsed?.errorCode ?? "PROTOCOL_INVALID")
+            : "NATIVE_FAILED";
       error = new WorkerFailure(
-        evidence.exitCode === 0 ? "PROTOCOL_INVALID" : "NATIVE_FAILED",
+        code,
         parsed?.error ||
           evidence.error ||
           "原生执行器退出码 " + String(evidence.exitCode),
@@ -1585,7 +2446,11 @@ export class WorkerService {
     this.store.saveRun(run);
     // Settle a rate-limit cooldown before dispatch can release the next queued item.
     if (worker.type === "agy" && status === "failed")
-      this.registerAgyCooldown(worker, run);
+      this.registerAgyCooldown(
+        worker,
+        run,
+        parsed?.errorCode === AGY_QUOTA_REACHED ? parsed.error : null,
+      );
     if (handle) {
       clearTimeout(handle.stopTimer);
       this.handles.delete(runId);
@@ -1602,10 +2467,37 @@ export class WorkerService {
     worker: WorkerRecord,
     run: WorkerRun,
     expectedSessionId: string | null,
+    expectedAction: "new" | "resume" | null = null,
   ): ReturnType<typeof parseDsh> | null {
     const events = path.join(this.runDirectory(worker.id, run.id), "events.log");
     if (!fs.existsSync(events)) return null;
     try {
+      if (run.nativeProtocol === "acp") {
+        if (worker.type === "agy") {
+          const parsed = parseAgyAcpRun(
+            readEventLines(events),
+            expectedSessionId,
+            worker.cwd,
+            { expectedAction: expectedAction ?? undefined },
+          );
+          return {
+            success: parsed.success,
+            nativeSessionId: parsed.validatedSessionId,
+            nativeSessionFile: null,
+            finalText: parsed.finalText,
+            usage: parsed.usage,
+            error: parsed.error,
+            errorCode: parsed.errorCode,
+          };
+        }
+        return parsePiAcp(events, expectedSessionId, worker.cwd, {
+          sessionsRoot: run.sessionsRoot,
+          sessionFile: run.nativeSessionFile,
+          transcriptOffset: run.piTranscriptOffset ?? null,
+          userHome: this.userHome(),
+          expectedAction,
+        });
+      }
       if (worker.type === "dsh")
         return parseDsh(events, expectedSessionId, worker.cwd, run.sessionsRoot);
       if (worker.type === "codex")
@@ -1855,9 +2747,13 @@ export class WorkerService {
    * SQLite deadline. The run itself stays failed and resumable; the stored maximum survives
    * restarts and is shared by every CloudCLI instance using this data directory.
    */
-  private registerAgyCooldown(worker: WorkerRecord, run: WorkerRun): void {
-    const text = this.agyFailureText(worker, run);
-    if (!agyRateLimited(text)) return;
+  private registerAgyCooldown(
+    worker: WorkerRecord,
+    run: WorkerRun,
+    classifiedQuotaText: string | null = null,
+  ): void {
+    const text = classifiedQuotaText ?? this.agyFailureText(worker, run);
+    if (classifiedQuotaText === null && !agyRateLimited(text)) return;
     const delay = agyResetDelay(text) ?? 60_000;
     this.store.setCooldown("agy", this.now() + delay);
     this.scheduleAgyWake();
@@ -1867,7 +2763,7 @@ export class WorkerService {
   private agyFailureText(worker: WorkerRecord, run: WorkerRun): string {
     const directory = this.runDirectory(worker.id, run.id);
     let text = "";
-    for (const name of ["stderr.log", "events.log"]) {
+    for (const name of ["stderr.log", "events.log", "final.json"]) {
       try {
         text += "\n" + fs.readFileSync(path.join(directory, name), "utf8").slice(-200_000);
       } catch {
@@ -2077,11 +2973,7 @@ export class WorkerService {
       run.progress.phase = "stopping";
       this.store.saveRun(run);
       this.emitChanged(worker.id);
-      try {
-        handle.child.send?.({ type: "stop" });
-      } catch {
-        // A closed IPC channel already triggers guardian disconnect cleanup.
-      }
+      handle.requestStop("cancelled");
       stops.push(
         (async () => {
           const settled = await this.settleHandle(handle);
@@ -2258,11 +3150,7 @@ export class WorkerService {
     run.progress.phase = "stopping";
     this.store.saveRun(run);
     this.emitChanged(workerId);
-    try {
-      handle.child.send?.({ type: "stop" });
-    } catch {
-      // A closed IPC channel already triggers guardian disconnect cleanup.
-    }
+    handle.requestStop("cancelled");
     const settled = await this.settleHandle(handle);
     if (!settled) {
       const current = this.store.run(run.id);
@@ -2612,9 +3500,48 @@ export class WorkerService {
           value: { ownerId: worker.ownerId, workerIds: [worker.id] },
         });
       }
+      this.pruneAcpGuardianDirectories(cutoff);
     } catch (error) {
       // Keep failed deletions eligible for the next sweep without breaking the plugin timer/API.
       process.stderr.write("worker history cleanup failed: " + String(error) + "\n");
+    }
+  }
+
+  /**
+   * Cleans up leftover shared ACP guardian directories whose own final.json confirms
+   * `groupExited === true` and `finishedAt <= cutoff`. Live or unconfirmed directories stay intact.
+   */
+  private pruneAcpGuardianDirectories(cutoff: number): void {
+    for (const engine of ["pi", "agy"] as const) {
+      const root = path.join(this.options.dataDirectory, `${engine}-acp-guardian`);
+      let entries: fs.Dirent[];
+      try {
+        if (fs.lstatSync(root).isSymbolicLink()) continue;
+        entries = fs.readdirSync(root, { withFileTypes: true });
+      } catch {
+        continue;
+      }
+      for (const entry of entries) {
+        if (entry.isSymbolicLink() || !entry.isDirectory()) continue;
+        if (!entry.name.startsWith("process-")) continue;
+        if (this.acpGenerationInUse(entry.name)) continue;
+        const directory = path.join(root, entry.name);
+        const finalFile = path.join(directory, "final.json");
+        try {
+          if (fs.lstatSync(finalFile).isSymbolicLink()) continue;
+          const evidence = JSON.parse(fs.readFileSync(finalFile, "utf8")) as {
+            groupExited?: unknown;
+            finishedAt?: unknown;
+          };
+          if (evidence.groupExited !== true) continue;
+          if (typeof evidence.finishedAt !== "string") continue;
+          const finishedAt = Date.parse(evidence.finishedAt);
+          if (!Number.isFinite(finishedAt) || finishedAt > cutoff) continue;
+          fs.rmSync(directory, { recursive: true, force: true });
+        } catch {
+          /* missing, unreadable, or unconfirmed evidence keeps the directory intact */
+        }
+      }
     }
   }
 
@@ -2634,9 +3561,33 @@ export class WorkerService {
     let failure: unknown;
     try {
       await this.nativeRetentionSweep;
-      await this.closeAll("插件进程退出");
+      const stopPromise = this.closeAll("插件进程退出");
+      const acp = [...new Set(this.acpSlots.values())];
+      if (acp.some((process) => process.isActive)) {
+        // Let cooperative ACP sessions finish targeted cancel briefly; then reap each shared
+        // process group so even a cancel-resistant turn/grandchild cannot hang shutdown.
+        await Promise.race([
+          stopPromise.then(
+            () => undefined,
+            () => undefined,
+          ),
+          new Promise<void>((resolve) => setTimeout(resolve, 1000)),
+        ]);
+        const reaped = await Promise.all(acp.map((process) => process.close()));
+        if (reaped.some((value) => !value)) {
+          failure = new WorkerFailure("STOP_UNCONFIRMED", "ACP 进程组尚未确认退出");
+        }
+      }
+      await stopPromise;
+      const finalReaped = await Promise.all(acp.map((process) => process.close()));
+      if (finalReaped.some((value) => !value) && !failure) {
+        failure = new WorkerFailure("STOP_UNCONFIRMED", "ACP 进程组尚未确认退出");
+      }
     } catch (error) {
       failure = error;
+      await Promise.all(
+        [...this.acpSlots.values()].map((process) => process.close().catch(() => false)),
+      );
     } finally {
       this.storeClosed = true;
       this.store.close();
@@ -2657,7 +3608,10 @@ export class WorkerService {
       const unknownWorker = this.store.worker(unknown.workerId);
       if (!unknownWorker || unknownWorker.type === "dsh") continue;
       const evidence = this.readEvidence(unknown.id);
-      if (evidence) this.finalizeRun(unknown.id, evidence, null);
+      // Only re-finalize once final.json proves the run or process group actually ended;
+      // unconfirmed evidence (guardian groupExited=false or open ACP session) stays unknown.
+      if (evidence && isEvidenceConfirmed(evidence))
+        this.finalizeRun(unknown.id, evidence, null);
     }
     const settings = this.store.settings();
     for (const handle of this.handles.values()) {
@@ -2803,6 +3757,12 @@ export class WorkerService {
 }
 
 
+function isEvidenceConfirmed(evidence: RunEvidence): boolean {
+  return evidence.kind === "acp_session"
+    ? evidence.sessionClosed
+    : evidence.groupExited;
+}
+
 function realPath(value: string): string {
   try {
     return fs.realpathSync(value);
@@ -2813,6 +3773,25 @@ function realPath(value: string): string {
 
 function clean(value: string | null | undefined): string | null {
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+/** Keeps raw JSON-RPC error data (for example a 429 RESOURCE_EXHAUSTED envelope) in evidence. */
+function acpErrorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (!(error instanceof AcpRpcError) || error.data === undefined) return message;
+  let data = error.data;
+  // ACP often repeats the same message in the error and its data envelope. Keep one copy so
+  // evidence scanners do not read a reset hint twice and double the cooldown.
+  if (data && typeof data === "object" && !Array.isArray(data)) {
+    const record = data as Record<string, unknown>;
+    if (typeof record.message === "string" && message.includes(record.message)) {
+      const { message: _duplicate, ...rest } = record;
+      data = rest;
+    }
+  }
+  if (data && typeof data === "object" && Object.keys(data).length === 0)
+    return message;
+  return message + " " + JSON.stringify(data);
 }
 
 /**
@@ -2840,7 +3819,9 @@ function agyRateLimited(text: string): boolean {
 function agyResetDelay(text: string): number | null {
   const match = /resets?\s+in\s+([^\n,;]+)/i.exec(text);
   if (!match) return null;
-  const value = match[1]!;
+  // Evidence may repeat the same error message (event + final evidence) on one JSON line;
+  // only the first reset phrase describes this failure.
+  const value = match[1]!.split(/resets?\s+in/i)[0]!;
   const colon = /(\d+):(\d+):(\d+)/.exec(value);
   if (colon)
     return (

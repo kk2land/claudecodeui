@@ -849,11 +849,11 @@ function WorkerPanel({ host }: { host: WorkerHost }) {
             host={host}
             api={api}
             onBack={() => setView("list")}
-            onSaved={(value) => {
+            onSaved={(value, notice = "Worker 设置已保存") => {
               setOverview((current) =>
                 current ? { ...current, settings: value } : current,
               );
-              setMessage("Worker 设置已保存");
+              setMessage(notice);
             }}
             onError={setError}
           />

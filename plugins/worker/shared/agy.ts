@@ -1,12 +1,17 @@
-/**
- * Native reasoning levels accepted by the Google Antigravity CLI's `--effort` flag.
- * These are the values documented by `agy --help`; the CLI remains the final validator.
- */
-export const AGY_EFFORT_LEVELS = [
+/** Reasoning levels supported by AGY ACP (`thought_level`). */
+export const AGY_ACP_EFFORT_LEVELS = [
   "low",
   "medium",
   "high",
   "xhigh",
+] as const;
+
+/**
+ * Native reasoning levels accepted by the Google Antigravity CLI's `--effort` flag.
+ * Includes legacy `max` for historical records; AGY ACP accepts only `AGY_ACP_EFFORT_LEVELS`.
+ */
+export const AGY_EFFORT_LEVELS = [
+  ...AGY_ACP_EFFORT_LEVELS,
   "max",
 ] as const;
 

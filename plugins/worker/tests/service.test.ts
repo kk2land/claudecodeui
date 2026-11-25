@@ -67,14 +67,22 @@ test("starts, records, logs, and deduplicates one Pi run", async (t) => {
   );
   assert.ok(fs.existsSync(worker.latestRun!.nativeSessionFile!));
   assert.match(worker.latestRun?.finalText ?? "", /pi answer/);
-  assert.equal(worker.latestRun?.usage, null);
+  assert.deepEqual(worker.latestRun?.usage, {
+    inputTokens: 12,
+    outputTokens: 5,
+    cacheReadTokens: 2,
+    cacheWriteTokens: 1,
+    totalTokens: 20,
+    scope: "run",
+    partial: false,
+  });
   assert.equal(worker.cwd, path.join(root, "project"));
   const snapshot = service.state({ projectId: "project-1" });
   assert.equal(snapshot.counts.total.completed, 1);
   assert.equal(snapshot.notifications.length, 1);
   assert.equal(snapshot.notifications[0]?.delivery, "pending");
   const logs = service.logs(worker.id, { stream: "events" });
-  assert.match(logs.text, /"type":"session"/);
+  assert.match(logs.text, /"type":"acp_session"/);
   assert.equal(logs.done, true);
   assert.equal(logs.nextCursor, null);
 
@@ -199,7 +207,7 @@ test("cancels a running group and holds the notification", async (t) => {
     TEST_SCENARIO: "hang",
     TEST_PID_FILE: pidFile,
   });
-  const started = await service.start("owner-1", startInput());
+  const started = await service.start("owner-1", startInput({ type: "codex" }));
   await waitStatus(service, started.worker.id, ["running"]);
   await waitFor(() => fs.existsSync(pidFile), Boolean);
   const pid = Number(fs.readFileSync(pidFile, "utf8"));
@@ -227,8 +235,11 @@ test("cancels a running group and holds the notification", async (t) => {
 test("stopping keeps the concurrency slot until the process group is confirmed gone", async (t) => {
   const root = temporaryRoot("worker-stopping-slot-");
   const { service } = createService(t, root, { TEST_SCENARIO: "hangtree" });
-  service.updateSettings({ concurrency: { pi: 1 } });
-  const first = await service.start("owner-1", startInput({ requestId: "stopping-1" }));
+  service.updateSettings({ concurrency: { ...service.settings().concurrency, codex: 1 } });
+  const first = await service.start(
+    "owner-1",
+    startInput({ type: "codex", requestId: "stopping-1" }),
+  );
   await waitStatus(service, first.worker.id, ["running"]);
   const cancelling = service.cancel({ workerIds: [first.worker.id] }, "host");
   await waitFor(
@@ -237,7 +248,7 @@ test("stopping keeps the concurrency slot until the process group is confirmed g
   );
   const queued = await service.start(
     "owner-1",
-    startInput({ requestId: "stopping-2" }),
+    startInput({ type: "codex", requestId: "stopping-2" }),
   );
   assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
   assert.deepEqual(await cancelling, [first.worker.id]);
@@ -253,7 +264,7 @@ test("kills a grandchild left behind by a normally exited CLI", async (t) => {
     TEST_SCENARIO: "grandchild",
     TEST_PID_FILE: pidFile,
   });
-  const started = await service.start("owner-1", startInput());
+  const started = await service.start("owner-1", startInput({ type: "codex" }));
   await waitStatus(service, started.worker.id, ["completed"]);
   const pid = Number(fs.readFileSync(pidFile, "utf8"));
   await waitFor(
@@ -385,7 +396,7 @@ test("an early step reminder keeps timed reviews active while a tool is silent",
   }, { now: () => now });
   const started = await service.start("owner-1", startInput());
   await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
-    (log) => (log.match(/"type":"turn_end"/g) ?? []).length === 20);
+    (log) => (log.match(/"status":"completed"/g) ?? []).length >= 20);
   // The guardian appends the event log before the parent consumes the same lines over IPC, and
   // step counting for reminders happens in the parent. Fire the one-second review interval until
   // a reminder exists instead of assuming the parent already consumed all 20 step_end lines; the
@@ -801,6 +812,144 @@ test("restart finalizes from guardian evidence without re-running", async (t) =>
   assert.equal(notification?.delivery, "pending");
 });
 
+test("restart settles a shared ACP run only from its exact confirmed generation", (t) => {
+  const root = temporaryRoot("worker-restart-acp-generation-");
+  const project = path.join(root, "project");
+  const data = path.join(root, "data");
+  const generationId = "process-00000000-0000-4000-8000-000000000001";
+  fs.mkdirSync(project, { recursive: true });
+  const store = new WorkerStore(data);
+  store.saveOwner(owner(project));
+  const worker = emptyWorker(project, "pi");
+  const run = {
+    ...emptyRun(worker.id, path.join(root, "pi-home"), path.join(root, "sessions")),
+    nativeProtocol: "acp" as const,
+  };
+  store.createWorker(
+    worker,
+    run,
+    "parent-1\u0000project-1",
+    "restart-request",
+    "start",
+    "seed-acp-generation",
+  );
+  const runDirectory = path.join(data, "logs", worker.id, run.id);
+  fs.mkdirSync(runDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDirectory, "spec.json"),
+    JSON.stringify({ argv: [], cwd: project, acp: { generationId } }),
+  );
+  const generationDirectory = path.join(data, "pi-acp-guardian", generationId);
+  fs.mkdirSync(generationDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(generationDirectory, "final.json"),
+    JSON.stringify({
+      reason: "disconnect",
+      exitCode: null,
+      signal: "SIGKILL",
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      groupExited: true,
+      error: null,
+    }),
+  );
+  store.close();
+
+  const service = new WorkerService({
+    dataDirectory: data,
+    environment: environment(root),
+    executablePaths: { pi: "" },
+    guardianCommand: [process.execPath, "--import", "x", "y"],
+  });
+  t.after(() => service.close());
+  service.registerOwner(owner(project), "owner-token");
+  service.recoverFromDisk();
+  const recovered = service.get(worker.id).worker.latestRun;
+  assert.equal(recovered?.status, "interrupted");
+  assert.equal(recovered?.error?.code, "INTERRUPTED");
+  assert.equal(fs.existsSync(path.join(runDirectory, "final.json")), false);
+  // The generation directory is consumed only by retention, never a second finalization.
+  assert.equal(fs.existsSync(generationDirectory), true);
+});
+
+test("restart keeps an unconfirmed shared timeout unknown, then the same generation restores TIMEOUT", async (t) => {
+  const root = temporaryRoot("worker-restart-acp-unknown-generation-");
+  const project = path.join(root, "project");
+  const data = path.join(root, "data");
+  const generationId = "process-00000000-0000-4000-8000-000000000002";
+  fs.mkdirSync(project, { recursive: true });
+  const store = new WorkerStore(data);
+  store.saveOwner(owner(project));
+  const worker = emptyWorker(project, "pi");
+  const run = {
+    ...emptyRun(worker.id, path.join(root, "pi-home"), path.join(root, "sessions")),
+    nativeProtocol: "acp" as const,
+  };
+  store.createWorker(
+    worker,
+    run,
+    "parent-1\u0000project-1",
+    "restart-request",
+    "start",
+    "seed-acp-unknown-generation",
+  );
+  const runDirectory = path.join(data, "logs", worker.id, run.id);
+  fs.mkdirSync(runDirectory, { recursive: true });
+  fs.writeFileSync(
+    path.join(runDirectory, "spec.json"),
+    JSON.stringify({ argv: [], cwd: project, acp: { generationId } }),
+  );
+  fs.writeFileSync(
+    path.join(runDirectory, "final.json"),
+    JSON.stringify({
+      kind: "acp_session",
+      reason: "timeout",
+      exitCode: 0,
+      signal: null,
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      sessionClosed: false,
+      promptStarted: true,
+      error: null,
+    }),
+  );
+  const generationDirectory = path.join(data, "pi-acp-guardian", generationId);
+  fs.mkdirSync(generationDirectory, { recursive: true });
+  store.close();
+
+  const service = new WorkerService({
+    dataDirectory: data,
+    environment: environment(root),
+    executablePaths: { pi: "" },
+    guardianCommand: [process.execPath, "--import", "x", "y"],
+  });
+  t.after(() => service.close());
+  service.registerOwner(owner(project), "owner-token");
+  service.recoverFromDisk();
+  const unknown = service.get(worker.id).worker.latestRun;
+  assert.equal(unknown?.status, "unknown");
+  assert.equal(unknown?.error?.code, "STOP_UNCONFIRMED");
+
+  fs.writeFileSync(
+    path.join(generationDirectory, "final.json"),
+    JSON.stringify({
+      reason: "disconnect",
+      exitCode: null,
+      signal: "SIGKILL",
+      startedAt: new Date().toISOString(),
+      finishedAt: new Date().toISOString(),
+      groupExited: true,
+      error: null,
+    }),
+  );
+  const settled = await waitFor(
+    () => service.get(worker.id).worker.latestRun,
+    (latest) => latest?.status === "failed",
+    5000,
+  );
+  assert.equal(settled?.error?.code, "TIMEOUT");
+});
+
 test("settings persist configured defaults, normalize legacy rows, and validate atomically", async (t) => {
   const root = temporaryRoot("worker-settings-");
   const { service, data } = createService(t, root);
@@ -1003,11 +1152,11 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
       path.join(data, "logs", first.id, first.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { argv: string[] };
-  assert.deepEqual(
-    spec.argv.slice(spec.argv.indexOf("--model")),
-    ["--model", "pi-default", "--thinking", "medium"],
-  );
+  ) as { acp?: { configOptions: unknown[] } };
+  assert.deepEqual(spec.acp?.configOptions, [
+    { configId: "model", value: "pi-default", match: "model" },
+    { configId: "thought_level", value: "medium", match: "exact" },
+  ]);
 
   const explicit = await service.start(
     "owner-1",
@@ -1022,11 +1171,11 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
       path.join(data, "logs", explicitWorker.id, explicitWorker.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { argv: string[] };
-  assert.deepEqual(
-    explicitSpec.argv.slice(explicitSpec.argv.indexOf("--model")),
-    ["--model", "explicit-pi", "--thinking", "low"],
-  );
+  ) as { acp?: { configOptions: unknown[] } };
+  assert.deepEqual(explicitSpec.acp?.configOptions, [
+    { configId: "model", value: "explicit-pi", match: "model" },
+    { configId: "thought_level", value: "low", match: "exact" },
+  ]);
 
   // The same raw request replay returns the original Pi run even though the default changed.
   configure(service, {
@@ -1234,11 +1383,11 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
       path.join(data, "logs", finished.id, finished.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { argv: string[] };
-  assert.deepEqual(
-    spec.argv.slice(spec.argv.indexOf("--model")),
-    ["--model", "accepted-model", "--thinking", "high"],
-  );
+  ) as { acp?: { configOptions: unknown[] } };
+  assert.deepEqual(spec.acp?.configOptions, [
+    { configId: "model", value: "accepted-model", match: "model" },
+    { configId: "thought_level", value: "high", match: "exact" },
+  ]);
 
   const resumed = await service.resume("owner-1", {
     workerId: finished.id,

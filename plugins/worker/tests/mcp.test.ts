@@ -809,7 +809,7 @@ test("MCP worker_start accepts an agy config and runs it end to end", async (t) 
   const done = await service.wait(receipt.worker.id, 10);
   assert.equal(done.run.id, receipt.run.id);
   assert.equal(done.run.status, "completed");
-  assert.match(done.run.finalText ?? "", /agy answer/);
+  assert.match(done.run.finalText ?? "", /model=gemini-3\.8-flash thought=low/);
   assert.equal(done.run.model, "gemini-3.8-flash-low");
   assert.equal(done.run.effort, "low");
 });

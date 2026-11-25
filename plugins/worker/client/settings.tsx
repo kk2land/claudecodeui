@@ -22,6 +22,10 @@ import type {
   WorkerTaskRole,
   SupportedWorkerType,
 } from "../shared/contracts.js";
+import {
+  ACP_IDLE_TIMEOUT_DEFAULT_SECONDS,
+  ACP_IDLE_TIMEOUT_MAX_SECONDS,
+} from "../shared/contracts.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerHost } from "./api.js";
 import type { workerApi } from "./api.js";
@@ -234,9 +238,18 @@ type SettingsViewProps = {
   host: WorkerHost;
   api: ReturnType<typeof workerApi>;
   onBack(): void;
-  onSaved(settings: WorkerSettings): void;
+  onSaved(settings: WorkerSettings, notice?: string): void;
   onError(message: string): void;
 };
+
+/** Detects whether the active Worker backend supports `acpIdleTimeoutSeconds`. */
+function supportsAcpIdleTimeout(value: WorkerSettings): boolean {
+  return (
+    typeof value.acpIdleTimeoutSeconds === "number" &&
+    Number.isSafeInteger(value.acpIdleTimeoutSeconds) &&
+    value.acpIdleTimeoutSeconds >= 1
+  );
+}
 
 /**
  * Named Worker config editor used by the Worker plugin settings view. Drafts are saved as the
@@ -256,6 +269,23 @@ export function SettingsView({
     defaultConfigId: settings.defaultConfigId,
   }));
   const [retentionDays, setRetentionDays] = useState(String(settings.retentionDays));
+  const acpIdleSupported = supportsAcpIdleTimeout(settings);
+  const [acpIdleTimeoutSeconds, setAcpIdleTimeoutSeconds] = useState(() =>
+    supportsAcpIdleTimeout(settings)
+      ? String(settings.acpIdleTimeoutSeconds)
+      : "",
+  );
+  // Only an explicit edit on a capable backend submits the idle field; saving other fields keeps the env fallback.
+  const [acpIdleTimeoutDirty, setAcpIdleTimeoutDirty] = useState(false);
+
+  useEffect(() => {
+    if (acpIdleSupported && !acpIdleTimeoutDirty) {
+      setAcpIdleTimeoutSeconds(String(settings.acpIdleTimeoutSeconds));
+    } else if (!acpIdleSupported) {
+      setAcpIdleTimeoutSeconds("");
+      setAcpIdleTimeoutDirty(false);
+    }
+  }, [acpIdleSupported, settings.acpIdleTimeoutSeconds, acpIdleTimeoutDirty]);
   const [envDraft, setEnvDraft] = useState<Record<string, string>>(() =>
     Object.fromEntries(
       settings.configs
@@ -439,6 +469,14 @@ export function SettingsView({
     const parsed = Number(value);
     return Number.isSafeInteger(parsed) && parsed > 0;
   };
+  const validAcpIdleTimeout = (value: string): boolean => {
+    const parsed = Number(value);
+    return (
+      Number.isSafeInteger(parsed) &&
+      parsed >= 1 &&
+      parsed <= ACP_IDLE_TIMEOUT_MAX_SECONDS
+    );
+  };
   const defaultConfig = draft.configs.find(
     (config) => config.id === draft.defaultConfigId,
   );
@@ -468,7 +506,9 @@ export function SettingsView({
             envResults[codexNameWithEnvError.id]!.error
           : !validNumber(retentionDays)
             ? "保留天数必须是大于 0 的整数。"
-            : !enabledCount
+            : acpIdleSupported && !validAcpIdleTimeout(acpIdleTimeoutSeconds)
+              ? "ACP 空闲关闭时间必须是 1 到 2147483 之间的整数秒。"
+              : !enabledCount
               ? "至少需要启用一个 Worker 配置。"
               : !defaultConfig
                 ? "请选择默认 Worker 配置。"
@@ -597,6 +637,7 @@ export function SettingsView({
 
   const save = async () => {
     if (validationMessage) return;
+    const submittedAcpIdle = acpIdleSupported && acpIdleTimeoutDirty;
     const body: WorkerSettingsUpdate = {
       configs: draft.configs.map((config) => {
         const name = config.name.trim();
@@ -617,11 +658,22 @@ export function SettingsView({
       }),
       defaultConfigId: draft.defaultConfigId,
       retentionDays: Number(retentionDays),
+      ...(submittedAcpIdle
+        ? { acpIdleTimeoutSeconds: Number(acpIdleTimeoutSeconds) }
+        : {}),
     };
     setBusy(true);
     try {
       const value = await api.saveSettings(body);
-      onSaved(value);
+      const responseSupportsAcpIdle = supportsAcpIdleTimeout(value);
+      if (submittedAcpIdle && !responseSupportsAcpIdle) {
+        onSaved(value, "");
+        onError(
+          "其他设置已保存，但当前 Worker 插件服务版本较旧，不支持保存 ACP 空闲关闭时间；请重启当前 CloudCLI 服务后重试。",
+        );
+      } else {
+        onSaved(value);
+      }
       const next = {
         configs: value.configs.map((config) => cloneConfig(config, config.name, config.id)),
         defaultConfigId: value.defaultConfigId,
@@ -635,6 +687,10 @@ export function SettingsView({
         ),
       );
       setRetentionDays(String(value.retentionDays));
+      setAcpIdleTimeoutSeconds(
+        responseSupportsAcpIdle ? String(value.acpIdleTimeoutSeconds) : "",
+      );
+      setAcpIdleTimeoutDirty(false);
     } catch (error) {
       onError(String(error));
     } finally {
@@ -1183,6 +1239,43 @@ export function SettingsView({
               默认 1 天，从每次运行结束起计算，到期自动删除日志和运行记录。
               运行中或状态未知的任务、原生会话和工作目录保留。
             </small>
+          </label>
+          <label>
+            ACP 空闲关闭时间（秒）
+            {acpIdleSupported ? (
+              <>
+                <input
+                  type="number"
+                  min="1"
+                  max={ACP_IDLE_TIMEOUT_MAX_SECONDS}
+                  step="1"
+                  aria-label="ACP 空闲关闭时间（秒）"
+                  value={acpIdleTimeoutSeconds}
+                  onChange={(event) => {
+                    setAcpIdleTimeoutSeconds(event.target.value);
+                    setAcpIdleTimeoutDirty(true);
+                  }}
+                />
+                <small>
+                  默认 {ACP_IDLE_TIMEOUT_DEFAULT_SECONDS} 秒（5 分钟）。Pi 和 AGY
+                  各自在最后一个任务结束后开始计时。
+                </small>
+              </>
+            ) : (
+              <>
+                <input
+                  type="text"
+                  aria-label="ACP 空闲关闭时间（秒）"
+                  value=""
+                  placeholder="当前后端版本暂不支持"
+                  disabled
+                />
+                <small>
+                  当前 Worker 插件服务版本较旧，暂不支持配置 ACP 空闲关闭时间；重启当前
+                  CloudCLI 服务后即可修改，其他设置仍可正常保存。
+                </small>
+              </>
+            )}
           </label>
         </section>
         <footer className="worker-settings-footer">

@@ -535,10 +535,10 @@ test("Pi launch persists its session file before finalize and cleanup protects i
     (value) => value?.nativeSessionFile !== null && value !== null,
   );
   assert.ok(run);
-  assert.equal(
-    run.nativeSessionFile,
-    path.join(data, "sessions", "pi", run.id + ".jsonl"),
+  assert.ok(
+    run.nativeSessionFile!.startsWith(path.join(env.PI_CODING_AGENT_DIR!, "sessions") + path.sep),
   );
+  assert.ok(run.nativeSessionFile!.endsWith(`_${run.nativeSessionId}.jsonl`));
   await waitFor(() => fs.existsSync(run.nativeSessionFile!), Boolean);
   age(run.nativeSessionFile!, NOW - 3 * DAY - 1);
 

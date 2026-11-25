@@ -107,12 +107,171 @@ class Rows {
   }
 }
 
-/** Pi JSON mode: streaming deltas, authoritative message_end, tool execution lifecycle. */
+/** Extracts readable text from ACP `tool_call_update` content blocks or rawOutput. */
+function acpToolOutput(update: Record<string, unknown>): string | undefined {
+  if (Array.isArray(update.content)) {
+    const parts: string[] = [];
+    for (const item of update.content) {
+      const block = object(item);
+      if (!block) continue;
+      if (block.type === "text" && typeof block.text === "string") {
+        parts.push(block.text);
+      } else if (block.type === "content") {
+        if (typeof block.content === "string") {
+          parts.push(block.content);
+        } else {
+          const inner = object(block.content);
+          if (inner?.type === "text" && typeof inner.text === "string") {
+            parts.push(inner.text);
+          }
+        }
+      }
+    }
+    if (parts.length) return parts.join("\n");
+  }
+  return toolContent(update.rawOutput);
+}
+
+/**
+ * Reusable ACP (`protocol: "acp"`) event-stream handler. Handles Pi ACP today and can be
+ * shared directly by future ACP engines such as AGY.
+ */
+function acpHandler(rows: Rows): Handler {
+  let textRow: string | null = null;
+  let thinkingRow: string | null = null;
+  let startupInfo: string | null = null;
+  let seenAssistantContent = false;
+  let seq = 0;
+  let errors = 0;
+  const closeThinking = () => {
+    if (!thinkingRow) return;
+    rows.upsert(thinkingRow, {
+      role: "assistant",
+      text: rows.text(thinkingRow),
+      thinking: true,
+      streaming: false,
+    });
+    thinkingRow = null;
+  };
+  const closeText = () => {
+    if (!textRow) return;
+    rows.upsert(textRow, {
+      role: "assistant",
+      text: rows.text(textRow),
+      streaming: false,
+    });
+    textRow = null;
+  };
+  return (event) => {
+    const kind = event.type;
+    if (kind === "acp_session") {
+      startupInfo = typeof event.startupInfo === "string" ? event.startupInfo : null;
+      return;
+    }
+    if (kind === "acp_prompt_result" || kind === "acp_closed") {
+      closeThinking();
+      closeText();
+      return;
+    }
+    if (kind === "acp_error") {
+      closeThinking();
+      closeText();
+      rows.upsert("acp-error-" + errors++, {
+        role: "error",
+        text: string(event.message) ?? "ACP 报告错误",
+      });
+      return;
+    }
+    if (kind !== "acp_update") return;
+    const update = object(event.update);
+    if (!update) return;
+    const updateKind = update.sessionUpdate;
+    if (updateKind === "agent_message_chunk") {
+      const content = object(update.content);
+      const chunk =
+        content?.type === "text" && typeof content.text === "string"
+          ? content.text
+          : undefined;
+      if (chunk === undefined) return;
+      // Suppress pi-acp's one-time startup banner emitted as a message chunk on session/new.
+      if (!seenAssistantContent && startupInfo !== null && chunk === startupInfo) {
+        startupInfo = null;
+        return;
+      }
+      seenAssistantContent = true;
+      closeThinking();
+      if (!textRow) textRow = "acp-text-" + seq++;
+      rows.upsert(textRow, {
+        role: "assistant",
+        text: rows.text(textRow) + chunk,
+        streaming: true,
+      });
+      return;
+    }
+    if (updateKind === "agent_thought_chunk") {
+      const content = object(update.content);
+      const chunk =
+        content?.type === "text" && typeof content.text === "string"
+          ? content.text
+          : undefined;
+      if (chunk === undefined) return;
+      seenAssistantContent = true;
+      closeText();
+      if (!thinkingRow) thinkingRow = "acp-thinking-" + seq++;
+      rows.upsert(thinkingRow, {
+        role: "assistant",
+        text: rows.text(thinkingRow) + chunk,
+        thinking: true,
+        streaming: true,
+      });
+      return;
+    }
+    if (updateKind === "tool_call" || updateKind === "tool_call_update") {
+      closeThinking();
+      closeText();
+      const toolId = string(update.toolCallId);
+      if (!toolId) return;
+      const status = string(update.status);
+      const done =
+        status === "completed" || status === "failed" || status === "cancelled";
+      const patch: RowPatch = {
+        role: "tool",
+        text: "",
+        toolId,
+        streaming: !done,
+      };
+      const name = string(update.title) ?? string(update.kind);
+      if (name) patch.toolName = name;
+      const input = object(update.rawInput);
+      if (input) patch.toolInput = input;
+      const output = acpToolOutput(update);
+      if (output !== undefined) patch.toolOutput = output;
+      if (status === "failed") patch.isError = true;
+      rows.upsert("acp-tool-" + toolId, patch);
+      return;
+    }
+    if (updateKind === "session_info_update") {
+      const meta = object(update._meta);
+      const piAcp = meta ? object(meta.piAcp) : null;
+      if (piAcp?.running === false) {
+        closeThinking();
+        closeText();
+      }
+    }
+  };
+}
+
+/** Pi handler: supports both new ACP event streams and historical Pi JSON event logs. */
 function piHandler(rows: Rows): Handler {
+  const handleAcp = acpHandler(rows);
   let current: string | null = null;
   let created = 0;
   let errors = 0;
   return (event) => {
+    if (event.protocol === "acp") {
+      handleAcp(event);
+      return;
+    }
     const kind = event.type;
     if (kind === "error") {
       rows.upsert("pi-error-" + errors++, {
@@ -556,7 +715,7 @@ function dshHandler(rows: Rows): Handler {
  * index, so streamed text and the final `result.response` update the same row instead of
  * duplicating the answer.
  */
-function agyHandler(rows: Rows): Handler {
+function agyLegacyHandler(rows: Rows): Handler {
   let lastTextRow: string | null = null;
   let errors = 0;
   const report = (text: string) => {
@@ -644,6 +803,20 @@ function agyHandler(rows: Rows): Handler {
       text: body,
       streaming: false,
     });
+  };
+}
+
+/** AGY dispatches by protocol: current ACP runs reuse the shared ACP handler, legacy history
+ * keeps the stream-json renderer. */
+function agyHandler(rows: Rows): Handler {
+  const acp = acpHandler(rows);
+  const legacy = agyLegacyHandler(rows);
+  return (event) => {
+    if (event.protocol === "acp") {
+      acp(event);
+      return;
+    }
+    legacy(event);
   };
 }
 

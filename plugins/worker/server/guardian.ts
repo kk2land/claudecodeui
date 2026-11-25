@@ -11,9 +11,10 @@ import type { GuardianEvidence } from "./shared/index.js";
  * reports progress lines to the plugin, and records final exit evidence before it exits.
  */
 type Spec = {
+  mode?: "native" | "acp";
   argv: string[];
   cwd: string;
-  prompt: string;
+  prompt?: string;
   timeoutSeconds: number | null;
   runDirectory: string;
   executable: string;
@@ -173,6 +174,44 @@ function start(): void {
   }
   const args =
     spec.argv[0] === spec.executable ? spec.argv.slice(1) : spec.argv;
+  if (spec.mode === "acp") {
+    // The shared ACP server inherits the guardian's stdio so the plugin talks JSON-RPC to the
+    // agent directly, while this guardian alone owns termination of the agent's process group.
+    child = spawn(spec.executable, args, {
+      cwd: spec.cwd,
+      env: process.env,
+      detached: process.platform !== "win32",
+      stdio: ["inherit", "inherit", "inherit"],
+    });
+    child.once("error", (error) => {
+      stopError = error.message;
+      void terminate("error", error.message);
+    });
+    child.once("exit", (code, value) => {
+      exitCode = code;
+      signal = value ?? null;
+      if (!stopping) {
+        stopping = true;
+        stopReason = "exit";
+        void (async () => {
+          const pid = child?.pid;
+          if (pid && groupAlive(pid)) {
+            signalGroup(pid, "SIGTERM");
+            killTimer = setTimeout(() => signalGroup(pid, "SIGKILL"), 2000);
+            await waitForGroup(pid, Date.now() + 10000);
+            clearTimeout(killTimer);
+          }
+          await finish("exit");
+        })();
+      }
+    });
+    send({ type: "started", pid: child.pid ?? null, startedAt });
+    if (!child.pid) {
+      stopError = "无法启动 ACP 执行器";
+      void terminate("error", stopError);
+    }
+    return;
+  }
   child = spawn(spec.executable, args, {
     cwd: spec.cwd,
     // Credentials stay in the guardian process environment only; spec.json never stores them.
@@ -224,7 +263,7 @@ function start(): void {
   child.stdin?.on("error", () => {
     /* the CLI may close stdin early; exit evidence is what matters */
   });
-  child.stdin?.end(spec.prompt, "utf8");
+  child.stdin?.end(spec.prompt ?? "", "utf8");
   if (spec.timeoutSeconds && spec.timeoutSeconds > 0)
     hardTimer = setTimeout(
       () => void terminate("timeout", "超过硬超时 " + spec.timeoutSeconds + " 秒"),

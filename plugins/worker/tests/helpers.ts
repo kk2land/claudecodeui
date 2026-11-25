@@ -16,8 +16,10 @@ export const pluginRoot = path.resolve(
 export const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
 export const dshFixture = path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs");
 export const piFixture = path.join(pluginRoot, "tests/fixtures/fake-pi.mjs");
+export const piAcpFixture = path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs");
 export const codexFixture = path.join(pluginRoot, "tests/fixtures/fake-codex.mjs");
 export const agyFixture = path.join(pluginRoot, "tests/fixtures/fake-agy.mjs");
+export const agyAcpFixture = path.join(pluginRoot, "tests/fixtures/fake-agy-acp.mjs");
 export const guardianSource = path.join(pluginRoot, "server/guardian.ts");
 
 export function temporaryRoot(prefix: string): string {
@@ -69,11 +71,43 @@ export function createService(
   const project = path.join(root, "project");
   fs.mkdirSync(project, { recursive: true });
   const data = path.join(root, "data");
-  const env = environment(root, extraEnv);
+  const envStateFile = path.join(root, ".fake-pi-acp-env.json");
+  const rawEnv = environment(root, {
+    TEST_ENV_STATE_FILE: envStateFile,
+    ...extraEnv,
+  });
+  const syncTestEnv = (): void => {
+    const snapshot: Record<string, string> = {};
+    for (const [key, value] of Object.entries(rawEnv)) {
+      if (key.startsWith("TEST_") && key !== "TEST_ENV_STATE_FILE" && typeof value === "string") {
+        snapshot[key] = value;
+      }
+    }
+    fs.writeFileSync(envStateFile, JSON.stringify(snapshot), "utf8");
+  };
+  syncTestEnv();
+  const env = new Proxy(rawEnv, {
+    set(target, prop, value) {
+      const ok = Reflect.set(target, prop, value);
+      if (typeof prop === "string" && prop.startsWith("TEST_")) syncTestEnv();
+      return ok;
+    },
+    deleteProperty(target, prop) {
+      const ok = Reflect.deleteProperty(target, prop);
+      if (typeof prop === "string" && prop.startsWith("TEST_")) syncTestEnv();
+      return ok;
+    },
+  });
   const service = new WorkerService({
     dataDirectory: data,
     environment: env,
-    executablePaths: { pi: piFixture, codex: codexFixture, agy: agyFixture },
+    executablePaths: {
+      pi: piFixture,
+      "pi-acp": piAcpFixture,
+      codex: codexFixture,
+      agy: agyFixture,
+      "agy-acp": agyAcpFixture,
+    },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
     ...extraOptions,
   });
