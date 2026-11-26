@@ -3,7 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { notifyRunFailed, notifyRunStopped } from '@/modules/notifications/index.js';
 import { sessionRuntimeDb, sessionDraftsDb } from '@/modules/database/index.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
-import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app-server.events.js';
+import { normalizeAppServerItem, VOICE_INPUT_CUE } from '@/modules/providers/list/codex/codex-app-server.events.js';
 import { CodexComposerPredictions } from '@/modules/providers/list/codex/codex-composer-predictions.provider.js';
 import { CodexPredictionConfigProvider } from '@/modules/providers/list/codex/codex-prediction-config.provider.js';
 import { CodexSessionsProvider } from '@/modules/providers/list/codex/codex-sessions.provider.js';
@@ -563,6 +563,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
     };
   }
 
+  /**
+   * Collaboration settings for one native turn. `developer_instructions` must
+   * stay null: both native presets ship their own non-empty instructions, and
+   * a non-null value replaces them instead of adding to them.
+   */
   private collaboration(session: NativeSession) {
     return { mode: session.state.mode, settings: {
       model: session.model,
@@ -843,6 +848,13 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       // `submittedInput` records, so the native user echo correlates even when it
       // carries no client id.
       const input = buildInput(turnCommand, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
+      // A speech-derived turn gets a fixed server-owned companion Text part for
+      // this turn only, in both Default and Plan mode. Keeping the user's words
+      // as the first part and the cue as a separate part avoids touching the
+      // native mode preset; history normalization strips the cue again.
+      if (options.inputSource === 'voice' && !approvedPlan) {
+        input.push({ type: 'text', text: VOICE_INPUT_CUE, text_elements: [] });
+      }
       turn.submittedInput = { clientId: clientUserMessageId, input };
       // Queue dispatch keeps its receipt reserved until input can actually be
       // delivered. A failed provider resume must leave that message queued.

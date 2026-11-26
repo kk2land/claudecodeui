@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test, { afterEach, beforeEach } from 'node:test';
 
+import { VOICE_INPUT_CUE } from '@/modules/providers/list/codex/codex-app-server.events.js';
 import { CodexAppServerRuntime } from '@/modules/providers/list/codex/codex-app-server.runtime.js';
 import { createCodexRuntimeRouter } from '@/modules/providers/list/codex/codex-runtime-router.provider.js';
 import { AppError } from '@/shared/index.js';
@@ -694,6 +695,56 @@ test('native turn uses independent Plan/permission settings and stable message i
   assert.equal(new Set(h.events.filter((event) => event.kind === 'text').map((event) => event.id)).size, 1);
   h.finish(); await running;
   assert.equal(h.events.filter((event) => event.kind === 'complete').length, 1);
+});
+
+test('voice transcription adds a per-turn companion Text and the next turn resets it', async () => {
+  const h = harness();
+  const first = h.run('spoken request', { inputSource: 'voice', clientMessageId: 'voice-1' });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+  let start = h.calls.find((call) => call.method === 'turn/start')!.params;
+  assert.equal(start.collaborationMode.settings.developer_instructions, null);
+  assert.equal(start.clientUserMessageId, 'voice-1');
+  assert.deepEqual(start.input.map((part: AnyRecord) => part.type), ['text', 'text']);
+  assert.equal(start.input[0].text, 'spoken request');
+  assert.equal(start.input[1].text, VOICE_INPUT_CUE);
+  assert.equal(VOICE_INPUT_CUE.includes('spoken request'), false);
+  // The native echo still binds by ID, while CloudCLI only displays the words.
+  h.event('item/completed', { turnId: 'turn-1', item: {
+    type: 'userMessage', id: 'u1', clientId: 'voice-1', content: start.input,
+  } });
+  const echo = h.events.filter((event) => event.role === 'user').at(-1);
+  assert.equal(echo?.id, 'voice-1');
+  assert.equal(echo?.content, 'spoken request');
+  h.finish('turn-1');
+  await first;
+
+  const second = h.run('typed request', { clientMessageId: 'typed-1' });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-2');
+  start = h.calls.filter((call) => call.method === 'turn/start')[1].params;
+  assert.equal(start.collaborationMode.settings.developer_instructions, null);
+  assert.equal(start.clientUserMessageId, 'typed-1');
+  assert.deepEqual(start.input.map((part: AnyRecord) => part.type), ['text']);
+  assert.equal(start.input[0].text, 'typed request');
+  h.finish('turn-2');
+  await second;
+});
+
+test('voice Plan turns keep the native plan template and permission settings', async () => {
+  const h = harness();
+  const running = h.run('plan by voice', {
+    inputSource: 'voice', collaborationMode: 'plan', permissionMode: 'acceptEdits', clientMessageId: 'voice-plan-1',
+  });
+  await eventually(() => h.runtime.getState('app-session').turnId === 'turn-1');
+  const start = h.calls.find((call) => call.method === 'turn/start')!.params;
+  assert.equal(start.collaborationMode.mode, 'plan');
+  assert.equal(start.collaborationMode.settings.developer_instructions, null);
+  assert.equal(start.approvalPolicy, 'never');
+  assert.equal(start.sandboxPolicy.type, 'workspaceWrite');
+  assert.equal(start.clientUserMessageId, 'voice-plan-1');
+  assert.equal(start.input[0].text, 'plan by voice');
+  assert.equal(start.input[1].text, VOICE_INPUT_CUE);
+  h.finish();
+  await running;
 });
 
 test('steer binds the active turn and user echo confirms delivery', async () => {

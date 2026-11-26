@@ -1,6 +1,37 @@
 import type { AnyRecord, NormalizedMessage } from '@/shared/index.js';
 import { createNormalizedMessage, unifiedDiffToTexts, parseFilesInputTag } from '@/shared/index.js';
 
+/**
+ * Server-owned companion text appended to a spoken turn as another Text part.
+ *
+ * The Codex runtime attaches it when the turn's `inputSource` is `voice`; live
+ * event normalization and history normalization remove it again before a
+ * prompt reaches CloudCLI, so the user keeps reading their own words. It is
+ * deliberately a user turn's text rather than a developer instruction: both
+ * native collaboration presets already carry their own non-empty instructions,
+ * which `settings.developer_instructions` would replace.
+ */
+export const VOICE_INPUT_CUE =
+  'This turn is the user speaking and the reply will be read aloud: start with a short, natural conclusion in the user\'s language, then add technical detail only as needed.';
+
+/**
+ * Strips the trailing {@link VOICE_INPUT_CUE} from a prompt assembled by
+ * joining Text parts with newlines.
+ *
+ * The runtime, {@link normalizeAppServerItem} and Codex history normalization
+ * share it. A cue that is not a trailing separate line is left alone, and the
+ * raw rollout is never rewritten.
+ */
+export function stripVoiceInputCue(content: string): string {
+  const blankLineSuffix = `\n\n${VOICE_INPUT_CUE}`;
+  if (content.endsWith(blankLineSuffix)) {
+    return content.slice(0, -blankLineSuffix.length);
+  }
+
+  const lineSuffix = `\n${VOICE_INPUT_CUE}`;
+  return content.endsWith(lineSuffix) ? content.slice(0, -lineSuffix.length) : content;
+}
+
 /** Codex runtime uses this adapter for both progressive items and final item snapshots. */
 export function normalizeAppServerItem(item: AnyRecord, sessionId: string, turnId: string): NormalizedMessage[] {
   const id = `codex:${turnId}:${String(item.id)}`;
@@ -16,7 +47,8 @@ export function normalizeAppServerItem(item: AnyRecord, sessionId: string, turnI
     case 'agentMessage':
       return [make({ role: 'assistant', content: item.text ?? '', model: item.model, isStreaming: !item.completed })];
     case 'userMessage': {
-      const parsed = parseFilesInputTag((item.content ?? []).filter((part: AnyRecord) => part.type === 'text').map((part: AnyRecord) => part.text).join('\n'));
+      const text = (item.content ?? []).filter((part: AnyRecord) => part.type === 'text').map((part: AnyRecord) => part.text).join('\n');
+      const parsed = parseFilesInputTag(stripVoiceInputCue(text));
       return [make({
         id: item.clientId || id,
         clientMessageId: item.clientId,

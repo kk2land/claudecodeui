@@ -7,7 +7,7 @@ import test from 'node:test';
 import { closeConnection, initializeDatabase, sessionsDb } from '@/modules/database/index.js';
 import { CodexSessionSynchronizer } from '@/modules/providers/list/codex/codex-session-synchronizer.provider.js';
 import { CodexSessionsProvider, parseCodexExecScript, readCodexMemoryCitations } from '@/modules/providers/list/codex/codex-sessions.provider.js';
-import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app-server.events.js';
+import { normalizeAppServerItem, VOICE_INPUT_CUE } from '@/modules/providers/list/codex/codex-app-server.events.js';
 
 const patchHomeDir = (nextHomeDir: string) => {
   const original = os.homedir;
@@ -695,6 +695,64 @@ test('Codex history restores user prompts from typed item_completed rows', { con
       assert.equal(users[0]?.clientMessageId, 'client-message-1');
       assert.equal(users[0]?.content, prompt);
       assert.equal(images?.[0]?.path, '/tmp/prompt-picture.png');
+    });
+  } finally {
+    restoreHomeDir();
+    await rm(tempRoot, { recursive: true, force: true });
+  }
+});
+
+test('Codex history hides the spoken-turn cue but keeps the original prompt and identity', { concurrency: false }, async () => {
+  const tempRoot = await mkdtemp(path.join(os.tmpdir(), 'codex-voice-history-'));
+  const workspacePath = path.join(tempRoot, 'workspace');
+  await mkdir(workspacePath, { recursive: true });
+  const restoreHomeDir = patchHomeDir(tempRoot);
+
+  try {
+    const providerSessionId = 'codex-voice-1';
+    const transcriptPath = path.join(tempRoot, '.codex', 'sessions', '2026', '07', '07', `rollout-${providerSessionId}.jsonl`);
+    await mkdir(path.dirname(transcriptPath), { recursive: true });
+    const spoken = 'Spoken prompt that must read back unchanged';
+    const legacySpoken = 'Legacy spoken prompt';
+    const lines = [
+      { type: 'session_meta', payload: { id: providerSessionId, cwd: workspacePath } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'voice-turn-1' } },
+      { type: 'event_msg', payload: {
+        type: 'item_completed',
+        turn_id: 'voice-turn-1',
+        item: {
+          type: 'UserMessage', id: 'item-voice-1', client_id: 'client-voice-1',
+          content: [
+            { type: 'text', text: spoken, text_elements: [] },
+            { type: 'text', text: VOICE_INPUT_CUE, text_elements: [] },
+            { type: 'local_image', path: '/tmp/voice-history.png', detail: null },
+          ],
+        },
+      } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'voice-turn-1' } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'voice-turn-2' } },
+      // Older files carry the joined prompt and cue in a single string.
+      { type: 'event_msg', payload: {
+        type: 'user_message', client_id: 'client-voice-2',
+        message: `${legacySpoken}\n${VOICE_INPUT_CUE}`,
+      } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'voice-turn-2' } },
+    ].map((entry) => JSON.stringify(entry));
+    await writeFile(transcriptPath, `${lines.join('\n')}\n`, 'utf8');
+
+    await withIsolatedDatabase(async () => {
+      sessionsDb.createAppSession('app-voice-1', 'codex', workspacePath);
+      sessionsDb.assignProviderSessionId('app-voice-1', providerSessionId);
+      await new CodexSessionSynchronizer().synchronize();
+
+      const history = await new CodexSessionsProvider().fetchHistory('app-voice-1');
+      const users = history.messages.filter((message) => message.role === 'user');
+      assert.equal(users.length, 2);
+      assert.equal(users[0]?.id, 'client-voice-1');
+      assert.equal(users[0]?.content, spoken);
+      assert.equal((users[0]?.images as Array<{ path?: string }> | undefined)?.[0]?.path, '/tmp/voice-history.png');
+      assert.equal(users[1]?.id, 'client-voice-2');
+      assert.equal(users[1]?.content, legacySpoken);
     });
   } finally {
     restoreHomeDir();

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { normalizeAppServerItem } from '@/modules/providers/list/codex/codex-app-server.events.js';
+import { normalizeAppServerItem, VOICE_INPUT_CUE } from '@/modules/providers/list/codex/codex-app-server.events.js';
 import { appendFilesInputTag } from '@/shared/index.js';
 
 test('native user echoes restore attachment metadata without exposing the transport envelope', () => {
@@ -14,6 +14,25 @@ test('native user echoes restore attachment metadata without exposing the transp
   assert.ok(Array.isArray(message.images));
   assert.equal(message.files?.[0]?.path, '/tmp/input.txt');
   assert.equal(message.images?.[0]?.path, '/tmp/picture.png');
+});
+
+test('spoken user echoes keep the original words, identity and attachments', () => {
+  const [separate] = normalizeAppServerItem({ type: 'userMessage', id: 'item', clientId: 'voice-1',
+    content: [
+      { type: 'text', text: 'Spoken words' },
+      { type: 'text', text: VOICE_INPUT_CUE },
+      { type: 'localImage', path: '/tmp/voice.png' },
+    ] }, 'app', 'turn');
+  assert.equal(separate.id, 'voice-1');
+  assert.equal(separate.content, 'Spoken words');
+  assert.ok(Array.isArray(separate.images));
+  assert.equal(separate.images[0]?.path, '/tmp/voice.png');
+
+  // Codex may hand the two Text parts back newline-joined as one part.
+  const [joined] = normalizeAppServerItem({ type: 'userMessage', id: 'item', clientId: 'voice-2',
+    content: [{ type: 'text', text: `Spoken words\n${VOICE_INPUT_CUE}` }] }, 'app', 'turn');
+  assert.equal(joined.id, 'voice-2');
+  assert.equal(joined.content, 'Spoken words');
 });
 
 test('completed plans and file diffs close their tool cards using stable history identities', () => {
