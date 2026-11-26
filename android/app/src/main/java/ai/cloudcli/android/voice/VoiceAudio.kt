@@ -83,10 +83,11 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
         synchronized(audioLock) {
             if (closed || listening == enabled) return
             listening = enabled
-            val generation = ++captureGeneration
             if (enabled) {
+                val generation = ++captureGeneration
                 inputWorker.execute { capture(generation) }
             } else {
+                // Keep the generation: the capture thread flushes its last utterance after this.
                 stopRecordingLocked()
             }
         }
@@ -216,69 +217,126 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
         var buffered = 0
         var stream: OnlineStream? = null
         var partial = ""
+        var lastWords = ""
         var speechWindows = 0
+        // An utterance follows the VAD segment, including its minSilence tail, not the first quiet window.
+        var inUtterance = false
         try {
             while (isListening(generation)) {
                 val count = input.read(pcm, buffered, pcm.size - buffered, AudioRecord.READ_BLOCKING)
+                // Keep the samples of the read that raced with stopping so the flush can decode them.
+                if (count > 0) buffered += count
                 if (!isListening(generation)) break
                 check(count >= 0) { "Microphone read failed ($count)" }
-                buffered += count
                 if (buffered < pcm.size) continue
                 buffered = 0
                 val frame = FloatArray(pcm.size) { pcm[it] / 32768f }
                 detector.acceptWaveform(frame)
+                var segmentClosed = false
+                while (!detector.empty()) {
+                    detector.front()
+                    detector.pop()
+                    segmentClosed = true
+                }
                 val speechDetected = detector.isSpeechDetected()
+
                 if (stream == null) {
-                    if (!speechDetected) {
-                        if (preRoll.size == PRE_ROLL_WINDOWS) preRoll.removeFirst()
-                        preRoll.addLast(frame)
-                        continue
+                    if (!inUtterance) {
+                        if (!speechDetected) {
+                            if (preRoll.size == PRE_ROLL_WINDOWS) preRoll.removeFirst()
+                            preRoll.addLast(frame)
+                            continue
+                        }
+                        inUtterance = true
+                        synchronized(audioLock) {
+                            if (!isListening(generation)) return
+                            userSpeaking = true
+                            cancelPlaybackLocked()
+                        }
+                        postInput(generation, listener::onSpeechStart)
+                        stream = asr.createStream()
+                        for (previous in preRoll) stream.acceptWaveform(previous, INPUT_RATE)
+                        preRoll.clear()
+                    } else {
+                        // A 60 s limit split one VAD segment: continue the same utterance without resetting VAD.
+                        stream = asr.createStream()
                     }
-                    synchronized(audioLock) {
-                        if (!isListening(generation)) return
-                        userSpeaking = true
-                        cancelPlaybackLocked()
-                    }
-                    postInput(generation, listener::onSpeechStart)
-                    stream = asr.createStream()
-                    for (previous in preRoll) stream.acceptWaveform(previous, INPUT_RATE)
-                    preRoll.clear()
                 }
 
-                stream.acceptWaveform(frame, INPUT_RATE)
-                val reachedLimit = ++speechWindows == MAX_SPEECH_WINDOWS
-                val endpoint = !speechDetected || reachedLimit
-                if (endpoint) {
-                    if (reachedLimit) stream.acceptWaveform(FloatArray(INPUT_RATE / 2), INPUT_RATE)
-                    stream.inputFinished()
-                } else if (!asr.isReady(stream)) {
+                val active = stream ?: continue
+                active.acceptWaveform(frame, INPUT_RATE)
+                val reachedLimit = ++speechWindows >= MAX_SPEECH_WINDOWS
+                if (segmentClosed || reachedLimit) {
+                    finishStream(active, asr)
+                    val text = asr.getResult(active).text.trim()
+                    active.release()
+                    stream = null
+                    postFinal(text.ifEmpty { lastWords })
+                    partial = ""
+                    lastWords = ""
+                    speechWindows = 0
+                    // maxSpeechDuration ends a segment while the person keeps talking: the next
+                    // stream continues the same utterance, so speech-start and barge-in are not repeated.
+                    if (!detector.isSpeechDetected()) {
+                        inUtterance = false
+                        synchronized(audioLock) { userSpeaking = false }
+                    }
                     continue
                 }
-                while (asr.isReady(stream)) asr.decode(stream)
-                val text = asr.getResult(stream).text.trim()
-                if (endpoint) {
-                    stream.release()
-                    stream = null
-                    if (reachedLimit) detector.reset() else detector.clear()
-                    partial = ""
-                    speechWindows = 0
-                    synchronized(audioLock) { userSpeaking = false }
-                    postInput(generation) { listener.onFinalTranscript(text) }
-                } else if (text != partial) {
+                if (!asr.isReady(active)) continue
+                while (asr.isReady(active)) asr.decode(active)
+                val text = asr.getResult(active).text.trim()
+                if (text != partial) {
                     partial = text
+                    if (text.isNotEmpty()) lastWords = text
                     postInput(generation) { listener.onPartialTranscript(text) }
                 }
             }
         } finally {
-            stream?.release()
+            val pendingStream = stream
+            if (pendingStream != null) {
+                // Stopping recording or leaving must not drop the last recognized words.
+                var text = ""
+                runCatching {
+                    if (buffered > 0) {
+                        pendingStream.acceptWaveform(FloatArray(buffered) { pcm[it] / 32768f }, INPUT_RATE)
+                    }
+                    finishStream(pendingStream, asr)
+                    text = asr.getResult(pendingStream).text.trim()
+                }
+                pendingStream.release()
+                synchronized(audioLock) { userSpeaking = false }
+                postFinal(text.ifEmpty { lastWords })
+            }
             detector.reset()
         }
+    }
+
+    /**
+     * Both utterance endings (VAD/max-duration segment and the stop flush) must give Zipformer the
+     * tail silence the sherpa-onnx v2.0.2 streaming example appends before InputFinished
+     * (c-api-examples/streaming-zipformer-c-api.c#L99-L108 uses 0.3 s).
+     */
+    private fun finishStream(stream: OnlineStream, asr: OnlineRecognizer) {
+        stream.acceptWaveform(FloatArray(TAIL_PADDING) { 0f }, INPUT_RATE)
+        stream.inputFinished()
+        while (asr.isReady(stream)) asr.decode(stream)
+    }
+
+    /**
+     * A final belongs to the session that started the capture, so it is delivered after the view
+     * stopped or closed too. Calls are posted from the input thread, preserving capture order.
+     */
+    private fun postFinal(text: String) {
+        if (text.isBlank()) return
+        main.post { listener.onFinalTranscript(text) }
     }
 
     private fun isListening(generation: Long): Boolean = synchronized(audioLock) {
         listening && generation == captureGeneration
     }
 
+    // Live capture state is only valid for the current generation and until close.
     private fun postInput(generation: Long, callback: () -> Unit) {
         main.post {
             if (synchronized(audioLock) { !closed && generation == captureGeneration }) callback()
@@ -479,7 +537,8 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
         const val INPUT_RATE = 16_000
         const val VAD_WINDOW = 512
         const val PRE_ROLL_WINDOWS = 6 // 192 ms at 16 kHz.
-        const val MAX_SPEECH_WINDOWS = 30 * INPUT_RATE / VAD_WINDOW
+        const val TAIL_PADDING = (INPUT_RATE * 0.3f).toInt() // Matches sherpa-onnx's 0.3 s example.
+        const val MAX_SPEECH_WINDOWS = 60 * INPUT_RATE / VAD_WINDOW // Matches VAD maxSpeechDuration.
         const val SYNTHESIS_CHARS = 400
         const val ZIPFORMER = "voice/zipformer"
         const val KOKORO = "voice/kokoro"

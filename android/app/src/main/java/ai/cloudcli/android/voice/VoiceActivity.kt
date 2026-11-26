@@ -6,31 +6,24 @@ import ai.cloudcli.android.R
 import ai.cloudcli.android.voice.VoiceAudio.Playback
 import android.Manifest
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.content.pm.PackageManager
-import android.graphics.Typeface
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.text.Editable
-import android.text.SpannableStringBuilder
-import android.text.Spanned
-import android.text.TextWatcher
-import android.text.style.StyleSpan
 import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.view.WindowInsetsController
-import android.view.inputmethod.InputMethodManager
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 
-/** Foreground microphone, playback and transcript for one verified Codex app-server session. */
-class VoiceActivity : Activity(), VoiceAudio.Listener {
+/** Foreground microphone, playback and the local voice queue for one verified Codex session. */
+class VoiceActivity : Activity() {
     private enum class Capture { OFF, PREPARING, LISTENING, HEARING }
     private enum class MicAccess { FIRST_REQUEST, REQUEST_AGAIN, SETTINGS, GRANTED }
 
@@ -47,13 +40,14 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
     private var playbackError: String? = null
     private var micAccess = MicAccess.FIRST_REQUEST
     private var requestingMic = false
-    private var autoSubmitUtterance = false
     private var transcriptOpen = false
-    private var imeVisible = false
     private var selectorLoading = false
     private var selectorError = false
     private var selectorMessage = R.string.voice_picker_choose
     private var nextOffset: Int? = 0
+    private var displayedPending: PendingView? = null
+    private var displayedSent = emptyList<Pair<String, String>>()
+    private var displayedStatus = 0
 
     private lateinit var root: View
     private lateinit var title: TextView
@@ -64,26 +58,20 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
     private lateinit var hint: TextView
     private lateinit var web: Button
     private lateinit var recovery: Button
-    private lateinit var recordRecovery: Button
     private lateinit var stopReply: Button
     private lateinit var records: ScrollView
-    private lateinit var recordStatus: TextView
-    private lateinit var history: TextView
-    private lateinit var note: TextView
-    private lateinit var composer: View
-    private lateinit var draft: EditText
     private lateinit var partial: TextView
-    private lateinit var pending: TextView
-    private lateinit var send: Button
-    private lateinit var enqueue: Button
+    private lateinit var outboxStatus: TextView
+    private lateinit var outboxRows: LinearLayout
+    private lateinit var outboxEmpty: TextView
+    private lateinit var sentRows: LinearLayout
+    private lateinit var sentEmpty: TextView
     private lateinit var picker: View
     private lateinit var pickerStatus: TextView
     private lateinit var choices: LinearLayout
     private lateinit var more: Button
     private lateinit var controls: View
     private lateinit var mic: Button
-    private var displayedRows = emptyList<VoiceRow>()
-    private var displayedStatus = 0
 
     private var renderScheduled = false
     private val renderQueued = Runnable {
@@ -99,7 +87,6 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         setContentView(R.layout.activity_voice)
         bindPage()
         applyInsets()
-        draft.setText(savedInstanceState?.getString("draft").orEmpty())
 
         val origin = AppRuntime.prefs.siteOrigin
         if (origin == null || !AppRuntime.prefs.signedIn()) {
@@ -125,20 +112,19 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         val current = session
-        val unresolved = current?.unconfirmed
-        outState.putString("draft", listOfNotNull(current?.pendingText?.takeIf { unresolved == null }, draft.text.toString())
-            .filter { it.isNotBlank() }.joinToString("\n"))
         outState.putString("session", current?.choice?.id)
         outState.putString("title", sessionTitle)
         outState.putBoolean("muted", muted)
         outState.putBoolean("transcriptOpen", transcriptOpen)
-        if (unresolved != null) outState.putBundle("pending", Bundle().apply {
-            putString("text", unresolved.text)
-            putString("client", unresolved.clientId)
-            putString("turn", unresolved.expectedTurnId)
-            putString("queue", unresolved.queueId)
-            putString("steer", unresolved.steerId)
-        })
+        current?.unconfirmed?.let { unresolved ->
+            outState.putBundle("pending", Bundle().apply {
+                putString("text", unresolved.text)
+                putString("client", unresolved.clientId)
+                putString("turn", unresolved.expectedTurnId)
+                putString("queue", unresolved.queueId)
+                putString("steer", unresolved.steerId)
+            })
+        }
     }
 
     override fun onStart() {
@@ -177,9 +163,20 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         val client = api ?: return
         intent.removeExtra(MainActivity.EXTRA_SESSION_ID)
         sessionTitle = choice.title
+        stopAudio()
+        audio?.close()
+        audio = null
+        capture = Capture.OFF
+        captureError = null
+        playbackError = null
+        val outbox = client.userId?.let {
+            VoiceOutbox(
+                VoiceOutbox.destination(client.origin, it, choice.id),
+                OutboxPrefs(applicationContext),
+            )
+        }
         val current = VoiceSession(client, choice, resources, {
-            val connection = session?.connection
-            if (connection != VoiceConnection.CONNECTED) updateCapture(connection)
+            updateCapture(session)
             scheduleRender()
         }, {
             session?.close()
@@ -188,11 +185,14 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
             transcriptOpen = false
             selectorMessage = R.string.voice_picker_unsupported
             if (choices.childCount == 0 && nextOffset != null && !selectorLoading) loadRecent() else render()
+        }, { _ ->
+            // Existing handwritten drafts are never touched or sent from the call UI.
         }, { text ->
-            draft.text.insert(0, if (draft.length() == 0) text else "$text\n")
-        }, { text ->
-            if (resumed && !isFinishing) audio().speak(text)
-        }, { audio?.stopPlayback() }, restored)
+            val target = session
+            if (target != null && resumed && !isFinishing) audio(target).speak(text)
+        }, { audio?.stopPlayback() }, outbox, { result ->
+            MainActivity.readVoicePermissionMode(client.origin, choice.id, result)
+        }, restored)
         session = current
         if (choice.title == null) {
             client.title(choice.id) { result ->
@@ -204,7 +204,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         }
         if (started) current.start()
         render()
-        if (transcriptOpen) showLatest()
+        if (transcriptOpen) showQueue()
     }
 
     private fun loadRecent() {
@@ -253,28 +253,12 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
             return
         }
         transcriptOpen = !transcriptOpen
-        if (!transcriptOpen && draft.hasFocus()) {
-            getSystemService(InputMethodManager::class.java).hideSoftInputFromWindow(draft.windowToken, 0)
-            draft.clearFocus()
-        }
         render()
-        if (transcriptOpen) showLatest()
+        if (transcriptOpen) showQueue()
     }
 
-    private fun submit(toQueue: Boolean, automatic: Boolean = false) {
-        val current = session ?: return
-        val client = api ?: return
-        val raw = draft.text.toString()
-        val text = raw.trim()
-        if (text.isEmpty()) return
-        draft.text.clear()
-        val submitted = current.submit(text, toQueue, automatic) { result ->
-            MainActivity.readVoicePermissionMode(client.origin, current.choice.id, result)
-        }
-        if (!submitted) draft.setText(raw)
-    }
-
-    private fun audio(): VoiceAudio = audio ?: VoiceAudio(this, this).also { audio = it }
+    private fun audio(target: VoiceSession): VoiceAudio =
+        audio ?: VoiceAudio(this, AudioListener(target)).also { audio = it }
 
     private fun silence() {
         session?.silence()
@@ -290,7 +274,6 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
     private fun stopCapture() {
         if (capture == Capture.OFF) return
         capture = Capture.OFF
-        autoSubmitUtterance = false
         partial.showText(null)
         audio?.setListening(false)
     }
@@ -321,22 +304,18 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         render()
     }
 
-    private fun updateCapture(connection: VoiceConnection?) {
-        if (resumed && !isFinishing && !muted && !requestingMic) {
-            if (connection == VoiceConnection.CONNECTED && micAccess == MicAccess.FIRST_REQUEST) requestMic()
-            if (micAccess == MicAccess.GRANTED && captureError == null) {
-                if (connection == VoiceConnection.CONNECTED) {
-                    if (capture == Capture.OFF) {
-                        capture = Capture.PREPARING
-                        audio().setListening(true)
-                    }
-                    return
+    private fun updateCapture(current: VoiceSession?) {
+        if (current != null && resumed && !isFinishing && !muted && !requestingMic) {
+            val usable = current.connection != VoiceConnection.SIGN_IN &&
+                current.connection != VoiceConnection.UNSUPPORTED
+            if (usable && micAccess == MicAccess.FIRST_REQUEST) requestMic()
+            if (usable && micAccess == MicAccess.GRANTED && captureError == null) {
+                // Recognition is local; keep it running through reconnects and queue the text.
+                if (capture == Capture.OFF) {
+                    capture = Capture.PREPARING
+                    audio(current).setListening(true)
                 }
-                if (isRecording && (connection == VoiceConnection.RECONNECTING || connection == VoiceConnection.CONNECTING)) {
-                    // Keep the current utterance as a draft through reconnection.
-                    autoSubmitUtterance = false
-                    return
-                }
+                return
             }
         }
         stopCapture()
@@ -350,59 +329,6 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         render()
     }
 
-    override fun onCaptureReady() {
-        if (capture != Capture.PREPARING) return
-        capture = Capture.LISTENING
-        scheduleRender()
-    }
-
-    override fun onSpeechStart() {
-        if (capture != Capture.LISTENING) return
-        capture = Capture.HEARING
-        val current = session
-        current?.bargeIn()
-        autoSubmitUtterance = current?.connection == VoiceConnection.CONNECTED &&
-            !draft.hasFocus() && draft.length() == 0 && current.pendingText == null
-        scheduleRender()
-    }
-
-    override fun onPartialTranscript(text: String) {
-        if (capture != Capture.HEARING) return
-        partial.showText(text.takeIf { it.isNotBlank() }?.let { getString(R.string.voice_recognized, it) })
-    }
-
-    override fun onFinalTranscript(text: String) {
-        if (capture != Capture.HEARING) return
-        capture = Capture.LISTENING
-        val sendNow = autoSubmitUtterance && !draft.hasFocus() && draft.length() == 0 && session?.canAutoSubmit == true
-        autoSubmitUtterance = false
-        partial.showText(null)
-        if (text.isNotBlank()) {
-            if (draft.length() != 0) draft.append("\n")
-            draft.append(text)
-            if (sendNow) submit(toQueue = false, automatic = true)
-        }
-        scheduleRender()
-    }
-
-    override fun onCaptureError(message: String) {
-        if (capture == Capture.OFF) return
-        captureError = message
-        stopCapture()
-        scheduleRender()
-    }
-
-    override fun onPlaybackChanged() {
-        if (audio?.playbackState == Playback.PLAYING) playbackError = null
-        scheduleRender()
-    }
-
-    override fun onPlaybackError(message: String) {
-        if (!resumed) return
-        playbackError = message
-        scheduleRender()
-    }
-
     private fun scheduleRender() {
         if (renderScheduled) return
         renderScheduled = true
@@ -411,7 +337,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
 
     private fun render() {
         val current = session
-        updateCapture(current?.connection)
+        updateCapture(current)
         val sessionLabel = sessionTitle ?: getString(R.string.action_voice)
         if (title.text != sessionLabel) title.text = sessionLabel
         val actionLabel = getString(when {
@@ -423,7 +349,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         picker.visibility = if (current == null) View.VISIBLE else View.GONE
         call.visibility = if (current != null && !transcriptOpen) View.VISIBLE else View.GONE
         records.visibility = if (current != null && transcriptOpen) View.VISIBLE else View.GONE
-        controls.visibility = if (current != null && !imeVisible) View.VISIBLE else View.GONE
+        controls.visibility = if (current != null) View.VISIBLE else View.GONE
         if (current == null) {
             wave.setMotion(false)
             pickerStatus.setText(if (selectorLoading) R.string.voice_picker_loading else selectorMessage)
@@ -458,7 +384,7 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
                 captureError != null -> R.string.voice_status_mic_error
                 capture == Capture.PREPARING -> R.string.voice_status_preparing
                 current.queueUnavailable -> R.string.voice_status_queue_error
-                current.generating || current.pendingText != null || playback == Playback.PREPARING -> R.string.voice_status_processing
+                current.generating || playback == Playback.PREPARING -> R.string.voice_status_processing
                 muted -> R.string.voice_status_muted
                 recording -> R.string.voice_status_listening
                 else -> R.string.voice_status_preparing
@@ -467,19 +393,18 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         if (displayedStatus != statusRes) {
             displayedStatus = statusRes
             status.setText(statusRes)
-            recordStatus.setText(statusRes)
         }
         val queued = current.queuedCount
         val hintText = when {
-            draft.text.isNotBlank() -> current.draftNotice ?: getString(R.string.voice_hint_draft)
             statusRes == R.string.voice_status_mic_permission -> getString(
                 if (micAccess == MicAccess.SETTINGS) R.string.voice_hint_mic_settings else R.string.voice_hint_mic_permission,
             )
             playbackError != null && playback == Playback.IDLE -> getString(R.string.voice_hint_playback_error)
+            statusRes == R.string.voice_status_listening && current.outboxWaiting ->
+                current.outboxNote ?: getString(R.string.voice_outbox_pending)
             statusRes == R.string.voice_status_listening && queued > 0 ->
                 resources.getQuantityString(R.plurals.voice_queued_count, queued, queued)
-            statusRes == R.string.voice_status_listening ->
-                getString(if (current.canAutoSubmit) R.string.voice_hint_speak else R.string.voice_hint_review)
+            statusRes == R.string.voice_status_listening -> getString(R.string.voice_hint_speak)
             statusRes == R.string.voice_status_speaking && recording -> getString(R.string.voice_hint_interrupt)
             else -> null
         }
@@ -490,10 +415,8 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
             current.connection == VoiceConnection.RECONNECTING -> R.string.voice_reconnect
             else -> null
         }
-        for (button in listOf(recovery, recordRecovery)) {
-            button.visibility = if (recoveryAction == null) View.GONE else View.VISIBLE
-            if (recoveryAction != null) button.setText(recoveryAction)
-        }
+        recovery.visibility = if (recoveryAction == null) View.GONE else View.VISIBLE
+        if (recoveryAction != null) recovery.setText(recoveryAction)
         val webRequired = current.connection == VoiceConnection.SIGN_IN || current.connection == VoiceConnection.UNSUPPORTED
         web.visibility = if (webReason != null || current.unknown || webRequired) {
             View.VISIBLE
@@ -520,48 +443,113 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
     }
 
     private fun renderTranscript(current: VoiceSession) {
-        val follow = !draft.hasFocus() && !records.canScrollVertically(1)
-        val rows = current.rows
-        if (rows != displayedRows) {
-            displayedRows = rows
-            history.text = if (rows.isEmpty()) getString(R.string.voice_transcript_empty) else SpannableStringBuilder().apply {
-                rows.forEachIndexed { index, row ->
-                    if (index != 0) append("\n\n")
-                    val start = length
-                    append(getString(when (row.role) {
-                        "user" -> R.string.voice_transcript_you
-                        "tool" -> R.string.voice_transcript_tool_output
-                        else -> R.string.voice_transcript_codex
-                    }))
-                    setSpan(StyleSpan(Typeface.BOLD), start, length, Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
-                    append('\n').append(row.content)
-                }
-            }
-            if (follow) showLatest()
-        }
-
-        val queued = current.queuedCount
-        val hasDraft = draft.text.isNotBlank()
-        note.showText(listOfNotNull(
-            current.draftNotice?.takeIf { hasDraft } ?: current.note,
-            captureError?.takeIf { it.isNotBlank() },
-            playbackError?.takeIf { it.isNotBlank() },
-            if (queued > 0) resources.getQuantityString(R.plurals.voice_queued_count, queued, queued) else null,
-        ).joinToString("\n"))
-        composer.visibility = if (current.opened) View.VISIBLE else View.GONE
-        pending.showText(current.pendingText?.let { getString(R.string.voice_pending, it) })
-        send.isEnabled = current.canSend && hasDraft
-        send.setText(if (current.route == SendRoute.STEER) R.string.voice_steer else R.string.voice_send)
-        enqueue.isEnabled = current.canQueue && hasDraft
+        renderPending(current)
+        renderSent(current)
     }
+
+    private fun renderPending(current: VoiceSession) {
+        val batch = current.outboxBatch
+        val entries = current.outboxEntries.filterNot { entry -> batch?.entryIds?.contains(entry.id) == true }
+        val view = PendingView(batch, entries, current.outboxSending)
+        if (view != displayedPending) {
+            displayedPending = view
+            outboxRows.removeAllViews()
+            if (batch != null) outboxRows.addView(batchRow(batch, current.outboxSending))
+            entries.forEachIndexed { index, entry -> outboxRows.addView(entryRow(index, entry)) }
+        }
+        outboxEmpty.visibility = if (batch == null && entries.isEmpty()) View.VISIBLE else View.GONE
+        outboxStatus.showText(current.outboxNote)
+    }
+
+    private fun entryRow(index: Int, entry: OutboxEntry): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        row.addView(TextView(this).apply {
+            text = getString(R.string.voice_outbox_entry, index + 1, entry.text)
+            setTextColor(getColor(R.color.voice_ink))
+            textSize = 15f
+            setTextIsSelectable(true)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(Button(this).apply {
+            text = getString(R.string.voice_outbox_delete)
+            setOnClickListener { session?.dropOutbox(entry.id) }
+        })
+        return row
+    }
+
+    private fun batchRow(batch: OutboxBatch, sending: Boolean): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            setPadding(0, dp(8), 0, 0)
+        }
+        row.addView(TextView(this).apply {
+            text = listOf(
+                getString(R.string.voice_outbox_batch), batch.content,
+            ).joinToString("\n")
+            setTextColor(getColor(R.color.voice_ink))
+            textSize = 15f
+            setTextIsSelectable(true)
+        }, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        row.addView(Button(this).apply {
+            text = getString(R.string.voice_outbox_delete)
+            isEnabled = !sending
+            setOnClickListener { confirmDropBatch(batch) }
+        })
+        return row
+    }
+
+    private fun confirmDropBatch(batch: OutboxBatch) {
+        if (session?.outboxSending == true) return
+        if (batch.entryIds.size <= 1) {
+            session?.dropOutboxBatch(batch.id)
+            return
+        }
+        AlertDialog.Builder(this)
+            .setMessage(getString(R.string.voice_outbox_batch_confirm, batch.entryIds.size))
+            .setNegativeButton(android.R.string.cancel, null)
+            .setPositiveButton(R.string.voice_outbox_delete) { _, _ ->
+                if (session?.outboxSending != true) session?.dropOutboxBatch(batch.id)
+            }
+            .show()
+    }
+
+    private fun renderSent(current: VoiceSession) {
+        val items = current.outboxSent.map { it.id to it.text }
+        if (items != displayedSent) {
+            displayedSent = items
+            sentRows.removeAllViews()
+            items.forEach { (_, text) ->
+                sentRows.addView(TextView(this).apply {
+                    this.text = text
+                    setTextColor(getColor(R.color.voice_ink))
+                    textSize = 15f
+                    setTextIsSelectable(true)
+                    setPadding(0, dp(8), 0, 0)
+                })
+            }
+        }
+        sentEmpty.visibility = if (items.isEmpty()) View.VISIBLE else View.GONE
+    }
+
+    private data class PendingView(
+        val batch: OutboxBatch?,
+        val entries: List<OutboxEntry>,
+        val sending: Boolean,
+    )
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     private fun TextView.showText(message: String?) {
         if (text != message.orEmpty()) text = message.orEmpty()
         visibility = if (message.isNullOrBlank()) View.GONE else View.VISIBLE
     }
 
-    private fun showLatest() {
-        records.post { records.scrollTo(0, records.getChildAt(0).height) }
+    private fun showQueue() {
+        records.post { records.fullScroll(View.FOCUS_UP) }
     }
 
     private fun bindPage() {
@@ -572,20 +560,16 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         wave = findViewById(R.id.voice_wave)
         status = findViewById(R.id.voice_status)
         hint = findViewById(R.id.voice_hint)
+        partial = findViewById(R.id.voice_partial)
         web = findViewById<Button>(R.id.voice_web).apply { setOnClickListener { openWeb() } }
         recovery = findViewById<Button>(R.id.voice_recovery).apply { setOnClickListener { session?.check() } }
-        recordRecovery = findViewById<Button>(R.id.voice_records_recovery).apply { setOnClickListener { session?.check() } }
         stopReply = findViewById<Button>(R.id.voice_stop_reply).apply { setOnClickListener { silence() } }
         records = findViewById(R.id.voice_records)
-        recordStatus = findViewById(R.id.voice_records_status)
-        history = findViewById(R.id.voice_history)
-        note = findViewById(R.id.voice_note)
-        composer = findViewById(R.id.voice_composer)
-        draft = findViewById(R.id.voice_draft)
-        partial = findViewById(R.id.voice_partial)
-        pending = findViewById(R.id.voice_pending)
-        send = findViewById<Button>(R.id.voice_send).apply { setOnClickListener { submit(toQueue = false) } }
-        enqueue = findViewById<Button>(R.id.voice_enqueue).apply { setOnClickListener { submit(toQueue = true) } }
+        outboxStatus = findViewById(R.id.voice_outbox_status)
+        outboxRows = findViewById(R.id.voice_outbox_rows)
+        outboxEmpty = findViewById(R.id.voice_outbox_empty)
+        sentRows = findViewById(R.id.voice_sent_rows)
+        sentEmpty = findViewById(R.id.voice_sent_empty)
         picker = findViewById(R.id.voice_picker)
         pickerStatus = findViewById(R.id.voice_picker_status)
         choices = findViewById(R.id.voice_choices)
@@ -593,16 +577,68 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
         controls = findViewById(R.id.voice_controls)
         mic = findViewById<Button>(R.id.voice_mic).apply { setOnClickListener { toggleMic() } }
         findViewById<Button>(R.id.voice_end).setOnClickListener { endCall() }
-        findViewById<Button>(R.id.voice_records_web).setOnClickListener { openWeb() }
         findViewById<Button>(R.id.voice_picker_web).setOnClickListener { openWeb() }
-        draft.addTextChangedListener(object : TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) = Unit
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                autoSubmitUtterance = false
+    }
+
+    /**
+     * Final speech is always written to the session that owned the audio, even after the view is
+     * gone. Only UI state for that same live session may change here.
+     */
+    private inner class AudioListener(private val target: VoiceSession) : VoiceAudio.Listener {
+        override fun onCaptureReady() = ui {
+            if (capture == Capture.PREPARING) {
+                capture = Capture.LISTENING
                 scheduleRender()
             }
-            override fun afterTextChanged(s: Editable?) = Unit
-        })
+        }
+
+        override fun onSpeechStart() = ui {
+            if (capture == Capture.LISTENING) {
+                capture = Capture.HEARING
+                target.bargeIn()
+                scheduleRender()
+            }
+        }
+
+        override fun onPartialTranscript(text: String) = ui {
+            if (capture == Capture.HEARING) {
+                partial.showText(text.takeIf { it.isNotBlank() }?.let { getString(R.string.voice_recognized, it) })
+            }
+        }
+
+        override fun onFinalTranscript(text: String) {
+            if (text.isNotBlank()) target.enqueueVoice(text)
+            ui {
+                if (capture == Capture.HEARING) capture = Capture.LISTENING
+                partial.showText(null)
+                scheduleRender()
+            }
+        }
+
+        override fun onCaptureError(message: String) = ui {
+            if (capture != Capture.OFF) {
+                captureError = message
+                stopCapture()
+                scheduleRender()
+            }
+        }
+
+        override fun onPlaybackChanged() = ui {
+            if (audio?.playbackState == Playback.PLAYING) playbackError = null
+            scheduleRender()
+        }
+
+        override fun onPlaybackError(message: String) = ui {
+            if (resumed) {
+                playbackError = message
+                scheduleRender()
+            }
+        }
+
+        private fun ui(block: () -> Unit) {
+            if (target !== session || isFinishing || isDestroyed) return
+            block()
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -621,10 +657,8 @@ class VoiceActivity : Activity(), VoiceAudio.Listener {
             val right = root.paddingRight
             val bottom = root.paddingBottom
             root.setOnApplyWindowInsetsListener { view, insets ->
-                imeVisible = insets.isVisible(WindowInsets.Type.ime())
-                val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout() or WindowInsets.Type.ime())
+                val safe = insets.getInsets(WindowInsets.Type.systemBars() or WindowInsets.Type.displayCutout())
                 view.setPadding(safe.left + left, safe.top + top, safe.right + right, safe.bottom + bottom)
-                controls.visibility = if (session != null && !imeVisible) View.VISIBLE else View.GONE
                 insets
             }
             root.requestApplyInsets()

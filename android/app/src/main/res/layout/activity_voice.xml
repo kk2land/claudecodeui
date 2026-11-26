@@ -79,6 +79,16 @@
                     android:textColor="@color/voice_secondary"
                     android:textSize="16sp" />
 
+                <TextView
+                    android:id="@+id/voice_partial"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="8dp"
+                    android:gravity="center"
+                    android:textColor="@color/voice_secondary"
+                    android:textSize="15sp"
+                    android:visibility="gone" />
+
                 <Button
                     android:id="@+id/voice_recovery"
                     style="@style/Widget.CloudCLI.Voice.Button"
@@ -114,113 +124,60 @@
                 android:paddingVertical="12dp">
 
                 <TextView
-                    android:id="@+id/voice_records_status"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginBottom="16dp"
-                    android:accessibilityLiveRegion="polite"
-                    android:textColor="@color/voice_secondary"
-                    android:textSize="14sp" />
-
-                <TextView
-                    android:id="@+id/voice_history"
-                    android:layout_width="match_parent"
-                    android:layout_height="wrap_content"
-                    android:lineSpacingExtra="4dp"
-                    android:saveEnabled="false"
-                    android:text="@string/voice_transcript_empty"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="@string/voice_outbox_title"
                     android:textColor="@color/voice_ink"
-                    android:textIsSelectable="true"
                     android:textSize="16sp" />
 
                 <TextView
-                    android:id="@+id/voice_note"
+                    android:id="@+id/voice_outbox_status"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="12dp"
+                    android:layout_marginTop="4dp"
+                    android:layout_marginBottom="8dp"
                     android:accessibilityLiveRegion="polite"
                     android:textColor="@color/voice_secondary"
                     android:textSize="14sp" />
 
                 <LinearLayout
-                    android:id="@+id/voice_composer"
+                    android:id="@+id/voice_outbox_rows"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_marginTop="16dp"
-                    android:orientation="vertical">
+                    android:orientation="vertical" />
 
-                    <TextView
-                        android:id="@+id/voice_pending"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="8dp"
-                        android:saveEnabled="false"
-                        android:textColor="@color/voice_ink"
-                        android:textIsSelectable="true"
-                        android:textSize="15sp" />
-
-                    <TextView
-                        android:id="@+id/voice_partial"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:layout_marginBottom="8dp"
-                        android:textColor="@color/voice_secondary"
-                        android:textSize="15sp"
-                        android:visibility="gone" />
-
-                    <EditText
-                        android:id="@+id/voice_draft"
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:gravity="start|top"
-                        android:hint="@string/voice_draft_hint"
-                        android:importantForAutofill="no"
-                        android:inputType="textCapSentences|textMultiLine"
-                        android:maxLines="4"
-                        android:minLines="2"
-                        android:saveEnabled="false"
-                        android:textColor="@color/voice_ink"
-                        android:textColorHint="@color/voice_secondary"
-                        android:textSize="16sp" />
-
-                    <LinearLayout
-                        android:layout_width="match_parent"
-                        android:layout_height="wrap_content"
-                        android:orientation="horizontal">
-
-                        <Button
-                            android:id="@+id/voice_send"
-                            style="@style/Widget.CloudCLI.Voice.Button"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="@string/voice_send" />
-
-                        <Button
-                            android:id="@+id/voice_enqueue"
-                            style="@style/Widget.CloudCLI.Voice.Button"
-                            android:layout_width="0dp"
-                            android:layout_height="wrap_content"
-                            android:layout_weight="1"
-                            android:text="@string/voice_enqueue" />
-                    </LinearLayout>
-                </LinearLayout>
-
-                <Button
-                    android:id="@+id/voice_records_recovery"
-                    style="@style/Widget.CloudCLI.Voice.Button"
-                    android:layout_width="wrap_content"
+                <TextView
+                    android:id="@+id/voice_outbox_empty"
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_gravity="center_horizontal"
-                    android:visibility="gone" />
+                    android:text="@string/voice_outbox_empty"
+                    android:textColor="@color/voice_secondary"
+                    android:textSize="14sp" />
 
-                <Button
-                    android:id="@+id/voice_records_web"
-                    style="@style/Widget.CloudCLI.Voice.Button"
-                    android:layout_width="wrap_content"
+                <TextView
+                    android:layout_width="match_parent"
                     android:layout_height="wrap_content"
-                    android:layout_gravity="center_horizontal"
-                    android:text="@string/voice_open_web" />
+                    android:layout_marginTop="20dp"
+                    android:fontFamily="sans-serif-medium"
+                    android:text="@string/voice_sent_title"
+                    android:textColor="@color/voice_ink"
+                    android:textSize="16sp" />
+
+                <LinearLayout
+                    android:id="@+id/voice_sent_rows"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginTop="4dp"
+                    android:orientation="vertical" />
+
+                <TextView
+                    android:id="@+id/voice_sent_empty"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:text="@string/voice_sent_empty"
+                    android:textColor="@color/voice_secondary"
+                    android:textSize="14sp" />
             </LinearLayout>
         </ScrollView>
 

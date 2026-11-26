@@ -24,6 +24,8 @@ internal class VoiceSession(
     private val returnDraft: (String) -> Unit,
     private val play: (String) -> Unit,
     private val stopPlayback: () -> Unit,
+    private val outbox: VoiceOutbox? = null,
+    private val requestPermissions: (((String?) -> Unit) -> Unit)? = null,
     restored: VoiceSubmission? = null,
 ) {
     private enum class Stage { PREPARING, SENDING, APPENDING, STEERING, UNKNOWN }
@@ -53,6 +55,29 @@ internal class VoiceSession(
     private var queueMessage: String? = null
     private var deliveryMessage: String? = restored?.let { strings.getString(R.string.voice_delivery_checking) }
     private var draftIssue: String? = null
+    private var outboxStatus: String? = null
+    private var outboxInFlight: OutboxBatch? = null
+    private var outboxRetryAt = 0L
+    private val outboxRetry = Runnable {
+        outboxRetryAt = 0L
+        if (closed || !active || !connected) return@Runnable
+        val outbox = outbox ?: return@Runnable
+        if (outbox.count == 0) return@Runnable
+        // A held or blocked snapshot must be re-read, not replayed from the cached state.
+        refreshOutboxSnapshot()
+    }
+    private val outboxChanged: () -> Unit = {
+        main.post {
+            if (!closed) {
+                changed()
+                drainOutbox()
+            }
+        }
+    }
+
+    init {
+        outbox?.observe(outboxChanged)
+    }
 
     var connection = VoiceConnection.CONNECTING
         private set
@@ -66,6 +91,14 @@ internal class VoiceSession(
     val generating: Boolean get() = processing || state?.phase == "starting" ||
         state?.phase == "running" || state?.goalActive == true
     val queuedCount: Int get() = queue?.entries?.size ?: 0
+    val outboxEntries: List<OutboxEntry> get() = outbox?.entries.orEmpty()
+    val outboxSent: List<OutboxEntry> get() = outbox?.sent.orEmpty()
+    val outboxBatch: OutboxBatch? get() = outboxInFlight ?: outbox?.batch
+    val outboxSending: Boolean get() = outboxInFlight != null
+    val outboxCount: Int get() = outbox?.count ?: 0
+    val outboxRetrying: Boolean get() = outbox?.retrying == true
+    val outboxNote: String? get() = outboxStatus
+    val outboxWaiting: Boolean get() = outbox?.count != 0
     val note: String? get() = deliveryMessage ?: historyMessage ?: queueMessage ?: state?.error
     // This labels Send while the queue snapshot may be out of date.
     val route: SendRoute? get() = sendRoute(state, processing, queueEmpty = true, enqueue = false)
@@ -115,6 +148,7 @@ internal class VoiceSession(
 
     fun close() {
         closed = true
+        outbox?.unobserve(outboxChanged)
         pause()
     }
 
@@ -133,6 +167,26 @@ internal class VoiceSession(
         val ws = socket
         if (ws == null) connect()
         else if (connected && stateRequest == null && pending?.stage != Stage.PREPARING) subscribe(ws)
+        drainOutbox()
+    }
+
+    /** An ordinary delete removes one entry; a taken request is never cancelled silently. */
+    fun dropOutbox(entryId: String) {
+        val queue = outbox ?: return
+        if (!queue.drop(entryId)) return
+        outboxStatus = strings.getString(R.string.voice_outbox_removed)
+        changed()
+        drainOutbox()
+    }
+
+    /** Explicit whole-batch delete is only possible while no request is in flight. */
+    fun dropOutboxBatch(batchId: String) {
+        val queue = outbox ?: return
+        if (outboxInFlight != null) return
+        if (!queue.dropBatch(batchId)) return
+        outboxStatus = strings.getString(R.string.voice_outbox_removed)
+        changed()
+        drainOutbox()
     }
 
     private fun connect() {
@@ -240,6 +294,7 @@ internal class VoiceSession(
             reconnect.onRegistered()
             main.removeCallbacks(handshakeDeadline)
             refresh()
+            drainOutbox()
             changed()
             return
         }
@@ -285,7 +340,11 @@ internal class VoiceSession(
             "control_result" -> steerResult(frame)
             "protocol_error" -> protocolError(frame)
         }
-        if (connected) changed()
+        if (connected) {
+            changed()
+            // A real frame may have lifted a hold without producing a new turn or completion.
+            drainOutbox()
+        }
     }
 
     private fun unavailable() {
@@ -300,7 +359,10 @@ internal class VoiceSession(
             refreshQueue()
         }
         val ticket = speechTicket
-        if (ticket?.matchesEcho(row) == true) {
+        val queuedEcho = row.role == "user" && row.clientId?.let { id ->
+            outbox?.sent?.any { it.id == id } == true || outbox?.batch?.id == id
+        } == true
+        if (ticket?.matchesEcho(row) == true || queuedEcho) {
             if (sequenced && !speech.open && row.executionId != null) speech.open(row.executionId, row.turnId)
         } else if (speech.open && change.previous == null) {
             silence()
@@ -322,9 +384,13 @@ internal class VoiceSession(
                 }
                 val ticket = speechTicket
                 val lastUser = rows.lastOrNull { it.role == "user" }
+                val matched = lastUser != null && (ticket?.matchesEcho(lastUser) == true ||
+                    lastUser.clientId?.let { id ->
+                        outbox?.sent?.any { it.id == id } == true || outbox?.batch?.id == id
+                    } == true)
                 val echoTurn = lastUser?.turnId ?: ticket?.expectedTurnId?.takeIf { lastUser?.clientId == ticket.steerId && ticket.steerId != null }
                 val run = sequence.executionId
-                if (!speech.open && ticket != null && lastUser != null && ticket.matchesEcho(lastUser) &&
+                if (!speech.open && lastUser != null && matched &&
                     echoTurn != null && echoTurn == state?.turnId && state?.phase == "running" && run != null) {
                     speech.open(run, echoTurn)
                 }
@@ -351,10 +417,23 @@ internal class VoiceSession(
             if (unknown) deliveryMessage = strings.getString(R.string.voice_delivery_verify_web)
             queueMessage = result.exceptionOrNull()?.let { strings.getString(R.string.voice_queue_unavailable, it.message.orEmpty()) }
             changed()
+            drainOutbox()
         }
     }
 
+    /** Captured speech enters the local queue only; the queue decides when the server may see it. */
+    fun enqueueVoice(text: String): Boolean {
+        val outbox = outbox ?: return false
+        if (outbox.enqueue(text) == null) return false
+        outboxStatus = strings.getString(R.string.voice_outbox_pending)
+        if (closed) return true // The final utterance still belongs to this destination; persist it.
+        changed()
+        drainOutbox()
+        return true
+    }
+
     fun submit(text: String, enqueue: Boolean, automatic: Boolean, permissions: ((String?) -> Unit) -> Unit): Boolean {
+        if (outbox?.count != 0) return false
         val allowed = when {
             enqueue -> canQueue
             automatic -> canAutoSubmit
@@ -550,6 +629,7 @@ internal class VoiceSession(
             returnDraft(staged.message.text)
         }
         if (!closed) changed()
+        drainOutbox()
     }
 
     private fun uncertain(message: String, refresh: Boolean = false) {
@@ -558,5 +638,156 @@ internal class VoiceSession(
         deliveryMessage = message
         if (refresh) refresh()
         if (!closed) changed()
+    }
+
+    /**
+     * One persisted batch at a time. The local head is only replaced after confirmation (200)
+     * or an explicit rejection; unknown receipts keep the same id and content for a verbatim retry.
+     * The persisted 5 s window gates every caller, including enqueue, check and refresh.
+     */
+    private fun drainOutbox() {
+        val outbox = outbox ?: return
+        if (closed || !active || !connected || pending != null || waitingForWeb || outboxInFlight != null) return
+        val native = state ?: return
+        if (native.modelRequired == true || native.queueHeld == true) {
+            scheduleOutboxRetry()
+            return
+        }
+        if (this.queue == null) {
+            // Missing snapshot: keep re-reading until the server supplies one.
+            scheduleOutboxRetry()
+            return
+        }
+        if (this.queue?.status?.let { it in BLOCKING_QUEUE_STATUS } == true) {
+            scheduleOutboxRetry()
+            return
+        }
+        val wait = outbox.retryRemaining()
+        if (wait > 0) {
+            scheduleOutboxRetry(wait)
+            return
+        }
+        val batch = outbox.take() ?: return
+        outboxInFlight = batch
+        outboxStatus = strings.getString(if (batch.unknown) R.string.voice_outbox_retry else R.string.voice_outbox_sending)
+        changed()
+        val permissions = requestPermissions
+        if (permissions == null) {
+            retryOutbox(batch, strings.getString(R.string.voice_outbox_retry))
+            return
+        }
+        permissions permission@{ mode ->
+            if (closed || outboxInFlight !== batch) return@permission
+            if (mode == null) {
+                retryOutbox(batch, strings.getString(R.string.voice_outbox_permission))
+                return@permission
+            }
+            api.model(id) { result ->
+                if (closed || outboxInFlight !== batch) return@model
+                val model = result.getOrElse {
+                    retryOutbox(batch, strings.getString(R.string.voice_outbox_retry))
+                    return@model
+                }
+                val current = state
+                if (current == null) {
+                    retryOutbox(batch, strings.getString(R.string.voice_outbox_retry))
+                    return@model
+                }
+                // Persist that the server may see this ticket before the request can leave.
+                outbox.markUnknown(batch)
+                // The literal marker is the only source of the server's voice cue; the
+                // batch id, permissions, model and effort stay ordinary queue options.
+                val options = JSONObject()
+                    .put("clientMessageId", batch.id)
+                    .put("permissionMode", mode)
+                    .put("model", current.model ?: model.string("model"))
+                    .put("effort", model.string("effort"))
+                    .put("inputSource", "voice")
+                api.appendIdempotent(id, batch.id, batch.content, options) { sent ->
+                    if (closed || outboxInFlight !== batch) return@appendIdempotent
+                    outboxInFlight = null
+                    sent.onSuccess { receipt ->
+                        if (receipt.id != batch.id) {
+                            // The receipt must name the ticket we sent; otherwise nothing is confirmed.
+                            outbox.markUnknown(batch)
+                            outbox.hold()
+                            outboxStatus = strings.getString(R.string.voice_outbox_unconfirmed)
+                        } else {
+                            outbox.confirm(batch)
+                            outboxStatus = strings.getString(R.string.voice_outbox_sent)
+                        }
+                        changed()
+                        drainOutbox()
+                    }.onFailure { failure ->
+                        val outcome = outboxFailure(failure)
+                        if (outcome == OutboxFailure.REJECTED && !batch.unknown) {
+                            // A refusal of the original attempt proves nothing was queued, so the
+                            // head may merge again after 5 s (at most MAX_BATCH entries).
+                            outbox.reject(batch)
+                            outboxStatus = strings.getString(R.string.voice_outbox_rejected)
+                        } else {
+                            // A possibly-delivered ticket is checked again with the same id/content.
+                            outbox.markUnknown(batch)
+                            outboxStatus = strings.getString(
+                                if (outcome == OutboxFailure.NOT_FOUND) R.string.voice_outbox_missing
+                                else R.string.voice_outbox_unconfirmed,
+                            )
+                        }
+                        outbox.hold()
+                        changed()
+                        drainOutbox()
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * A batch that never left the device may merge into a new attempt after 5 s. Once an attempt
+     * marker was persisted, preparation failures keep the same ticket and content verbatim.
+     */
+    private fun retryOutbox(batch: OutboxBatch, message: String) {
+        if (closed || outboxInFlight !== batch) return
+        outboxInFlight = null
+        val outbox = outbox ?: return
+        if (batch.unknown) outbox.markUnknown(batch) else outbox.reject(batch)
+        outbox.hold()
+        outboxStatus = message
+        changed()
+        drainOutbox()
+    }
+
+    /**
+     * The outbox may wait on a held queue, a missing model or an unfinished steering turn. Nothing
+     * else on the socket may change then, so a light timer re-reads the native state and the queue
+     * snapshot; only a fresh snapshot can release the send.
+     */
+    private fun scheduleOutboxRetry(delay: Long = VoiceOutbox.RETRY_DELAY_MS) {
+        if (closed || !active || outbox?.count == 0) return
+        val now = android.os.SystemClock.uptimeMillis()
+        val at = now + maxOf(0L, delay)
+        // Keep the earliest poll; a later frame must not push a pending recovery out indefinitely.
+        if (outboxRetryAt in 1 until at) return
+        main.removeCallbacks(outboxRetry)
+        outboxRetryAt = at
+        main.postDelayed(outboxRetry, at - now)
+    }
+
+    private fun refreshOutboxSnapshot() {
+        val ws = socket?.takeIf { connected } ?: return
+        if (stateRequest != null) {
+            scheduleOutboxRetry()
+            return
+        }
+        readState(ws) { native ->
+            if (closed) return@readState
+            if (native != null && native.runtime == "app-server") state = native
+            changed()
+            refreshQueue()
+        }
+    }
+
+    private companion object {
+        val BLOCKING_QUEUE_STATUS = setOf("held", "unknown", "steering")
     }
 }

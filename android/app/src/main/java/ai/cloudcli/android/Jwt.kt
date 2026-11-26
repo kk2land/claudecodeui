@@ -34,6 +34,22 @@ object Jwt {
         }
     }
 
+    /** The account identity the server binds a token to (`userId` in `auth.middleware.ts`). */
+    fun userId(token: String): String? {
+        val parts = token.split('.')
+        if (parts.size != 3) return null
+        return try {
+            val json = JSONObject(String(Base64.getUrlDecoder().decode(parts[1]), Charsets.UTF_8))
+            when (val value = json.opt("userId")) {
+                is String -> value.takeIf { it.isNotBlank() }
+                is Number -> value.toString()
+                else -> null
+            }
+        } catch (_: Exception) {
+            null
+        }
+    }
+
     /** Valid means: parseable `iat`/`exp` and not inside the 60 s expiry skew. */
     fun isUsable(token: String, nowMs: Long = System.currentTimeMillis()): Boolean {
         val claims = claims(token) ?: return false

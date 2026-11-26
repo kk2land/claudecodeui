@@ -29,7 +29,7 @@
 
     <string name="voice_status_connecting">正在连接…</string>
     <string name="voice_status_reconnecting">正在重新连接…</string>
-    <string name="voice_status_reconnecting_draft">正在重连，识别内容将存为草稿</string>
+    <string name="voice_status_reconnecting_draft">正在重连，识别内容已保存并会按顺序发送</string>
     <string name="voice_status_preparing">正在准备麦克风…</string>
     <string name="voice_status_listening">在听，请开口</string>
     <string name="voice_status_hearing">正在听你说</string>
@@ -92,4 +92,22 @@
     <string name="voice_picker_error">无法加载最近会话。</string>
     <string name="voice_picker_no_site">请先设置 CloudCLI 服务器。</string>
     <string name="voice_picker_unsupported">语音通话需要 Codex app-server。请选择另一个最近会话。</string>
+    <string name="voice_outbox_title">待发送（按先后顺序）</string>
+    <string name="voice_outbox_pending">语音已保存，将按顺序发送。</string>
+    <string name="voice_outbox_sending">正在发送最早的一条语音…</string>
+    <string name="voice_outbox_retry">正在重试最早的一条语音…</string>
+    <string name="voice_outbox_rejected">服务器拒绝了这一批，5 秒后按顺序合并队首重试。</string>
+    <string name="voice_outbox_unconfirmed">发送结果不明，将用同一编号重试同一条内容。</string>
+    <string name="voice_outbox_missing">服务器接口不存在（404）。队列已保留，5 秒后重试。</string>
+    <string name="voice_outbox_permission">需要先在网页里批准，语音消息才能发送。</string>
+    <string name="voice_outbox_sent">语音消息已被接收。</string>
+    <string name="voice_outbox_removed">已删除该条语音，继续发送下一条。</string>
+    <string name="voice_outbox_delete">删除</string>
+    <string name="voice_outbox_blocked">请先发送或删除待发的语音消息，再发送此草稿。</string>
+    <string name="voice_outbox_entry">%1$d. %2$s</string>
+    <string name="voice_outbox_empty">没有待发送的消息。</string>
+    <string name="voice_outbox_batch">作为一条消息排队</string>
+    <string name="voice_outbox_batch_confirm">删除这一组共 %1$d 条待发消息？它们将从本设备移除。</string>
+    <string name="voice_sent_title">已发送</string>
+    <string name="voice_sent_empty">还没有已发送的消息。</string>
 </resources>

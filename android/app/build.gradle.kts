@@ -73,8 +73,8 @@ android {
         minSdk = 26
         targetSdk = 36
         // 0.1.0 (code 1) shipped the first real-device build; 0.1.3 must install over 0.1.2 (code 3).
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 6
+        versionName = "0.1.5"
     }
 
     signingConfigs {

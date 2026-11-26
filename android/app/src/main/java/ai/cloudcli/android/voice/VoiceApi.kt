@@ -21,14 +21,19 @@ import org.json.JSONObject
 
 internal class VoiceHttpError(val status: Int, val code: String?, message: String) : IOException(message)
 internal data class VoiceAppendReceipt(val id: String, val appended: Boolean)
+internal data class VoiceIdempotentReceipt(val id: String, val appended: Boolean, val alreadySent: Boolean)
 
 internal class VoiceApi(val origin: String) {
+    /** The sign-in bound when this client was created; a token refreshed for another account is refused. */
+    val userId: String? = AppRuntime.prefs.token()?.let(Jwt::userId)
+
     private val base = origin.toHttpUrl()
     private val main = Handler(Looper.getMainLooper())
 
     private fun authorized(url: HttpUrl): Request.Builder? {
         if (AppRuntime.prefs.siteOrigin != origin) return null
         val token = AppRuntime.prefs.token()?.takeIf { Jwt.isUsable(it) } ?: return null
+        if (userId != null && Jwt.userId(token) != userId) return null
         return Request.Builder().url(url).header("Authorization", "Bearer $token")
     }
 
@@ -68,6 +73,21 @@ internal class VoiceApi(val origin: String) {
         if (ifEmpty) body.put("ifEmpty", true)
         request(base.newBuilder().addPathSegments("api/user/drafts/queued-message").build(), body,
             read = { VoiceAppendReceipt(it.getJSONObject("queuedMessage").getString("id"), it.getBoolean("appended")) }, done = done)
+    }
+
+    /** Persists one locally ordered batch under its stable id; a repeat of the same id is deduplicated server-side. */
+    fun appendIdempotent(id: String, clientMessageId: String, text: String, options: JSONObject,
+                         done: (Result<VoiceIdempotentReceipt>) -> Unit) {
+        val body = JSONObject().put("scope", id).put("clientMessageId", clientMessageId)
+            .put("queuedMessage", JSONObject().put("content", text).put("options", options))
+        request(base.newBuilder().addPathSegments("api/user/drafts/queued-message/idempotent").build(), body,
+            read = {
+                VoiceIdempotentReceipt(
+                    it.getJSONObject("queuedMessage").getString("id"),
+                    it.optBoolean("appended"),
+                    it.optBoolean("alreadySent"),
+                )
+            }, done = done)
     }
 
     private fun <T> request(url: HttpUrl, body: JSONObject? = null, read: (JSONObject) -> T, done: (Result<T>) -> Unit) {

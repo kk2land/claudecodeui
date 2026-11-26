@@ -29,7 +29,7 @@
 
     <string name="voice_status_connecting">Connecting…</string>
     <string name="voice_status_reconnecting">Reconnecting…</string>
-    <string name="voice_status_reconnecting_draft">Reconnecting… Speech is saved as a draft</string>
+    <string name="voice_status_reconnecting_draft">Reconnecting… Speech is saved for sending</string>
     <string name="voice_status_preparing">Preparing microphone…</string>
     <string name="voice_status_listening">Listening</string>
     <string name="voice_status_hearing">Hearing you</string>
@@ -93,4 +93,22 @@
     <string name="voice_picker_error">Could not load recent sessions.</string>
     <string name="voice_picker_no_site">Set up your CloudCLI server first.</string>
     <string name="voice_picker_unsupported">Voice calls require Codex app-server. Choose another recent session.</string>
+    <string name="voice_outbox_title">Waiting to send (oldest first)</string>
+    <string name="voice_outbox_pending">Speech saved. Sending in order.</string>
+    <string name="voice_outbox_sending">Sending the oldest voice message…</string>
+    <string name="voice_outbox_retry">Retrying the oldest voice message…</string>
+    <string name="voice_outbox_rejected">The server refused the batch. Retrying the merged head in 5 seconds.</string>
+    <string name="voice_outbox_unconfirmed">Delivery unconfirmed. Retrying the same message with the same id.</string>
+    <string name="voice_outbox_missing">Server route missing (404). Queue kept; retrying in 5 seconds.</string>
+    <string name="voice_outbox_permission">Web approval is required before voice messages can send.</string>
+    <string name="voice_outbox_sent">Voice message accepted.</string>
+    <string name="voice_outbox_removed">Voice message removed. Sending the next one.</string>
+    <string name="voice_outbox_delete">Delete</string>
+    <string name="voice_outbox_blocked">Send or delete pending voice messages before sending this draft.</string>
+    <string name="voice_outbox_entry">%1$d. %2$s</string>
+    <string name="voice_outbox_empty">Nothing waiting to send.</string>
+    <string name="voice_outbox_batch">Queued as one message</string>
+    <string name="voice_outbox_batch_confirm">Delete this group of %1$d queued messages? They will be removed from this device.</string>
+    <string name="voice_sent_title">Sent</string>
+    <string name="voice_sent_empty">No sent messages yet.</string>
 </resources>
