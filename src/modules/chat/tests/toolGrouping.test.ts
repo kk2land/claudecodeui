@@ -103,6 +103,21 @@ test('an unparsable tool input does not throw while grouping', () => {
   assert.equal(group.preview, '+2 more');
 });
 
+test('a call whose input has not arrived still uses its tool static summary', () => {
+  // A provider reports the tool call before its arguments: one row has no
+  // toolInput at all, the next has the JSON literal null. Neither may be handed
+  // to the config as nullish — but an absent input is read as an empty one, so
+  // TaskList's input-independent summary still names both calls.
+  const items = groupConsecutiveTools([
+    toolMessage('TaskList', undefined),
+    toolMessage('TaskList', 'null'),
+  ]);
+
+  const [group] = items;
+  assert.ok(isToolGroupItem(group));
+  assert.equal(group.preview, 'listing tasks, listing tasks');
+});
+
 test('a tool with no config is previewed by what it operated on', () => {
   // Exercises the other half of getToolInputPreview: unknown tools resolve to
   // the Default config, whose title summarizes the input. Previewing the

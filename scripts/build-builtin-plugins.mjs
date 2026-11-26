@@ -64,6 +64,7 @@ for (const plugin of builtinPlugins) {
     target: "es2020",
     format: "esm",
     bundle: true,
+    minifySyntax: true,
     loader: { ".css": "text" },
     jsx: "automatic",
     define: { "process.env.NODE_ENV": '"production"' },

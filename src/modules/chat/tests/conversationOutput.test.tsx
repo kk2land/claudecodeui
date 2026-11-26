@@ -282,6 +282,66 @@ describe('ConversationOutput rendering', () => {
     expect(view.container.textContent).toContain('42 passed');
   });
 
+  test('a running call whose arguments have not arrived keeps the transcript renderable and updates in place', () => {
+    // Providers announce a tool call by name before its input: this is exactly the shape the
+    // Worker view receives while Bash is starting. Two adjacent calls fold, so grouping asks the
+    // config for a preview of an input that does not exist yet — that must not take the page down.
+    const before: WorkerConversationMessage[] = [
+      { id: 'u-0', role: 'user', text: '先看看仓库状态，再跑测试。' },
+      {
+        id: 'b-1',
+        role: 'tool',
+        text: '',
+        toolId: 'call-1',
+        toolName: 'Bash',
+        streaming: true,
+      },
+      {
+        id: 'b-2',
+        role: 'tool',
+        text: '',
+        toolId: 'call-2',
+        toolName: 'Bash',
+        toolInput: { command: 'npm test' },
+        toolOutput: '42 passed',
+      },
+    ];
+
+    const view = renderView(before);
+    const groupButton = view.getByRole('button', { name: /Bash/ });
+    expect(groupButton.getAttribute('aria-expanded')).toBe('false');
+    expect(groupButton.textContent).toContain('x2');
+    // Only the call that has input is named; the pending one is accounted for as the remainder.
+    expect(groupButton.textContent).toContain('npm test');
+    expect(groupButton.textContent).not.toContain('undefined');
+
+    // Expanding works while input is still missing: the group and its pending row stay mountable.
+    fireEvent.click(groupButton);
+    expect(groupButton.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(groupButton);
+    expect(groupButton.getAttribute('aria-expanded')).toBe('false');
+
+    // Input arrives for the in-flight call: the same group must pick it up.
+    const after: WorkerConversationMessage[] = [
+      before[0],
+      { ...before[1], toolInput: { command: 'git status' }, streaming: false },
+      before[2],
+    ];
+    view.rerender(after);
+
+    const updatedGroupButton = view.getByRole('button', { name: /Bash/ });
+    expect(updatedGroupButton.textContent).toContain('git status');
+    expect(updatedGroupButton.textContent).toContain('npm test');
+    expect(updatedGroupButton.textContent).not.toContain('undefined');
+
+    // The group still expands and every call keeps its own output.
+    fireEvent.click(updatedGroupButton);
+    expect(updatedGroupButton.getAttribute('aria-expanded')).toBe('true');
+    fireEvent.click(view.getByText('git status'));
+    fireEvent.click(view.getByText('npm test'));
+    expect(view.container.textContent).toContain('42 passed');
+  });
+
   test('the showThinking prop governs reasoning exactly as the main conversation setting does', () => {
     const messages: WorkerConversationMessage[] = [
       { id: 'think-1', role: 'assistant', text: '需要先确认端口。', thinking: true },

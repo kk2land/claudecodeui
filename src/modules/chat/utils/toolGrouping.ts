@@ -1,5 +1,6 @@
 import type { ChatMessage, ToolGroupItem } from '@/shared/types';
 import { getToolConfig } from '@/modules/chat/tools/configs/toolConfigs';
+import { parseToolPayload } from '@/modules/chat/utils/messageTransforms';
 
 export const TOOL_GROUP_THRESHOLD = 2;
 
@@ -69,21 +70,13 @@ function rendersNothing(message: ChatMessage, showThinking: boolean): boolean {
   return Boolean(message.isThinking && !showThinking);
 }
 
-function parseToolInput(toolInput: unknown): unknown {
-  if (typeof toolInput !== 'string') {
-    return toolInput;
-  }
-
-  try {
-    return JSON.parse(toolInput);
-  } catch {
-    return toolInput;
-  }
-}
-
 function getToolInputPreview(message: ChatMessage): string {
   const config = getToolConfig(message.toolName || 'UnknownTool').input;
-  const parsedInput = parseToolInput(message.toolInput);
+  // A provider reports a call by name before its arguments exist. Config
+  // readers (Bash's getValue reads .command) assume the input shape, so an
+  // absent input is read as an empty one, as ToolGroupContainer already does —
+  // tools with a static summary (TaskList) still name the call.
+  const parsedInput = parseToolPayload(message.toolInput) ?? {};
   const title = typeof config.title === 'function' ? config.title(parsedInput) : config.title;
   const value = config.getValue?.(parsedInput);
 
