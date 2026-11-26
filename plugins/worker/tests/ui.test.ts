@@ -3666,6 +3666,220 @@ test("DOM: a bottom position clamped by a growing viewport is not an upward scro
   }
 });
 
+test("DOM: a short card pages back on an upward finger drag and ignores a sideways one", async () => {
+  const requests: string[] = [];
+  const mounted = await mountPlugin({
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (!pathAndQuery.includes("before="))
+        return {
+          text: jsonl([{ type: "text", text: "唯一尾页" }]),
+          prevCursor: "40",
+          nextCursor: null,
+          done: true,
+        };
+      return {
+        text: jsonl([
+          { type: "text", text: "开头一段" },
+          { type: "status", phase: "turn_end" },
+        ]),
+        prevCursor: null,
+        nextCursor: "40",
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("唯一尾页"),
+      "短卡尾页",
+    );
+    const card = mounted.container.querySelector<HTMLElement>(".worker-card")!;
+    const box = byLabel(card, "对话内容")!;
+    // Let the opening fill settle with no viewport, so only the gestures below page.
+    await delay(80);
+    const baseline = requests.length;
+    // 200px of rows in a 320px card: the newest row is in view and there is no scroll range.
+    const metrics = stubScrollMetrics(box);
+    metrics.clientHeight = 320;
+    metrics.scrollHeight = 200;
+    // A sideways swipe belongs to the card carousel and must not read history.
+    touch(box, "touchstart", 180, 160);
+    touch(box, "touchmove", 120, 158);
+    touch(box, "touchend", 120, 158);
+    await delay(80);
+    assert.equal(requests.length, baseline, JSON.stringify(requests));
+    // The same short card accepts the natural upward drag because it has nothing to scroll.
+    touch(box, "touchstart", 100, 240);
+    touch(box, "touchmove", 100, 210);
+    await waitFor(() => textOf(card).includes("开头一段"), "短卡上滑加载");
+    touch(box, "touchend", 100, 210);
+    // Only one page was read, and it asked for the full earlier window.
+    const earlier = requests.filter((path) => path.includes("limit=262144"));
+    assert.equal(earlier.length, 1, JSON.stringify(requests));
+    assert.ok(earlier[0]!.includes("before=40"), earlier[0]);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: a short card offers an explicit earlier-page button only while history remains", async () => {
+  const requests: string[] = [];
+  const mounted = await mountPlugin({
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (!pathAndQuery.includes("before="))
+        return {
+          text: jsonl([{ type: "text", text: "唯一尾页" }]),
+          prevCursor: "40",
+          nextCursor: null,
+          done: true,
+        };
+      return {
+        text: jsonl([
+          { type: "text", text: "开头一段" },
+          { type: "status", phase: "turn_end" },
+        ]),
+        prevCursor: null,
+        nextCursor: "40",
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("唯一尾页"),
+      "短卡尾页",
+    );
+    const card = mounted.container.querySelector<HTMLElement>(".worker-card")!;
+    await delay(80);
+    // History is available but is never read without a gesture.
+    assert.equal(
+      requests.filter((path) => path.includes("before=")).length,
+      0,
+      JSON.stringify(requests),
+    );
+    const more = button(card, "加载更早内容");
+    assert.equal(more.disabled, false);
+    more.click();
+    await waitFor(() => textOf(card).includes("开头一段"), "按钮加载历史");
+    assert.ok(requests.at(-1)!.includes("before=40"), requests.at(-1));
+    assert.ok(requests.at(-1)!.includes("limit=262144"), requests.at(-1));
+    // The page reported no cursor above it, so there is nothing left to ask for.
+    assert.ok(findButton(card, "加载更早内容") === undefined);
+    assert.ok(textOf(card).includes("已到日志开头"), textOf(card));
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: asking for older rows from the newest position stops following", async () => {
+  const mounted = await mountPlugin({
+    logs: (_id, pathAndQuery) => {
+      if (!pathAndQuery.includes("before="))
+        return {
+          text: jsonl([{ type: "text", text: "唯一尾页" }]),
+          prevCursor: "40",
+          nextCursor: null,
+          done: true,
+        };
+      return {
+        text: jsonl([
+          { type: "text", text: "开头一段" },
+          { type: "status", phase: "turn_end" },
+        ]),
+        prevCursor: null,
+        nextCursor: "40",
+        done: true,
+      };
+    },
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("唯一尾页"),
+      "短卡尾页",
+    );
+    const card = mounted.container.querySelector<HTMLElement>(".worker-card")!;
+    const box = byLabel(card, "对话内容")!;
+    await delay(80);
+    // The reader sits at the newest row, so live output still follows them.
+    const metrics = stubScrollMetrics(box);
+    metrics.clientHeight = 300;
+    metrics.scrollHeight = 900;
+    metrics.scrollTop = 600;
+    await delay(40);
+    button(card, "加载更早内容").click();
+    await waitFor(() => textOf(card).includes("开头一段"), "按钮加载历史");
+    // Reading older rows stops following, so the prepended page cannot pull the reader to
+    // the newest row and the way back is offered explicitly.
+    assert.ok(
+      textOf(card).includes("回到最新"),
+      String(metrics.scrollTop) + "/" + String(metrics.scrollHeight),
+    );
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: an unchanged empty poll page does not redraw the host conversation", async () => {
+  const requests: string[] = [];
+  let feed: string | null = null;
+  const mounted = await mountPlugin({
+    conversation: true,
+    logs: (_id, pathAndQuery) => {
+      requests.push(pathAndQuery);
+      if (!pathAndQuery.includes("cursor="))
+        return {
+          text: jsonl([{ type: "text", text: "开始输出" }]),
+          nextCursor: "100",
+          done: false,
+        };
+      return {
+        text: feed ? jsonl([{ type: "text", text: feed }]) : "",
+        nextCursor: "100",
+        done: false,
+      };
+    },
+  });
+  try {
+    await waitFor(
+      () =>
+        requests.filter((path) => path.includes("cursor=100")).length >= 2,
+      "轮询空页",
+    );
+    const view = mounted.views.at(-1)!;
+    const baseline = view.updates.length;
+    assert.ok(baseline >= 1, "首屏内容到达应写入一次宿主视图");
+    const settled = requests.length;
+    await delay(1300);
+    assert.ok(requests.length > settled, "空轮询仍应继续读取日志");
+    assert.equal(view.updates.length, baseline, "空页不应重绘宿主对话");
+    // A page with a new row still goes through, so skipping empty pages hides nothing.
+    feed = "后来一段";
+    await waitFor(() => textOf(mounted.container).includes("后来一段"), "新内容到达");
+    assert.ok(view.updates.length > baseline, "有新内容的页应更新宿主视图");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+/** Dispatches a one-finger touch event; jsdom ships no `TouchEvent` constructor. */
+function touch(
+  box: HTMLElement,
+  type: "touchstart" | "touchmove" | "touchend",
+  x = 0,
+  y = 0,
+) {
+  const view = box.ownerDocument.defaultView as unknown as {
+    Event: new (type: string, init?: { bubbles?: boolean }) => Event;
+  };
+  const event = new view.Event(type, { bubbles: true });
+  Object.defineProperty(event, "touches", {
+    value: type === "touchend" ? [] : [{ clientX: x, clientY: y }],
+  });
+  box.dispatchEvent(event);
+}
+
 test("DOM: selecting another record opens its conversation tail instead of the last log tab", async () => {
   const older = run({
     id: "run-1",

@@ -1,7 +1,6 @@
 import React, {
   useCallback,
   useEffect,
-  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -19,8 +18,20 @@ import {
 
 /** Distance from the top, in pixels, still counted as reading the loaded window's start. */
 const TOP_PROXIMITY_PX = 80;
-/** Downward finger travel at the top of a short panel that counts as asking for older rows. */
+/** Finger travel at the top of a short panel that counts as asking for older rows. */
 const PULL_STEP_PX = 24;
+/** Vertical travel before a touch is known to be a vertical drag rather than a sideways one. */
+const TOUCH_SLOP_PX = 8;
+/**
+ * A reader's own backward page. A log page is clamped to 256 KiB on the server, so asking for
+ * the full page reads four times as much history per round trip, which cuts the requests and
+ * window replays a long log needs on a phone. The opening fill keeps the default 64 KiB page so
+ * its budget stays cheap.
+ */
+const EARLIER_PAGE_BYTES = 256 * 1024;
+/** Next poll after new bytes; an empty page keeps the cheaper one-second retry. */
+const LIVE_POLL_MS = 250;
+const IDLE_POLL_MS = 1000;
 /** One message row of either renderer, and the displayed blocks inside it that stay stable. */
 const MESSAGE_SELECTOR = ".chat-message, .worker-conv-row";
 const ANCHOR_SELECTOR = "p, li, pre, h1, h2, h3, h4";
@@ -59,6 +70,27 @@ const EMPTY_CONVERSATION: ConversationState = {
   loadingEarlier: false,
   error: "",
 };
+
+/**
+ * An empty poll page rewrites nothing, so its rows keep their object identity. Comparing the
+ * published state against that window keeps an idle run from redrawing the whole host list.
+ */
+function sameConversation(
+  previous: ConversationState,
+  next: ConversationState,
+): boolean {
+  return (
+    previous.key === next.key &&
+    previous.prompt === next.prompt &&
+    previous.done === next.done &&
+    previous.started === next.started &&
+    previous.before === next.before &&
+    previous.loadingEarlier === next.loadingEarlier &&
+    previous.error === next.error &&
+    previous.messages.length === next.messages.length &&
+    next.messages.every((row, index) => row === previous.messages[index])
+  );
+}
 
 /** Mutable pager state of one run; publishing only replaces the rows on screen. */
 type ConversationWindow = {
@@ -194,10 +226,12 @@ function ConversationFallback({
 /**
  * Keeps the conversation scrolled to the newest row while the reader follows it. Scrolling up
  * pauses following until the reader asks for the latest again, so live output never yanks the
- * position they are reading.
+ * position they are reading. Only a change of the rendered rows or an explicit return to latest
+ * moves the position: an idle poll and a parent redraw leave it alone.
  */
 export function useFollowLatest(
   scroller: React.MutableRefObject<HTMLDivElement | null>,
+  rows: WorkerConversationMessage[],
 ): {
   follow: boolean;
   setFollow(value: boolean): void;
@@ -208,13 +242,13 @@ export function useFollowLatest(
     followRef.current = value;
     setFollowState(value);
   }, []);
-  // Any row change while following lands at the newest row. The host view renders its rows on
-  // its own root during a child effect, before this layout effect, so the offset is still final.
-  useLayoutEffect(() => {
+  // The host view updates its rows in its own child effect, which runs before this parent effect,
+  // so the offset is computed from the content that is already on screen.
+  useEffect(() => {
     const node = scroller.current;
     if (!node || !followRef.current) return;
     node.scrollTop = node.scrollHeight;
-  });
+  }, [follow, rows, scroller]);
   const onScroll = useCallback(() => {
     const node = scroller.current;
     if (!node) return;
@@ -252,6 +286,13 @@ export function useRunConversation({
   const key = workerId + ":" + runId;
   const [conversation, setConversation] =
     useState<ConversationState>(EMPTY_CONVERSATION);
+  /** Last state handed to React; an unchanged poll page must not redraw it. */
+  const shown = useRef<ConversationState>(EMPTY_CONVERSATION);
+  const show = useCallback((next: ConversationState) => {
+    if (sameConversation(shown.current, next)) return;
+    shown.current = next;
+    setConversation(next);
+  }, []);
   // The conversation's scroll container is the plugin's wrapper in both render paths.
   const scroller = useRef<HTMLDivElement | null>(null);
   /** Watches the prepended page's layout so the reading position can follow it. */
@@ -365,7 +406,7 @@ export function useRunConversation({
     };
     pager.current = loaded;
     const publish = () =>
-      setConversation({
+      show({
         key,
         prompt: loaded.prompt,
         messages: loaded.reader.messages(),
@@ -399,16 +440,20 @@ export function useRunConversation({
         loaded.done = page.done || page.nextCursor === null;
         if (loaded.done) loaded.reader.flush();
         error = "";
+        // `publish` keeps an empty page with unchanged rows from redrawing the host.
         publish();
         if (!loaded.done)
-          timer = setTimeout(() => void pump(), page.text ? 0 : 1000);
+          timer = setTimeout(
+            () => void pump(),
+            page.text ? LIVE_POLL_MS : IDLE_POLL_MS,
+          );
       } catch {
         if (!live) return;
         // A transient read failure keeps the cursor and retries on the same 1s timer while
         // the short error stays visible; a later page clears it.
         error = "读取失败，正在重试…";
         publish();
-        timer = setTimeout(() => void pump(), 1000);
+        timer = setTimeout(() => void pump(), IDLE_POLL_MS);
       }
     };
     // `/input` is the only source of the user's prompt; Pi echoes of the same prompt are
@@ -431,7 +476,7 @@ export function useRunConversation({
       // Leaving the conversation tab or the run ends the prepend's hold with its pager.
       releaseScroll();
     };
-  }, [api, key, releaseScroll, workerId, runId, workerType]);
+  }, [api, key, releaseScroll, show, workerId, runId, workerType]);
   /**
    * Reads the page in front of the loaded window. The whole window is parsed again from its own
    * start because a page boundary would otherwise split a streamed message or a tool call from
@@ -457,13 +502,29 @@ export function useRunConversation({
       }
       loaded.loadingEarlier = true;
       // The opening fill stays invisible: its page is below the newest row the reader is on.
-      if (!prefilling) {
-        setConversation((value) =>
-          value.key === key ? { ...value, loadingEarlier: true, error: "" } : value,
-        );
-      }
+      if (!prefilling)
+        show({
+          key,
+          prompt: loaded.prompt,
+          messages: loaded.reader.messages(),
+          done: loaded.done,
+          started: loaded.started,
+          before: loaded.before,
+          loadingEarlier: true,
+          error: "",
+        });
       void api
-        .logs(workerId, runId, "events", null, { before: loaded.before! })
+        .logs(
+          workerId,
+          runId,
+          "events",
+          null,
+          // A reader's page asks for the full server maximum; the opening fill keeps the
+          // cheaper default page so its budget still reads a few times faster than a reader.
+          prefilling
+            ? { before: loaded.before! }
+            : { before: loaded.before!, limit: EARLIER_PAGE_BYTES },
+        )
         .then((page) => {
           if (pager.current !== loaded) return;
           loaded.raw = page.text + loaded.raw;
@@ -476,7 +537,7 @@ export function useRunConversation({
           // Only a reader who asked for the page keeps their place; the opening fill stays at the
           // newest row because nothing above it was on screen yet.
           if (!prefilling) holdScroll(scroller.current);
-          setConversation({
+          show({
             key,
             prompt: loaded.prompt,
             messages: reader.messages(),
@@ -490,25 +551,35 @@ export function useRunConversation({
         .catch((caught) => {
           if (pager.current !== loaded) return;
           loaded.loadingEarlier = false;
-          setConversation((value) =>
-            value.key === key
-              ? { ...value, loadingEarlier: false, error: prefilling ? "" : String(caught) }
-              : value,
-          );
+          show({
+            key,
+            prompt: loaded.prompt,
+            messages: loaded.reader.messages(),
+            done: loaded.done,
+            started: loaded.started,
+            before: loaded.before,
+            loadingEarlier: false,
+            error: prefilling ? "" : String(caught),
+          });
         });
     },
-    [api, holdScroll, key, runId, workerId, workerType],
+    [api, holdScroll, key, runId, show, workerId, workerType],
   );
   /**
    * Earlier pages load only when the reader really moves up to the top of the loaded window: the
    * first placement and any downward scroll request nothing, so a run's history stays unread
-   * until it is asked for. A tail page that fits the panel has no scroll range at all, so an
-   * upward wheel or a downward finger pull at the top is the request there.
+   * until it is asked for. A tail page that fits the panel has no scroll range at all, so a
+   * vertical drag over it (or an upward wheel when it does scroll) is the request there. A
+   * sideways drag is left to the card and the outer carousel and never reads history.
    */
   useEffect(() => {
     const node = scroller.current;
     if (!node) return;
     let touching = false;
+    let short = false;
+    let sideways = false;
+    let decided = false;
+    let touchX = 0;
     let touchY = 0;
     previousTop.current = node.scrollTop;
     const onScroll = () => {
@@ -527,24 +598,44 @@ export function useRunConversation({
     };
     const onTouchStart = (event: TouchEvent) => {
       touching = node.scrollTop === 0;
+      // A panel with no scroll range has no native vertical movement, so either direction of a
+      // vertical drag is the reader asking for the rows above it.
+      short = node.scrollHeight <= node.clientHeight;
+      sideways = false;
+      decided = false;
+      touchX = event.touches[0]?.clientX ?? 0;
       touchY = event.touches[0]?.clientY ?? 0;
     };
     const onTouchMove = (event: TouchEvent) => {
       if (!touching) return;
-      const current = event.touches[0]?.clientY ?? touchY;
-      // A finger pulled down at the top asks for what is above, like a phone transcript.
-      if (current - touchY > PULL_STEP_PX) {
-        touchY = current;
+      const touch = event.touches[0];
+      if (!touch) return;
+      const dx = touch.clientX - touchX;
+      const dy = touch.clientY - touchY;
+      if (!decided) {
+        if (Math.abs(dx) + Math.abs(dy) < TOUCH_SLOP_PX) return;
+        decided = true;
+        sideways = Math.abs(dx) > Math.abs(dy);
+      }
+      // The gesture belongs to a horizontal scroller or the outer carousel; a little vertical
+      // drift does not turn it into a history request.
+      if (sideways) return;
+      // A finger pulled down at the top asks for what is above, like a phone transcript; a short
+      // panel also accepts the natural upward drag because it has nothing else to scroll.
+      if (dy > PULL_STEP_PX || (short && dy < -PULL_STEP_PX)) {
+        touchY = touch.clientY;
         loadEarlier();
       }
     };
     const onTouchEnd = () => {
       touching = false;
     };
+    // Passive listeners keep the browser free to hand the gesture to the outer page or carousel
+    // while the pane still observes it; nothing here calls `preventDefault`.
     node.addEventListener("scroll", onScroll);
-    node.addEventListener("wheel", onWheel);
-    node.addEventListener("touchstart", onTouchStart);
-    node.addEventListener("touchmove", onTouchMove);
+    node.addEventListener("wheel", onWheel, { passive: true });
+    node.addEventListener("touchstart", onTouchStart, { passive: true });
+    node.addEventListener("touchmove", onTouchMove, { passive: true });
     node.addEventListener("touchend", onTouchEnd);
     return () => {
       node.removeEventListener("scroll", onScroll);
@@ -587,6 +678,8 @@ export function useRunConversation({
     return {
       rows,
       resultOnly,
+      canLoadEarlier: active.before !== null,
+      loadingEarlier: active.loadingEarlier,
       inputUnavailable:
         active.done &&
         active.before === null &&
@@ -596,8 +689,8 @@ export function useRunConversation({
         ? "正在读取更早内容…"
         : active.before !== null
           ? active.done
-            ? "已到末尾 · 上滚加载更早内容"
-            : "等待新内容 · 上滚加载更早内容"
+            ? "已到末尾"
+            : "等待新内容"
           : active.done
             ? "已到日志开头"
             : rows.length
@@ -646,9 +739,9 @@ export function ConversationPane({
     runId,
     finalText,
   });
-  const follow = useFollowLatest(conversation.scroller);
-  const capability = typeof host.mountConversationOutput === "function";
   const { view, loadEarlier } = conversation;
+  const follow = useFollowLatest(conversation.scroller, view.rows);
+  const capability = typeof host.mountConversationOutput === "function";
   /**
    * A tail window with no row at all, or too few rows to browse, would open as an empty or dead
    * first screen while earlier output already exists. Only the opening follows: once a full screen
@@ -724,6 +817,23 @@ export function ConversationPane({
       ) : null}
       <div className="worker-conv-foot">
         <span className="worker-muted">{view.status}</span>
+        {view.canLoadEarlier ? (
+          <button
+            className="worker-conv-more"
+            disabled={view.loadingEarlier}
+            onClick={(event) => {
+              event.stopPropagation();
+              // Asking for older rows is leaving the newest position; a pane that can scroll
+              // must not be pulled back to the bottom by the follow effect when the page lands.
+              const node = conversation.scroller.current;
+              if (follow.follow && node && node.scrollHeight > node.clientHeight)
+                follow.setFollow(false);
+              loadEarlier();
+            }}
+          >
+            加载更早内容
+          </button>
+        ) : null}
         {typeof footer === "function" ? footer(follow) : footer}
       </div>
     </div>

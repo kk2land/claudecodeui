@@ -638,6 +638,21 @@
   background: var(--worker-bg);
   font-size: 11px;
 }
+/* A phone card may have no scroll range at all; this is the explicit way to ask for older rows. */
+.worker-conv-more {
+  flex: none;
+  padding: 2px 9px;
+  border: 1px solid var(--worker-border);
+  border-radius: 999px;
+  background: var(--worker-bg);
+  color: var(--worker-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.worker-card .worker-conv-more {
+  height: 24px;
+  padding: 0 9px;
+}
 .worker-result {
   margin-top: 14px;
 }
@@ -1312,6 +1327,7 @@
 }
 .worker-card .worker-conv-foot {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: flex-start;
   gap: 8px;
