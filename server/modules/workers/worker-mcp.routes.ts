@@ -43,10 +43,25 @@ export function createWorkerMcpRouter(dependencies: {
       const value = req.headers[name];
       if (typeof value === 'string') headers[name] = value;
     }
-    const body = req.body === undefined || req.method === 'GET' || req.method === 'HEAD'
+    // The server composition root mounts this router without a global body parser, so the
+    // plugin's own 2 MB JSON parser must receive the original bytes. Forward the raw stream
+    // (with the client's content-length when it sent one) instead of parsing here: the plugin
+    // also owns the unknown-token response, which must not depend on host-side parsing.
+    const body = req.body === undefined
       ? null
       : Buffer.isBuffer(req.body) ? req.body : Buffer.from(JSON.stringify(req.body));
-    if (body) headers['content-length'] = String(body.length);
+    if (body) {
+      headers['content-length'] = String(body.length);
+    } else {
+      // Raw bytes are still compressed when the client sent a compressed JSON body; keep the
+      // encoding so the plugin's parser can decompress instead of rejecting the payload.
+      if (typeof req.headers['content-length'] === 'string') {
+        headers['content-length'] = req.headers['content-length'];
+      }
+      if (typeof req.headers['content-encoding'] === 'string') {
+        headers['content-encoding'] = req.headers['content-encoding'];
+      }
+    }
     const path = `/api/worker-mcp${req.url === '/' ? '' : req.url}`;
     const proxyRequest = http.request({
       hostname: '127.0.0.1',
@@ -64,8 +79,13 @@ export function createWorkerMcpRouter(dependencies: {
     });
     proxyRequest.on('error', next);
     req.on('aborted', () => proxyRequest.destroy());
-    if (body) proxyRequest.write(body);
-    proxyRequest.end();
+    if (body) {
+      proxyRequest.write(body);
+      proxyRequest.end();
+    } else {
+      // A GET/HEAD request ends immediately; a POST streams through unmodified.
+      req.pipe(proxyRequest);
+    }
   }));
 
   return router;

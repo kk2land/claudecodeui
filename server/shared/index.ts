@@ -141,6 +141,17 @@ export type {
   WorkerWakeResult,
   WorkerWakeSource,
   WorkerWakeTurnInput,
+  // Session pins and the shared provider request contracts are consumed by the
+  // Database, Providers and project-scheduler modules through this barrel.
+  CustomProviderModelEffort,
+  McpScope,
+  McpTransport,
+  ProviderSkillCreateFile,
+  ProviderSkillCreateInput,
+  ProviderSkillSetEnabledInput,
+  SessionForkAncestor,
+  SessionPinRecord,
+  UpsertProviderMcpServerInput,
 } from './types.js';
 
 export {
@@ -162,6 +173,7 @@ export type {
 export {
   AppError,
   asyncHandler,
+  createApiSuccessResponse,
   createCompleteMessage,
   createNormalizedMessage,
   extractFirstValidJsonlData,

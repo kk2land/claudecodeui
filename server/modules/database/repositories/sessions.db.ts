@@ -4,8 +4,8 @@ import { getConnection } from '@/modules/database/connection.js';
 import { projectsDb } from '@/modules/database/repositories/projects.db.js';
 import { residentBindingsDb } from '@/modules/database/repositories/resident-bindings.db.js';
 import { scheduledTaskSessionsDb } from '@/modules/database/repositories/scheduled-task-sessions.db.js';
-import { normalizeProjectPath } from '@/shared/utils.js';
-import type { ClearedContextSegment, SessionForkAncestor } from '@/shared/types.js';
+import { normalizeProjectPath } from '@/shared/index.js';
+import type { ClearedContextSegment, SessionForkAncestor } from '@/shared/index.js';
 
 type SessionRow = {
   session_id: string;
@@ -34,6 +34,23 @@ type RecentSessionsPage = {
   total: number;
 };
 
+// The caller's transaction replaces a duplicate row; preserve pin ordering and
+// collapse per-user duplicates after the canonical target exists.
+function preservePinsOnReplacement(sourceId: string, targetId: string, replace: () => void): void {
+  const db = getConnection();
+  const pins = sourceId === targetId ? [] : db.prepare(
+    'SELECT pin_id, user_id FROM session_pins WHERE session_id = ?'
+  ).all(sourceId) as Array<{ pin_id: number; user_id: number }>;
+  replace();
+  // A source owned by a resident binding or scheduled task survives `replace`:
+  // its pins belong to the session that still exists, so they are not copied.
+  if (db.prepare('SELECT 1 FROM sessions WHERE session_id = ?').get(sourceId)) {
+    return;
+  }
+  const restore = db.prepare('INSERT OR IGNORE INTO session_pins (pin_id, user_id, session_id) VALUES (?, ?, ?)');
+  for (const pin of pins) restore.run(pin.pin_id, pin.user_id, targetId);
+}
+
 const SESSION_ROW_COLUMNS =
   'session_id, provider, provider_session_id, project_path, jsonl_path, session_source, custom_name, model, effort, forked_from_session_id, isArchived, created_at, updated_at, last_opened_at';
 
@@ -45,10 +62,15 @@ const SESSION_ROW_COLUMNS =
 const RETIRED_SESSION_PROVIDERS: readonly string[] = ['gptweb', 'dsh'];
 
 /** SQL form of `RETIRED_SESSION_PROVIDERS`, optionally qualified by a table alias. */
-function retiredProviderSql(alias?: string): string {
+export function retiredProviderSql(alias?: string): string {
   const column = alias ? `${alias}.provider` : 'provider';
   const list = RETIRED_SESSION_PROVIDERS.map((provider) => `'${provider}'`).join(', ');
   return `${column} NOT IN (${list})`;
+}
+
+/** True for a provider id this build retired: its stored rows are never listed, pinned or dispatched. */
+export function isRetiredSessionProvider(provider: string): boolean {
+  return RETIRED_SESSION_PROVIDERS.includes(provider);
 }
 
 /** Unaliased predicate for the single-table maintenance queries. */
@@ -310,7 +332,7 @@ export const sessionsDb = {
     // The watcher may already have created a row for the new transcript. Its
     // id is the provider-native one, which is what this row claims, so replace
     // it rather than leaving two sidebar entries for one conversation.
-    db.transaction(() => {
+    db.transaction(() => preservePinsOnReplacement(input.providerSessionId, input.sessionId, () => {
       db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ? AND provider = ?
         AND session_id NOT IN (SELECT session_id FROM resident_bindings)
         AND session_id NOT IN (SELECT session_id FROM scheduled_task_sessions)`)
@@ -329,7 +351,7 @@ export const sessionsDb = {
         input.effort,
         input.forkedFromSessionId,
       );
-    })();
+    }))();
 
     return input.sessionId;
   },
@@ -358,18 +380,20 @@ export const sessionsDb = {
         .get(providerSessionId, providerSessionId, sessionId, sessionId) as SessionRow | undefined;
 
       if (duplicate) {
-        if (!isSessionOwned(duplicate.session_id)) {
-          db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
-        }
-        db.prepare(
-          `UPDATE sessions SET
-             provider_session_id = ?,
-             jsonl_path = COALESCE(jsonl_path, ?),
-             session_source = COALESCE(?, session_source),
-             custom_name = COALESCE(custom_name, ?),
-             updated_at = CURRENT_TIMESTAMP
-           WHERE session_id = ?`
-        ).run(providerSessionId, duplicate.jsonl_path, duplicate.session_source, duplicate.custom_name, sessionId);
+        preservePinsOnReplacement(duplicate.session_id, sessionId, () => {
+          if (!isSessionOwned(duplicate.session_id)) {
+            db.prepare('DELETE FROM sessions WHERE session_id = ?').run(duplicate.session_id);
+          }
+          db.prepare(
+            `UPDATE sessions SET
+               provider_session_id = ?,
+               jsonl_path = COALESCE(jsonl_path, ?),
+               session_source = COALESCE(?, session_source),
+               custom_name = COALESCE(custom_name, ?),
+               updated_at = CURRENT_TIMESTAMP
+             WHERE session_id = ?`
+          ).run(providerSessionId, duplicate.jsonl_path, duplicate.session_source, duplicate.custom_name, sessionId);
+        });
         return;
       }
 
@@ -403,7 +427,7 @@ export const sessionsDb = {
   ): void {
     const db = getConnection();
 
-    db.transaction(() => {
+    db.transaction(() => preservePinsOnReplacement(input.providerSessionId, sessionId, () => {
       db.prepare(`DELETE FROM sessions WHERE (session_id = ? OR provider_session_id = ?) AND session_id <> ?
         AND provider = (SELECT provider FROM sessions WHERE session_id = ?)
         AND session_id NOT IN (SELECT session_id FROM resident_bindings)
@@ -417,7 +441,7 @@ export const sessionsDb = {
            updated_at = CURRENT_TIMESTAMP
          WHERE session_id = ?`
       ).run(input.providerSessionId, input.jsonlPath, sessionId);
-    })();
+    }))();
   },
 
   /**

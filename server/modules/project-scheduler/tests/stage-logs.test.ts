@@ -243,8 +243,8 @@ test('a real MCP client lists the default rules, records only after adoption, an
     const { Client } = await import('@modelcontextprotocol/sdk/client/index.js');
     const { StreamableHTTPClientTransport } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
 
+    // The composition root mounts the MCP router without a global body parser.
     const app = express();
-    app.use(express.json());
     app.use('/api/scheduler-mcp', createStageLogMcpRouter({
       service: mcp,
       isEnabled: () => enabled,

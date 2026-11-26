@@ -31,7 +31,8 @@ let createFails = false;
 let preparedDraft = { text: 'prepared body', todoIds: ['todo-2'], attachments: [] as TodoDraftMeta['attachments'] };
 
 vi.mock('@/shared/api', () => {
-  const okJson = (data: unknown) => Promise.resolve({ ok: true, json: async () => data });
+  // Main's upload helper reads the correlation header off the response.
+  const okJson = (data: unknown) => Promise.resolve({ ok: true, headers: new Headers(), json: async () => data });
   return {
     api: {
       user: {

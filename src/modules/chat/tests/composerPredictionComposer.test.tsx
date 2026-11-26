@@ -104,7 +104,8 @@ function Harness({ codexControls, overrides }: { codexControls?: CodexControls; 
       onDeleteQueuedDraft={composer.deleteQueuedDraft}
       attachedFiles={composer.attachedFiles}
       onRemoveAttachment={() => {}}
-      fileErrors={composer.fileErrors}
+      attachmentRejections={composer.attachmentRejections}
+      onDismissAttachmentRejections={composer.dismissAttachmentRejections}
       showFileDropdown={composer.showFileDropdown}
       filteredFiles={composer.filteredFiles}
       selectedFileIndex={composer.selectedFileIndex}

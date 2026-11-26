@@ -7,6 +7,7 @@ import { cn } from '@/shared/utils';
 import type { LLMProvider, Project, ProjectSession, SessionWithProvider, SidebarSessionSelection } from '@/shared/types';
 import SidebarSessionItem from '@/modules/sidebar/SidebarSessionItem';
 import { useCompactSidebar } from '@/modules/sidebar/hooks/useCompactSidebar';
+import { useSessionPins } from '@/modules/sidebar/hooks/useSessionPins';
 import { buildProjectSessionTree } from '@/modules/sidebar/utils/projectSessionTree';
 
 const FORK_INDENT_PX = 12;
@@ -26,6 +27,7 @@ type PendingServerReveal = {
 type SidebarProjectSessionsProps = {
   project: Project;
   isExpanded: boolean;
+  includeOffPagePins?: boolean;
   sessions: SessionWithProvider[];
   selectedSession: ProjectSession | null;
   initialSessionsLoaded: boolean;
@@ -80,6 +82,7 @@ function SessionListSkeleton() {
 export default function SidebarProjectSessions({
   project,
   isExpanded,
+  includeOffPagePins = true,
   sessions,
   selectedSession,
   initialSessionsLoaded,
@@ -154,9 +157,49 @@ export default function SidebarProjectSessions({
     () => sessions.slice(0, visibleSessionCount),
     [sessions, visibleSessionCount],
   );
-  // Fork grouping runs over the rows this project is showing: a page that ends
-  // in the middle of a branch simply renders its older rows as roots.
-  const treeRows = useMemo(() => buildProjectSessionTree(visibleSessions, project.projectId), [visibleSessions, project.projectId]);
+  const pins = useSessionPins();
+  const projectPins = useMemo(
+    () => pins?.sessions.filter((pin) => pin.projectId === project.projectId) ?? [],
+    [pins?.sessions, project.projectId],
+  );
+  const pinnedSessionIds = useMemo(
+    () => projectPins.map((pin) => pin.sessionId),
+    [projectPins],
+  );
+  // A pin never spends one of the page's five slots: the window skips pinned
+  // rows, and the tree then gets those pinned rows back from `sessions` in
+  // their original order so a loaded pin keeps its real metadata.
+  const normalSessions = useMemo(() => {
+    // Filtered/Running lists keep the plain window, pins are not excluded there.
+    if (!includeOffPagePins) return sessions;
+    const pinned = new Set(pinnedSessionIds);
+    return sessions.filter((session) => !pinned.has(session.id));
+  }, [sessions, pinnedSessionIds, includeOffPagePins]);
+  const treeRows = useMemo(() => {
+    // Filtered/Running lists keep the plain window and borrow no pins.
+    if (!includeOffPagePins) {
+      return buildProjectSessionTree(visibleSessions, project.projectId);
+    }
+
+    const loadedIds = new Set(sessions.map((session) => session.id));
+    const ancestors = new Map(sessions.flatMap((session) => session.forkAncestors ?? []).map((ancestor) => [ancestor.id, ancestor]));
+    // A pin the server never returned has no page row and no ancestor snapshot
+    // to borrow, so it keeps the smaller pin summary.
+    const offPagePins: SessionWithProvider[] = projectPins.filter((pin) => !loadedIds.has(pin.sessionId)).map((pin) => ({
+      forkedFromSessionId: pin.forkedFromSessionId,
+      forkAncestors: pin.forkAncestors,
+      ...ancestors.get(pin.sessionId),
+      id: pin.sessionId, summary: pin.sessionTitle, __provider: pin.provider,
+      __projectId: project.projectId, lastActivity: pin.lastActivity ?? undefined,
+    }));
+    const ordinaryIds = new Set(normalSessions.slice(0, visibleSessionCount).map((session) => session.id));
+    const pageIds = new Set([...pinnedSessionIds, ...ordinaryIds]);
+    return buildProjectSessionTree(
+      [...sessions.filter((session) => pageIds.has(session.id)), ...offPagePins],
+      project.projectId,
+      pinnedSessionIds,
+    );
+  }, [includeOffPagePins, visibleSessions, sessions, normalSessions, project.projectId, projectPins, pinnedSessionIds]);
   const selectedSessionId = selectedSession?.id ?? null;
   const targetAncestors = useMemo(() => {
     const parents = new Map(treeRows.map((row) => [row.session.id, row.parentId]));
@@ -213,9 +256,11 @@ export default function SidebarProjectSessions({
     return null;
   }
 
-  const hasSessions = sessions.length > 0;
-  // Loaded sessions the reveal window still hides; independent of the server.
-  const hasHiddenSessions = sessions.length > visibleSessionCount;
+  // The tree also holds pin-only rows the server never returned, so the empty
+  // state follows the rows the project can actually draw.
+  const hasSessions = treeRows.length > 0;
+  // Ordinary rows the reveal window still hides; pinned rows never count.
+  const hasHiddenSessions = normalSessions.length > visibleSessionCount;
   const isSelecting = selectedSessionIds !== null;
   // A session with a response in flight cannot be deleted — the same rule the
   // row's options menu applies — so it is not selectable either.
@@ -260,7 +305,7 @@ export default function SidebarProjectSessions({
     // Every loaded row is already on screen: continue with the server's page,
     // remembering where the list and the window stood so only one page of the
     // response shows.
-    pendingServerRevealRef.current = { loaded: sessions.length, visible: visibleSessions.length };
+    pendingServerRevealRef.current = { loaded: sessions.length, visible: Math.min(visibleSessionCount, normalSessions.length) };
     onLoadMoreSessions(project.projectId);
   };
 
@@ -461,7 +506,7 @@ export default function SidebarProjectSessions({
               onClick={showMoreSessions}
               disabled={isLoadingMoreSessions}
             >
-              {isLoadingMoreSessions ? t('sessions.loadingSessions') : t('sessions.showMore')}
+              {isLoadingMoreSessions ? t('sessions.loadingSessions') : t('sessions.showMore', 'Load more sessions')}
             </Button>
           )}
         </>

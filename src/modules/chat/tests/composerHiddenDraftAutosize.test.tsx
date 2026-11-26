@@ -130,7 +130,8 @@ function Harness({ isVisible, passiveHeights }: Args & { passiveHeights: ProbeAr
         todoNotice={composer.todoNotice}
         localTodoCommand={composer.localTodoCommand}
         onRemoveAttachment={() => {}}
-        fileErrors={composer.fileErrors}
+        attachmentRejections={composer.attachmentRejections}
+        onDismissAttachmentRejections={composer.dismissAttachmentRejections}
         showFileDropdown={composer.showFileDropdown}
         filteredFiles={composer.filteredFiles}
         selectedFileIndex={composer.selectedFileIndex}

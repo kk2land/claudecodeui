@@ -17,6 +17,7 @@ import {
   STAGE_LOGS_TABLE_SCHEMA_SQL,
   SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL,
   SESSIONS_TABLE_SCHEMA_SQL,
+  SESSION_PINS_TABLE_SCHEMA_SQL,
   USER_PREFERENCES_TABLE_SCHEMA_SQL,
   USER_NOTIFICATION_PREFERENCES_TABLE_SCHEMA_SQL,
   VAPID_KEYS_TABLE_SCHEMA_SQL,
@@ -674,6 +675,8 @@ export const runMigrations = (db: Database) => {
     addForkedFromSessionIdColumn(db);
     addSessionSourceColumn(db);
     addSessionLastOpenedAtColumn(db);
+    // Create after legacy session-table repairs so the foreign key names the canonical app id.
+    db.exec(SESSION_PINS_TABLE_SCHEMA_SQL);
     ensureProjectsForSessionPaths(db);
     db.exec(SCHEDULED_MESSAGES_TABLE_SCHEMA_SQL);
     // Additive: resident bindings/logs never rewrite or drop existing data.

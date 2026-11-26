@@ -135,7 +135,8 @@ function Harness({ isLoading, codexControls, onAbortSession, background = false,
       onOpenTodoList={onOpenTodoList}
       localTodoCommand={composer.localTodoCommand}
       onRemoveAttachment={() => {}}
-      fileErrors={composer.fileErrors}
+      attachmentRejections={composer.attachmentRejections}
+      onDismissAttachmentRejections={composer.dismissAttachmentRejections}
       showFileDropdown={composer.showFileDropdown}
       filteredFiles={composer.filteredFiles}
       selectedFileIndex={composer.selectedFileIndex}

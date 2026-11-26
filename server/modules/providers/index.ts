@@ -29,6 +29,10 @@ export { codexRateLimitsService } from './list/codex/codex-rate-limits.service.j
 // OpenCode turn servers a killed CloudCLI process left running.
 export { reapOrphanedOpenCodeServers } from './list/opencode/opencode-runtime.provider.js';
 
+// resolveCodexCommandLine: used by the websocket module's Shell tab to start
+// the same Codex install that chats run.
+export { resolveCodexCommandLine } from './list/codex/codex-cli.js';
+
 export { initializeSessionsWatcher } from './services/sessions-watcher.service.js';
 export { closeSessionsWatcher } from './services/sessions-watcher.service.js';
 

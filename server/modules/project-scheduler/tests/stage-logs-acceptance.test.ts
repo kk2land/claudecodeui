@@ -174,8 +174,8 @@ test('an ordinary session token logs nothing until a real adoption, then the plu
     let pluginEnabled = true;
     const runtime = createRuntime();
 
+    // The composition root mounts the MCP router without a global body parser.
     const app = express();
-    app.use(express.json());
     const httpServer = app.listen(0, '127.0.0.1');
     await new Promise<void>((resolve) => httpServer.once('listening', () => resolve()));
     const address = httpServer.address();

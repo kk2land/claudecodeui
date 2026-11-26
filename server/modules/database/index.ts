@@ -22,6 +22,8 @@ export type {
   SessionDraftRecord,
 } from '@/shared/types.js';
 export { sessionsDb } from '@/modules/database/repositories/sessions.db.js';
+// isRetiredSessionProvider: the Providers sessions service refuses to pin a retired provider's stored row.
+export { isRetiredSessionProvider } from '@/modules/database/repositories/sessions.db.js';
 // residentBindingsDb: the project-scheduler host module owns resident binding
 // rows; the sessions repository reads the same table for deletion protection
 // and list visibility.
@@ -33,6 +35,8 @@ export { stageLogsDb } from '@/modules/database/repositories/stage-logs.db.js';
 export { scheduledTaskSessionsDb } from '@/modules/database/repositories/scheduled-task-sessions.db.js';
 export type { ResidentBindingRecord } from '@/modules/database/repositories/resident-bindings.db.js';
 export { sessionRuntimeDb } from '@/modules/database/repositories/session-runtime.db.js';
+// sessionPinsDb: used by the Providers sessions service to persist per-user pins.
+export { sessionPinsDb } from '@/modules/database/repositories/session-pins.db.js';
 export { userDb } from '@/modules/database/repositories/users.js';
 // userPreferencesDb: used by the User module to persist the settings that used to live in browser localStorage.
 export { userPreferencesDb } from '@/modules/database/repositories/user-preferences.db.js';
