@@ -5,7 +5,6 @@ import test from "node:test";
 import {
   codexFixture,
   createService,
-  piAcpFixture,
   piFixture,
   startInput,
   temporaryRoot,
@@ -335,7 +334,7 @@ test("Codex concurrency is isolated and PATH from settings is used for the execu
     t,
     root,
     { TEST_SCENARIO: "sleep", TEST_DELAY_MS: "300" },
-    { executablePaths: { pi: piFixture, "pi-acp": piAcpFixture } },
+    { executablePaths: { pi: piFixture } },
   );
   service.updateSettings({
     concurrency: { pi: 3, codex: 1 },

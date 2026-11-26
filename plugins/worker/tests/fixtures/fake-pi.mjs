@@ -4,9 +4,8 @@ import path from "node:path";
 import { randomUUID } from "node:crypto";
 
 const scenario = process.env.TEST_SCENARIO || "ok";
-if (process.env.TEST_PID_FILE) {
-  const fsPid = await import("node:fs");
-  fsPid.writeFileSync(process.env.TEST_PID_FILE, String(process.pid));
+if (process.env.TEST_PID_FILE && scenario !== "hangtree" && scenario !== "grandchild") {
+  fs.writeFileSync(process.env.TEST_PID_FILE, String(process.pid));
 }
 const args = process.argv.slice(2);
 const file = args[args.indexOf("--session") + 1];
@@ -55,7 +54,9 @@ if (scenario === "hangtree") {
     ["-e", "process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],
     { stdio: "inherit" },
   );
-  fs.writeFileSync(process.env.TEST_PID_FILE, String(child.pid));
+  if (process.env.TEST_PID_FILE) {
+    fs.writeFileSync(process.env.TEST_PID_FILE, String(child.pid));
+  }
   child.unref();
   await wait(60000);
 } else if (scenario === "hang") {
@@ -80,22 +81,33 @@ if (scenario === "hangtree") {
     emit({ type: "turn_end" });
   }
   if (scenario === "sleep") await wait(Number(process.env.TEST_DELAY_MS || 400));
+  if (scenario === "hold") {
+    while (!fs.existsSync(process.env.TEST_RELEASE_FILE)) {
+      emit({ type: "tool_execution_update", toolCallId: "c1", toolName: "read" });
+      await wait(50);
+    }
+  }
   if (scenario === "grandchild") {
     const { spawn } = await import("node:child_process");
     const child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], {
       stdio: "inherit",
     });
-    fs.writeFileSync(process.env.TEST_PID_FILE, String(child.pid));
+    if (process.env.TEST_PID_FILE) {
+      fs.writeFileSync(process.env.TEST_PID_FILE, String(child.pid));
+    }
     child.unref();
   }
-  emit({
-    type: "message_end",
-    message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "pi answer " + sessionId }] },
-  });
-  emit({
-    type: "turn_end",
-    message: { usage: { input: 7, output: 3, totalTokens: 10 } },
-  });
+  const message = {
+    role: "assistant",
+    stopReason: "stop",
+    content: [{ type: "text", text: "pi answer " + sessionId }],
+    usage: process.env.TEST_USAGE_JSON
+      ? JSON.parse(process.env.TEST_USAGE_JSON)
+      : { input: 12, output: 5, cacheRead: 2, cacheWrite: 1, totalTokens: 20 },
+  };
+  fs.appendFileSync(file, JSON.stringify({ type: "message", message }) + "\n");
+  emit({ type: "message_end", message });
+  emit({ type: "turn_end", message });
   emit({ type: "agent_end", willRetry: false });
   emit({ type: "agent_settled", aborted: false });
 }

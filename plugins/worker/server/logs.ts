@@ -6,6 +6,21 @@ const MAX_BYTES = 24 * 1024 * 1024;
 const PAGE_BYTES = 64 * 1024;
 const TAIL_BYTES = 4 * 1024;
 
+/** Reads a JSON event log with line numbers, retaining malformed entries for validation. */
+export function readEventLines(file: string): Array<{ value: unknown; number: number }> {
+  const output: Array<{ value: unknown; number: number }> = [];
+  const source = fs.readFileSync(file, "utf8");
+  source.split("\n").forEach((line, index) => {
+    if (!line.trim()) return;
+    try {
+      output.push({ value: JSON.parse(line), number: index + 1 });
+    } catch {
+      output.push({ value: undefined, number: index + 1 });
+    }
+  });
+  return output;
+}
+
 /** Appends raw output to a bounded run log; a marker records the first truncation. */
 export function appendLog(
   directory: string,

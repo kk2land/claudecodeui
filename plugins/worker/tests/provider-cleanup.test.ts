@@ -126,7 +126,6 @@ test("non-Codex provider is rejected for new work while an old request replays",
     environment: environment(root),
     executablePaths: {
       pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"),
-      "pi-acp": path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs"),
       codex: codexFixture,
     },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],

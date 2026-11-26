@@ -8,7 +8,6 @@ import type { WorkerOwner } from "../shared/contracts.js";
 import {
   environment,
   guardianSource,
-  piAcpFixture,
   piFixture,
   startInput,
   temporaryRoot,
@@ -42,7 +41,7 @@ test("historical parent+project keeps read and resume after owner generation cha
   const options = {
     dataDirectory: data,
     environment: environment(root),
-    executablePaths: { pi: piFixture, "pi-acp": piAcpFixture },
+    executablePaths: { pi: piFixture },
     guardianCommand: [process.execPath, "--import", tsxLoader, guardianSource],
   };
   const first = new WorkerService(options);

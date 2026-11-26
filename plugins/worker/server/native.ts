@@ -1,12 +1,9 @@
 import fs from "node:fs";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import type {
-  AcpConfigOptionRequest,
   NativeExecution,
   NativeLaunch,
-  PiAcpSessionPlan,
   WorkerCodexUsageBaseline,
   WorkerRun,
   WorkerTokenCounters,
@@ -15,31 +12,19 @@ import type {
 } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
 import { trackAcpProgress } from "./acp.js";
-import {
-  parsePiAcp,
-  resolvePiAcpTranscriptFile,
-} from "./pi-acp.js";
+import { readEventLines } from "./logs.js";
+import { resolvePiTranscriptFile } from "./pi-history.js";
 
-export { parsePiAcp, resolvePiAcpTranscriptFile };
-
-/** Thinking levels supported by `pi-acp` (0.4.0 does not support `max`). */
-export const PI_ACP_THINKING_LEVELS = [
+/** Thinking levels accepted by the Pi CLI. */
+export const PI_THINKING_LEVELS = [
   "off",
   "minimal",
   "low",
   "medium",
   "high",
   "xhigh",
-] as const;
-
-/** Thinking levels supported by legacy `pi --print --mode json` continuation runs. */
-export const PI_LEGACY_THINKING_LEVELS = [
-  ...PI_ACP_THINKING_LEVELS,
   "max",
 ] as const;
-
-/** Default Pi thinking levels exposed for new configurations and catalog responses. */
-export const PI_THINKING_LEVELS = PI_ACP_THINKING_LEVELS;
 
 export type ModelSelection = {
   model: string | null;
@@ -84,22 +69,6 @@ export function resolveExecutable(
     "EXECUTABLE_MISSING",
     "PATH 中找不到可执行文件: " + name,
   );
-}
-
-/**
- * Resolves the bundled `@geohar/pi-acp` JS entry from the application's local `node_modules`
- * without using `npx` or global installs. Returns `null` when the dependency is unavailable.
- */
-export function resolveBundledPiAcpEntry(
-  fromUrl: string = import.meta.url,
-): string | null {
-  try {
-    const require = createRequire(fromUrl);
-    const entry = require.resolve("@geohar/pi-acp");
-    return fs.statSync(entry).isFile() ? entry : null;
-  } catch {
-    return null;
-  }
 }
 
 function nonBlank(value: string | undefined | null): string | null {
@@ -160,115 +129,49 @@ export function nativeHome(
       sessionsRoot: path.join(dataDirectory, "sessions", "agy"),
     };
   }
-  const resolvedHome = home(
-    environment,
-    "PI_CODING_AGENT_DIR",
-    path.join(".pi", "agent"),
-  );
   return {
-    home: resolvedHome,
-    sessionsRoot: path.join(resolvedHome, "sessions"),
+    home: home(environment, "PI_CODING_AGENT_DIR", path.join(".pi", "agent")),
+    sessionsRoot: path.join(dataDirectory, "sessions", "pi"),
   };
 }
 
-/**
- * Validates and prepares per-run parameters for a Pi ACP session hosted on the shared Pi ACP
- * process. Rejects unsupported options (`provider`, `max` thinking) and home/transcript mismatches
- * up front without spawning anything.
- */
-export function preparePiAcpLaunch(input: {
-  run: WorkerRun;
-  cwd: string;
-  previous: WorkerRun | null;
-  dataDirectory: string;
-  baseEnvironment: NodeJS.ProcessEnv;
-}): PiAcpSessionPlan {
-  const previous = input.previous;
-  const defaults = nativeHome("pi", input.dataDirectory, input.baseEnvironment);
-  const resolvedHome = previous ? previous.home : defaults.home;
-  const sessionsRoot = previous ? previous.sessionsRoot : defaults.sessionsRoot;
-  const model = nonBlank(input.run.model);
-  const effort = nonBlank(input.run.effort);
-  if (nonBlank(input.run.provider)) {
-    throw new WorkerFailure(
-      "PROVIDER_UNSUPPORTED",
-      "provider 仅 Codex 支持；Pi 请使用完整 model",
-    );
-  }
-  if (effort && !(PI_ACP_THINKING_LEVELS as readonly string[]).includes(effort)) {
-    throw new WorkerFailure(
-      "THINKING_INVALID",
-      effort === "max"
-        ? "Pi ACP 不支持 max thinking 级别"
-        : "不支持的 Pi thinking 级别",
-    );
-  }
-  let sessionFile: string | null = null;
+/** Builds a standalone Pi turn using the admitted home and an explicit session file. */
+function preparePi(input: PrepareInput): NativeLaunch {
+  const { run, previous, cwd, baseEnvironment } = input;
+  let sessionsRoot = run.sessionsRoot;
+  let sessionFile = path.join(sessionsRoot, run.id + ".jsonl");
   if (previous) {
-    if (!previous.nativeSessionId) {
+    const sessionId = previous.nativeSessionId;
+    if (!sessionId)
       throw new WorkerFailure("NATIVE_SESSION_UNKNOWN", "缺少已核实的 Pi 会话身份");
+    if (previous.nativeSessionFile) {
+      sessionFile = previous.nativeSessionFile;
+      readPiHeader(sessionFile, cwd, sessionId);
+    } else {
+      // Some ACP runs saved an ID before their session file was located.
+      const userHome = nonBlank(baseEnvironment.HOME) ??
+        nonBlank(baseEnvironment.USERPROFILE) ?? os.homedir();
+      let resolved = resolvePiTranscriptFile(sessionsRoot, sessionId, cwd, null, userHome);
+      if (resolved.status === "missing") {
+        let configuredDir: string | null = null;
+        try {
+          const settings = JSON.parse(fs.readFileSync(path.join(run.home, "settings.json"), "utf8"));
+          configuredDir = typeof settings?.sessionDir === "string" ? nonBlank(settings.sessionDir) : null;
+        } catch {
+          // A missing or unreadable settings file leaves the stored session root authoritative.
+        }
+        if (configuredDir) {
+          sessionsRoot = path.resolve(run.home, configuredDir);
+          resolved = resolvePiTranscriptFile(sessionsRoot, sessionId, cwd, null, userHome);
+        }
+      }
+      if (resolved.status !== "ok")
+        throw new WorkerFailure(
+          resolved.status === "missing" ? "NATIVE_SESSION_MISSING" : "NATIVE_SESSION_MISMATCH",
+          resolved.reason,
+        );
+      sessionFile = resolved.file;
     }
-    if (path.resolve(previous.home) !== path.resolve(defaults.home)) {
-      throw new WorkerFailure(
-        "NATIVE_SESSION_MISMATCH",
-        "Pi ACP 共享进程目录与历史会话目录不一致",
-      );
-    }
-    const userHome =
-      nonBlank(input.baseEnvironment.HOME) ??
-      nonBlank(input.baseEnvironment.USERPROFILE) ??
-      os.homedir();
-    const resolved = resolvePiAcpTranscriptFile(
-      sessionsRoot,
-      previous.nativeSessionId,
-      input.cwd,
-      previous.nativeSessionFile,
-      userHome,
-    );
-    if (resolved.status !== "ok") {
-      throw new WorkerFailure(
-        resolved.status === "missing"
-          ? "NATIVE_SESSION_MISSING"
-          : "NATIVE_SESSION_MISMATCH",
-        resolved.reason,
-      );
-    }
-    sessionFile = resolved.file;
-  }
-  const configOptions: AcpConfigOptionRequest[] = [];
-  if (model) configOptions.push({ configId: "model", value: model, match: "model" });
-  if (effort) configOptions.push({ configId: "thought_level", value: effort, match: "exact" });
-  return {
-    cwd: input.cwd,
-    sessionId: previous?.nativeSessionId ?? null,
-    sessionFile,
-    home: resolvedHome,
-    sessionsRoot,
-    configOptions,
-  };
-}
-
-/** Builds the legacy Pi print/JSON launch for resuming pre-ACP explicit session files. */
-function preparePiLegacy(input: PrepareInput): NativeLaunch {
-  const previous = input.previous;
-  const defaults = nativeHome("pi", input.dataDirectory, input.baseEnvironment);
-  const resolvedHome = previous ? previous.home : defaults.home;
-  const sessionsRoot = previous
-    ? previous.sessionsRoot
-    : path.join(input.dataDirectory, "sessions", "pi");
-  // The full native model identifier is passed through; the CLI resolves it.
-  const model = nonBlank(input.run.model);
-  const effort = nonBlank(input.run.effort);
-  if (effort && !(PI_LEGACY_THINKING_LEVELS as readonly string[]).includes(effort))
-    throw new WorkerFailure("THINKING_INVALID", "不支持的 Pi thinking 级别");
-  const sessionFile = previous
-    ? previous.nativeSessionFile
-    : path.join(sessionsRoot, input.run.id + ".jsonl");
-  if (previous) {
-    if (!previous.nativeSessionId || !sessionFile)
-      throw new WorkerFailure("NATIVE_SESSION_UNKNOWN", "缺少已核实的 Pi 会话身份");
-    const header = readPiHeader(sessionFile, input.cwd, previous.nativeSessionId);
-    void header;
   }
   const argv = [
     input.executable,
@@ -278,14 +181,14 @@ function preparePiLegacy(input: PrepareInput): NativeLaunch {
     "--session-dir",
     sessionsRoot,
     "--session",
-    sessionFile!,
+    sessionFile,
   ];
-  if (model) argv.push("--model", model);
-  if (effort) argv.push("--thinking", effort);
+  if (run.model) argv.push("--model", run.model);
+  if (run.effort) argv.push("--thinking", run.effort);
   return {
     argv,
-    cwd: input.cwd,
-    env: { ...input.baseEnvironment, PI_CODING_AGENT_DIR: resolvedHome },
+    cwd,
+    env: { ...baseEnvironment, PI_CODING_AGENT_DIR: run.home },
     prompt: input.prompt,
     expectedSessionId: previous?.nativeSessionId ?? null,
     sessionFile,
@@ -377,7 +280,7 @@ export function prepareLaunch(input: PrepareInput): NativeLaunch {
     );
   if (input.type === "codex") return prepareCodex(input);
   if (input.type === "agy") return prepareAgy(input);
-  return preparePiLegacy(input);
+  return preparePi(input);
 }
 
 function existsNonEmpty(file: string): boolean {
@@ -406,7 +309,7 @@ function readPiHeader(
     throw new WorkerFailure("NATIVE_SESSION_MISMATCH", "Pi 会话身份不匹配");
   if (
     typeof value.cwd !== "string" ||
-    path.resolve(value.cwd) !== path.resolve(cwd)
+    !samePath(value.cwd, cwd)
   )
     throw new WorkerFailure("NATIVE_SESSION_MISMATCH", "Pi 会话工作目录不匹配");
   return { id: expectedId, cwd: value.cwd };
@@ -792,20 +695,6 @@ export function findCodexSessionFile(
   return walk(sessionsRoot, 0);
 }
 
-function lines(file: string): { value: unknown; number: number }[] {
-  const output: { value: unknown; number: number }[] = [];
-  const source = fs.readFileSync(file, "utf8");
-  source.split("\n").forEach((line, index) => {
-    if (!line.trim()) return;
-    try {
-      output.push({ value: JSON.parse(line), number: index + 1 });
-    } catch {
-      output.push({ value: undefined, number: index + 1 });
-    }
-  });
-  return output;
-}
-
 function samePath(left: string, right: string): boolean {
   try {
     return fs.realpathSync(left) === fs.realpathSync(right);
@@ -832,7 +721,7 @@ export function parseDsh(
   const fail = (message: string) => {
     if (error === null) error = message;
   };
-  for (const { value, number } of lines(file)) {
+  for (const { value, number } of readEventLines(file)) {
     if (value === undefined || typeof value !== "object" || Array.isArray(value)) {
       fail("无效 DSH 事件 (line " + number + ")");
       continue;
@@ -969,7 +858,7 @@ export function parsePi(
   const fail = (message: string) => {
     if (error === null) error = message;
   };
-  for (const { value, number } of lines(file)) {
+  for (const { value, number } of readEventLines(file)) {
     if (value === undefined || typeof value !== "object" || Array.isArray(value)) {
       fail("无效 Pi 事件 (line " + number + ")");
       continue;
@@ -1110,7 +999,7 @@ export function parseAgy(
   const fail = (message: string) => {
     if (error === null) error = message;
   };
-  for (const { value, number } of lines(file)) {
+  for (const { value, number } of readEventLines(file)) {
     if (value === undefined || typeof value !== "object" || Array.isArray(value)) {
       fail("无效 agy 事件 (line " + number + ")");
       continue;
@@ -1272,7 +1161,7 @@ export function parseCodex(
   const fail = (message: string) => {
     if (error === null) error = message;
   };
-  for (const { value, number } of lines(file)) {
+  for (const { value, number } of readEventLines(file)) {
     if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) {
       fail("无效 Codex 事件 (line " + number + ")");
       continue;

@@ -216,7 +216,7 @@ Worker 或后续 Worker。用户明确要求只委派部分工作时，按指定
 ### 设置结构与兼容投影
 
 `GET /state` 的 `settings` 以 schema 2 的 `configs` 与 `defaultConfigId` 为唯一持久化来源，另含保留天数、
-ACP 空闲关闭时间 `acpIdleTimeoutSeconds` 及由服务端管理的软提醒值。硬超时通过 `PUT /settings` 中各配置的 `hardTimeoutSeconds` 保存。
+AGY ACP 空闲关闭时间 `acpIdleTimeoutSeconds` 及由服务端管理的软提醒值。硬超时通过 `PUT /settings` 中各配置的 `hardTimeoutSeconds` 保存。
 `acpIdleTimeoutSeconds` 为有效秒数（默认 `300` 秒 / 5 分钟），优先级为：设置中显式保存的值 > 环境变量
 `CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS`（缺失、格式非法或超范围时回退 300） > 默认 300 秒；从未显式保存时
 不写入持久化记录，无关设置保存不会把环境变量或默认值落库固化。
@@ -269,7 +269,7 @@ ACP 空闲关闭时间 `acpIdleTimeoutSeconds` 及由服务端管理的软提醒
 规范的 `PUT /settings` 整份替换 `configs`，并在保存前原子校验：`id` 唯一且非空、`name` 非空、`type` 合法、
 `enabled` 为布尔值、`roles` 只含任务角色目录中的值、`concurrency` 为正整数、`defaultConfigId` 引用已启用
 配置；每项 `hardTimeoutSeconds` 为正整数或 `null`，省略时补为 300 秒。
-Pi 的 effort 必须是受支持的 ACP thinking 级别（`off`/`minimal`/`low`/`medium`/`high`/`xhigh`），agy 的 effort
+Pi 的 effort 必须是 CLI 支持的 thinking 级别（`off`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`），agy 的 effort
 必须是 ACP 支持的 `low`/`medium`/`high`/`xhigh`（已持久化配置中同 ID、同引擎且未改动的历史 `max` 允许在保存
 其他字段时原样保留，不静默改写；新建或显式改为 `max` 会被拒绝）；若 agy 模型 ID 以 `agy models` 实际公布的
 `-low`/`-medium`/`-high`/`-xhigh` 变体结尾，则 effort 必须是同一档或留空，否则保存被拒绝并指出模型与
@@ -277,7 +277,7 @@ Pi 的 effort 必须是受支持的 ACP thinking 级别（`off`/`minimal`/`low`/
 对象，`env` 为字符串到字符串映射，`legacyExtraArgs` 为字符串数组，含 `-C`/`--cd` 的项被拒绝。任一项非法
 都会让整次更新失败且不保存任何字段。`retentionDays` 为正整数，省略时保留原值；`acpIdleTimeoutSeconds` 为
 可选的 `1` 到 `2147483` 之间的整数秒，省略时保留已保存值或继续沿用环境变量/默认 300 秒回退，保存后立即应用到
-Pi 与 AGY 各自独立的 ACP 空闲计时器（已处于空闲的槽位沿用原空闲起点，缩短超时可立即回收）；`schemaVersion`
+AGY 的 ACP 空闲计时器（沿用原空闲起点，缩短超时可立即回收）；`schemaVersion`
 由服务端管理，客户端不提供。前端页面按 `GET /state` 与 `PUT /settings` 响应是否包含 `acpIdleTimeoutSeconds`
 判断后端能力：未重启的旧 schema-2 后端缺少该字段时，页面禁用该输入框且不提交该字段，其他设置仍可正常保存，
 且不假称空闲时长已保存。
@@ -342,24 +342,21 @@ Codex `env` 在每次原生 start/resume 时合并到继承环境之上，同名
 只在已启用的配置中路由，显式 `type` 先收窄候选，提供了 `taskRole` 时取候选中第一个 `roles` 包含该角色的
 配置（按 `configs` 列表顺序，默认配置不覆盖前面的匹配项）。无角色匹配或未提供 `taskRole` 时回退到类型
 候选中的默认配置，不在候选中则取首个配置。`worker_start`
-在接受请求时把最终 `configId`、`type`、model、provider、effort 快照到 worker/run（新建 Pi 与 AGY 标记
+在接受请求时把最终 `configId`、`type`、model、provider、effort 快照到 worker/run（新建 AGY 标记
 `nativeProtocol: "acp"`）；之后修改设置不会改变已排队 run 已接受的值，原生启动（ACP 配置或 CLI argv）使用该快照。
 
 新任务的 model/effort 优先级为：请求显式值 > 所选配置的 `model`/`effort` > 执行器原生默认。provider 只有
 Codex 支持：请求显式 provider > 所选配置的 `codex.modelProvider` > Codex 原生默认；非 Codex 类型若显式
 传入非空 provider，会在幂等重放检查之后以 `PROVIDER_UNSUPPORTED` 拒绝，旧请求的幂等重放仍返回原结果。
-Pi 与 AGY 新任务均通过 ACP `session/set_config_option` 传入模型与推理级别，不再接受 `provider`：Pi 将完整模型
-ID 传给 `model`、thinking 传给 `thought_level`（仅旧 Pi JSON 续接仍使用 `--model` 与 `--thinking`）；AGY
-将带 `-low`/`-medium`/`-high`/`-xhigh` 固定后缀的目录变体拆成 `model=<base>` + `thought_level=<suffix>`
-（模型列表中字面自带后缀的 ID 如 `gpt-oss-120b-medium` 保持原样），无固定后缀的模型 ID 原样传给 `model`。
-配置保存、创建和续接都在现有服务边界校验已知的
-变体/effort 冲突与 ACP 不支持的 `max`，拒绝时不写入新 worker 或 run；续接继承的旧记录若与当前模型或 ACP 能力
-冲突也会明确报错，必须显式改用兼容 effort。
+Pi 将完整模型 ID 和推理级别分别通过 `--model` 与 `--thinking` 传给 CLI。AGY 通过
+ACP `session/set_config_option` 配置模型与推理级别。已知的 `-low`、`-medium`、`-high`、`-xhigh`
+模型变体拆为 `model=<base>` 和 `thought_level=<suffix>`，如 `gpt-oss-120b-medium` 这类字面 ID 原样传给模型选项。
+保存配置、创建和续接会校验模型与 effort 冲突。AGY ACP 拒绝 `max`。
 
 `worker_resume` 保持原 worker 类型与 `configId`、cwd、home 和原生会话身份，默认沿用上一次 run 记录的
 model/provider/effort，不套用当前配置；显式 model/effort（Codex 还包括 provider）仍可覆盖。旧 Pi 的独立
-provider 会折叠进完整模型 ID，并按大小写不敏感的前缀去重；历史非 ACP Pi 会话（无 `nativeProtocol: "acp"`）
-保持旧 `--print --mode json` 续接路径（仍接受 `max`），Pi ACP 会话继续走 ACP `session/resume`。DSH 历史记录
+provider 会折叠进完整模型 ID，并按大小写不敏感的前缀去重。Pi 通过 `--session` 续接原会话文件，
+也支持从历史 ACP 运行续接。历史记录按其保存的协议读取。DSH 历史记录
 不再展示且只读，续接请求明确以
 `WORKER_TYPE_UNSUPPORTED` 拒绝。agy 的模型 ID 原样沿用上一次 run 的记录，不拼接 provider，且无论历史记录是否
 带 `nativeProtocol: "acp"`，续接均以 `nativeProtocol: "acp"` 通过 `session/resume` 传入原原生会话 ID（含旧
@@ -399,32 +396,18 @@ DSH 已停止执行：`prepareLaunch` 对新 DSH 运行返回 `WORKER_TYPE_UNSUP
 ID 的续接也明确拒绝。遗留的排队 DSH 运行不会再进入调度或恢复流程，而是原样留在数据库中；其 Worker、
 运行、通知、日志与原生会话不会出现在列表/历史/通知视图，也不会被迁移、回填或补写失败通知。
 
-Pi（新任务默认走 ACP，历史 JSON 会话保持原路径续接）：
+Pi（新建和续接均使用本机 CLI，每轮运行独立进程）：
 
-- **使用前提与执行器解析：** 新建 Pi 任务使用 ACP 适配器（`@geohar/pi-acp` `0.4.0`），底层仍调用本机已安装的 `pi`
-  CLI 并沿用 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）及认证配置。插件优先使用注入路径或用户 `PATH` 中的
-  `pi-acp`；若用户只安装了 `pi` 而未单独安装 `pi-acp`，则自动回退到 CloudCLI 应用本地生产依赖中的
-  `@geohar/pi-acp` JS 入口并以当前 Node 进程启动（不触发 `npx` 或全局安装）；若两者均不可用则明确报
-  `EXECUTABLE_MISSING`，不会静默回退到旧 JSON 模式。
-- **ACP 路径（新建任务及 ACP 续接）：** 由按引擎共享的懒启动 ACP 进程通过 stdio JSON-RPC 2.0
-  （`initialize` / `session/new` / `session/resume` / `session/set_config_option` / `session/prompt` /
-  `session/cancel` / `session/close`）驱动；同一引擎按空闲时间（默认 300 秒，可在设置页或环境变量
-  `CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS` 配置）回收。`thought_level` 仅接受
-  `off/minimal/low/medium/high/xhigh`（不支持 `max`），且不允许静默降级。每轮仍对照
-  `$PI_CODING_AGENT_DIR/sessions` 下本地 transcript 起始偏移核对最终 `stopReason` 与本轮 usage，防止误判成功。
-- **旧 JSON 路径（仅用于续接历史非 ACP Pi 会话）：**
+```sh
+pi -p --mode json --session-dir <插件数据目录>/sessions/pi \
+  --session <首次 runId>.jsonl [--model <完整模型 ID>] [--thinking X]
+```
 
-    pi --print --mode json --session-dir <实例数据目录>/sessions/pi \
-      --session <首次 runId>.jsonl [--model <完整模型 ID>] [--thinking X]
-
-  - 通过 stdin 输入提示词，不追加 `-`。
-  - 仅续接历史未标记 `nativeProtocol: "acp"` 的 Pi 会话时使用，仍支持旧版 `thinking` 档位
-    `off/minimal/low/medium/high/xhigh/max`；续接前核实会话文件存在且非空、header 的 ID 与 cwd 匹配。
-  - 新请求参数优先级：显式请求 > 所选配置的默认值 > Pi 原生配置；续接时显式参数 > 旧记录。完整模型 ID 直接传给
-    model 配置 / `--model`，不再接受 `--provider`，也没有 `CODEX_PI_MODEL`/`CODEX_PI_PROVIDER`/`CODEX_PI_THINKING`
-    环境回退。
-  - 旧 JSON 成功要求：exit 0、会话身份匹配、最终 assistant 的 `stopReason=stop`、最终 `agent_end` 的
-    `willRetry=false`、`agent_settled` 的 `aborted=false`。原生重试后最终成功可以接受。
+- 提示词从 stdin 传入。原生配置和认证来自 `PI_CODING_AGENT_DIR`（默认 `~/.pi/agent`）。
+- 续接使用原来的 home、cwd 和会话文件。历史 ACP 记录缺少文件路径时，按原生会话 ID 和工作目录在
+  记录的会话目录中查找，并支持 Pi 设置里的 `sessionDir`。确认文件身份后用 `--session` 打开。
+- 成功要求进程退出码为 0、会话身份匹配、最终 assistant 的 `stopReason=stop`，并收到
+  `willRetry=false` 的 `agent_end` 和 `aborted=false` 的 `agent_settled`。用量来自本轮 JSON 事件。
 
 Antigravity（`agy`，新任务与续接均走 ACP；历史 `stream-json` 日志与旧排队记录保持兼容）：
 
@@ -434,8 +417,7 @@ Antigravity（`agy`，新任务与续接均走 ACP；历史 `stream-json` 日志
 
   - 使用本机 `agy 1.5.16` 实测的 stdio JSON-RPC 2.0 ACP 模式（`initialize` / `session/new` /
     `session/resume` / `session/set_config_option` / `session/prompt` / `session/cancel` /
-    `session/close`）。AGY 拥有独立于 Pi 的按引擎共享懒启动 ACP 进程，跨 owner、项目与 cwd 复用同一
-    `initialize` 进程，多会话按 `sessionId` 复用且互不串扰；按独立的 ACP 空闲超时（默认 300 秒）回收。
+    `session/close`）。AGY 懒启动一个共享 ACP 进程，跨 owner、项目与 cwd 复用该进程，多会话按 `sessionId` 复用且互不串扰；按独立的 ACP 空闲超时（默认 300 秒）回收。
   - 无头 ACP 无法交互授权，因此继续传入 `--dangerously-skip-permissions` 以允许实现类任务执行工具；该参数
     作用于共享 AGY 进程，不是 OS 沙箱，仍依赖任务工作区与主代理 review。
   - 原生会话身份为 `session/new` 返回的 `sessionId`；续接（包括历史 `--print`/`stream-json` 产出的
@@ -493,9 +475,8 @@ Codex：
 读取。
 
 每个 run 单独保存用量字段 `inputTokens`、`outputTokens`、`cacheReadTokens`、`cacheWriteTokens`、
-`totalTokens` 以及 `scope`/`partial`。Pi ACP 从本轮 transcript 起始偏移累加 assistant 用量，AGY ACP 直接读取
-本轮 `session/prompt` 的 `result.usage`（历史 DSH / Pi JSON / AGY `stream-json` 按原原生样本累加），并标记本次
-运行范围；Codex 按上述基线差分。
+`totalTokens` 以及 `scope`/`partial`。Pi 从本轮 JSON 消息事件累加用量。AGY ACP 读取
+本轮 `session/prompt` 的 `result.usage`。历史运行按保存的协议核对用量，Codex 按上述基线差分。
 未知或未上报的字段保持 `null`，真实 0 仍显示 0，不估算也不裁剪。失败、取消或超时的 run 对已收集用量标记
 `partial`，插件重启后无法确认停止的 `unknown` run 同样标记 `partial`，成功结果按已确认的原生数据保存。
 UI 对 Codex 显示“输入（含缓存）”，对 DSH/Pi/agy 显示“未缓存输入”，并显示缓存读取/写入、合计、统计范围与
@@ -542,21 +523,20 @@ Codex 的进程停止同样等待 Worker 清理确认；失败时保留暂停的
 
 进程监护按执行路径区分：
 
-- **单次独立原生进程（Codex、旧 Pi JSON 续接及升级前遗留非 ACP 排队记录）：** 每次运行有独立 Node 监护进程，
+- **单次独立原生进程（Pi、Codex 和历史 AGY CLI 排队记录）。** 每次运行有独立 Node 监护进程，
   CLI 置于新的进程组。IPC 断开、SIGTERM、SIGINT 都触发 stop；先 TERM，2 秒后 KILL，确认进程组退出（`groupExited: true`）
   后才进入终态并释放额度。正常完成也会清理遗留子进程；不使用历史 PID 发信号。插件自身退出时由独立监护进程清理。
-- **共享 ACP 进程（Pi ACP 与 AGY ACP）：** 两个引擎各自拥有一个懒启动的共享 ACP 进程，分别由一个共享 Node 监护进程
-  （目录 `<插件数据目录>/{pi,agy}-acp-guardian/process-<uuid>/`）持有该引擎代理的进程组，stdio 直通插件完成 JSON-RPC
-  复用。单轮取消、硬超时或 owner 退场只对该 run 的 `sessionId` 发送 `session/cancel` 与 `session/close`，不中断同引擎
+- **AGY 共享 ACP 进程。** 一个懒启动的 Node 监护进程持有 AGY 的进程组，退出证据位于
+  `<插件数据目录>/agy-acp-guardian/process-<uuid>/`。插件通过 stdio 复用 JSON-RPC 会话。单轮取消、硬超时或 owner 退场只对该 run 的 `sessionId` 发送 `session/cancel` 与 `session/close`，不中断同引擎
   其他并发会话，也不拆毁共享进程。`session/prompt` 尚未开始时取消/超时会直接结束当前 run，迟到返回的 setup 跳过后续
   配置 RPC 并只关闭自身会话；已开始 prompt 但服务端不响应取消时，经有界等待进入 `unknown`（`STOP_UNCONFIRMED`）并继续
-  占额，直到该代共享监护进程确认 `groupExited: true` 后才落为终态并放行排队任务。每个引擎在最后一个活动任务释放后
-  启动独立空闲计时（默认 300 秒，受 `acpIdleTimeoutSeconds` / `CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS` 控制），
+  占额，直到该代共享监护进程确认 `groupExited: true` 后才落为终态并放行排队任务。AGY 在最后一个活动任务释放后
+  启动空闲计时（默认 300 秒，受 `acpIdleTimeoutSeconds` / `CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS` 控制），
   到期经共享监护进程回收进程组；插件退出时同样经共享监护进程回收。
 - **共享监护目录清理：** 共享 `stopGuardian` 在守护实际退出并读到 `final.json` 的 `groupExited: true` 后，若已无
   活动或 `unknown` run 引用该代证据，则即时清理该代 `process-<uuid>` 目录（正常空闲回收仍即时清理，清理异常不会
   把已确认的退出结果改回 `false`）；若仍有活动/`unknown` run 引用同代证据，或 `groupExited: false`/证据不可读，
-  则保留目录。待关联 run 结算后，到期历史清理按 `retentionDays` 安全清扫遗留的 `{pi,agy}-acp-guardian/process-*`
+  则保留目录。待关联 run 结算后，到期历史清理按 `retentionDays` 安全清扫 AGY 和历史 Pi ACP 的监护
   目录，且仅删除无活动/`unknown` run 引用、`final.json` 已确认 `groupExited: true` 且 `finishedAt` 到期的目录，
   绝不清理存活、未确认目录或原生会话。
 

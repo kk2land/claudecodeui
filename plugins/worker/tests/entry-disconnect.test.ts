@@ -16,7 +16,7 @@ function ensureBuiltEntry(): void {
     "server/service.ts",
     "server/guardian.ts",
     "server/acp.ts",
-    "server/pi-acp.ts",
+    "server/pi-history.ts",
     "server/store.ts",
     "server/native.ts",
     "shared/contracts.ts",
@@ -58,8 +58,8 @@ test("losing the host IPC channel stops the active Pi tree and its TERM-resistan
     { mode: 0o755 },
   );
   fs.writeFileSync(
-    path.join(bin, "pi-acp"),
-    `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs")}" "$@"\n`,
+    path.join(bin, "pi"),
+    `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-pi.mjs")}" "$@"\n`,
     { mode: 0o755 },
   );
   const initialStore = new WorkerStore(data);
@@ -194,9 +194,7 @@ test("losing the host IPC channel stops the active Pi tree and its TERM-resistan
   }
   const evidence = JSON.parse(
     fs.readFileSync(path.join(data, "logs", workerId, runId, "final.json"), "utf8"),
-  ) as { kind?: string; sessionClosed?: boolean; groupExited?: boolean; reason: string };
-  assert.equal(evidence.kind, "acp_session");
-  assert.equal(evidence.sessionClosed, true);
-  assert.equal(evidence.groupExited, undefined);
+  ) as { groupExited: boolean; reason: string };
+  assert.equal(evidence.groupExited, true);
   assert.ok(["cancelled", "disconnect"].includes(evidence.reason));
 });

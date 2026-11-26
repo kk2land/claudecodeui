@@ -72,20 +72,6 @@ function agyConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
   };
 }
 
-function piConfig(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
-  return {
-    id: "pi-default",
-    name: "Pi#1",
-    type: "pi",
-    enabled: true,
-    roles: [],
-    concurrency: 3,
-    hardTimeoutSeconds: 600,
-    model: null,
-    effort: null,
-    ...overrides,
-  };
-}
 
 function init(id: string, cwd = process.cwd()) {
   return { event: "init", conversation_id: id, init: { cwd } };
@@ -501,80 +487,46 @@ test("agy ACP raw JSON-RPC 429 keeps the global cooldown", async (t) => {
   assert.equal(queued.run.status, "queued");
 });
 
-test("Pi and AGY use independent lazy ACP processes and can run at the same time", async (t) => {
-  const root = temporaryRoot("worker-acp-slots-");
-  const spawnLog = path.join(root, "spawn.log");
-  const { service } = createService(t, root, {
+test("Pi CLI and AGY ACP can run at the same time", async (t) => {
+  const root = temporaryRoot("worker-agy-pi-parallel-");
+  const spawnLog = path.join(root, "agy-spawn.log");
+  const piPidFile = path.join(root, "pi.pid");
+  const { service, env } = createService(t, root, {
+    TEST_SCENARIO: "hang",
+    TEST_CLI_PID_FILE: piPidFile,
     TEST_SPAWN_LOG_FILE: spawnLog,
-    TEST_SESSION_ID: "pi-slot-session",
   });
   service.updateSettings({
-    configs: [
-      ...service.settings().configs,
-      agyConfig({ concurrency: 2 }),
-    ],
+    configs: [...service.settings().configs, agyConfig({ concurrency: 2 })],
     defaultConfigId: "agy-default",
   });
-  const pidAlive = (pid: number): boolean => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  // Neither engine starts before a real task reaches it.
   assert.equal(fs.existsSync(spawnLog), false);
 
-  const pi = await service.start(
-    "owner-1",
-    startInput({ type: "pi", prompt: "[scenario:sleep:30000] pi", requestId: "slot-pi-1" }),
-  );
-  const agy = await service.start(
-    "owner-1",
-    startInput({
-      type: "agy",
-      configId: "agy-default",
-      prompt: "[scenario:sleep:1500] agy",
-      requestId: "slot-agy-1",
-    }),
-  );
-  await waitStatus(service, pi.worker.id, ["running"]);
+  const pi = await service.start("owner-1", startInput({ type: "pi", requestId: "parallel-pi" }));
+  await waitFor(() => fs.existsSync(piPidFile), Boolean);
+  const piPid = Number(fs.readFileSync(piPidFile, "utf8"));
+  env.TEST_SCENARIO = "ok";
+  const agy = await service.start("owner-1", startInput({
+    type: "agy",
+    configId: "agy-default",
+    prompt: "[scenario:sleep:1500] agy",
+    requestId: "parallel-agy",
+  }));
   await waitStatus(service, agy.worker.id, ["running"]);
-  await waitFor(
-    () => fs.readFileSync(spawnLog, "utf8").trim().split("\n").length,
-    (count) => count === 2,
-  );
-  const lines = fs.readFileSync(spawnLog, "utf8").trim().split("\n");
-  const agyLine = lines.find((line) => line.startsWith("agy "));
-  const piLine = lines.find((line) => !line.startsWith("agy "));
-  assert.ok(agyLine);
-  assert.ok(piLine);
-  const piPid = Number(piLine);
-  const agyPid = Number(agyLine.split(" ")[1]);
+  const agyPid = Number(fs.readFileSync(spawnLog, "utf8").trim().split(" ")[1]);
   assert.notEqual(piPid, agyPid);
-  assert.equal(pidAlive(piPid), true);
-  assert.equal(pidAlive(agyPid), true);
+  assert.equal(service.get(pi.worker.id).worker.latestRun?.status, "running");
 
   await service.cancel({ workerIds: [pi.worker.id] }, "ui", "owner-1");
   await waitStatus(service, pi.worker.id, ["cancelled"]);
-  const agyDone = await waitStatus(service, agy.worker.id, ["completed"]);
-  assert.equal(agyDone.latestRun?.status, "completed");
-
-  // Each engine keeps serving later work on its own established PID.
-  const agyAgain = await service.start(
-    "owner-1",
-    startInput({ type: "agy", configId: "agy-default", prompt: "agy again", requestId: "slot-agy-2" }),
-  );
+  await waitStatus(service, agy.worker.id, ["completed"]);
+  const agyAgain = await service.start("owner-1", startInput({
+    type: "agy",
+    configId: "agy-default",
+    requestId: "parallel-agy-again",
+  }));
   await waitStatus(service, agyAgain.worker.id, ["completed"]);
-  const piAgain = await service.start(
-    "owner-1",
-    startInput({ type: "pi", prompt: "pi again", requestId: "slot-pi-2" }),
-  );
-  await waitStatus(service, piAgain.worker.id, ["completed"]);
-  assert.equal(fs.readFileSync(spawnLog, "utf8").trim().split("\n").length, 2);
-  assert.equal(pidAlive(piPid), true);
-  assert.equal(pidAlive(agyPid), true);
+  assert.equal(fs.readFileSync(spawnLog, "utf8").trim(), "agy " + agyPid);
 });
 
 test("agy falls back to partial run usage when the ACP result omits a counter", async (t) => {
@@ -602,16 +554,11 @@ test("ACP idle timeout waits for the last task and reuses the process inside the
   const spawnLog = path.join(root, "spawn.log");
   const { service } = createService(t, root, {
     CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS: "2",
-    TEST_SESSION_ID: "pi-idle-window",
     TEST_SPAWN_LOG_FILE: spawnLog,
   });
   service.updateSettings({
-    configs: service
-      .settings()
-      .configs.map((config) =>
-        config.id === "pi-default" ? piConfig({ concurrency: 2 }) : config,
-      ),
-    defaultConfigId: service.settings().defaultConfigId,
+    configs: [...service.settings().configs, agyConfig({ concurrency: 2 })],
+    defaultConfigId: "agy-default",
   });
   const pidAlive = (pid: number): boolean => {
     try {
@@ -627,14 +574,14 @@ test("ACP idle timeout waits for the last task and reuses the process inside the
 
   const held = await service.start(
     "owner-1",
-    startInput({ type: "pi", prompt: "[scenario:hang] hold", requestId: "idle-window-1" }),
+    startInput({ type: "agy", configId: "agy-default", prompt: "[scenario:hang] hold", requestId: "idle-window-1" }),
   );
   await waitStatus(service, held.worker.id, ["running"]);
   await waitFor(spawnLines, (lines) => lines.length === 1);
-  const pid = Number(spawnLines()[0]);
+  const pid = Number(spawnLines()[0]!.split(" ")[1]);
   const quick = await service.start(
     "owner-1",
-    startInput({ type: "pi", prompt: "finish first", requestId: "idle-window-2" }),
+    startInput({ type: "agy", configId: "agy-default", prompt: "finish first", requestId: "idle-window-2" }),
   );
   await waitStatus(service, quick.worker.id, ["completed"]);
   assert.equal(spawnLines().length, 1);
@@ -648,7 +595,7 @@ test("ACP idle timeout waits for the last task and reuses the process inside the
   await waitStatus(service, held.worker.id, ["cancelled"]);
   const reused = await service.start(
     "owner-1",
-    startInput({ type: "pi", prompt: "reuse", requestId: "idle-window-3" }),
+    startInput({ type: "agy", configId: "agy-default", prompt: "reuse", requestId: "idle-window-3" }),
   );
   await waitStatus(service, reused.worker.id, ["completed"]);
   assert.equal(spawnLines().length, 1, "a task inside the idle window must reuse the PID");
@@ -662,45 +609,7 @@ test("saving a shorter ACP idle window recycles an already idle slot promptly", 
   const spawnLog = path.join(root, "spawn.log");
   const { service } = createService(t, root, {
     CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS: "10",
-    TEST_SESSION_ID: "pi-idle-shorten",
-    TEST_SPAWN_LOG_FILE: spawnLog,
-  });
-  const pidAlive = (pid: number): boolean => {
-    try {
-      process.kill(pid, 0);
-      return true;
-    } catch {
-      return false;
-    }
-  };
-  const spawnLines = (): string[] =>
-    fs.existsSync(spawnLog) ? fs.readFileSync(spawnLog, "utf8").trim().split("\n") : [];
-
-  const started = await service.start(
-    "owner-1",
-    startInput({ type: "pi", prompt: "idle shorten", requestId: "idle-shorten-1" }),
-  );
-  await waitStatus(service, started.worker.id, ["completed"]);
-  const pid = Number((await waitFor(spawnLines, (lines) => lines.length === 1))[0]);
-
-  // Keep the slot idle past the new one-second window, but well inside the old ten seconds.
-  await new Promise((resolve) => setTimeout(resolve, 1200));
-  const current = service.settings();
-  const saved = service.updateSettings({
-    configs: current.configs,
-    defaultConfigId: current.defaultConfigId,
-    acpIdleTimeoutSeconds: 1,
-  });
-  assert.equal(saved.acpIdleTimeoutSeconds, 1);
-  await waitFor(() => pidAlive(pid), (alive) => alive === false, 3000);
-});
-
-test("Pi and AGY ACP idle windows recycle independently and resume on a fresh process", async (t) => {
-  const root = temporaryRoot("worker-acp-idle-resume-");
-  const spawnLog = path.join(root, "spawn.log");
-  const { service } = createService(t, root, {
-    CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS: "1",
-    TEST_SESSION_ID: "pi-idle-resume",
+    TEST_AGY_SESSION_ID: "agy-idle-shorten",
     TEST_SPAWN_LOG_FILE: spawnLog,
   });
   service.updateSettings({
@@ -718,50 +627,67 @@ test("Pi and AGY ACP idle windows recycle independently and resume on a fresh pr
   const spawnLines = (): string[] =>
     fs.existsSync(spawnLog) ? fs.readFileSync(spawnLog, "utf8").trim().split("\n") : [];
 
-  const pi = await service.start(
+  const started = await service.start(
     "owner-1",
-    startInput({ type: "pi", prompt: "pi idle", requestId: "idle-resume-pi-1" }),
+    startInput({ type: "agy", configId: "agy-default", prompt: "idle shorten", requestId: "idle-shorten-1" }),
   );
-  await waitStatus(service, pi.worker.id, ["completed"]);
-  const piPid = Number((await waitFor(spawnLines, (lines) => lines.length === 1))[0]);
+  await waitStatus(service, started.worker.id, ["completed"]);
+  const pid = Number((await waitFor(spawnLines, (lines) => lines.length === 1))[0]!.split(" ")[1]);
 
-  const agy = await service.start(
-    "owner-1",
-    startInput({
-      type: "agy",
-      configId: "agy-default",
-      prompt: "[scenario:sleep:3500] agy idle",
-      requestId: "idle-resume-agy-1",
-    }),
-  );
-  await waitStatus(service, agy.worker.id, ["running"]);
-  const lines = await waitFor(spawnLines, (value) => value.length === 2);
-  const agyPid = Number(lines.find((line) => line.startsWith("agy "))!.split(" ")[1]);
+  // Keep the slot idle past the new one-second window, but well inside the old ten seconds.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  const current = service.settings();
+  const saved = service.updateSettings({
+    configs: current.configs,
+    defaultConfigId: current.defaultConfigId,
+    acpIdleTimeoutSeconds: 1,
+  });
+  assert.equal(saved.acpIdleTimeoutSeconds, 1);
+  await waitFor(() => pidAlive(pid), (alive) => alive === false, 3000);
+});
 
-  await waitFor(() => pidAlive(piPid), (alive) => alive === false, 5000);
-  assert.equal(pidAlive(agyPid), true, "the AGY slot must keep its own process while running");
-  await waitStatus(service, agy.worker.id, ["completed"]);
-  await waitFor(() => pidAlive(agyPid), (alive) => alive === false, 5000);
+test("AGY ACP resumes the same session after its idle process exits", async (t) => {
+  const root = temporaryRoot("worker-acp-idle-resume-");
+  const spawnLog = path.join(root, "spawn.log");
+  const { service, data } = createService(t, root, {
+    CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS: "1",
+    TEST_AGY_SESSION_ID: "agy-idle-resume",
+    TEST_SPAWN_LOG_FILE: spawnLog,
+  });
+  service.updateSettings({
+    configs: [...service.settings().configs, agyConfig()],
+    defaultConfigId: "agy-default",
+  });
+  const started = await service.start("owner-1", startInput({
+    type: "agy",
+    configId: "agy-default",
+    requestId: "idle-resume-agy-start",
+  }));
+  const first = (await waitStatus(service, started.worker.id, ["completed"])).latestRun!;
+  const firstPid = Number(fs.readFileSync(spawnLog, "utf8").trim().split(" ")[1]);
+  await waitFor(() => {
+    try {
+      process.kill(firstPid, 0);
+      return false;
+    } catch {
+      return true;
+    }
+  }, Boolean, 5000);
 
   const resumed = await service.resume("owner-1", {
-    workerId: pi.worker.id,
-    prompt: "pi resume",
-    requestId: "idle-resume-pi-2",
+    workerId: started.worker.id,
+    prompt: "Continue AGY",
+    requestId: "idle-resume-agy-next",
   });
-  await waitStatus(service, pi.worker.id, ["completed"]);
-  const after = await waitFor(spawnLines, (value) => value.length === 3);
-  const resumedPid = Number(after[2]);
-  assert.notEqual(resumedPid, piPid, "the expired Pi process must be replaced");
-  assert.equal(pidAlive(resumedPid), true);
-  const events = fs
-    .readFileSync(
-      path.join(root, "data", "logs", pi.worker.id, resumed.run.id, "events.log"),
-      "utf8",
-    )
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as Record<string, unknown>);
-  const session = events.find((event) => event.type === "acp_session");
-  assert.equal(session?.action, "resume");
-  assert.equal(session?.sessionId, "pi-idle-resume");
+  const latest = (await waitStatus(service, started.worker.id, ["completed"])).latestRun!;
+  const pids = fs.readFileSync(spawnLog, "utf8").trim().split("\n").map((line) => Number(line.split(" ")[1]));
+  assert.equal(pids.length, 2);
+  assert.notEqual(pids[0], pids[1]);
+  assert.equal(latest.id, resumed.run.id);
+  assert.equal(latest.nativeSessionId, first.nativeSessionId);
+  const events = fs.readFileSync(
+    path.join(data, "logs", started.worker.id, resumed.run.id, "events.log"),
+    "utf8",
+  ).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(events.find((event) => event.type === "acp_session")?.action, "resume");
 });

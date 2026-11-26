@@ -16,15 +16,10 @@ import {
   parseAgy,
   parseDsh,
   parsePi,
-  parsePiAcp,
   prepareLaunch,
-  preparePiAcpLaunch,
-  resolveBundledPiAcpEntry,
   resolveExecutable,
-  resolvePiAcpTranscriptFile,
   trackProgress,
   zeroCodexCounters,
-  PI_LEGACY_THINKING_LEVELS,
   PI_THINKING_LEVELS,
 } from "./native.js";
 import type { ProgressTracker } from "./native.js";
@@ -38,8 +33,8 @@ import {
   LazyAcpProcess,
 } from "./acp.js";
 import type { AcpEvent, AcpSessionHandle } from "./acp.js";
-import { appendLog, readLogPage } from "./logs.js";
-import { readEventLines } from "./pi-acp.js";
+import { appendLog, readEventLines, readLogPage } from "./logs.js";
+import { parseHistoricalPiAcp } from "./pi-history.js";
 import { readAgyCatalog } from "./agy-catalog.js";
 import {
   AGY_QUOTA_REACHED,
@@ -62,7 +57,6 @@ import {
 } from "./settings.js";
 import type { WorkerHistoryCursor } from "./store.js";
 import type {
-  AcpConfigOptionRequest,
   AcpSessionEvidence,
   AgyModelCatalog,
   LegacyWorkerType,
@@ -166,16 +160,8 @@ const TERMINAL: WorkerStatus[] = [
 const MAX_WAIT_MS = 25_000;
 
 type RegisteredOwner = { owner: WorkerOwner; token: string };
-type SharedAcpPlan = {
-  cwd: string;
-  sessionId: string | null;
-  configOptions: AcpConfigOptionRequest[];
-  sessionFile: string | null;
-};
-
 /** One guarded shared ACP process generation, identified without any host/database schema. */
 type AcpGeneration = {
-  engine: "pi" | "agy";
   id: string;
   directory: string;
 };
@@ -206,8 +192,8 @@ type RunHandle = {
 export type WorkerServiceOptions = {
   dataDirectory: string;
   environment?: NodeJS.ProcessEnv;
-  /** Tests inject fixture executables; production resolves `pi-acp`/`pi`/`codex`/`agy` from PATH. */
-  executablePaths?: Partial<Record<WorkerType | "pi-acp" | "agy-acp", string>>;
+  /** Tests may inject fixture executables in place of PATH lookup. */
+  executablePaths?: Partial<Record<WorkerType | "agy-acp", string>>;
   /** Tests inject a source guardian invocation; production uses compiled guardian.mjs. */
   guardianCommand?: string[];
   now?: () => number;
@@ -226,11 +212,11 @@ export class WorkerService {
   private readonly handles = new Map<string, RunHandle>();
   private readonly prompts = new Map<string, string>();
   private readonly pendingAdmissions = new Set<string>();
-  private readonly acpSlots = new Map<"pi" | "agy", LazyAcpProcess>();
+  private agyAcpProcess: LazyAcpProcess | null = null;
   private readonly acpGenerations = new WeakMap<AcpConnection, AcpGeneration>();
-  private readonly acpBlocked = new Map<"pi" | "agy", AcpTransportError>();
+  private agyAcpBlocked: AcpTransportError | null = null;
   /**
-   * Effective idle window shared by the Pi and AGY slot durations. A saved settings value wins;
+   * Effective idle window for the AGY ACP process. A saved settings value wins;
    * absent it, this starts at the environment/default fallback and is never persisted implicitly.
    */
   private acpIdleTimeoutSeconds: number;
@@ -508,11 +494,7 @@ export class WorkerService {
         model: initial("codex").model,
         effort: initial("codex").effort,
       };
-      const defaults = this.validateDefaults(
-        input.defaults,
-        currentCodex,
-        initial("pi").effort,
-      );
+      const defaults = this.validateDefaults(input.defaults, currentCodex);
       for (const type of LEGACY_WORKER_TYPES) {
         if (type === "codex" && input.defaults.codex === undefined) continue;
         initial(type).model = defaults[type].model;
@@ -580,14 +562,10 @@ export class WorkerService {
     return projectSettings(record, this.acpIdleTimeoutSeconds);
   }
 
-  /**
-   * Applies a newly saved idle window to every existing engine slot. Idle slots keep their
-   * original idle start so shortening can recycle immediately; occupied slots only store it.
-   */
+  /** Updates the AGY idle window without resetting the current idle start. */
   private applyAcpIdleTimeoutSeconds(seconds: number): void {
     this.acpIdleTimeoutSeconds = seconds;
-    for (const process of this.acpSlots.values())
-      process.setIdleTimeoutMs(seconds * 1000);
+    this.agyAcpProcess?.setIdleTimeoutMs(seconds * 1000);
   }
 
   /** Validates one canonical config and normalizes its Codex launch view. */
@@ -649,16 +627,11 @@ export class WorkerService {
       before !== undefined &&
       before.type === type &&
       before.effort === effort;
-    if (type === "pi" && effort) {
-      const allowed: readonly string[] = preservesLegacyEffort
-        ? PI_LEGACY_THINKING_LEVELS
-        : PI_THINKING_LEVELS;
-      if (!allowed.includes(effort))
-        throw new WorkerFailure(
-          "INVALID_SETTINGS",
-          "Pi 配置的 effort 必须是受支持的 thinking 级别",
-        );
-    }
+    if (type === "pi" && effort && !(PI_THINKING_LEVELS as readonly string[]).includes(effort))
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "Pi 配置的 effort 必须是受支持的 thinking 级别",
+      );
     const effortProblem = validateConfigEffort(type, model, effort, {
       allowLegacy: preservesLegacyEffort,
     });
@@ -746,7 +719,6 @@ export class WorkerService {
   private validateDefaults(
     value: NonNullable<WorkerLegacySettingsInput["defaults"]>,
     currentCodex: WorkerDefaults["codex"],
-    currentPiEffort: string | null = null,
   ): Record<LegacyWorkerType, WorkerDefaults["codex"]> {
     if (!value || typeof value !== "object" || Array.isArray(value))
       throw new WorkerFailure(
@@ -782,11 +754,7 @@ export class WorkerService {
       if (
         type === "pi" &&
         normalizedEffort &&
-        !(PI_THINKING_LEVELS as readonly string[]).includes(normalizedEffort) &&
-        !(
-          currentPiEffort === normalizedEffort &&
-          (PI_LEGACY_THINKING_LEVELS as readonly string[]).includes(normalizedEffort)
-        )
+        !(PI_THINKING_LEVELS as readonly string[]).includes(normalizedEffort)
       )
         throw new WorkerFailure(
           "INVALID_SETTINGS",
@@ -822,11 +790,7 @@ export class WorkerService {
     const type = config.type;
     this.rejectNonCodexProvider(type, input.provider);
     const selection = this.startSelection(type, input, config);
-    this.validateSelection(
-      type,
-      selection,
-      type === "pi" || type === "agy" ? "acp" : "legacy",
-    );
+    this.validateSelection(type, selection);
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     const id = randomUUID();
     const runId = randomUUID();
@@ -852,9 +816,7 @@ export class WorkerService {
       sessionsRoot: homes.sessionsRoot,
       nativeSessionId: null,
       nativeSessionFile: null,
-      ...(type === "pi" || type === "agy"
-        ? { nativeProtocol: "acp" as const }
-        : {}),
+      ...(type === "agy" ? { nativeProtocol: "acp" as const } : {}),
       exitCode: null,
       finalText: null,
       error: null,
@@ -959,22 +921,13 @@ export class WorkerService {
       throw new WorkerFailure("RUN_NOT_FOUND", "worker 尚无运行记录");
     if (!TERMINAL.includes(previous.status))
       throw new WorkerFailure("ACTIVE_RUN", "worker 仍有活动运行，不能续接");
-    const isPiAcp = worker.type === "pi" && previous.nativeProtocol === "acp";
-    const isAgyAcp = worker.type === "agy";
-    if (
-      !previous.nativeSessionId ||
-      (worker.type === "pi" && !isPiAcp && !previous.nativeSessionFile)
-    )
+    if (!previous.nativeSessionId)
       throw new WorkerFailure(
         "NATIVE_SESSION_UNKNOWN",
         "上一次运行没有可核实的原生会话身份，不能续接",
       );
     const selection = this.resumeSelection(worker.type, input, previous);
-    this.validateSelection(
-      worker.type,
-      selection,
-      isPiAcp || isAgyAcp ? "acp" : "legacy",
-    );
+    this.validateSelection(worker.type, selection);
     const runId = randomUUID();
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     // Each resumed requirement gets its own title; the worker's original name stays the fallback
@@ -996,11 +949,7 @@ export class WorkerService {
       sessionsRoot: previous.sessionsRoot,
       nativeSessionId: previous.nativeSessionId,
       nativeSessionFile: previous.nativeSessionFile,
-      ...(previous.nativeProtocol
-        ? { nativeProtocol: previous.nativeProtocol }
-        : worker.type === "agy"
-          ? { nativeProtocol: "acp" as const }
-          : {}),
+      ...(worker.type === "agy" ? { nativeProtocol: "acp" as const } : {}),
       legacyCodexProvider:
         worker.type === "codex" &&
         previous.legacyCodexProvider === true &&
@@ -1295,28 +1244,16 @@ export class WorkerService {
   private validateSelection(
     type: SupportedWorkerType,
     selection: NativeSelection,
-    protocol: "acp" | "legacy" = "acp",
   ): void {
-    if (type === "pi" && selection.effort) {
-      const allowed: readonly string[] =
-        protocol === "acp" ? PI_THINKING_LEVELS : PI_LEGACY_THINKING_LEVELS;
-      if (!allowed.includes(selection.effort)) {
-        throw new WorkerFailure(
-          "INVALID_INPUT",
-          protocol === "acp" && selection.effort === "max"
-            ? "Pi ACP 不支持 max thinking 级别"
-            : "不支持的 Pi thinking 级别",
-        );
-      }
+    if (
+      type === "pi" && selection.effort &&
+      !(PI_THINKING_LEVELS as readonly string[]).includes(selection.effort)
+    ) {
+      throw new WorkerFailure("INVALID_INPUT", "不支持的 Pi thinking 级别");
     }
-    const effortProblem = validateConfigEffort(
-      type,
-      selection.model,
-      selection.effort,
-      { allowLegacy: protocol === "legacy" },
-    );
+    const effortProblem = validateConfigEffort(type, selection.model, selection.effort);
     if (effortProblem) throw new WorkerFailure("INVALID_INPUT", effortProblem);
-    if (type === "agy" && protocol === "acp") {
+    if (type === "agy") {
       try {
         planAgyAcpConfig({
           model: selection.model,
@@ -1402,6 +1339,8 @@ export class WorkerService {
           skipped.add(selected.id);
           continue;
         }
+        // Queued Pi runs created by an older plugin also launch through the CLI.
+        if (worker.type === "pi") delete selected.nativeProtocol;
         selected.status = "starting";
         selected.startedAt = new Date(this.now()).toISOString();
         selected.progress.hardTimeoutAt = selected.timeoutSeconds === null
@@ -1431,11 +1370,8 @@ export class WorkerService {
     const settings = this.store.settings();
     const config = configById(settings, worker.configId);
     const safeEnvironment = this.nativeEnvironment(worker.type, config);
-    const isAcp =
-      (worker.type === "pi" || worker.type === "agy") &&
-      run.nativeProtocol === "acp";
-    if (isAcp) {
-      this.launchAcp(worker, run, runDirectory, prompt, previous, safeEnvironment);
+    if (worker.type === "agy" && run.nativeProtocol === "acp") {
+      this.launchAgyAcp(worker, run, runDirectory, prompt, previous, safeEnvironment);
       return;
     }
     const executable = this.executable(worker.type, safeEnvironment);
@@ -1472,7 +1408,7 @@ export class WorkerService {
           : null,
     });
     if (!run.nativeSessionFile && launch.sessionFile) {
-      // Legacy Pi JSON names its transcript before spawn; persist it so cleanup protects it.
+      // Persist the explicit Pi session file before spawning so retention protects it.
       run.nativeSessionFile = launch.sessionFile;
       this.store.saveRun(run);
     }
@@ -1539,32 +1475,7 @@ export class WorkerService {
     });
   }
 
-  /**
-   * Resolves the guarded ACP command for one engine.
-   * Pi prefers an injected path or user-installed `pi-acp` on PATH, then falls back to the
-   * application's local `@geohar/pi-acp` JS entry launched with the current Node runtime.
-   * Production AGY is `agy acp ...`.
-   */
-  private acpCommand(
-    engine: "pi" | "agy",
-    environment: NodeJS.ProcessEnv,
-  ): { executable: string; args: string[] } {
-    if (engine === "pi") {
-      const injected = this.options.executablePaths?.["pi-acp"];
-      if (injected) return { executable: path.resolve(injected), args: [] };
-      try {
-        return { executable: resolveExecutable("pi-acp", environment), args: [] };
-      } catch (error) {
-        if (!(error instanceof WorkerFailure) || error.code !== "EXECUTABLE_MISSING")
-          throw error;
-      }
-      const bundled = resolveBundledPiAcpEntry();
-      if (bundled) return { executable: process.execPath, args: [bundled] };
-      throw new WorkerFailure(
-        "EXECUTABLE_MISSING",
-        "PATH 中找不到可执行文件: pi-acp，且本地依赖 @geohar/pi-acp 不可用",
-      );
-    }
+  private agyAcpCommand(environment: NodeJS.ProcessEnv): { executable: string; args: string[] } {
     const injected = this.options.executablePaths?.["agy-acp"];
     return {
       executable: injected ? path.resolve(injected) : resolveExecutable("agy", environment),
@@ -1572,26 +1483,18 @@ export class WorkerService {
     };
   }
 
-  /**
-   * Spawns one guarded ACP agent for an engine. Each engine's lazy slot calls this at most once;
-   * Pi and AGY can run independently, while owners/cwds of the same engine share the process.
-   */
-  private spawnAcpProcess(engine: "pi" | "agy"): Promise<AcpConnection> {
+  /** Spawns the shared AGY agent under its own process-group guardian. */
+  private spawnAgyAcpProcess(): Promise<AcpConnection> {
     const safeEnvironment = this.guardianEnvironment(this.environment);
-    const command = this.acpCommand(engine, safeEnvironment);
-    const { home } =
-      engine === "pi"
-        ? nativeHome("pi", this.options.dataDirectory, safeEnvironment)
-        : { home: null };
+    const command = this.agyAcpCommand(safeEnvironment);
     const guardianDirectory = path.join(
       this.options.dataDirectory,
-      `${engine}-acp-guardian`,
+      "agy-acp-guardian",
       `process-${randomUUID()}`,
     );
     fs.mkdirSync(guardianDirectory, { recursive: true, mode: 0o700 });
     const finalPath = path.join(guardianDirectory, "final.json");
     const generation: AcpGeneration = {
-      engine,
       id: path.basename(guardianDirectory),
       directory: guardianDirectory,
     };
@@ -1611,10 +1514,7 @@ export class WorkerService {
     const [guardian, ...prefix] = this.guardianCommand();
     const child = spawn(guardian!, [...prefix, specPath], {
       cwd: guardianDirectory,
-      env:
-        home === null
-          ? { ...safeEnvironment }
-          : { ...safeEnvironment, PI_CODING_AGENT_DIR: home },
+      env: safeEnvironment,
       detached: process.platform !== "win32",
       stdio: ["pipe", "pipe", "pipe", "ipc"],
     });
@@ -1703,43 +1603,27 @@ export class WorkerService {
       // A failed handshake must reclaim the whole guarded group, not just signal the guardian.
       const reaped = await stopGuardian();
       if (!reaped) {
-        this.acpBlocked.set(
-          engine,
-          new AcpTransportError({
-            kind: "shutdown",
-            message: `上一个 ${engine} ACP 进程未能确认退出，拒绝启动新进程`,
-            exitCode: null,
-            signal: null,
-          }),
-        );
+        this.agyAcpBlocked = new AcpTransportError({
+          kind: "shutdown",
+          message: "上一个 AGY ACP 进程未能确认退出，拒绝启动新进程",
+          exitCode: null,
+          signal: null,
+        });
       }
       throw error;
     });
   }
 
-  /**
-   * Each engine owns one lazy ACP slot. All owners/cwds/configs of that engine share its single
-   * process, while Pi and AGY start, run, and idle out independently. An unconfirmed shutdown
-   * blocks only the engine whose guarded group could not be reaped.
-   */
-  private acpSlot(engine: "pi" | "agy"): LazyAcpProcess {
-    const blocked = this.acpBlocked.get(engine);
-    if (blocked) throw blocked;
-    let process = this.acpSlots.get(engine);
-    if (!process) {
-      process = new LazyAcpProcess(() => this.spawnAcpProcess(engine), {
-        idleTimeoutMs: this.acpIdleTimeoutSeconds * 1000,
-      });
-      this.acpSlots.set(engine, process);
-    }
-    return process;
+  private agyAcpSlot(): LazyAcpProcess {
+    if (this.agyAcpBlocked) throw this.agyAcpBlocked;
+    this.agyAcpProcess ??= new LazyAcpProcess(() => this.spawnAgyAcpProcess(), {
+      idleTimeoutMs: this.acpIdleTimeoutSeconds * 1000,
+    });
+    return this.agyAcpProcess;
   }
 
-  /**
-   * Executes one turn on this engine's own lazy ACP slot. Cancel, hard timeout, and owner
-   * retirement only cancel & close this run's sessionId without stopping sibling sessions.
-   */
-  private launchAcp(
+  /** Executes an AGY turn on the shared ACP process, with session-scoped cancellation. */
+  private launchAgyAcp(
     worker: WorkerRecord,
     run: WorkerRun,
     runDirectory: string,
@@ -1747,52 +1631,21 @@ export class WorkerService {
     previous: WorkerRun | null,
     safeEnvironment: NodeJS.ProcessEnv,
   ): void {
-    const engine: "pi" | "agy" = worker.type === "agy" ? "agy" : "pi";
-    const command = this.acpCommand(engine, safeEnvironment);
-    let plan: SharedAcpPlan;
-    if (engine === "pi") {
-      // Validate executable, options, home consistency, and resume transcript before touching
-      // the shared process.
-      const piPlan = preparePiAcpLaunch({
-        run,
-        cwd: worker.cwd,
-        previous,
-        dataDirectory: this.options.dataDirectory,
-        baseEnvironment: safeEnvironment,
-      });
-      if (piPlan.sessionFile) run.nativeSessionFile = piPlan.sessionFile;
-      run.piTranscriptOffset = previous ? fs.statSync(piPlan.sessionFile!).size : 0;
-      plan = {
-        cwd: piPlan.cwd,
-        sessionId: piPlan.sessionId,
-        configOptions: piPlan.configOptions,
-        sessionFile: piPlan.sessionFile,
-      };
-    } else {
-      const agyPlan = planAgyAcpConfig({
-        model: run.model,
-        effort: run.effort,
-      });
-      plan = {
-        cwd: worker.cwd,
-        // Legacy AGY conversation ids become `session/resume` inputs unchanged.
-        sessionId: previous?.nativeSessionId ?? null,
-        configOptions: agyPlan.configOptions,
-        sessionFile: null,
-      };
-    }
-    this.store.saveRun(run);
+    const command = this.agyAcpCommand(safeEnvironment);
+    const { configOptions } = planAgyAcpConfig({ model: run.model, effort: run.effort });
+    const sessionId = previous?.nativeSessionId ?? null;
+
     // Persist the launch spec (same observability contract as native guardians); the ACP agent
     // runs in the shared process, so this is the only per-run record of the prompt and choices.
     fs.writeFileSync(
       path.join(runDirectory, "spec.json"),
       JSON.stringify({
         argv: [command.executable, ...command.args],
-        cwd: plan.cwd,
+        cwd: worker.cwd,
         prompt,
         timeoutSeconds: run.timeoutSeconds,
         runDirectory,
-        acp: { sessionId: plan.sessionId, configOptions: plan.configOptions },
+        acp: { sessionId, configOptions },
       }),
       { mode: 0o600 },
     );
@@ -1844,7 +1697,7 @@ export class WorkerService {
       holdNotification: false,
       stopRequested: false,
       progress: newProgress(),
-      expectedSessionId: plan.sessionId,
+      expectedSessionId: sessionId,
       expectedAction: previous ? "resume" : "new",
       lastProgressSave: 0,
     };
@@ -1911,16 +1764,16 @@ export class WorkerService {
         slot?.endTask();
       };
       try {
-        slot = this.acpSlot(engine);
+        slot = this.agyAcpSlot();
         const setup = (async (): Promise<AcpSessionHandle | null> => {
           acquired.conn = await slot!.beginTask();
           const generation = this.acpGenerations.get(acquired.conn);
           if (generation) this.recordAcpGeneration(runDirectory, generation);
           if (cancelTriggered) return null;
           const opened = await acquired.conn.openSession({
-            cwd: plan.cwd,
-            sessionId: plan.sessionId,
-            configOptions: plan.configOptions,
+            cwd: worker.cwd,
+            sessionId,
+            configOptions,
             onEvent: emitAcpEvent,
             timeoutMs: ACP_SETUP_TIMEOUT_MS,
             shouldAbort: () => cancelTriggered,
@@ -2000,7 +1853,7 @@ export class WorkerService {
         acceptingEvents = false;
         clearTimeout(hardTimer);
         clearTimeout(settleTimer);
-        // Session cleanup is complete here; the last task starts this engine's idle clock.
+        // Session cleanup is complete here; the last task starts the AGY idle clock.
         if (!setupAbandoned) releaseLease();
         const evidence: AcpSessionEvidence = {
           kind: "acp_session",
@@ -2085,7 +1938,7 @@ export class WorkerService {
   }
 
   private executable(
-    type: WorkerType | "pi-acp",
+    type: WorkerType,
     environment: NodeJS.ProcessEnv = this.environment,
   ): string {
     const injected = this.options.executablePaths?.[type];
@@ -2106,31 +1959,9 @@ export class WorkerService {
     if (this.storeClosed) return;
     const run = this.store.run(handle.runId);
     if (!run || TERMINAL.includes(run.status)) return;
-    const worker = this.store.worker(handle.workerId);
-    trackProgress(worker?.type ?? "pi", event, handle.progress);
-    let identityChanged = false;
-    if (worker && event.type === "acp_session" && !run.nativeSessionId) {
-      run.nativeSessionId = event.sessionId;
-      identityChanged = true;
-    }
-    if (
-      worker?.type === "pi" &&
-      run.nativeSessionId &&
-      !run.nativeSessionFile &&
-      (event.type === "acp_session" || event.type === "acp_update")
-    ) {
-      const resolved = resolvePiAcpTranscriptFile(
-        run.sessionsRoot,
-        run.nativeSessionId,
-        worker.cwd,
-        null,
-        this.userHome(),
-      );
-      if (resolved.status === "ok") {
-        run.nativeSessionFile = resolved.file;
-        identityChanged = true;
-      }
-    }
+    trackProgress("agy", event, handle.progress);
+    const identityChanged = event.type === "acp_session" && !run.nativeSessionId;
+    if (identityChanged) run.nativeSessionId = event.sessionId;
     this.recordProgress(handle, run, identityChanged);
   }
 
@@ -2149,8 +1980,10 @@ export class WorkerService {
     let identityChanged = false;
     const value = event as Record<string, unknown> | null;
     if (worker && !run.nativeSessionId) {
-      if (worker.type === "dsh") {
-        const id = value?.type === "session" ? value.sessionId : null;
+      if (worker.type === "dsh" || worker.type === "pi") {
+        const id = value?.type === "session"
+          ? (worker.type === "pi" ? value.id : value.sessionId)
+          : null;
         const cwd = value?.type === "session" ? value.cwd : null;
         if (
           typeof id === "string" &&
@@ -2262,7 +2095,6 @@ export class WorkerService {
       )
         return null;
       return {
-        engine: worker.type,
         id,
         directory: path.join(this.options.dataDirectory, `${worker.type}-acp-guardian`, id),
       };
@@ -2502,7 +2334,7 @@ export class WorkerService {
             errorCode: parsed.errorCode,
           };
         }
-        return parsePiAcp(events, expectedSessionId, worker.cwd, {
+        return parseHistoricalPiAcp(events, expectedSessionId, worker.cwd, {
           sessionsRoot: run.sessionsRoot,
           sessionFile: run.nativeSessionFile,
           transcriptOffset: run.piTranscriptOffset ?? null,
@@ -3574,8 +3406,8 @@ export class WorkerService {
     try {
       await this.nativeRetentionSweep;
       const stopPromise = this.closeAll("插件进程退出");
-      const acp = [...new Set(this.acpSlots.values())];
-      if (acp.some((process) => process.isActive)) {
+      const acp = this.agyAcpProcess;
+      if (acp?.isActive) {
         // Let cooperative ACP sessions finish targeted cancel briefly; then reap each shared
         // process group so even a cancel-resistant turn/grandchild cannot hang shutdown.
         await Promise.race([
@@ -3585,21 +3417,17 @@ export class WorkerService {
           ),
           new Promise<void>((resolve) => setTimeout(resolve, 1000)),
         ]);
-        const reaped = await Promise.all(acp.map((process) => process.close()));
-        if (reaped.some((value) => !value)) {
+        if (!(await acp.close())) {
           failure = new WorkerFailure("STOP_UNCONFIRMED", "ACP 进程组尚未确认退出");
         }
       }
       await stopPromise;
-      const finalReaped = await Promise.all(acp.map((process) => process.close()));
-      if (finalReaped.some((value) => !value) && !failure) {
+      if (acp && !(await acp.close()) && !failure) {
         failure = new WorkerFailure("STOP_UNCONFIRMED", "ACP 进程组尚未确认退出");
       }
     } catch (error) {
       failure = error;
-      await Promise.all(
-        [...this.acpSlots.values()].map((process) => process.close().catch(() => false)),
-      );
+      await this.agyAcpProcess?.close().catch(() => false);
     } finally {
       this.storeClosed = true;
       this.store.close();

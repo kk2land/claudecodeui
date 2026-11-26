@@ -2,24 +2,20 @@ import fs from "node:fs";
 import path from "node:path";
 import type { NativeExecution, WorkerUsage } from "./shared/index.js";
 import { parseAcpEvents } from "./acp.js";
+import { readEventLines } from "./logs.js";
 
 /**
- * Pi-specific ACP transcript location and turn reconciliation.
- *
- * `pi-acp` 0.4.0 does not report token usage over ACP and may swallow model/API failures as
- * `stopReason: "end_turn"`. Every Pi ACP turn is therefore cross-checked against the local Pi
- * transcript JSONL written under `$PI_CODING_AGENT_DIR/sessions` starting from the byte offset
- * captured when the run launched. If the transcript path or current-turn terminal status cannot
- * be reliably confirmed, finalization fails explicitly to prevent false success.
+ * Reads Pi session files and reconciles persisted ACP runs during recovery.
+ * Older Pi ACP runs recorded usage and model errors in the session file.
  */
 
-export type PiTranscriptResolution =
+type PiTranscriptResolution =
   | { status: "ok"; file: string }
   | { status: "missing"; reason: string }
   | { status: "ambiguous"; files: string[]; reason: string }
   | { status: "invalid"; file: string; reason: string };
 
-export type PiAcpParseContext = {
+type HistoricalPiAcpContext = {
   sessionsRoot: string;
   sessionFile: string | null;
   /** Byte offset captured at launch (0 for a brand-new session, prior EOF for a resume). */
@@ -166,7 +162,7 @@ function existsNonEmptyFile(file: string): boolean {
 }
 
 /** Validates line 1 of a Pi JSONL transcript against the expected session id and cwd. */
-export function validatePiTranscriptHeader(
+function validatePiTranscriptHeader(
   file: string,
   expectedSessionId: string,
   expectedCwd: string,
@@ -284,7 +280,7 @@ function lookupSessionMap(
  * Immune to concurrent `session-map.json` races because it scans `$PI_CODING_AGENT_DIR/sessions`
  * directly by session id and validates every candidate's session header.
  */
-export function resolvePiAcpTranscriptFile(
+export function resolvePiTranscriptFile(
   sessionsRoot: string,
   sessionId: string,
   expectedCwd: string,
@@ -389,7 +385,7 @@ type TranscriptCheck = {
  *    model errors where `pi-acp` still returned `stopReason: "end_turn"`) and was not
  *    removed by a trailing `context_edit`.
  */
-export function auditPiTranscriptTurn(
+function auditPiTranscriptTurn(
   file: string,
   offset: number,
   expectedSessionId: string,
@@ -547,29 +543,12 @@ export function auditPiTranscriptTurn(
   };
 }
 
-export function readEventLines(file: string): Array<{ value: unknown; number: number }> {
-  const output: Array<{ value: unknown; number: number }> = [];
-  const source = fs.readFileSync(file, "utf8");
-  source.split("\n").forEach((line, index) => {
-    if (!line.trim()) return;
-    try {
-      output.push({ value: JSON.parse(line), number: index + 1 });
-    } catch {
-      output.push({ value: undefined, number: index + 1 });
-    }
-  });
-  return output;
-}
-
-/**
- * Parses a Pi ACP run's `events.log` AND reconciles it against the local Pi transcript.
- * Both the ACP protocol and the local transcript must confirm completion before `success: true`.
- */
-export function parsePiAcp(
+/** Recovers a historical ACP run with both its event log and the original transcript. */
+export function parseHistoricalPiAcp(
   eventsFile: string,
   expectedSessionId: string | null,
   expectedCwd: string,
-  context: PiAcpParseContext,
+  context: HistoricalPiAcpContext,
 ): NativeExecution {
   const acp = parseAcpEvents(readEventLines(eventsFile), expectedSessionId, expectedCwd, {
     expectedAction: context.expectedAction,
@@ -589,7 +568,7 @@ export function parsePiAcp(
 
   if (acp.validatedSessionId && !acp.identityMismatch) {
     const pinned = context.sessionFile;
-    const resolution = resolvePiAcpTranscriptFile(
+    const resolution = resolvePiTranscriptFile(
       context.sessionsRoot,
       acp.validatedSessionId,
       expectedCwd,

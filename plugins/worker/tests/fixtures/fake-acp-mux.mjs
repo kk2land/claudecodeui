@@ -131,7 +131,6 @@ function handleMessage(msg) {
         result: {
           sessionId,
           configOptions: session.configOptions,
-          _meta: { piAcp: { startupInfo: `mux-startup:${sessionId}:${cwd}` } },
         },
       });
       if (earlyUpdateSameChunk) {
@@ -182,7 +181,6 @@ function handleMessage(msg) {
     sendResult(id, {
       sessionId,
       configOptions: session.configOptions,
-      _meta: { piAcp: { startupInfo: `mux-resumed:${sessionId}:${cwd}` } },
     });
     return;
   }

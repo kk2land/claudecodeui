@@ -208,6 +208,7 @@ for (const type of ["pi"] as const) {
       requestId: "resume-before-expiry",
     });
     assert.equal(resumed.run.status, "queued");
+    service.store.saveRun({ ...resumed.run, nativeProtocol: "acp" });
     env.TEST_SESSION_ID = first.nativeSessionId!;
     delete env.TEST_SCENARIO;
     delete env.TEST_DELAY_MS;
@@ -221,10 +222,10 @@ for (const type of ["pi"] as const) {
       .logs(original.worker.id, { stream: "events", runId: resumed.run.id })
       .text.split("\n")
       .filter((line) => line.trim())
-      .map((line) => JSON.parse(line) as { type?: string; action?: string; sessionId?: string });
-    const sessionEvent = events.find((event) => event.type === "acp_session");
-    assert.equal(sessionEvent?.action, "resume");
-    assert.equal(sessionEvent?.sessionId, first.nativeSessionId);
+      .map((line) => JSON.parse(line) as { type?: string; id?: string });
+    const sessionEvent = events.find((event) => event.type === "session");
+    assert.equal(sessionEvent?.id, first.nativeSessionId);
+    assert.equal(completed.latestRun?.nativeProtocol, undefined);
     assert.equal(completed.latestRun?.id, resumed.run.id);
     assert.equal(completed.latestRun?.nativeSessionId, first.nativeSessionId);
     assert.equal(completed.latestRun?.nativeSessionFile, first.nativeSessionFile);

@@ -687,12 +687,9 @@ test("Pi passes the full configured model id through and ignores env services", 
       path.join(data, "logs", configuredWorker.id, configuredWorker.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { argv: string[]; acp?: { configOptions: unknown[] } };
-  assert.deepEqual(spec.acp?.configOptions, [
-    { configId: "model", value: "config-provider/sub/config-model", match: "model" },
-    { configId: "thought_level", value: "medium", match: "exact" },
-  ]);
-  assert.equal(spec.argv.includes("--session-dir"), false);
+  ) as { argv: string[] };
+  assert.deepEqual(spec.argv.slice(-4), ["--model", "config-provider/sub/config-model", "--thinking", "medium"]);
+  assert.equal(spec.argv.includes("--session-dir"), true);
   assert.equal(spec.argv.includes("--provider"), false);
   assert.equal(spec.argv.includes("env-provider"), false);
 
@@ -788,7 +785,7 @@ test("canonical settings reject invalid configs atomically", async (t) => {
   assert.deepEqual(service.settings(), before);
 });
 
-test("stored legacy Pi/AGY max effort is preserved on unrelated saves while new max is rejected", async (t) => {
+test("Pi CLI accepts max while AGY ACP preserves only stored legacy max settings", async (t) => {
   const root = temporaryRoot("worker-configs-legacy-max-");
   const { service } = createService(t, root);
   const agyLegacy: WorkerConfig = {
@@ -832,11 +829,11 @@ test("stored legacy Pi/AGY max effort is preserved on unrelated saves while new 
   assert.equal(legacySaved.configs.find((c) => c.id === "pi-default")?.effort, "max");
   assert.equal(legacySaved.configs.find((c) => c.id === "agy-legacy")?.effort, "max");
 
-  // Starting a new ACP run against those legacy `max` configs still fails explicitly.
-  await assert.rejects(
-    () => service.start("owner-1", startInput({ configId: "pi-default", type: "pi", requestId: "pi-stored-max" })),
-    /max/,
+  const piRun = await service.start(
+    "owner-1",
+    startInput({ configId: "pi-default", type: "pi", requestId: "pi-stored-max" }),
   );
+  assert.equal(piRun.run.effort, "max");
   await assert.rejects(
     () => service.start("owner-1", startInput({ configId: "agy-legacy", type: "agy", requestId: "agy-stored-max" })),
     /max/,
@@ -854,17 +851,11 @@ test("stored legacy Pi/AGY max effort is preserved on unrelated saves while new 
       }),
     /AGY ACP 不支持 effort=max/,
   );
-  assert.throws(
-    () =>
-      service.updateSettings({
-        configs: [
-          ...saved.configs,
-          pi({ id: "pi-new", name: "New Pi", effort: "max" }),
-        ],
-        defaultConfigId: saved.defaultConfigId,
-      }),
-    /thinking/,
-  );
+  const newPi = service.updateSettings({
+    configs: [...saved.configs, pi({ id: "pi-new", name: "New Pi", effort: "max" })],
+    defaultConfigId: saved.defaultConfigId,
+  });
+  assert.equal(newPi.configs.find((c) => c.id === "pi-new")?.effort, "max");
   // Once cleared, setting AGY back to `max` is also rejected.
   const cleared = service.updateSettings({
     configs: saved.configs.map((c) =>

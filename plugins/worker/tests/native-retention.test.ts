@@ -535,10 +535,7 @@ test("Pi launch persists its session file before finalize and cleanup protects i
     (value) => value?.nativeSessionFile !== null && value !== null,
   );
   assert.ok(run);
-  assert.ok(
-    run.nativeSessionFile!.startsWith(path.join(env.PI_CODING_AGENT_DIR!, "sessions") + path.sep),
-  );
-  assert.ok(run.nativeSessionFile!.endsWith(`_${run.nativeSessionId}.jsonl`));
+  assert.equal(run.nativeSessionFile, path.join(data, "sessions", "pi", run.id + ".jsonl"));
   await waitFor(() => fs.existsSync(run.nativeSessionFile!), Boolean);
   age(run.nativeSessionFile!, NOW - 3 * DAY - 1);
 
@@ -701,3 +698,45 @@ async function waitUntil(check: () => boolean, timeoutMs = 1000): Promise<void> 
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
 }
+
+test("native retention leaves a non-default PI_CODING_AGENT_DIR untouched", (t) => {
+  const root = temporaryRoot("worker-pi-acp-retention-");
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  const data = path.join(root, "data");
+  const home = path.join(root, "home");
+  const customAgentDir = path.join(root, "custom-pi-agent");
+  const env = { HOME: home, PI_CODING_AGENT_DIR: customAgentDir };
+  const roots = nativeSessionRoots(data, env).map((item) => item.directory);
+  assert.ok(!roots.includes(path.resolve(path.join(customAgentDir, "sessions"))));
+  assert.ok(roots.includes(path.resolve(path.join(home, ".pi", "agent", "sessions"))));
+  assert.ok(roots.includes(path.resolve(path.join(data, "sessions", "pi"))));
+
+  const now = Date.parse("2026-11-24T12:00:00.000Z");
+  const oldTime = new Date(now - 3 * 86_400_000 - 1000);
+  const encodedDir = path.join(customAgentDir, "sessions", "--tmp-project--");
+  fs.mkdirSync(encodedDir, { recursive: true });
+  const activeFile = path.join(encodedDir, "2026-11-20_active-sid.jsonl");
+  const staleFile = path.join(encodedDir, "2026-11-20_stale-sid.jsonl");
+  fs.writeFileSync(activeFile, "{}\n");
+  fs.writeFileSync(staleFile, "{}\n");
+  fs.utimesSync(activeFile, oldTime, oldTime);
+  fs.utimesSync(staleFile, oldTime, oldTime);
+
+  const summary = sweepNativeSessions({
+    dataDirectory: data,
+    environment: env,
+    now,
+    activeRuns: [
+      {
+        type: "pi",
+        sessionsRoot: path.join(customAgentDir, "sessions"),
+        nativeSessionId: "active-sid",
+        nativeSessionFile: activeFile,
+      },
+    ],
+  });
+  // The custom directory is outside the supported default roots and is never swept.
+  assert.equal(summary.deleted, 0);
+  assert.equal(fs.existsSync(activeFile), true);
+  assert.equal(fs.existsSync(staleFile), true);
+});

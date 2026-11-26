@@ -10,7 +10,6 @@ import {
   parseDsh,
   parsePi,
   prepareLaunch,
-  preparePiAcpLaunch,
   resolveExecutable,
 } from "../server/native.js";
 import type { WorkerRun } from "../shared/contracts.js";
@@ -71,60 +70,27 @@ test("DSH cannot launch; Pi keeps recorded model, effort and session arguments",
     (error: { code?: string }) => error.code === "WORKER_TYPE_UNSUPPORTED",
   );
 
-  const pi = preparePiAcpLaunch({
-    run: run(root, {
-      workerId: "worker-pi",
-      id: "run-pi",
-      model: "provider/sub/model",
-      provider: null,
-      effort: "high",
-      nativeProtocol: "acp",
-    }),
+  const dataDirectory = path.join(root, "data");
+  const homes = nativeHome("pi", dataDirectory, { PI_CODING_AGENT_DIR: path.join(root, "pi-home") });
+  const pi = prepareLaunch({
+    type: "pi",
+    run: run(root, { ...homes, id: "run-pi", model: "provider/sub/model", effort: "max" }),
     cwd: root,
+    prompt: "x",
     previous: null,
-    dataDirectory: path.join(root, "data"),
-    baseEnvironment: {
-      CODEX_PI_MODEL: "changed-environment-model",
-      CODEX_PI_THINKING: "low",
-    },
-  });
-  assert.deepEqual(pi.configOptions, [
-    { configId: "model", value: "provider/sub/model", match: "model" },
-    { configId: "thought_level", value: "high", match: "exact" },
-  ]);
-  assert.equal(pi.sessionId, null);
-  const configured = preparePiAcpLaunch({
-    run: run(root, { workerId: "worker-pi", id: "run-pi-2", effort: "low", nativeProtocol: "acp" }),
-    cwd: root,
-    previous: null,
-    dataDirectory: path.join(root, "data"),
+    dataDirectory,
+    runDirectory,
+    executable: "/bin/fake-pi",
     baseEnvironment: {},
   });
-  assert.deepEqual(configured.configOptions, [
-    { configId: "thought_level", value: "low", match: "exact" },
+  const newFile = path.join(homes.sessionsRoot, "run-pi.jsonl");
+  assert.deepEqual(pi.argv, [
+    "/bin/fake-pi", "--print", "--mode", "json", "--session-dir", homes.sessionsRoot,
+    "--session", newFile, "--model", "provider/sub/model", "--thinking", "max",
   ]);
-  assert.throws(
-    () =>
-      preparePiAcpLaunch({
-        run: run(root, { workerId: "worker-pi", id: "run-pi-3", model: null, effort: "max", nativeProtocol: "acp" }),
-        cwd: root,
-        previous: null,
-        dataDirectory: path.join(root, "data"),
-        baseEnvironment: {},
-      }),
-    /max/,
-  );
-  assert.throws(
-    () =>
-      preparePiAcpLaunch({
-        run: run(root, { workerId: "worker-pi", id: "run-pi-4", model: null, effort: "extreme", nativeProtocol: "acp" }),
-        cwd: root,
-        previous: null,
-        dataDirectory: path.join(root, "data"),
-        baseEnvironment: {},
-      }),
-    /thinking/i,
-  );
+  assert.equal(pi.expectedSessionId, null);
+  assert.equal(pi.sessionFile, newFile);
+  assert.equal(pi.env.PI_CODING_AGENT_DIR, homes.home);
 
   // Legacy pre-ACP Pi JSON sessions keep their original `--print --mode json --session-dir --session` path on resume.
   const legacySessionsRoot = path.join(root, "data", "sessions", "pi");

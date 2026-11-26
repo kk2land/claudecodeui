@@ -14,7 +14,7 @@ export type { WorkerTaskRole };
 /** Environment variable that seeds the ACP idle window when no UI value was saved. */
 export const ACP_IDLE_TIMEOUT_ENV = "CLOUDCLI_WORKER_ACP_IDLE_TIMEOUT_SECONDS";
 
-/** Default ACP idle window: five minutes, shared by the Pi and AGY slots. */
+/** Default idle window of the AGY ACP process, in seconds. */
 export const ACP_IDLE_TIMEOUT_DEFAULT_SECONDS = 300;
 
 /** Largest whole-second idle window whose milliseconds remain below Node's 2,147,483,647 ms timer limit. */
@@ -393,14 +393,12 @@ export type WorkerRun = {
   nativeSessionId: string | null;
   nativeSessionFile: string | null;
   /**
-   * Execution protocol recorded at admission. Absent on historical runs (which keep their
-   * legacy CLI path on resume, such as Pi `--print --mode json`); `"acp"` marks runs driven
-   * over the stdio ACP protocol.
+   * `"acp"` marks an AGY or historical Pi run driven over stdio ACP.
+   * Absent for standalone CLI runs.
    */
   nativeProtocol?: "acp";
   /**
-   * Pi ACP transcript byte offset captured at launch time (0 for a new session, prior EOF for
-   * a resumed session) so finalization verifies only this turn's status and usage.
+   * Transcript offset used to recover a historical Pi ACP turn's status and usage.
    */
   piTranscriptOffset?: number;
   /**
@@ -597,8 +595,8 @@ export type WorkerSettings = {
   /** Days to retain finished runs and their logs, measured from finishedAt; initially 1. */
   retentionDays: number;
   /**
-   * Effective idle window for each shared ACP slot. A saved value wins; otherwise it comes from
-   * `ACP_IDLE_TIMEOUT_ENV` or the 300-second default. Pi and AGY keep independent clocks.
+   * Effective idle window of the AGY ACP process. A saved value wins; otherwise it comes from
+   * `ACP_IDLE_TIMEOUT_ENV` or the 300-second default.
    */
   acpIdleTimeoutSeconds: number;
   softReminderSeconds: number;

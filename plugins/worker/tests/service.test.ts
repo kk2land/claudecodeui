@@ -82,7 +82,7 @@ test("starts, records, logs, and deduplicates one Pi run", async (t) => {
   assert.equal(snapshot.notifications.length, 1);
   assert.equal(snapshot.notifications[0]?.delivery, "pending");
   const logs = service.logs(worker.id, { stream: "events" });
-  assert.match(logs.text, /"type":"acp_session"/);
+  assert.match(logs.text, /"type":"session"/);
   assert.equal(logs.done, true);
   assert.equal(logs.nextCursor, null);
 
@@ -418,10 +418,10 @@ test("an early step reminder keeps timed reviews active while a tool is silent",
   }, { now: () => now });
   const started = await service.start("owner-1", startInput());
   await waitFor(() => service.logs(started.worker.id, { stream: "events" }).text,
-    (log) => (log.match(/"status":"completed"/g) ?? []).length >= 20);
+    (log) => (log.match(/"type":"turn_end"/g) ?? []).length >= 20);
   // The guardian appends the event log before the parent consumes the same lines over IPC, and
   // step counting for reminders happens in the parent. Fire the one-second review interval until
-  // a reminder exists instead of assuming the parent already consumed all 20 step_end lines; the
+  // a reminder exists instead of assuming the parent already consumed all 20 turn_end lines; the
   // injected clock stays fixed, so extra interval fires cannot make a timed review due early.
   await waitFor(
     () => {
@@ -1174,11 +1174,8 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
       path.join(data, "logs", first.id, first.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { acp?: { configOptions: unknown[] } };
-  assert.deepEqual(spec.acp?.configOptions, [
-    { configId: "model", value: "pi-default", match: "model" },
-    { configId: "thought_level", value: "medium", match: "exact" },
-  ]);
+  ) as { argv: string[] };
+  assert.deepEqual(spec.argv.slice(-4), ["--model", "pi-default", "--thinking", "medium"]);
 
   const explicit = await service.start(
     "owner-1",
@@ -1193,11 +1190,8 @@ test("omitted type uses configured defaults ahead of Pi environment, and replay 
       path.join(data, "logs", explicitWorker.id, explicitWorker.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { acp?: { configOptions: unknown[] } };
-  assert.deepEqual(explicitSpec.acp?.configOptions, [
-    { configId: "model", value: "explicit-pi", match: "model" },
-    { configId: "thought_level", value: "low", match: "exact" },
-  ]);
+  ) as { argv: string[] };
+  assert.deepEqual(explicitSpec.argv.slice(-4), ["--model", "explicit-pi", "--thinking", "low"]);
 
   // The same raw request replay returns the original Pi run even though the default changed.
   configure(service, {
@@ -1391,6 +1385,8 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
   );
   assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
   assert.equal(queued.run.model, "accepted-model");
+  // Simulate an accepted run that was still queued when the plugin was upgraded.
+  service.store.saveRun({ ...service.store.run(queued.run.id)!, nativeProtocol: "acp" });
   configure(service, {
     default: "pi",
     concurrency: { pi: 1 },
@@ -1400,16 +1396,14 @@ test("queued runs keep accepted defaults and resume retains recorded selection",
   assert.equal(retained.model, "accepted-model");
   assert.equal(retained.effort, "high");
   const finished = await waitStatus(service, queued.worker.id, ["completed"]);
+  assert.equal(finished.latestRun?.nativeProtocol, undefined);
   const spec = JSON.parse(
     fs.readFileSync(
       path.join(data, "logs", finished.id, finished.latestRun!.id, "spec.json"),
       "utf8",
     ),
-  ) as { acp?: { configOptions: unknown[] } };
-  assert.deepEqual(spec.acp?.configOptions, [
-    { configId: "model", value: "accepted-model", match: "model" },
-    { configId: "thought_level", value: "high", match: "exact" },
-  ]);
+  ) as { argv: string[] };
+  assert.deepEqual(spec.argv.slice(-4), ["--model", "accepted-model", "--thinking", "high"]);
 
   const resumed = await service.resume("owner-1", {
     workerId: finished.id,

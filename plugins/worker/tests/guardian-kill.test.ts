@@ -75,7 +75,7 @@ test("parent SIGKILL: per-run guardian kills a TERM-resistant CLI tree and write
   assert.equal(evidence.groupExited, true);
 });
 
-test("parent SIGKILL: shared ACP recovery settles only its confirmed generation and releases the queue", async (t) => {
+test("parent SIGKILL: Pi CLI recovery settles from its guardian evidence and releases the queue", async (t) => {
   const { harness, ready, cliPid, childPid } = await startHarness(t, "pi");
   process.kill(harness.pid!, "SIGKILL");
   await waitFor(() => dead(cliPid) && dead(childPid), Boolean, 15000);
@@ -84,34 +84,19 @@ test("parent SIGKILL: shared ACP recovery settles only its confirmed generation 
   const project = path.join(root, "project");
   const runDirectory = path.join(ready.data, "logs", ready.workerId, ready.runId);
   const finalFile = path.join(runDirectory, "final.json");
-  // A shared ACP run never writes a per-run terminal guess; only its generation owns that proof.
-  assert.equal(fs.existsSync(finalFile), false);
-  const specFile = path.join(runDirectory, "spec.json");
-  const specText = fs.readFileSync(specFile, "utf8");
-  const spec = JSON.parse(specText) as { acp?: { generationId?: string } };
-  const generationId = spec.acp?.generationId;
-  assert.match(generationId ?? "", /^process-/);
-  const generationFinal = path.join(
-    ready.data,
-    "pi-acp-guardian",
-    generationId!,
-    "final.json",
-  );
-  await waitFor(() => fs.existsSync(generationFinal), Boolean, 15000);
-  const generationEvidence = JSON.parse(fs.readFileSync(generationFinal, "utf8"));
-  assert.equal(generationEvidence.groupExited, true);
-  assert.equal(generationEvidence.reason, "disconnect");
+  await waitFor(() => fs.existsSync(finalFile), Boolean, 5000);
+  const evidence = JSON.parse(fs.readFileSync(finalFile, "utf8"));
+  assert.equal(evidence.groupExited, true);
+  assert.equal(evidence.reason, "disconnect");
 
-  // Reopen after the guardian proof exists on disk, but hold it back to reproduce the restart
-  // window where recovery sees an unknown run and a still-confirmed-independent generation.
-  const heldFinal = generationFinal + ".held";
-  fs.renameSync(generationFinal, heldFinal);
+  // Hold back the proof to reproduce a restart before the guardian has recorded its exit.
+  const heldFinal = finalFile + ".held";
+  fs.renameSync(finalFile, heldFinal);
   const service = new WorkerService({
     dataDirectory: ready.data,
     environment: environment(root),
     executablePaths: {
       pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"),
-      "pi-acp": path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs"),
     },
     guardianCommand: [
       process.execPath,
@@ -150,26 +135,16 @@ test("parent SIGKILL: shared ACP recovery settles only its confirmed generation 
     defaultConfigId: settings.defaultConfigId,
   });
   const queued = await service.start("harness-owner", {
-    taskName: "after shared recovery",
+    taskName: "after Pi recovery",
     type: "pi",
     prompt: "finish after recovery",
     workspace: { mode: "existing" },
     writePaths: [],
-    requestId: "after-shared-recovery",
+    requestId: "after-pi-recovery",
   });
   assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
 
-  // A different generation's confirmed evidence must not release this run or its queue.
-  const otherSpec = JSON.parse(specText) as { acp?: Record<string, unknown> };
-  otherSpec.acp = { ...otherSpec.acp, generationId: "process-00000000-0000-4000-8000-000000000000" };
-  fs.writeFileSync(specFile, JSON.stringify(otherSpec), { mode: 0o600 });
-  fs.renameSync(heldFinal, generationFinal);
-  await new Promise((resolve) => setTimeout(resolve, 2200));
-  assert.equal(service.get(ready.workerId).worker.latestRun?.status, "unknown");
-  assert.equal(service.get(queued.worker.id).worker.latestRun?.status, "queued");
-
-  // Restoring the exact generation link lets the next reminder settle as interrupted once.
-  fs.writeFileSync(specFile, specText, { mode: 0o600 });
+  fs.renameSync(heldFinal, finalFile);
   const interrupted = await waitFor(
     () => service.get(ready.workerId).worker.latestRun,
     (run) => run?.status === "interrupted",

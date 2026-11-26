@@ -137,16 +137,6 @@ export type AcpTurnResult = {
   result: Record<string, unknown>;
 };
 
-/** Validated per-run session parameters for one Pi ACP turn on the shared Pi ACP process. */
-export type PiAcpSessionPlan = {
-  cwd: string;
-  sessionId: string | null;
-  sessionFile: string | null;
-  home: string;
-  sessionsRoot: string;
-  configOptions: AcpConfigOptionRequest[];
-};
-
 /** Everything needed to launch one guardian-wrapped native invocation. */
 export type NativeLaunch = {
   argv: string[];

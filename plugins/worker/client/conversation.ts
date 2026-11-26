@@ -154,8 +154,7 @@ function acpToolOutput(update: Record<string, unknown>): string | undefined {
 }
 
 /**
- * Reusable ACP (`protocol: "acp"`) event-stream handler. Handles Pi ACP today and can be
- * shared directly by future ACP engines such as AGY.
+ * Reads ACP event streams from AGY and historical Pi runs.
  */
 function acpHandler(rows: Rows): Handler {
   let textRow: string | null = null;

@@ -1257,8 +1257,8 @@ export function SettingsView({
                   }}
                 />
                 <small>
-                  默认 {ACP_IDLE_TIMEOUT_DEFAULT_SECONDS} 秒（5 分钟）。Pi 和 AGY
-                  各自在最后一个任务结束后开始计时。
+                  默认 {ACP_IDLE_TIMEOUT_DEFAULT_SECONDS} 秒（5 分钟）。AGY
+                  在最后一个任务结束后开始计时。
                 </small>
               </>
             ) : (

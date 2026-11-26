@@ -16,7 +16,6 @@ export const pluginRoot = path.resolve(
 export const tsxLoader = fileURLToPath(import.meta.resolve("tsx"));
 export const dshFixture = path.join(pluginRoot, "tests/fixtures/fake-dsh.mjs");
 export const piFixture = path.join(pluginRoot, "tests/fixtures/fake-pi.mjs");
-export const piAcpFixture = path.join(pluginRoot, "tests/fixtures/fake-pi-acp.mjs");
 export const codexFixture = path.join(pluginRoot, "tests/fixtures/fake-codex.mjs");
 export const agyFixture = path.join(pluginRoot, "tests/fixtures/fake-agy.mjs");
 export const agyAcpFixture = path.join(pluginRoot, "tests/fixtures/fake-agy-acp.mjs");
@@ -71,7 +70,7 @@ export function createService(
   const project = path.join(root, "project");
   fs.mkdirSync(project, { recursive: true });
   const data = path.join(root, "data");
-  const envStateFile = path.join(root, ".fake-pi-acp-env.json");
+  const envStateFile = path.join(root, ".fake-agy-acp-env.json");
   const rawEnv = environment(root, {
     TEST_ENV_STATE_FILE: envStateFile,
     ...extraEnv,
@@ -103,7 +102,6 @@ export function createService(
     environment: env,
     executablePaths: {
       pi: piFixture,
-      "pi-acp": piAcpFixture,
       codex: codexFixture,
       agy: agyFixture,
       "agy-acp": agyAcpFixture,

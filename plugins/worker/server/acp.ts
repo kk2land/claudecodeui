@@ -57,7 +57,6 @@ export type AcpEvent =
       sessionId: string;
       cwd: string;
       configOptions: AcpConfigOptionSnapshot[];
-      startupInfo: string | null;
     }
   | {
       protocol: "acp";
@@ -109,7 +108,6 @@ export type AcpParsedStream = {
   cwd: string | null;
   identityMismatch: boolean;
   stopReason: string | null;
-  startupInfo: string | null;
   error: string | null;
   errorCode: string | null;
 };
@@ -140,7 +138,6 @@ export type AcpSessionHandle = {
   readonly action: "new" | "resume";
   readonly sessionId: string;
   readonly cwd: string;
-  readonly startupInfo: string | null;
   readonly configOptions: readonly AcpConfigOptionSnapshot[];
   readonly closed: boolean;
   setConfigOption(
@@ -223,7 +220,6 @@ type ParsedSessionUpdate = {
 type OpenedSessionData = {
   sessionId: string;
   configOptions: AcpConfigOptionSnapshot[];
-  startupInfo: string | null;
 };
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -389,14 +385,9 @@ function parseSessionResponse(
     }
     sessionId = expectedSessionId;
   }
-  const meta = asRecord(record._meta);
-  const piAcp = meta ? asRecord(meta.piAcp) : null;
-  const startupInfo =
-    piAcp && typeof piAcp.startupInfo === "string" ? piAcp.startupInfo : null;
   return {
     sessionId,
     configOptions: parseConfigOptions(record.configOptions),
-    startupInfo,
   };
 }
 
@@ -764,7 +755,6 @@ type InternalSessionState = {
   readonly action: "new" | "resume";
   readonly sessionId: string;
   readonly cwd: string;
-  readonly startupInfo: string | null;
   configOptions: AcpConfigOptionSnapshot[];
   readonly onEvent?: (event: AcpEvent) => void;
   unsubscribeUpdates: () => void;
@@ -1027,7 +1017,7 @@ export class AcpConnection {
           timeoutMs: input.timeoutMs,
           onResultSync: (result) => {
             // Validate once and subscribe synchronously before the next line in the same stdout
-            // chunk is parsed so `startupInfo` or immediate `session/update` notifications route cleanly.
+            // chunk is parsed so immediate `session/update` notifications route cleanly.
             const parsed = parseSessionResponse(result, input.sessionId);
             if (action === "new") {
               if (
@@ -1075,7 +1065,6 @@ export class AcpConnection {
       action,
       sessionId: opened.sessionId,
       cwd: input.cwd,
-      startupInfo: opened.startupInfo,
       configOptions: opened.configOptions,
       onEvent: input.onEvent,
       unsubscribeUpdates: preSubscribedUnsub ?? (() => {}),
@@ -1102,7 +1091,6 @@ export class AcpConnection {
       sessionId: state.sessionId,
       cwd: state.cwd,
       configOptions: state.configOptions,
-      startupInfo: state.startupInfo,
     });
     for (const early of bufferedEarlyUpdates) dispatchUpdate(early);
 
@@ -1202,9 +1190,6 @@ export class AcpConnection {
       },
       get cwd() {
         return state.cwd;
-      },
-      get startupInfo() {
-        return state.startupInfo;
       },
       get configOptions() {
         return state.configOptions;
@@ -1667,19 +1652,6 @@ export function trackAcpProgress(
     }
     return;
   }
-  if (updateKind === "session_info_update") {
-    const meta = asRecord(update._meta);
-    const piAcp = meta ? asRecord(meta.piAcp) : null;
-    if (piAcp?.running === false) {
-      progress.phase = "turn_end";
-      progress.steps++;
-      progress.active.clear();
-      progress.currentTool = null;
-    } else if (piAcp?.running === true) {
-      progress.phase = "turn_start";
-    }
-    return;
-  }
   if (
     updateKind === "agent_message_chunk" ||
     updateKind === "agent_thought_chunk"
@@ -1708,7 +1680,6 @@ export function parseAcpEvents(
   let identityMismatch = false;
   let promptResultSeen = false;
   let stopReason: string | null = null;
-  let startupInfo: string | null = null;
   let error: string | null = null;
   let errorCode: string | null = null;
 
@@ -1775,9 +1746,6 @@ export function parseAcpEvents(
           fail("ACP session 工作目录不匹配");
         } else {
           sessionCwd = event.cwd as string;
-        }
-        if (typeof event.startupInfo === "string") {
-          startupInfo = event.startupInfo;
         }
         if (identityValid && cwdValid && sessionId !== null) {
           validatedSessionId = sessionId;
@@ -1860,7 +1828,6 @@ export function parseAcpEvents(
     cwd: sessionCwd,
     identityMismatch,
     stopReason,
-    startupInfo,
     error,
     errorCode,
   };
