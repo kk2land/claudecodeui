@@ -4,8 +4,9 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 
-import { closeConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
+import { closeConnection, getConnection, initializeDatabase, scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb, userDb } from '@/modules/database/index.js';
 import { providerRuntimeService } from '@/modules/providers/index.js';
+import { AppError } from '@/shared/index.js';
 import type { ProviderRuntimeGateway } from '@/shared/index.js';
 import {
   closeScheduledMessageDispatcher,
@@ -59,6 +60,12 @@ function holdFirstRun() {
 }
 
 type RunCall = { provider: string; command: string; options: Record<string, unknown> };
+
+/** Native callbacks a queue-dispatch test runtime receives from the server. */
+type QueueRunOptions = Record<string, unknown> & {
+  onTurnStarting?: () => void;
+  onInputAccepted?: () => void;
+};
 
 /** Waits for a dispatcher pass that was started without a promise to await. */
 async function waitFor(predicate: () => boolean): Promise<void> {
@@ -683,6 +690,285 @@ test('a provider-level dispatch failure consumes the head but keeps the queued t
     const runs: RunCall[] = [];
     assert.equal(await dispatchQueuedMessages(createRuntime(runs)), 1);
     assert.deepEqual(runs.map(({ command }) => command), ['still queued']);
+  });
+});
+
+test('a restart before native acceptance preserves the voice head and blocks its tail', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-voice-restart';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp', 'Voice restart');
+    sessionRuntimeDb.update(sessionId, { runtime: 'app-server' });
+    const head = sessionDraftsDb.enqueueChatMessage(userId, sessionId, {
+      content: 'original spoken text', attachments: [], options: { inputSource: 'voice' },
+    }, 'restart-head').queuedMessage;
+    const tail = sessionDraftsDb.enqueueChatMessage(userId, sessionId, {
+      content: 'tail must wait', attachments: [], options: { inputSource: 'voice' },
+    }, 'restart-tail').queuedMessage;
+
+    const attempts: string[] = [];
+    let interrupt: (() => void) | undefined;
+    const runtime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        options.onTurnStarting?.();
+        attempts.push(command);
+        await new Promise<void>((resolve) => { interrupt = resolve; });
+        throw new Error('Synthetic connection lost during restart');
+      },
+    } as never;
+
+    const firstDispatch = dispatchQueuedMessages(runtime, { sessionId });
+    await waitFor(() => Boolean(interrupt));
+    const before = sessionDraftsDb.getDrafts(userId)[0];
+    const requestId = before.queuedDelivery.requestId;
+    assert.ok(requestId);
+    assert.equal(before.queuedDelivery.status, 'steering');
+    assert.deepEqual(before.queuedMessages, [head, tail]);
+    assert.deepEqual(getConnection().prepare('SELECT message_id, status FROM queued_steer_receipts WHERE request_id = ?').get(requestId), {
+      message_id: 'restart-head', status: 'steering',
+    });
+
+    closeConnection();
+    await initializeDatabase();
+    const recovered = sessionDraftsDb.getDrafts(userId)[0];
+    assert.deepEqual(recovered.queuedMessages, [head, tail]);
+    assert.equal(recovered.queuedDelivery.status, 'unknown');
+    assert.equal(recovered.queuedDelivery.requestId, requestId);
+    assert.deepEqual(getConnection().prepare('SELECT message_id, status FROM queued_steer_receipts WHERE request_id = ?').get(requestId), {
+      message_id: 'restart-head', status: 'unknown',
+    });
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages(sessionId), []);
+    const replay = sessionDraftsDb.enqueueChatMessage(userId, sessionId, {
+      content: 'changed retry', attachments: [], options: { inputSource: 'voice' },
+    }, 'restart-head');
+    assert.equal(replay.appended, false);
+    assert.equal(replay.alreadySent, true);
+    assert.deepEqual(replay.queuedMessage, head);
+    assert.deepEqual(sessionDraftsDb.getDrafts(userId)[0].queuedMessages, [head, tail]);
+
+    interrupt!();
+    assert.equal(await firstDispatch, 1);
+    assert.equal(await dispatchQueuedMessages(runtime, { sessionId }), 0);
+    assert.deepEqual(attempts, ['original spoken text']);
+
+    sessionDraftsDb.recoverUnknown(userId, sessionId, 'discard');
+    const tailRuntime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        options.onTurnStarting?.();
+        options.onInputAccepted?.();
+        attempts.push(command);
+      },
+    } as never;
+    assert.equal(await dispatchQueuedMessages(tailRuntime, { sessionId }), 1);
+    assert.deepEqual(attempts, ['original spoken text', 'tail must wait']);
+  });
+});
+
+test('a voice Codex queued head is restored only for a pre-attempt failure or an explicit turn/start rejection', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-voice-rejected';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp', 'Voice queue');
+    // No modelSelection yet: the queue must not count the turn as attempted
+    // before the provider itself says it is about to create the native turn.
+    sessionRuntimeDb.update(sessionId, { runtime: 'app-server' });
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [
+      { id: 'voice-head', content: 'first spoken', options: { inputSource: 'voice' } },
+      { id: 'voice-tail', content: 'second spoken', options: { inputSource: 'voice' } },
+    ] });
+
+    const received: string[] = [];
+    let phase: 'resume-failure' | 'reject' | 'ok' = 'resume-failure';
+    const runtime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        if (phase === 'resume-failure') {
+          // The provider failed before any native input was attempted.
+          phase = 'reject';
+          throw new Error('provider resume rejected before input');
+        }
+        options.onTurnStarting?.();
+        if (phase === 'reject') {
+          phase = 'ok';
+          throw new AppError('Codex rejected the turn.', { code: 'CODEX_APP_SERVER_REJECTED', statusCode: 409 });
+        }
+        options.onInputAccepted?.();
+        received.push(command);
+      },
+    } as never;
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, []);
+    assert.deepEqual(
+      sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages.map((entry) => (entry as { id: string }).id),
+      ['voice-head', 'voice-tail'],
+      'a failure before the native attempt restores the same head',
+    );
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedDelivery.status, 'queued');
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, [], 'the rejected turn never ran');
+    assert.deepEqual(
+      sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages.map((entry) => (entry as { id: string }).id),
+      ['voice-head', 'voice-tail'],
+      'the explicitly rejected head keeps its ticket in front of the untouched tail',
+    );
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedDelivery.status, 'queued');
+
+    // The next normal pass retries the same ticket, and the tail still waits.
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, ['first spoken']);
+    assert.deepEqual(
+      sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages.map((entry) => (entry as { id: string }).id),
+      ['voice-tail'],
+    );
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, ['first spoken', 'second spoken']);
+  });
+});
+
+test('a voice Codex turn the provider accepted is consumed even when execution then fails', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-voice-accepted-failure';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp', 'Voice accepted failure');
+    sessionRuntimeDb.update(sessionId, {
+      runtime: 'app-server',
+      modelSelection: { modelProvider: 'beta', model: 'voice-model' },
+    });
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [
+      { id: 'accepted-head', content: 'accepted then failed', options: { inputSource: 'voice' } },
+      { id: 'accepted-tail', content: 'after accepted failure', options: { inputSource: 'voice' } },
+    ] });
+
+    const received: string[] = [];
+    const runtime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        options.onTurnStarting?.();
+        options.onInputAccepted?.();
+        received.push(command);
+        throw new Error('turn failed after native acceptance');
+      },
+    } as never;
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(received, ['accepted then failed']);
+    assert.deepEqual(
+      sessionDraftsDb.getDrafts(userId)[0]?.queuedMessages.map((entry) => (entry as { id: string }).id),
+      ['accepted-tail'],
+      'an accepted turn is delivered, so only the tail remains queued',
+    );
+
+    const tailRuntime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        options.onTurnStarting?.();
+        options.onInputAccepted?.();
+        received.push(command);
+      },
+    } as never;
+    assert.equal(await dispatchQueuedMessages(tailRuntime), 1);
+    assert.deepEqual(received, ['accepted then failed', 'after accepted failure']);
+  });
+});
+
+test('an unprovable voice Codex outcome parks the head without resending or releasing the tail', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-voice-unknown';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp', 'Voice unknown');
+    sessionRuntimeDb.update(sessionId, {
+      runtime: 'app-server',
+      modelSelection: { modelProvider: 'beta', model: 'voice-model' },
+    });
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [
+      { id: 'unknown-head', content: 'unknown outcome', options: { inputSource: 'voice' } },
+      { id: 'unknown-tail', content: 'must wait for resolution', options: { inputSource: 'voice' } },
+    ] });
+
+    const attempts: string[] = [];
+    const runtime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        // The native input was attempted, then the runtime failed with an
+        // ordinary transport error instead of a native turn/start rejection.
+        options.onTurnStarting?.();
+        attempts.push(command);
+        throw new Error('Synthetic pipe closed after turn/start');
+      },
+    } as never;
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.deepEqual(attempts, ['unknown outcome']);
+    const draft = sessionDraftsDb.getDrafts(userId)[0];
+    assert.equal(draft?.queuedDelivery.status, 'unknown');
+    assert.deepEqual(
+      draft?.queuedMessages.map((entry) => (entry as { id: string }).id),
+      ['unknown-head', 'unknown-tail'],
+      'the unproven ticket stays at the head under the same id',
+    );
+
+    // No automatic pass may resend it or let the tail overtake it.
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.deepEqual(attempts, ['unknown outcome'], 'the head and the tail are not retried');
+
+    // Explicit recovery is the only way the queue continues.
+    sessionDraftsDb.recoverUnknown(userId, sessionId, 'discard');
+    const tailRuntime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        options.onTurnStarting?.();
+        options.onInputAccepted?.();
+        attempts.push(command);
+      },
+    } as never;
+    assert.equal(await dispatchQueuedMessages(tailRuntime), 1);
+    assert.deepEqual(attempts, ['unknown outcome', 'must wait for resolution']);
+  });
+});
+
+test('a voice Codex runtime that returns without native confirmation is parked as unknown', async () => {
+  await withIsolatedDatabase(async (userId) => {
+    const sessionId = 'codex-voice-silent';
+    sessionsDb.createAppSession(sessionId, 'codex', '/tmp', 'Voice silent');
+    sessionRuntimeDb.update(sessionId, {
+      runtime: 'app-server',
+      modelSelection: { modelProvider: 'beta', model: 'voice-model' },
+    });
+    sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [
+      { id: 'silent-head', content: 'silent outcome', options: { inputSource: 'voice' } },
+      { id: 'silent-tail', content: 'silent tail', options: { inputSource: 'voice' } },
+    ] });
+
+    const attempts: string[] = [];
+    const runtime: ProviderRuntimeGateway = {
+      hasRuntime: () => true,
+      hasBackgroundWork: () => false,
+      abort: async () => true,
+      async run(_provider: string, command: string, options: QueueRunOptions) {
+        options.onTurnStarting?.();
+        attempts.push(command);
+      },
+    } as never;
+
+    assert.equal(await dispatchQueuedMessages(runtime), 1);
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedDelivery.status, 'unknown');
+    assert.equal(await dispatchQueuedMessages(runtime), 0);
+    assert.deepEqual(attempts, ['silent outcome'], 'no automatic resend and no tail release');
   });
 });
 

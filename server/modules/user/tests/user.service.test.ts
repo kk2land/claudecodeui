@@ -12,6 +12,11 @@ const noDrafts: UserDependencies['drafts'] = {
   saveDraft: () => undefined,
   saveDraftText: () => undefined,
   appendQueuedMessage: (_userId, _scope, message) => ({ queuedMessage: message, appended: false }),
+  enqueueChatMessage: (_userId, _scope, message) => ({
+    queuedMessage: { ...message, id: 'ticket' },
+    appended: false,
+    alreadySent: false,
+  }),
   clearQueuedMessage: () => undefined,
   deleteDraft: () => undefined,
 };
@@ -263,6 +268,93 @@ test('appendQueuedMessage refuses, as a conflict, a slash command the repository
       return true;
     },
   );
+});
+
+test('enqueueQueuedMessage uses the body ticket as the queue id and normalizes options', () => {
+  const enqueued: unknown[][] = [];
+  const changed: string[] = [];
+  const service = createUserService(createDependencies({
+    drafts: {
+      ...noDrafts,
+      enqueueChatMessage: (...args) => {
+        enqueued.push(args);
+        return { queuedMessage: { ...args[2], id: args[3] }, appended: true, alreadySent: false };
+      },
+    },
+    onQueueChanged: (scope) => changed.push(scope),
+  }));
+
+  const result = service.enqueueQueuedMessage(5, ' session-1 ', ' ticket-1 ', {
+    content: 'voice note',
+    options: { model: 'opus', clientMessageId: 'stale-ticket' },
+    attachments: [],
+    stray: 'dropped',
+  });
+
+  assert.deepEqual(enqueued, [[5, 'session-1', {
+    content: 'voice note',
+    options: { model: 'opus', clientMessageId: 'ticket-1' },
+    attachments: [],
+  }, 'ticket-1', { preserveHold: true }]]);
+  assert.deepEqual(result, {
+    success: true,
+    queuedMessage: {
+      content: 'voice note',
+      options: { model: 'opus', clientMessageId: 'ticket-1' },
+      attachments: [],
+      id: 'ticket-1',
+    },
+    appended: true,
+    alreadySent: false,
+  });
+  assert.deepEqual(changed, ['session-1']);
+});
+
+test('enqueueQueuedMessage does not re-notify for a replay or an already-claimed ticket', () => {
+  for (const outcome of [
+    { appended: false, alreadySent: false },
+    { appended: false, alreadySent: true },
+  ]) {
+    const service = createUserService(createDependencies({
+      drafts: {
+        ...noDrafts,
+        enqueueChatMessage: (_userId, _scope, message) => ({
+          queuedMessage: { ...message, id: 'ticket-1' },
+          ...outcome,
+        }),
+      },
+      onQueueChanged: () => assert.fail('A repeated ticket must not request a new delivery'),
+    }));
+
+    assert.deepEqual(
+      service.enqueueQueuedMessage(5, 'session-1', 'ticket-1', { content: 'voice note' }),
+      {
+        success: true,
+        queuedMessage: {
+          content: 'voice note',
+          options: { clientMessageId: 'ticket-1' },
+          attachments: [],
+          id: 'ticket-1',
+        },
+        ...outcome,
+      },
+    );
+  }
+});
+
+test('enqueueQueuedMessage requires a non-empty ticket and a sendable message', () => {
+  const service = createUserService(createDependencies());
+
+  for (const ticket of [undefined, null, '', '   ', 7]) {
+    assert.throws(
+      () => service.enqueueQueuedMessage(5, 'session-1', ticket, { content: 'voice note' }),
+      (error: Error & { code?: string; statusCode?: number }) => (
+        error.code === 'INVALID_CLIENT_MESSAGE_ID' && error.statusCode === 400
+      ),
+    );
+  }
+  assert.throws(() => service.enqueueQueuedMessage(5, '   ', 'ticket-1', { content: 'x' }), /scope/i);
+  assert.throws(() => service.enqueueQueuedMessage(5, 'session-1', 'ticket-1', { content: '  ' }), /text or attachments/);
 });
 
 test('clearQueuedMessage clears the named scope', () => {

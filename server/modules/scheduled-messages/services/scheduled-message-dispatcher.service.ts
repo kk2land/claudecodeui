@@ -1,4 +1,4 @@
-import { scheduledMessagesDb, sessionDraftsDb, sessionsDb } from '@/modules/database/index.js';
+import { scheduledMessagesDb, sessionDraftsDb, sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import type { QueuedSessionMessageRecord, ScheduledMessageRow } from '@/modules/database/index.js';
 import { announceScheduledMessagesChanged } from '@/modules/scheduled-messages/services/scheduled-messages.service.js';
 import { chatRunRegistry, runDetachedChatTurn } from '@/modules/websocket/index.js';
@@ -130,9 +130,10 @@ function readOptions(raw: string): Record<string, unknown> {
 /** Returns whether the claimed turn was admitted; false means its head was restored or consumed. */
 async function sendClaimedQueuedMessage(
   candidate: QueuedSessionMessageRecord,
+  message: QueuedChatMessage | null,
+  needsProof: boolean,
   runtime: ProviderRuntimeGateway,
 ): Promise<boolean> {
-  const message = readQueuedChatMessage(candidate.queuedMessage);
   if (!message) {
     // An unusable legacy entry is consumed without reserving a slot forever.
     sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
@@ -140,13 +141,11 @@ async function sendClaimedQueuedMessage(
     return false;
   }
 
-  // The claim removed only the head and reserved its slot; the tail stays
-  // queued. A turn that could not be admitted is put back at the head, so it is
-  // retried ahead of the tail. Once admitted the receipt stays accepted, which
-  // also stops a delayed browser PUT from resurrecting the turn.
+  // A turn that could not be admitted stays ahead of the tail. Accepted
+  // receipts also stop a delayed browser PUT from resurrecting the turn.
   try {
-    const started = await sendClaimedQueuedMessageHead(candidate, message, runtime);
-    if (started) {
+    const started = await sendClaimedQueuedMessageHead(candidate, message, needsProof, runtime);
+    if (started && !needsProof) {
       sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
     }
     return started;
@@ -160,10 +159,29 @@ async function sendClaimedQueuedMessage(
   }
 }
 
+/**
+ * Whether this queue entry may only be confirmed from native delivery proof.
+ *
+ * A speech-derived Codex app-server turn carries no draft text anyone can
+ * re-derive, and its `turn/start` can be refused after the receipt was claimed.
+ * Only that provider loses the "started" shortcut; every other provider and
+ * ordinary web prompt keeps its existing delivery policy.
+ */
+function requiresNativeInputAcceptance(
+  candidate: QueuedSessionMessageRecord,
+  message: QueuedChatMessage,
+): boolean {
+  if (message.options?.inputSource !== 'voice') return false;
+  const session = sessionsDb.getSessionById(candidate.sessionId);
+  if (session?.provider !== 'codex') return false;
+  return sessionRuntimeDb.get(candidate.sessionId)?.runtime === 'app-server';
+}
+
 /** Returns whether the turn was admitted; an unadmitted claim is put back. */
 async function sendClaimedQueuedMessageHead(
   candidate: QueuedSessionMessageRecord,
   message: QueuedChatMessage,
+  needsProof: boolean,
   runtime: ProviderRuntimeGateway,
 ): Promise<boolean> {
   const previousRun = chatRunRegistry.getRun(candidate.sessionId);
@@ -173,26 +191,52 @@ async function sendClaimedQueuedMessageHead(
       userId: candidate.userId,
       content: message.content,
       options: { ...message.options, attachments: message.attachments },
-      onTurnStarting: () => sessionDraftsDb.confirmQueuedMessageDispatch(candidate),
+      // A proof-backed claim is confirmed from the provider's own acceptance
+      // callback below, never merely because native input is about to start.
+      ...(needsProof
+        ? { onInputAccepted: () => sessionDraftsDb.finishSteer(candidate.userId, candidate.sessionId, candidate.dispatchRequestId!, 'accepted') }
+        : { onTurnStarting: () => sessionDraftsDb.confirmQueuedMessageDispatch(candidate) }),
     },
     { runtime },
   );
 
   // Reservation alone does not prove delivery: Codex may still be changing
-  // model providers. The callback frees the slot immediately before input is
-  // sent, while a failed resume leaves the dispatch receipt restorable.
+  // model providers. Ordinary turns free their slot before input starts; a
+  // proof-backed turn waits for native acceptance.
   const admittedRun = chatRunRegistry.getRun(candidate.sessionId);
   const admitted = Boolean(admittedRun && admittedRun !== previousRun);
 
   try {
     const result = await dispatch;
 
+    // The native turn exists but the runtime could neither confirm nor refuse
+    // it. Retrying could deliver it twice, so park it for the existing
+    // explicit recovery flow and leave the tail untouched.
+    if (result.deliveryUnknown) {
+      const delivery = sessionDraftsDb.finishSteer(
+        candidate.userId,
+        candidate.sessionId,
+        candidate.dispatchRequestId!,
+        'unknown',
+        'The provider result could not be confirmed. Resolve this message before the queue continues.',
+      );
+      if (delivery === 'accepted') {
+        sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
+        return true;
+      }
+      return false;
+    }
+
     // The registry check and run reservation are separate operations. If a run
     // wins that tiny race, put the turn back at the head so the next poll tries
     // again. A run that did start and then failed is consumed rather than
     // retried: its turn may already have reached the provider.
     if (!result.started) {
-      sessionDraftsDb.restoreQueuedMessage(candidate);
+      if (needsProof) {
+        sessionDraftsDb.finishSteer(candidate.userId, candidate.sessionId, candidate.dispatchRequestId!, 'rejected', result.error, { keepQueuedOnRejection: true });
+      } else {
+        sessionDraftsDb.restoreQueuedMessage(candidate);
+      }
       return false;
     }
     sessionDraftsDb.deleteEmptyDraft(candidate.userId, candidate.sessionId);
@@ -202,7 +246,10 @@ async function sendClaimedQueuedMessageHead(
     // deleted session, failing `hasRuntime`) never reached the provider, so the
     // head goes back at the front of the untouched tail. Once admitted the
     // receipt becomes accepted instead: retrying could deliver the turn twice.
-    if (admitted) {
+    // finishSteer retains a prior acceptance instead of releasing it.
+    if (needsProof) {
+      sessionDraftsDb.finishSteer(candidate.userId, candidate.sessionId, candidate.dispatchRequestId!, 'rejected', null, { keepQueuedOnRejection: true });
+    } else if (admitted) {
       sessionDraftsDb.confirmQueuedMessageDispatch(candidate);
     } else {
       sessionDraftsDb.restoreQueuedMessage(candidate);
@@ -251,14 +298,16 @@ export async function dispatchQueuedMessages(
     if (isSessionBusy(candidate.sessionId, runtime)) {
       return;
     }
-    if (!sessionDraftsDb.claimQueuedMessage(candidate)) {
+    const message = readQueuedChatMessage(candidate.queuedMessage);
+    const needsProof = message !== null && requiresNativeInputAcceptance(candidate, message);
+    if (!sessionDraftsDb.claimQueuedMessage(candidate, needsProof)) {
       return;
     }
     claimed += 1;
     dispatchingSessions.add(candidate.sessionId);
     let admitted = false;
     try {
-      admitted = await sendClaimedQueuedMessage(candidate, runtime);
+      admitted = await sendClaimedQueuedMessage(candidate, message, needsProof, runtime);
     } finally {
       dispatchingSessions.delete(candidate.sessionId);
       // Completion (or an enqueue) during the run asked for another pass; do

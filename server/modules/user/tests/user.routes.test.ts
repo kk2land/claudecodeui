@@ -41,6 +41,15 @@ async function withUserServer(run: (baseUrl: string, calls: DraftCall[]) => Prom
         // Stands in for a scope whose waiting message cannot take this one.
         return args[1] === 'session-with-command' ? null : { queuedMessage: { ...args[2], id: 'ticket' }, appended: false };
       },
+      enqueueChatMessage: (...args) => {
+        calls.push(['enqueueChatMessage', ...args]);
+        const clientMessageId = args[3] as string;
+        return {
+          queuedMessage: { ...(args[2] as Record<string, unknown>), id: clientMessageId } as never,
+          appended: clientMessageId !== 'sent-ticket',
+          alreadySent: clientMessageId === 'sent-ticket',
+        };
+      },
       clearQueuedMessage: (...args) => { calls.push(['clearQueuedMessage', ...args]); },
       deleteDraft: (...args) => { calls.push(['deleteDraft', ...args]); },
     },
@@ -157,6 +166,78 @@ test('POST /drafts/queued-message answers 409 when the message cannot be combine
     assert.equal(response.status, 409);
     const body = await response.json() as { error: { code: string } };
     assert.equal(body.error.code, 'QUEUED_MESSAGE_NOT_COMBINABLE');
+  });
+});
+
+test('POST /drafts/queued-message/idempotent uses the body ticket and returns the stored turn', async () => {
+  await withUserServer(async (baseUrl, calls) => {
+    const queuedMessage = { content: 'voice note', options: { model: 'opus' } };
+    const response = await send(`${baseUrl}/api/user/drafts/queued-message/idempotent`, 'POST', {
+      scope: 'session-a',
+      clientMessageId: 'ticket-1',
+      queuedMessage,
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      success: true,
+      queuedMessage: {
+        content: 'voice note',
+        options: { model: 'opus', clientMessageId: 'ticket-1' },
+        attachments: [],
+        id: 'ticket-1',
+      },
+      appended: true,
+      alreadySent: false,
+    });
+    assert.deepEqual(calls, [['enqueueChatMessage', USER_ID, 'session-a', {
+      content: 'voice note',
+      options: { model: 'opus', clientMessageId: 'ticket-1' },
+      attachments: [],
+    }, 'ticket-1', { preserveHold: true }]]);
+  });
+});
+
+test('POST /drafts/queued-message/idempotent reports an already-claimed ticket without appending', async () => {
+  await withUserServer(async (baseUrl) => {
+    const response = await send(`${baseUrl}/api/user/drafts/queued-message/idempotent`, 'POST', {
+      scope: 'session-a',
+      clientMessageId: 'sent-ticket',
+      queuedMessage: { content: 'voice note' },
+    });
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      success: true,
+      queuedMessage: {
+        content: 'voice note',
+        options: { clientMessageId: 'sent-ticket' },
+        attachments: [],
+        id: 'sent-ticket',
+      },
+      appended: false,
+      alreadySent: true,
+    });
+  });
+});
+
+test('POST /drafts/queued-message/idempotent rejects a missing ticket or empty message', async () => {
+  await withUserServer(async (baseUrl, calls) => {
+    const missingTicket = await send(`${baseUrl}/api/user/drafts/queued-message/idempotent`, 'POST', {
+      scope: 'session-a',
+      queuedMessage: { content: 'voice note' },
+    });
+    assert.equal(missingTicket.status, 400);
+    assert.equal(((await missingTicket.json()) as { error: { code: string } }).error.code, 'INVALID_CLIENT_MESSAGE_ID');
+
+    const emptyMessage = await send(`${baseUrl}/api/user/drafts/queued-message/idempotent`, 'POST', {
+      scope: 'session-a',
+      clientMessageId: 'ticket-1',
+      queuedMessage: { content: '   ', attachments: [] },
+    });
+    assert.equal(emptyMessage.status, 400);
+    assert.equal(((await emptyMessage.json()) as { error: { code: string } }).error.code, 'INVALID_QUEUED_MESSAGE');
+    assert.deepEqual(calls, []);
   });
 });
 

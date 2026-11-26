@@ -20,6 +20,9 @@ type DraftRecord = {
   updatedAt: string;
 };
 
+/** A queued turn plus the durable ticket id the idempotent enqueue returned. */
+type EnqueuedQueuedMessage = QueuedChatMessage & { id: string };
+
 type UserDependencies = {
   users: {
     getGitConfig(userId: number): GitConfig | undefined;
@@ -43,6 +46,13 @@ type UserDependencies = {
     }): void;
     saveDraftText(userId: number, scope: string, text: string, meta?: TodoDraftMeta | null): void;
     appendQueuedMessage(userId: number, scope: string, message: QueuedChatMessage, ifEmpty?: boolean): { queuedMessage: QueuedChatMessage; appended: boolean } | null;
+    enqueueChatMessage(
+      userId: number,
+      scope: string,
+      message: QueuedChatMessage,
+      clientMessageId: string,
+      options?: { preserveHold?: boolean },
+    ): { queuedMessage: EnqueuedQueuedMessage; appended: boolean; alreadySent: boolean };
     clearQueuedMessage(userId: number, scope: string): void;
     deleteDraft(userId: number, scope: string): void;
   };
@@ -150,6 +160,24 @@ const readDraftScope = (value: unknown): string => {
     });
   }
   return scope;
+};
+
+/**
+ * Reads the client-owned ticket of an automatic enqueue.
+ *
+ * The ticket is the queue idempotency key, so the client must supply it on
+ * every attempt (a retry after a lost response reuses the same one). Only the
+ * existing `chat.send` format rule applies: a trimmed, non-empty string.
+ */
+const readClientMessageId = (value: unknown): string => {
+  const clientMessageId = typeof value === 'string' ? value.trim() : '';
+  if (!clientMessageId) {
+    throw new AppError('A non-empty clientMessageId is required', {
+      code: 'INVALID_CLIENT_MESSAGE_ID',
+      statusCode: 400,
+    });
+  }
+  return clientMessageId;
 };
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> => (
@@ -378,6 +406,48 @@ export function createUserService(dependencies: UserDependencies) {
       }
       dependencies.onQueueChanged?.(scope);
       return { success: true, queuedMessage: result.queuedMessage, appended: result.appended };
+    },
+
+    /**
+     * Enqueues an automatically captured turn under a client-owned ticket.
+     *
+     * The ticket is both the queue id and the idempotency key, so a retry after
+     * a lost HTTP response returns the original entry, or `alreadySent` once
+     * the dispatcher/steer claimed it, without appending a second turn. A
+     * retry of a still-waiting entry does not ask for a new dispatch attempt.
+     * The body ticket is authoritative and is normalized into the stored
+     * options; an options ticket is overwritten rather than trusted. Unlike the
+     * manual append, this path never resumes a queue the user paused.
+     */
+    enqueueQueuedMessage(
+      userId: number,
+      scopeInput: unknown,
+      clientMessageIdInput: unknown,
+      queuedMessageInput: unknown,
+    ) {
+      const scope = readDraftScope(scopeInput);
+      const clientMessageId = readClientMessageId(clientMessageIdInput);
+      const queuedMessage = readQueuedMessageInput(queuedMessageInput);
+      const message: QueuedChatMessage = {
+        ...queuedMessage,
+        options: { ...(queuedMessage.options ?? {}), clientMessageId },
+      };
+      const result = dependencies.drafts.enqueueChatMessage(
+        userId,
+        scope,
+        message,
+        clientMessageId,
+        { preserveHold: true },
+      );
+      // Only the attempt that actually inserted the turn triggers dispatch: a
+      // replay is already queued (and its first request notified) or claimed.
+      if (result.appended) dependencies.onQueueChanged?.(scope);
+      return {
+        success: true,
+        queuedMessage: result.queuedMessage,
+        appended: result.appended,
+        alreadySent: result.alreadySent,
+      };
     },
 
     clearQueuedMessage(userId: number, scopeInput: unknown) {

@@ -40,6 +40,13 @@ type SavedDraft = {
    * stored value so text/queue writes cannot erase it; null explicitly clears it.
    */
   meta?: TodoDraftMeta | null;
+  /**
+   * Keeps an existing `held` queue paused even though its stored messages
+   * changed. Only an append handler that must not resume a user-paused queue
+   * sets this; omission retains the legacy behavior where a queue change
+   * returns the draft to `queued`.
+   */
+  preserveQueueHold?: boolean;
 };
 
 /**
@@ -209,24 +216,29 @@ export const sessionDraftsDb = {
    * accepted by the dispatcher/steer receipts, the retry reports alreadySent
    * instead of enqueueing it again. It appends behind every waiting user
    * message, and the queue cap including a claimed slot still applies.
+   *
+   * `preserveHold` leaves a queue the user paused (`held`) paused after the
+   * append; callers opt in when adding a turn must not resume automatic
+   * delivery of messages held by an earlier failed steer.
    */
   enqueueChatMessage(
     userId: number,
     scope: string,
     message: QueuedChatMessage,
     clientMessageId: string,
+    options?: { preserveHold?: boolean },
   ): EnqueuedChatMessage {
     const db = getConnection();
     return db.transaction(() => {
-      const existingRow = db.prepare('SELECT draft_text, queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
-        .get(userId, scope) as { draft_text: string; queued_message: string | null } | undefined;
+      const existingRow = db.prepare('SELECT draft_text, queued_message, queue_status FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
+        .get(userId, scope) as { draft_text: string; queued_message: string | null; queue_status: string } | undefined;
       const queue = readQueuedMessages(existingRow?.queued_message ?? null);
       const existing = queue.find((entry) => queuedMessageId(entry) === clientMessageId);
       if (existing) {
         return {
           queuedMessage: existing as QueuedChatMessage & { id: string },
           appended: false,
-          alreadySent: false,
+          alreadySent: sessionDraftsDb.hasSentChatMessage(userId, scope, clientMessageId),
         };
       }
       if (sessionDraftsDb.hasSentChatMessage(userId, scope, clientMessageId)) {
@@ -249,6 +261,7 @@ export const sessionDraftsDb = {
       sessionDraftsDb.saveDraft(userId, scope, {
         text: existingRow?.draft_text ?? '',
         queuedMessages: [...queue, queuedMessage],
+        preserveQueueHold: Boolean(options?.preserveHold) && existingRow?.queue_status === 'held',
       });
       return { queuedMessage, appended: true, alreadySent: false };
     })();
@@ -327,15 +340,17 @@ export const sessionDraftsDb = {
   },
 
   /**
-   * Atomically reserves and removes the queue head, leaving the tail queued.
+   * Atomically reserves the queue head. Ordinary dispatch removes it; a turn
+   * requiring native acceptance retains it under a steering receipt.
    *
-   * The claimed turn gets a `dispatching` receipt before it leaves the queue.
+   * An ordinary claim gets a `dispatching` receipt before it leaves the queue.
    * `saveDraft` treats that ticket as already consumed, so a delayed browser
    * PUT carrying an older snapshot cannot resurrect a turn that is already
    * running. The receipt also reserves the slot, so a concurrent append cannot
-   * push the pending count past the cap while dispatch is in flight.
+   * push the pending count past the cap while dispatch is in flight. A retained
+   * head survives a restart, whose existing migration marks it unknown.
    */
-  claimQueuedMessage(candidate: QueuedSessionMessageRecord): boolean {
+  claimQueuedMessage(candidate: QueuedSessionMessageRecord, requireNativeAcceptance = false): boolean {
     const db = getConnection();
     return db.transaction(() => {
       const row = db.prepare('SELECT queued_message FROM session_drafts WHERE user_id = ? AND draft_scope = ?')
@@ -350,24 +365,32 @@ export const sessionDraftsDb = {
       }
       // A legacy entry without a ticket is stamped first so the receipt can
       // refer to it by a stable id.
-      const messageId = queuedMessageId(head) ?? randomUUID();
-      const stampedHead = queuedMessageId(head) ? head : { ...(head as Record<string, unknown>), id: messageId };
+      const headId = queuedMessageId(head);
+      const messageId = headId ?? randomUUID();
+      const stampedHead = headId ? head : { ...(head as Record<string, unknown>), id: messageId };
       const dispatchRequestId = `dispatch:${randomUUID()}`;
       const result = db.prepare(
         `UPDATE session_drafts
-         SET queued_message = ?, updated_at = CURRENT_TIMESTAMP
-         WHERE user_id = ? AND draft_scope = ? AND queued_message = ? AND queue_status = 'queued'`
-      ).run(
-        serializeQueuedMessages(queue.slice(1)),
-        candidate.userId,
-        candidate.sessionId,
-        row.queued_message,
-      );
+         SET queued_message = @queuedMessage,
+             queue_status = CASE WHEN @needsProof THEN 'steering' ELSE queue_status END,
+             queue_request_id = CASE WHEN @needsProof THEN @requestId ELSE queue_request_id END,
+             queue_error = CASE WHEN @needsProof THEN NULL ELSE queue_error END,
+             updated_at = CURRENT_TIMESTAMP
+         WHERE user_id = @userId AND draft_scope = @sessionId
+           AND queued_message = @claimToken AND queue_status = 'queued'`
+      ).run({
+        queuedMessage: serializeQueuedMessages(requireNativeAcceptance ? [stampedHead, ...queue.slice(1)] : queue.slice(1)),
+        needsProof: Number(requireNativeAcceptance),
+        requestId: dispatchRequestId,
+        userId: candidate.userId,
+        sessionId: candidate.sessionId,
+        claimToken: row.queued_message,
+      });
       if (result.changes === 0) {
         return false;
       }
-      db.prepare("INSERT INTO queued_steer_receipts(request_id, user_id, session_id, message_id, status) VALUES (?, ?, ?, ?, 'dispatching')")
-        .run(dispatchRequestId, candidate.userId, candidate.sessionId, messageId);
+      db.prepare('INSERT INTO queued_steer_receipts(request_id, user_id, session_id, message_id, status) VALUES (?, ?, ?, ?, ?)')
+        .run(dispatchRequestId, candidate.userId, candidate.sessionId, messageId, requireNativeAcceptance ? 'steering' : 'dispatching');
       candidate.dispatchRequestId = dispatchRequestId;
       candidate.queuedMessage = stampedHead;
       return true;
@@ -492,11 +515,11 @@ export const sessionDraftsDb = {
     }
     // Reordering or normalizing the same pending entries must keep a rejected steer held.
     // Legacy entries without tickets occupy unticketed slots in both snapshots.
-    let preserveHold = false;
+    let preserveHold = Boolean(draft.preserveQueueHold);
     if (knownIds && existing?.queue_status === 'held' && existingQueue.length === queuedMessages.length) {
       const previousTickets = existingQueue.map((entry) => queuedMessageId(entry) ?? '').sort();
       const nextTickets = queuedMessages.map((entry) => queuedMessageId(entry) ?? '').sort();
-      preserveHold = previousTickets.every((ticket, index) => ticket === nextTickets[index]);
+      preserveHold = preserveHold || previousTickets.every((ticket, index) => ticket === nextTickets[index]);
     }
 
     const text = draft.text ?? '';

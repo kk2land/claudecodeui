@@ -106,6 +106,22 @@ export function createUserRouter(service: ReturnType<typeof createUserService>):
     }
   });
 
+  // Idempotent append for a client-held ticket; a repeated request after a lost
+  // response must not queue the turn a second time.
+  router.post('/drafts/queued-message/idempotent', (req, res, next) => {
+    try {
+      const body = req.body as { scope?: unknown; clientMessageId?: unknown; queuedMessage?: unknown };
+      res.json(service.enqueueQueuedMessage(
+        readUserId(req),
+        body?.scope,
+        body?.clientMessageId,
+        body?.queuedMessage,
+      ));
+    } catch (error) {
+      next(error);
+    }
+  });
+
   router.delete('/drafts/queued-message', (req, res, next) => {
     try {
       const body = req.body as { scope?: unknown };

@@ -513,7 +513,12 @@ async function dispatchRun(
   extraRuntimeOptions: AnyRecord = {},
   beforeRun?: (run: NonNullable<ReturnType<typeof chatRunRegistry.startRun>>) => void | Promise<void>,
   onTurnStarting?: () => void,
-): Promise<{ started: boolean; error: string | null }> {
+  /**
+   * Server-owned proof that the provider natively accepted this turn's input.
+   * When supplied, `started` means accepted, not merely attempted.
+   */
+  onInputAccepted?: () => void,
+): Promise<{ started: boolean; error: string | null; deliveryUnknown?: boolean }> {
   const provider = session.provider as LLMProvider;
   const codexSettings = provider === 'codex' ? sessionRuntimeDb.get(sessionId) : null;
   if (codexSettings?.runtime === 'app-server' && codexSettings.modelSelection?.model === null) {
@@ -669,16 +674,23 @@ async function dispatchRun(
   // alive after the app-facing `complete` (Claude background work), and output
   // arriving then belongs to a later/automatic turn, never to this input.
   const numericUserId = Number(userId);
-  if (todoIds.length && Number.isSafeInteger(numericUserId)) {
-    let accepted = false;
+  const wantsTodoAcceptance = todoIds.length > 0 && Number.isSafeInteger(numericUserId);
+  let inputAccepted = false;
+  if (wantsTodoAcceptance || onInputAccepted) {
     runtimeOptions.onInputAccepted = () => {
-      if (accepted || run.status !== 'running') return;
-      accepted = true;
-      try {
-        markTodosSubmitted({ userId: numericUserId, sessionId, todoIds });
-      } catch (error) {
-        console.error('[Chat] Failed to mark todo sources submitted', { sessionId, error });
+      // The run's own lifecycle fences an automatic follow-up turn.
+      if (inputAccepted || run.status !== 'running') return;
+      inputAccepted = true;
+      if (wantsTodoAcceptance) {
+        try {
+          markTodosSubmitted({ userId: numericUserId, sessionId, todoIds });
+        } catch (error) {
+          console.error('[Chat] Failed to mark todo sources submitted', { sessionId, error });
+        }
       }
+      // Server-owned delivery proof (queued voice turns): the provider has
+      // natively accepted this exact input, so it may be confirmed as sent.
+      onInputAccepted?.();
     };
   }
   // The Codex app-server consults this immediately before creating its native
@@ -686,6 +698,7 @@ async function dispatchRun(
   if (workerWakeup && workerFinalGuard) runtimeOptions.deferTurn = workerFinalGuard;
 
   let failure: string | null = null;
+  let rejectedByProvider = false;
   let turnStarting = false;
   const markTurnStarting = () => {
     if (turnStarting) return;
@@ -707,7 +720,7 @@ async function dispatchRun(
       }
       markTurnStarting();
     };
-  } else if (waitsForCodexSetup) runtimeOptions.onTurnStarting = markTurnStarting;
+  } else if (waitsForCodexSetup || onInputAccepted) runtimeOptions.onTurnStarting = markTurnStarting;
   let deferred = false;
   try {
     // Runs only now that the session is reserved, because an edit rewinds the
@@ -716,7 +729,9 @@ async function dispatchRun(
     // run instead of leaving the session processing forever.
     await beforeRun?.(run);
     await sessionsService.initializeSessionName(sessionId, command);
-    if (!waitsForCodexSetup && !workerWakeup) markTurnStarting();
+    // A proof-backed run counts as attempted only once the provider itself says
+    // it is about to create the native turn, never before its resume.
+    if (!waitsForCodexSetup && !workerWakeup && !onInputAccepted) markTurnStarting();
     await dependencies.runtime.run(provider, command, runtimeOptions, run.writer);
   } catch (error) {
     if (error instanceof AppError && error.code === 'WORKER_WAKE_DEFERRED') {
@@ -725,6 +740,7 @@ async function dispatchRun(
       deferred = true;
       failure = error.message;
     } else {
+      rejectedByProvider = error instanceof AppError && error.code === 'CODEX_APP_SERVER_REJECTED';
       failure = error instanceof Error ? error.message : String(error);
       console.error(`[Chat] Provider runtime "${provider}" failed`, { sessionId, error: failure });
     }
@@ -742,7 +758,22 @@ async function dispatchRun(
     chatRunRegistry.completeRunIfCurrent(run, deferred ? { exitCode: 0, aborted: true } : { exitCode: 1 });
   }
 
-  return { started: deferred ? false : failure ? turnStarting : true, error: failure };
+  // With a server-owned acceptance callback, "started" means the provider
+  // proved delivery. A known acceptance followed by an execution failure is
+  // still delivered. Before any native attempt the ticket is safely restorable;
+  // after an attempt only an explicit native rejection may be retried at once.
+  // A silent return or any other error leaves delivery unproven.
+  const attempted = turnStarting;
+  const deliveryUnknown = Boolean(onInputAccepted) && !deferred && !inputAccepted
+    && attempted && !rejectedByProvider;
+  const started = deferred
+    ? false
+    : onInputAccepted
+      ? inputAccepted
+      : failure
+        ? turnStarting
+        : true;
+  return deliveryUnknown ? { started, error: failure, deliveryUnknown: true } : { started, error: failure };
 }
 
 /**
@@ -1369,6 +1400,12 @@ export async function runDetachedChatTurn(
     /** Queue receipts are accepted only once the runtime can deliver input. */
     onTurnStarting?: () => void;
     /**
+     * Opt-in delivery proof for queue entries that must not be confirmed from
+     * "input about to start": the callback fires only when the provider has
+     * natively accepted this exact input.
+     */
+    onInputAccepted?: () => void;
+    /**
      * Set only by the Worker host bridge after it has claimed an outbox result.
      * These markers are trusted server metadata and never come from chat JSON.
      */
@@ -1377,7 +1414,7 @@ export async function runDetachedChatTurn(
     finalGuard?: () => boolean;
   },
   dependencies: ChatWebSocketDependencies,
-): Promise<{ started: boolean; error: string | null }> {
+): Promise<{ started: boolean; error: string | null; deliveryUnknown?: boolean }> {
   // A scheduled, queued or detached turn has no new native thread to hand a
   // plan to. Refused before a due message can abort or reserve anything.
   if (carriesApprovedPlan(input.options)) {
@@ -1429,7 +1466,9 @@ export async function runDetachedChatTurn(
     // run's own dispatch settles later through completeRunIfCurrent, which is
     // scoped to that run and cannot touch the one started here.
     const aborted = await dependencies.runtime.abort(provider, input.sessionId);
-    if (!aborted) return { started: false, error: 'The previous run has not confirmed its stop.' };
+    if (!aborted) {
+      return { started: false, error: 'The previous run has not confirmed its stop.' };
+    }
     if (activeRun) chatRunRegistry.completeRunIfCurrent(activeRun, { exitCode: 0, aborted: true });
   }
 
@@ -1445,6 +1484,7 @@ export async function runDetachedChatTurn(
       : {},
     undefined,
     input.onTurnStarting,
+    input.onInputAccepted,
   );
 }
 

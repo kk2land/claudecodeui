@@ -98,6 +98,81 @@ test('guarded append counts a dispatching head until its receipt is accepted', a
   });
 });
 
+test('enqueueing the same ticket twice keeps one entry and replays the original', async () => {
+  await withDrafts((userId, sessionId) => {
+    const first = sessionDraftsDb.enqueueChatMessage(
+      userId, sessionId, { content: 'voice note', attachments: [] }, 'ticket-1',
+    );
+    assert.equal(first.appended, true);
+    assert.equal(first.alreadySent, false);
+    assert.equal(first.queuedMessage.id, 'ticket-1');
+    assert.equal(first.queuedMessage.options?.clientMessageId, 'ticket-1');
+
+    const replay = sessionDraftsDb.enqueueChatMessage(
+      userId, sessionId, { content: 'changed by the retry', attachments: [] }, 'ticket-1',
+    );
+    assert.equal(replay.appended, false);
+    assert.equal(replay.alreadySent, false);
+    assert.deepEqual(replay.queuedMessage, first.queuedMessage);
+    assert.deepEqual(ids(userId), ['ticket-1']);
+  });
+});
+
+test('a claimed or accepted ticket replays as alreadySent and later tickets stay FIFO', async () => {
+  await withDrafts((userId, sessionId) => {
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, { content: 'first', attachments: [] }, 'ticket-1');
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, { content: 'second', attachments: [] }, 'ticket-2');
+
+    const [head] = sessionDraftsDb.listQueuedMessages(sessionId);
+    assert.equal((head.queuedMessage as { id?: string }).id, 'ticket-1');
+    assert.equal(sessionDraftsDb.claimQueuedMessage(head), true);
+    assert.deepEqual(ids(userId), ['ticket-2']);
+
+    // The response was lost even though the dispatcher already owns the turn.
+    const claimedReplay = sessionDraftsDb.enqueueChatMessage(
+      userId, sessionId, { content: 'first', attachments: [] }, 'ticket-1',
+    );
+    assert.equal(claimedReplay.appended, false);
+    assert.equal(claimedReplay.alreadySent, true);
+    assert.deepEqual(ids(userId), ['ticket-2']);
+
+    sessionDraftsDb.confirmQueuedMessageDispatch(head);
+    const acceptedReplay = sessionDraftsDb.enqueueChatMessage(
+      userId, sessionId, { content: 'first', attachments: [] }, 'ticket-1',
+    );
+    assert.equal(acceptedReplay.appended, false);
+    assert.equal(acceptedReplay.alreadySent, true);
+    assert.deepEqual(ids(userId), ['ticket-2']);
+
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, { content: 'third', attachments: [] }, 'ticket-3');
+    assert.deepEqual(ids(userId), ['ticket-2', 'ticket-3']);
+  });
+});
+
+test('preserveHold keeps a user-paused queue held after an idempotent append', async () => {
+  await withDrafts((userId, sessionId) => {
+    sessionDraftsDb.enqueueChatMessage(userId, sessionId, { content: 'first', attachments: [] }, 'ticket-1');
+    sessionDraftsDb.beginSteer(userId, sessionId, 'ticket-1', 'failed-steer');
+    sessionDraftsDb.finishSteer(userId, sessionId, 'failed-steer', 'rejected', 'Turn ended');
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0].queuedDelivery.status, 'held');
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages(sessionId), []);
+
+    sessionDraftsDb.enqueueChatMessage(
+      userId, sessionId, { content: 'voice note', attachments: [] }, 'ticket-2', { preserveHold: true },
+    );
+
+    assert.deepEqual(ids(userId), ['ticket-1', 'ticket-2']);
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0].queuedDelivery.status, 'held');
+    assert.deepEqual(sessionDraftsDb.listQueuedMessages(sessionId), []);
+
+    sessionDraftsDb.resumeQueue(userId, sessionId);
+    assert.deepEqual(
+      sessionDraftsDb.listQueuedMessages(sessionId).map((candidate) => (candidate.queuedMessage as { id?: string }).id),
+      ['ticket-1'],
+    );
+  });
+});
+
 test('a ticket-aware PUT replaces a known message and keeps a server-side ticket it did not see', async () => {
   await withDrafts((userId, sessionId) => {
     sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [{ id: 'A', content: 'A' }] });
@@ -288,5 +363,55 @@ test('a new local ticket with a legacy snapshot stays after a server-side ticket
 
     assert.deepEqual(queue(userId).map((message) => message.content), ['legacy A', 'B', 'C']);
     assert.equal(queue(userId).filter((message) => message.content === 'legacy A').length, 1);
+  });
+});
+
+test('a proof-backed claim keeps its head and ticket until explicit recovery', async () => {
+  await withDrafts((userId, sessionId) => {
+    sessionDraftsDb.saveDraft(userId, sessionId, {
+      queuedMessages: [{ id: 'head', content: 'head' }, { id: 'tail', content: 'tail' }],
+    });
+    const candidate = sessionDraftsDb.listQueuedMessages(sessionId)[0];
+    assert.equal(sessionDraftsDb.claimQueuedMessage(candidate, true), true);
+    assert.deepEqual(ids(userId), ['head', 'tail']);
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedDelivery.status, 'steering');
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedDelivery.requestId, candidate.dispatchRequestId);
+    const replay = sessionDraftsDb.enqueueChatMessage(userId, sessionId, { content: 'changed', attachments: [] }, 'head');
+    assert.equal(replay.appended, false);
+    assert.equal(replay.alreadySent, true);
+    assert.equal(replay.queuedMessage.content, 'head');
+
+    assert.equal(sessionDraftsDb.finishSteer(userId, sessionId, candidate.dispatchRequestId!, 'unknown', 'unconfirmed'), 'unknown');
+    assert.deepEqual(ids(userId), ['head', 'tail']);
+    assert.equal(sessionDraftsDb.getDrafts(userId)[0]?.queuedDelivery.status, 'unknown');
+    assert.equal(sessionDraftsDb.listQueuedMessages(sessionId).length, 0, 'no automatic pass can claim it');
+    assert.equal(sessionDraftsDb.hasSentChatMessage(userId, sessionId, 'head'), true, 'the client ticket stays idempotent');
+
+    // The draft is locked exactly like an unconfirmed steer until the user resolves it.
+    assert.throws(
+      () => sessionDraftsDb.saveDraft(userId, sessionId, { queuedMessages: [{ id: 'tail', content: 'tail' }] }),
+      (error: Error & { code?: string }) => error.code === 'QUEUE_BUSY',
+    );
+
+    sessionDraftsDb.recoverUnknown(userId, sessionId, 'discard');
+    assert.deepEqual(ids(userId), ['tail']);
+    assert.equal(sessionDraftsDb.listQueuedMessages(sessionId).length, 1);
+  });
+});
+
+test('native acceptance consumes a proof-backed legacy head under its stamped ticket', async () => {
+  await withDrafts((userId, sessionId) => {
+    sessionDraftsDb.saveDraft(userId, sessionId, {
+      queuedMessages: [{ content: 'legacy voice' }, { id: 'tail', content: 'tail' }],
+    });
+    const candidate = sessionDraftsDb.listQueuedMessages(sessionId)[0];
+    assert.equal(sessionDraftsDb.claimQueuedMessage(candidate, true), true);
+    const stamped = queue(userId)[0];
+    assert.equal(stamped.content, 'legacy voice');
+    assert.ok(stamped.id);
+    assert.deepEqual(candidate.queuedMessage, stamped);
+    assert.equal(sessionDraftsDb.finishSteer(userId, sessionId, candidate.dispatchRequestId!, 'accepted'), 'accepted');
+    assert.deepEqual(ids(userId), ['tail']);
+    assert.equal(sessionDraftsDb.hasSentChatMessage(userId, sessionId, String(stamped.id)), true);
   });
 });
