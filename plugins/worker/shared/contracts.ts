@@ -595,6 +595,12 @@ export type WorkerSettings = {
   /** Days to retain finished runs and their logs, measured from finishedAt; initially 1. */
   retentionDays: number;
   /**
+   * Project ids for which this setting closes the Worker plugin. Every new start or resume in
+   * one of these projects is rejected from the persisted settings, including from sessions that
+   * were opened before the project was added. Existing runs and history stay readable.
+   */
+  blockedProjectIds: string[];
+  /**
    * Effective idle window of the AGY ACP process. A saved value wins; otherwise it comes from
    * `ACP_IDLE_TIMEOUT_ENV` or the 300-second default.
    */
@@ -613,13 +619,15 @@ export type WorkerSettings = {
  * An omitted `retentionDays` keeps the stored value. An omitted
  * `acpIdleTimeoutSeconds` keeps the saved value, or the environment/default fallback when none
  * was saved; a supplied value must be an integer from 1 through
- * `ACP_IDLE_TIMEOUT_MAX_SECONDS`.
+ * `ACP_IDLE_TIMEOUT_MAX_SECONDS`. An omitted `blockedProjectIds` keeps the stored list; a
+ * supplied list replaces it and must contain non-empty project ids.
  */
 export type WorkerSettingsUpdate = {
   configs: WorkerConfig[];
   defaultConfigId: string;
   retentionDays?: number;
   acpIdleTimeoutSeconds?: number;
+  blockedProjectIds?: string[];
 };
 
 /**
@@ -717,6 +725,19 @@ export type CodexModelsDirectory = {
 export type CodexServiceModelCatalog = {
   modelProvider: string;
   models: string[];
+};
+
+/** One project row served to the settings UI from the host's project catalog. */
+export type WorkerProjectOption = {
+  /** Stable `project_id`; the blacklist persists this value, never a display name or path. */
+  id: string;
+  name: string;
+  path: string;
+};
+
+/** `GET /projects` response used to choose blocked projects in the settings UI. */
+export type WorkerProjectCatalog = {
+  projects: WorkerProjectOption[];
 };
 
 /** One Pi model from the plugin's `GET /catalog/pi` response. */

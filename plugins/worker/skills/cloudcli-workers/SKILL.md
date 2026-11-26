@@ -11,6 +11,7 @@ description: 通过 MCP 委派 CloudCLI Worker 或管理已有 Worker，在用�
 
 - 用户明确指定的执行方式和委派范围优先。否则默认委派 Worker。主代理直接处理只限根据已有信息回答、一次明确查询即可确认，或在已知位置按明确指示做可直接核对的机械修改。
 - 技能被禁用、未启用，或 MCP 未连接、缺所需工具时，跳过本 skill，用普通工具直接完成原任务，不要求先配置 MCP。
+- 若当前轮的 `worker_context` 返回 `projectWorkers.enabled` 为 false，由主会话直接完成该轮任务。已接收的 Worker 可通过 MCP 查看和管理。
 - 已进入 Worker 流程后调用持续失败时，报告事实、原始错误与已尝试调用，不接管执行子任务，也不绕过 MCP 调用底层执行器。
 - 子 Worker 只做本次派发的任务，不递归派发、不 commit/merge/push、不清理 worktree。
 

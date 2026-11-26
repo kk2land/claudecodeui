@@ -149,6 +149,7 @@ test("legacy settings migrate once into fixed initial configs and canonical stor
   const persisted = rawSettings(data);
   assert.equal(persisted.schemaVersion, 2);
   assert.deepEqual(Object.keys(persisted).sort(), [
+    "blockedProjectIds",
     "configs",
     "defaultConfigId",
     "retentionDays",

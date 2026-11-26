@@ -327,6 +327,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
       softReminderSteps: 20,
       hardTimeoutSeconds: null,
       retentionDays: 1,
+      blockedProjectIds: [],
       acpIdleTimeoutSeconds: 300,
     },
     configUsage: {},
@@ -481,6 +482,14 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       if (pathAndQuery === "/catalog/agy") {
         if (mode.agyCatalog) return mode.agyCatalog();
         return AGY_CATALOG;
+      }
+      if (pathAndQuery === "/projects") {
+        return {
+          projects: [
+            { id: "project-a", name: "Project A", path: "/tmp/project-a" },
+            { id: "project-b", name: "Project B", path: "/tmp/project-b" },
+          ],
+        };
       }
       if (pathAndQuery === "/settings") {
         if (mode.settings) return mode.settings(body);
@@ -5087,6 +5096,51 @@ test("DOM: older schema-2 backend without acpIdleTimeoutSeconds keeps other sett
     await waitFor(() => textOf(mounted.container).includes("Worker 设置已保存"), "保存成功提示");
     assert.equal(acpIdleInput.disabled, true);
     assert.equal(acpIdleInput.value, "");
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: project blacklist saves the selected ids and echoes them after reopening", async () => {
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        settings: { ...snapshot().settings, blockedProjectIds: ["project-b"] },
+      }),
+  });
+  try {
+    await openSettings(mounted);
+    const projectB = byLabel(
+      mounted.container,
+      "关闭项目 Project B 的 Worker",
+    ) as HTMLInputElement;
+    const projectA = byLabel(
+      mounted.container,
+      "关闭项目 Project A 的 Worker",
+    ) as HTMLInputElement;
+    assert.equal(projectB.checked, true);
+    assert.equal(projectA.checked, false);
+    projectB.click();
+    projectA.click();
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "项目黑名单保存");
+    const body = callsTo(mounted, "/settings")[0]!.body as {
+      blockedProjectIds: string[];
+    };
+    assert.deepEqual(body.blockedProjectIds, ["project-a"]);
+
+    button(mounted.container, "返回列表").click();
+    await openSettings(mounted);
+    assert.equal(
+      (byLabel(mounted.container, "关闭项目 Project A 的 Worker") as HTMLInputElement)
+        .checked,
+      true,
+    );
+    assert.equal(
+      (byLabel(mounted.container, "关闭项目 Project B 的 Worker") as HTMLInputElement)
+        .checked,
+      false,
+    );
   } finally {
     mounted.unmount();
   }

@@ -19,6 +19,7 @@ import type {
   WorkerModelCatalog,
   WorkerSettings,
   WorkerSettingsUpdate,
+  WorkerProjectCatalog,
   WorkerTaskRole,
   SupportedWorkerType,
 } from "../shared/contracts.js";
@@ -269,6 +270,9 @@ export function SettingsView({
     defaultConfigId: settings.defaultConfigId,
   }));
   const [retentionDays, setRetentionDays] = useState(String(settings.retentionDays));
+  const [blockedProjectIds, setBlockedProjectIds] = useState<string[]>(() => [
+    ...(settings.blockedProjectIds ?? []),
+  ]);
   const acpIdleSupported = supportsAcpIdleTimeout(settings);
   const [acpIdleTimeoutSeconds, setAcpIdleTimeoutSeconds] = useState(() =>
     supportsAcpIdleTimeout(settings)
@@ -299,6 +303,7 @@ export function SettingsView({
   const [dragState, setDragState] = useState<{ id: string; overId: string | null } | null>(null);
 
   const [agyCatalog, setAgyCatalog] = useState<Loadable<AgyModelCatalog>>(loading());
+  const [projectCatalog, setProjectCatalog] = useState<Loadable<WorkerProjectCatalog>>(loading());
   const [codexCatalog, setCodexCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
   const [piCatalog, setPiCatalog] = useState<Loadable<PiModelCatalog>>(loading());
   const [codexDirectory, setCodexDirectory] = useState<Loadable<CodexModelsDirectory>>(loading());
@@ -309,6 +314,7 @@ export function SettingsView({
   const codexModelsRef = useRef<Record<string, Loadable<string[]>>>({});
   const providerRequestTokens = useRef<Record<string, number>>({});
   const [agyAttempt, setAgyAttempt] = useState(0);
+  const [projectAttempt, setProjectAttempt] = useState(0);
   const [codexAttempt, setCodexAttempt] = useState(0);
   const [piAttempt, setPiAttempt] = useState(0);
   const [directoryAttempt, setDirectoryAttempt] = useState(0);
@@ -337,6 +343,22 @@ export function SettingsView({
       live = false;
     };
   }, [api, needsAgyCatalog, agyAttempt]);
+
+  useEffect(() => {
+    let live = true;
+    setProjectCatalog((current) => loading(current.value));
+    api
+      .projects()
+      .then((value) => live && setProjectCatalog({ status: "ready", value, error: "" }))
+      .catch(
+        (error) =>
+          live &&
+          setProjectCatalog({ status: "error", value: null, error: String(error) }),
+      );
+    return () => {
+      live = false;
+    };
+  }, [api, projectAttempt]);
 
   useEffect(() => {
     let live = true;
@@ -455,6 +477,15 @@ export function SettingsView({
       }
     },
   };
+
+  const projectOptions = useMemo(() => {
+    const options = [...(projectCatalog.value?.projects ?? [])];
+    // A project can disappear from the host catalog while still blocked; keep it removable.
+    for (const id of blockedProjectIds)
+      if (!options.some((project) => project.id === id))
+        options.push({ id, name: "未知项目 (" + id + ")", path: "" });
+    return options;
+  }, [blockedProjectIds, projectCatalog.value]);
 
   const envResults = useMemo(() => {
     const results: Record<string, { env: Record<string, string>; error: string }> = {};
@@ -658,6 +689,7 @@ export function SettingsView({
       }),
       defaultConfigId: draft.defaultConfigId,
       retentionDays: Number(retentionDays),
+      blockedProjectIds,
       ...(submittedAcpIdle
         ? { acpIdleTimeoutSeconds: Number(acpIdleTimeoutSeconds) }
         : {}),
@@ -687,6 +719,7 @@ export function SettingsView({
         ),
       );
       setRetentionDays(String(value.retentionDays));
+      setBlockedProjectIds([...(value.blockedProjectIds ?? [])]);
       setAcpIdleTimeoutSeconds(
         responseSupportsAcpIdle ? String(value.acpIdleTimeoutSeconds) : "",
       );
@@ -1224,6 +1257,56 @@ export function SettingsView({
           </div>
         </div>
 
+        <section className="worker-settings-block">
+          <div className="worker-roles worker-project-list">
+            <span className="worker-roles-label">关闭 Worker 的项目（可多选）</span>
+            <p>
+              勾选并保存后，该项目的新旧会话从下一条提示词起由主会话直接处理。已派发的
+              Worker 任务可以继续运行。取消勾选并保存后即可恢复 Worker。
+            </p>
+            {projectOptions.map((project) => {
+              const checked = blockedProjectIds.includes(project.id);
+              return (
+                <label className="worker-checkbox" key={project.id}>
+                  <input
+                    type="checkbox"
+                    aria-label={"关闭项目 " + project.name + " 的 Worker"}
+                    checked={checked}
+                    onChange={() =>
+                      setBlockedProjectIds((current) =>
+                        current.includes(project.id)
+                          ? current.filter((id) => id !== project.id)
+                          : [...current, project.id],
+                      )
+                    }
+                  />
+                  <span>
+                    {project.name}
+                    {project.path ? <small>{project.path}</small> : null}
+                  </span>
+                </label>
+              );
+            })}
+            {projectCatalog.status === "loading" && !projectCatalog.value ? (
+              <small>正在加载项目列表…</small>
+            ) : null}
+            {projectCatalog.status === "error" ? (
+              <small className="worker-error" role="alert">
+                项目列表加载失败：{projectCatalog.error}{" "}
+                <button
+                  type="button"
+                  className="worker-soft"
+                  onClick={() => setProjectAttempt((value) => value + 1)}
+                >
+                  重试
+                </button>
+              </small>
+            ) : null}
+            {projectCatalog.status === "ready" && !projectOptions.length ? (
+              <small>暂无可选项目。</small>
+            ) : null}
+          </div>
+        </section>
         <section className="worker-settings-block">
           <label>
             日志和运行记录保留天数

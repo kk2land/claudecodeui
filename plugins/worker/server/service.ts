@@ -50,6 +50,7 @@ import {
   SUPPORTED_WORKER_TYPES,
   configById,
   extractCodexLaunch,
+  normalizeBlockedProjectIds,
   acpIdleTimeoutSecondsFromEnvironment,
   projectSettings,
   validAcpIdleTimeoutSeconds,
@@ -373,11 +374,21 @@ export class WorkerService {
     if (!configs.some((config) => config.enabled))
       throw new WorkerFailure("INVALID_SETTINGS", "至少需要一个已启用的配置");
     this.assertConfigReferences(current.configs, configs);
+    const blockedProjectIds =
+      input.blockedProjectIds === undefined
+        ? current.blockedProjectIds
+        : normalizeBlockedProjectIds(input.blockedProjectIds);
+    if (!blockedProjectIds)
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "blockedProjectIds 必须是项目 ID 字符串数组",
+      );
     const record: WorkerSettingsRecord = {
       schemaVersion: 2,
       configs,
       defaultConfigId,
       retentionDays: input.retentionDays ?? current.retentionDays,
+      blockedProjectIds,
       softReminderSeconds: current.softReminderSeconds,
       softReminderSteps: current.softReminderSteps,
       acpIdleTimeoutSeconds:
@@ -549,6 +560,7 @@ export class WorkerService {
       configs,
       defaultConfigId,
       retentionDays: input.retentionDays ?? current.retentionDays,
+      blockedProjectIds: current.blockedProjectIds,
       softReminderSeconds: current.softReminderSeconds,
       softReminderSteps: current.softReminderSteps,
       acpIdleTimeoutSeconds:
@@ -784,8 +796,10 @@ export class WorkerService {
       return this.resultOf(existing.workerId, existing.runId);
     }
     // Resolve mutable settings only after replay lookup: an omitted config must not reinterpret a
-    // request whose original run already exists.
+    // request whose original run already exists. The same fresh snapshot gates the project and
+    // resolves config so an accepted request keeps its retry receipt after a later blacklist save.
     const settings = this.store.settings();
+    this.assertProjectWorkersAllowed(owner, settings);
     const config = this.resolveStartConfig(input, settings);
     const type = config.type;
     this.rejectNonCodexProvider(type, input.provider);
@@ -903,13 +917,15 @@ export class WorkerService {
       this.assertReplay(existing, "resume", fingerprint);
       return this.resultOf(existing.workerId, existing.runId);
     }
+    // Keep retry receipts intact: the gate and config lookup share one settings snapshot after replay.
+    const settings = this.store.settings();
+    this.assertProjectWorkersAllowed(owner, settings);
     const worker = this.ownedWorker(ownerId, input.workerId);
     if (worker.type === "dsh")
       throw new WorkerFailure(
         "WORKER_TYPE_UNSUPPORTED",
         "DSH Worker 已停止支持；历史记录仍可读取，但不能续接",
       );
-    const settings = this.store.settings();
     const config = configById(settings, worker.configId);
     if (!config || !config.enabled)
       throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 类型已禁用或配置不存在，不能续接");
@@ -2633,6 +2649,7 @@ export class WorkerService {
     return {
       owner,
       plan: this.store.plan(owner.parentSessionId, owner.projectId),
+      projectWorkers: this.projectWorkerAccess(owner, snapshot.settings),
       // MCP context is model-visible; configs are projected without Codex env/extra args.
       settings: this.mcpSettings(snapshot.settings),
       counts: snapshot.counts,
@@ -3525,6 +3542,37 @@ export class WorkerService {
   }
 
   //------------------ HELPERS ----------------
+
+  /** Model-visible signal that this project's sessions must not delegate to a Worker. */
+  private projectWorkerAccess(
+    owner: WorkerOwner,
+    settings: WorkerSettings,
+  ):
+    | { enabled: true; code: null; message: null }
+    | { enabled: false; code: string; message: string } {
+    const blocked = settings.blockedProjectIds.includes(owner.projectId);
+    return blocked
+      ? {
+          enabled: false,
+          code: "PROJECT_WORKERS_BLOCKED",
+          message:
+            "该项目已在 CloudCLI Worker 设置中关闭 Worker，请主代理自行完成本次任务，不要重试 worker_start 或 worker_resume。",
+        }
+      : { enabled: true, code: null, message: null };
+  }
+
+  /**
+   * Authoritative per-request gate: reads the persisted settings on every start/resume so an old
+   * session, cached tool description, or pre-existing token cannot bypass a newly blocked project.
+   */
+  private assertProjectWorkersAllowed(
+    owner: WorkerOwner,
+    settings: WorkerSettings,
+  ): void {
+    const access = this.projectWorkerAccess(owner, settings);
+    if (!access.enabled)
+      throw new WorkerFailure(access.code, access.message);
+  }
 
   private requireOwner(ownerId: string): WorkerOwner {
     const owner = this.owners.get(ownerId)?.owner ?? this.store.owner(ownerId);

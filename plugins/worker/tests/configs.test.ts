@@ -104,6 +104,7 @@ test("canonical settings persist only canonical fields and project per-engine de
     .get() as { body: string };
   const persisted = JSON.parse(row.body) as Record<string, unknown>;
   assert.deepEqual(Object.keys(persisted).sort(), [
+    "blockedProjectIds",
     "configs",
     "defaultConfigId",
     "retentionDays",

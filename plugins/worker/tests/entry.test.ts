@@ -12,6 +12,14 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
   const root = temporaryRoot("worker-entry-");
   const project = path.join(root, "project");
   fs.mkdirSync(project, { recursive: true });
+  const projectsFile = path.join(root, "projects.json");
+  fs.writeFileSync(
+    projectsFile,
+    JSON.stringify({
+      generatedAt: 1,
+      projects: [{ id: "entry-project", name: "Entry project", path: project }],
+    }),
+  );
   const child: ChildProcess = spawn(
     process.execPath,
     ["--import", tsxLoader, path.join(pluginRoot, "server/entry.ts")],
@@ -24,6 +32,7 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
         CLOUDCLI_PLUGIN_TOKEN: "ui-token",
         CLOUDCLI_PLUGIN_DATA_DIR: path.join(root, "data"),
         CLOUDCLI_HOST_ROOT: pluginRoot,
+        CLOUDCLI_PROJECTS_FILE: projectsFile,
       },
       stdio: ["ignore", "pipe", "pipe", "ipc"],
     },
@@ -119,6 +128,13 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
     headers: { authorization: "Bearer owner-token" },
   });
   assert.equal(wrong.status, 401);
+  const projects = await fetch(base + "/projects", {
+    headers: { authorization: "Bearer ui-token" },
+  });
+  assert.equal(projects.status, 200);
+  assert.deepEqual(await projects.json(), {
+    projects: [{ id: "entry-project", name: "Entry project", path: project }],
+  });
   const unauthenticatedInput = await fetch(
     base + "/workers/missing/input?runId=run-1",
   );

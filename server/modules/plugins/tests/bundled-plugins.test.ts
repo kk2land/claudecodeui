@@ -123,6 +123,12 @@ test("bundled metadata is public but launch context and project allowlist are pr
   assert.notEqual(worker.CLOUDCLI_PLUGIN_TOKEN, process.env.ANTHROPIC_API_KEY);
   assert.ok(worker.CLOUDCLI_PLUGIN_DATA_DIR?.includes("/plugins/worker/"));
   assert.notEqual(worker.CLOUDCLI_PLUGIN_TOKEN, env.CLOUDCLI_PLUGIN_TOKEN);
+  const workerCatalog = JSON.parse(
+    fs.readFileSync(worker.CLOUDCLI_PROJECTS_FILE!, "utf8"),
+  ) as { projects: { id: string; name: string; path: string }[] };
+  assert.deepEqual(workerCatalog.projects, [
+    { id: "p", name: "registered", path: directory },
+  ]);
   assert.equal(fs.existsSync(worker.CLOUDCLI_PLUGIN_DATA_DIR!), true);
   assert.deepEqual(bundledPluginEnvironment("unrelated"), {});
   assert.deepEqual(bundledPluginHeaders("unrelated"), {});

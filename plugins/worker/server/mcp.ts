@@ -126,7 +126,7 @@ export function createWorkerMcpServer(
   server.registerTool(
     "worker_context",
     {
-      description: "获取 owner、计划、配置与并发设置、活动任务与待确认通知；配置不含凭据。计划须结合实际 Worker 状态核对，派发后由提醒或终态唤醒再检查进展或验收",
+      description: "获取 owner、计划、项目 Worker 可用性、配置与并发设置、活动任务与待确认通知；配置不含凭据。项目关闭 Worker 时会明确返回 projectWorkers，此时不要派发，自行完成原任务。计划须结合实际 Worker 状态核对，派发后由提醒或终态唤醒再检查进展或验收",
       inputSchema: { view: viewField },
     },
     async ({ view }) => {
@@ -135,6 +135,7 @@ export function createWorkerMcpServer(
         if (view !== "compact") return result(context);
         return result({
           owner: context.owner,
+          projectWorkers: context.projectWorkers,
           plan: context.plan ? { updatedAt: context.plan.updatedAt } : null,
           activeWorkers: context.activeWorkers.map(compactWorker),
           notifications: compactNotifications(context.notifications),

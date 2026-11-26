@@ -197,6 +197,7 @@ export function defaultSettingsRecord(): WorkerSettingsRecord {
     }],
     defaultConfigId: INITIAL_CONFIG_IDS.pi,
     retentionDays: 1,
+    blockedProjectIds: [],
     softReminderSeconds: 600,
     softReminderSteps: 20,
   };
@@ -231,6 +232,21 @@ function stringList(value: unknown): string[] | null {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string"))
     return null;
   return [...value];
+}
+
+/**
+ * Normalizes a project blacklist: trims ids, drops blanks, and de-duplicates while keeping order.
+ * Returns null for a malformed value so callers can distinguish it from a valid empty list.
+ */
+export function normalizeBlockedProjectIds(value: unknown): string[] | null {
+  if (!Array.isArray(value)) return null;
+  const ids: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") return null;
+    const id = item.trim();
+    if (id && !ids.includes(id)) ids.push(id);
+  }
+  return ids;
 }
 
 /**
@@ -289,6 +305,7 @@ export function migrateLegacySettings(
     configs,
     defaultConfigId: chosen.id,
     retentionDays: positiveInteger(stored.retentionDays, 1),
+    blockedProjectIds: normalizeBlockedProjectIds(stored.blockedProjectIds) ?? [],
     softReminderSeconds: positiveInteger(stored.softReminderSeconds, 600),
     softReminderSteps: positiveInteger(stored.softReminderSteps, 20),
   };
@@ -342,6 +359,7 @@ export function normalizeSettingsRecord(record: WorkerSettingsRecord): WorkerSet
     ...record,
     configs,
     defaultConfigId: chosen.id,
+    blockedProjectIds: record.blockedProjectIds ?? [],
   };
   return next;
 }
@@ -388,6 +406,7 @@ export function projectSettings(
     configs,
     defaultConfigId: record.defaultConfigId,
     defaultWorkerType: defaultConfig.type,
+    blockedProjectIds: [...(record.blockedProjectIds ?? [])],
     concurrency,
     enabled,
     roles,

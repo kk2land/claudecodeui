@@ -6,6 +6,7 @@ import type {
   WorkerLogPage,
   WorkerLogStream,
   WorkerNotificationRetryInput,
+  WorkerProjectCatalog,
   WorkerRecoverInput,
   WorkerRecord,
   WorkerRun,
@@ -156,6 +157,8 @@ export function workerApi(host: WorkerHost) {
     piCatalog: () => request<PiModelCatalog>("GET", "/catalog/pi"),
     /** Real `agy models` directory from the Worker environment, read on demand. */
     agyCatalog: () => request<AgyModelCatalog>("GET", "/catalog/agy"),
+    /** Host-published project catalog for the Worker project blacklist. */
+    projects: () => request<WorkerProjectCatalog>("GET", "/projects"),
     saveSettings: (input: WorkerSettingsInput) =>
       request<WorkerSettings>("PUT", "/settings", input),
     recover: (input: WorkerRecoverInput) =>

@@ -9,7 +9,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { createWorkerMcpServer } from "../server/mcp.js";
 import type { WorkerService } from "../server/service.js";
 import type { WorkerNotification, WorkerPlan, WorkerRecord, WorkerRun } from "../shared/contracts.js";
-import { createService, startInput, temporaryRoot, waitFor } from "./helpers.js";
+import { createService, startInput, temporaryRoot, waitFor, waitStatus } from "./helpers.js";
 
 function raw(result: unknown): string {
   const content = (result as { content?: { type: string; text?: string }[] }).content;
@@ -356,6 +356,90 @@ test("real MCP handshake exposes 12 tools and executes worker tools", async (t) 
   await assert.rejects(unauthorized.connect(badTransport));
 });
 
+test("MCP context and dispatch reflect a project blacklist saved after the client connected", async (t) => {
+  const { service, project } = createService(
+    t,
+    temporaryRoot("worker-mcp-project-block-"),
+  );
+  service.registerOwner(
+    {
+      id: "blocked-owner",
+      parentSessionId: "blocked-parent",
+      projectId: "blocked-project",
+      projectPath: project,
+      userId: null,
+      appServerInstanceId: "blocked-app",
+      paused: false,
+    },
+    "blocked-token",
+  );
+  const host = await mcpServer(service, "blocked-token");
+  t.after(host.close);
+  const client = new Client({ name: "worker-blocked", version: "1.0.0" });
+  await client.connect(
+    new StreamableHTTPClientTransport(host.url, {
+      requestInit: { headers: { authorization: "Bearer blocked-token" } },
+    }),
+  );
+  t.after(() => client.close());
+
+  const before = text(
+    await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  ) as { projectWorkers: { enabled: boolean } };
+  assert.equal(before.projectWorkers.enabled, true);
+  const started = text(
+    await client.callTool({
+      name: "worker_start",
+      arguments: startInput({ requestId: "mcp-before-block" }),
+    }),
+  ) as { worker: WorkerRecord; run: WorkerRun };
+  await waitStatus(service, started.worker.id, ["completed"]);
+
+  const current = service.settings();
+  service.updateSettings({
+    configs: current.configs,
+    defaultConfigId: current.defaultConfigId,
+    blockedProjectIds: ["blocked-project"],
+  });
+
+  const after = text(
+    await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  ) as { projectWorkers: { enabled: boolean; code: string | null; message: string | null } };
+  assert.deepEqual(after.projectWorkers, {
+    enabled: false,
+    code: "PROJECT_WORKERS_BLOCKED",
+    message:
+      "该项目已在 CloudCLI Worker 设置中关闭 Worker，请主代理自行完成本次任务，不要重试 worker_start 或 worker_resume。",
+  });
+  const deniedStart = await client.callTool({
+    name: "worker_start",
+    arguments: startInput({ requestId: "mcp-blocked-start" }),
+  });
+  assert.equal(deniedStart.isError, true);
+  assert.match(raw(deniedStart), /已在 CloudCLI Worker 设置中关闭 Worker/);
+  const deniedResume = await client.callTool({
+    name: "worker_resume",
+    arguments: {
+      workerId: started.worker.id,
+      prompt: "blocked resume",
+      requestId: "mcp-blocked-resume",
+    },
+  });
+  assert.equal(deniedResume.isError, true);
+  assert.match(raw(deniedResume), /已在 CloudCLI Worker 设置中关闭 Worker/);
+  assert.equal(service.get(started.worker.id).runs.length, 1);
+
+  service.updateSettings({
+    configs: current.configs,
+    defaultConfigId: current.defaultConfigId,
+    blockedProjectIds: [],
+  });
+  const restored = text(
+    await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
+  ) as { projectWorkers: { enabled: boolean } };
+  assert.equal(restored.projectWorkers.enabled, true);
+});
+
 for (const type of ["pi", "codex"] as const) test(`MCP corrects a slow ${type} task by cancelling and resuming its original session`, async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
   let now = Date.now();
@@ -452,13 +536,15 @@ test("compact view is opt-in, scoped, and keeps only the current run", async (t)
   // Compact context while the run is active: no settings/counts, locating worker fields only.
   const activeContext = text(
     await client.callTool({ name: "worker_context", arguments: { view: "compact" } }),
-  ) as { activeWorkers: Record<string, unknown>[]; plan: { updatedAt: string }; owner: { id: string } };
+  ) as { activeWorkers: Record<string, unknown>[]; plan: { updatedAt: string }; owner: { id: string }; projectWorkers: { enabled: boolean } };
   assert.deepEqual(Object.keys(activeContext).sort(), [
     "activeWorkers",
     "notifications",
     "owner",
     "plan",
+    "projectWorkers",
   ]);
+  assert.equal(activeContext.projectWorkers.enabled, true);
   assert.equal(activeContext.owner.id, "owner-1");
   assert.deepEqual(activeContext.plan, { updatedAt: fullPlan.updatedAt });
   assert.equal(activeContext.activeWorkers.length, 1);

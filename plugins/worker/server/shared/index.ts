@@ -24,6 +24,11 @@ export type WorkerSettingsRecord = Pick<
    * environment/default fallback", so unrelated settings saves must not materialize it.
    */
   acpIdleTimeoutSeconds?: number;
+  /**
+   * Project ids whose sessions must not start or resume workers. Absence means no project is
+   * blocked, preserving rows written before this setting existed.
+   */
+  blockedProjectIds?: string[];
 };
 
 /** Validated internal error raised by service boundaries; `code` is stable for API responses. */

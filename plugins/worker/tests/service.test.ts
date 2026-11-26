@@ -1441,3 +1441,94 @@ test("active Worker queries are scoped to one runtime owner and ignore terminal 
   await waitStatus(service, queued.worker.id, ["completed"], 5000);
   assert.equal(service.hasActiveWorkers("owner-1"), false);
 });
+
+test("project blacklist blocks old-session starts and resumes until the project is removed", async (t) => {
+  const root = temporaryRoot("worker-project-block-");
+  const { service, project } = createService(t, root);
+  assert.deepEqual(service.settings().blockedProjectIds, []);
+  assert.deepEqual(service.context("owner-1").projectWorkers, {
+    enabled: true,
+    code: null,
+    message: null,
+  });
+  const started = await service.start("owner-1", startInput({ requestId: "before-block" }));
+  await waitStatus(service, started.worker.id, ["completed"]);
+
+  const block = (blockedProjectIds: string[]) => {
+    const current = service.settings();
+    service.updateSettings({
+      configs: current.configs,
+      defaultConfigId: current.defaultConfigId,
+      blockedProjectIds,
+    });
+  };
+  block(["project-1"]);
+  assert.deepEqual(service.context("owner-1").projectWorkers, {
+    enabled: false,
+    code: "PROJECT_WORKERS_BLOCKED",
+    message:
+      "该项目已在 CloudCLI Worker 设置中关闭 Worker，请主代理自行完成本次任务，不要重试 worker_start 或 worker_resume。",
+  });
+  const replay = await service.start(
+    "owner-1",
+    startInput({ requestId: "before-block" }),
+  );
+  assert.equal(replay.worker.id, started.worker.id);
+  assert.equal(replay.run.id, started.run.id);
+  await assert.rejects(
+    service.start("owner-1", startInput({ requestId: "blocked-start" })),
+    (error: unknown) =>
+      (error as { code?: string }).code === "PROJECT_WORKERS_BLOCKED",
+  );
+  await assert.rejects(
+    service.resume("owner-1", {
+      workerId: started.worker.id,
+      prompt: "blocked resume",
+      requestId: "blocked-resume",
+    }),
+    (error: unknown) =>
+      (error as { code?: string }).code === "PROJECT_WORKERS_BLOCKED",
+  );
+  assert.equal(service.get(started.worker.id).runs.length, 1);
+
+  service.registerOwner(
+    {
+      ...owner(project),
+      id: "owner-same-project",
+      parentSessionId: "parent-same-project",
+    },
+    "same-project-token",
+  );
+  await assert.rejects(
+    service.start(
+      "owner-same-project",
+      startInput({ requestId: "blocked-same-project" }),
+    ),
+    (error: unknown) =>
+      (error as { code?: string }).code === "PROJECT_WORKERS_BLOCKED",
+  );
+
+  const otherProject = path.join(root, "other-project");
+  fs.mkdirSync(otherProject, { recursive: true });
+  service.registerOwner(
+    {
+      ...owner(otherProject),
+      id: "owner-2",
+      parentSessionId: "parent-2",
+      projectId: "project-2",
+    },
+    "owner-2-token",
+  );
+  const other = await service.start("owner-2", startInput({ requestId: "other-start" }));
+  await waitStatus(service, other.worker.id, ["completed"]);
+
+  block([]);
+  const resumed = await service.resume("owner-1", {
+    workerId: started.worker.id,
+    prompt: "after unblock",
+    requestId: "after-unblock",
+  });
+  await waitStatus(service, started.worker.id, ["completed"]);
+  assert.equal(service.get(started.worker.id).runs.length, 2);
+  assert.equal(resumed.worker.projectId, "project-1");
+});

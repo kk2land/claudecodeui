@@ -117,7 +117,7 @@ export function bundledPluginDataDirectory(name: string): string | null {
 
 /** Used on startup and heartbeat to publish a private, atomically replaced project allowlist. */
 export function syncBundledPluginContext(name: string): void {
-  if (name !== "project-scheduler") return;
+  if (name !== "project-scheduler" && name !== "worker") return;
   const directory = dataDirectory(name);
   fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
   const projects = projectsDb.getProjectPaths().map((project) => ({
@@ -165,8 +165,8 @@ function workerEnvironment(): NodeJS.ProcessEnv {
 /** Used only for bundled launches; arbitrary installed plugins retain the minimal host environment. */
 export function bundledPluginEnvironment(name: string): NodeJS.ProcessEnv {
   if (!getBundledPluginDirectory(name)) return {};
-  if (name === "project-scheduler") syncBundledPluginContext(name);
-  if (name === "worker") fs.mkdirSync(dataDirectory(name), { recursive: true, mode: 0o700 });
+  if (name === "project-scheduler" || name === "worker")
+    syncBundledPluginContext(name);
   const env: NodeJS.ProcessEnv = name === "worker"
     ? workerEnvironment()
     : Object.fromEntries(Object.entries(process.env).filter(([key]) =>
@@ -177,7 +177,7 @@ export function bundledPluginEnvironment(name: string): NodeJS.ProcessEnv {
     CLOUDCLI_HOST_ROOT: root,
     CLOUDCLI_PLUGIN_TOKEN: runtimeToken(name),
     CLOUDCLI_PLUGIN_DATA_DIR: dataDirectory(name),
-    ...(name === "project-scheduler"
+    ...(name === "project-scheduler" || name === "worker"
       ? { CLOUDCLI_PROJECTS_FILE: path.join(dataDirectory(name), "projects.json") }
       : {}),
   };

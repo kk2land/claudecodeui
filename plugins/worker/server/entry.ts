@@ -11,6 +11,7 @@ import type {
   WorkerIpcSuccessResponse,
   WorkerNotificationDelivery,
   WorkerOwner,
+  WorkerProjectCatalog,
   WorkerSettingsInput,
 } from "./shared/index.js";
 import { WorkerFailure } from "./shared/index.js";
@@ -108,6 +109,23 @@ app.get(
   "/catalog/pi",
   uiOnly,
   route(() => service.piCatalog()),
+);
+
+/**
+ * Project choices for the blacklist. The host publishes the same private catalog the scheduler
+ * uses; an older host that does not publish it yields an empty list instead of failing settings.
+ */
+app.get(
+  "/projects",
+  uiOnly,
+  route((): WorkerProjectCatalog => {
+    const file = process.env.CLOUDCLI_PROJECTS_FILE;
+    if (!file) return { projects: [] };
+    const catalog = JSON.parse(
+      fs.readFileSync(file, "utf8"),
+    ) as WorkerProjectCatalog;
+    return { projects: catalog.projects };
+  }),
 );
 
 app.get(

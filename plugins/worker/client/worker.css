@@ -975,6 +975,15 @@
   font-size: 12px;
   font-weight: 500;
 }
+.worker-project-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.worker-project-list > p {
+  margin: 0;
+  color: var(--worker-muted);
+  font-size: 11.5px;
+}
 .worker-roles small {
   display: block;
   color: var(--worker-muted);
