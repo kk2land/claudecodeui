@@ -94,6 +94,9 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             signingConfigs.findByName("release")?.let { signingConfig = it }
+            ndk {
+                abiFilters.add("arm64-v8a")
+            }
         }
     }
 

@@ -47,6 +47,10 @@ Two independent DSH paths remain and must keep working:
   scheduled prompt sessions and resident tasks are Codex-only, so the host
   refuses a `dsh` job explicitly instead of starting a session it cannot read.
 
+## Android release APK
+
+Build signed Android release APKs for `arm64-v8a` only.
+
 ## Service restarts
 
 - Codex may restart the `dev` service (`localhost:3000`) as needed for testing.
