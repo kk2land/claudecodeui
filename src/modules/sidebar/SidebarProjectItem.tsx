@@ -151,7 +151,10 @@ function SidebarProjectItem({
   };
 
   const selectAndToggleProject = () => {
-    if (selectedProject?.projectId !== project.projectId) {
+    // An expanded row is already on screen; clicking it must only collapse its
+    // list. Selecting it too makes the controller's selection effect re-open
+    // the list the same click just closed, so the first click appears inert.
+    if (!isSelected && !isExpanded) {
       onProjectSelect(project);
     }
 
