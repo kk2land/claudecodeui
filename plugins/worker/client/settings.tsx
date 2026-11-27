@@ -854,7 +854,7 @@ export function SettingsView({
 
         <p className="worker-sort-note">
           配置顺序决定角色匹配：任务角色命中时，从上到下使用第一个已启用且类型匹配的配置；
-          排序在保存后生效。拖动左侧手柄，或用上移/下移按钮调整。
+          排序在保存后生效。<span className="worker-sort-note-desktop">拖动左侧手柄，或</span>用上移/下移按钮调整。
         </p>
 
         <div
@@ -950,7 +950,13 @@ export function SettingsView({
               }}
             >
               <summary aria-label={"配置 " + position + " " + config.name}>
-                <span className="worker-sort">
+                <span
+                  className="worker-sort"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  }}
+                >
                   <span
                     className="worker-drag-handle"
                     draggable
