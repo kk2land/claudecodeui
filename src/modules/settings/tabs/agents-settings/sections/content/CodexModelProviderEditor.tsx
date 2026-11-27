@@ -18,8 +18,8 @@ type EditorValues = {
 };
 
 type CodexModelProviderEditorProps = {
-  /** Provider being edited, or null when creating a custom gateway. */
-  provider: CodexModelProviderSummary | null;
+  /** Saved provider being edited. */
+  provider: CodexModelProviderSummary;
   /** A write is in flight; the form stays visible so a failure keeps its values. */
   saving: boolean;
   onSave(patch: CodexModelProviderPatch): void;
@@ -43,10 +43,9 @@ function bedrockTarget(id: string): 'amazon-bedrock' | 'amazon-bedrock-runtime' 
   return id === 'amazon-bedrock' || id === 'amazon-bedrock-runtime' ? id : null;
 }
 
-/** Stored values the form starts from; a create starts empty. */
-function initialValues(provider: CodexModelProviderSummary | null): EditorValues {
+/** Stored values the form starts from. */
+function initialValues(provider: CodexModelProviderSummary): EditorValues {
   const values: EditorValues = { name: '', baseUrl: '', envKey: '', profile: '', region: '', projectId: '', location: '', credentialFile: '' };
-  if (!provider) return values;
   values.name = provider.name;
   values.baseUrl = provider.baseUrl ?? '';
   const settings = provider.settings;
@@ -76,15 +75,8 @@ function changedField(initial: string, next: string): string | null | undefined 
 }
 
 /** Only the fields the user actually edited reach the native write request. */
-function buildPatch(provider: CodexModelProviderSummary | null, values: EditorValues): CodexModelProviderPatch | null {
+function buildPatch(provider: CodexModelProviderSummary, values: EditorValues): CodexModelProviderPatch | null {
   const initial = initialValues(provider);
-  if (!provider) {
-    const patch: Extract<CodexModelProviderPatch, { type: 'customGateway' }> = { type: 'customGateway' };
-    if (values.name.trim()) patch.name = values.name.trim();
-    if (values.baseUrl.trim()) patch.baseUrl = values.baseUrl.trim();
-    if (values.envKey.trim()) patch.envKey = values.envKey.trim();
-    return patch;
-  }
   if (provider.settings.type === 'customGateway') {
     const patch: Extract<CodexModelProviderPatch, { type: 'customGateway' }> = { type: 'customGateway', providerId: provider.id };
     const name = changedField(initial.name, values.name);
@@ -119,18 +111,18 @@ function buildPatch(provider: CodexModelProviderSummary | null, values: EditorVa
 }
 
 /**
- * Rendered by CodexModelProviderCard to create a custom gateway or edit the
- * fields Codex permits on one native model service. It submits only changed
- * fields and never re-sends a credential it was not asked to change.
+ * Rendered by CodexModelProviderCard to edit the fields Codex permits on one
+ * native model service. It submits only changed fields and never re-sends a
+ * credential it was not asked to change.
  */
 export function CodexModelProviderEditor({ provider, saving, onSave, onCancel }: CodexModelProviderEditorProps) {
   const { t } = useTranslation('settings');
   // The form's own draft; the confirmed provider stays in the card's directory.
   const [values, setValues] = useState<EditorValues>(() => initialValues(provider));
-  // A custom gateway needs a name, which Codex rejects instead of defaulting.
+  // The form refuses to save a custom gateway without a name instead of dropping the edit.
   const [nameMissing, setNameMissing] = useState(false);
-  const isCredentialHint = provider?.settings.type === 'customGateway' && provider.settings.auth.mode === 'externallyConfigured';
-  const kind = provider?.settings.type ?? 'customGateway';
+  const isCredentialHint = provider.settings.type === 'customGateway' && provider.settings.auth.mode === 'externallyConfigured';
+  const kind = provider.settings.type;
 
   const field = (key: keyof EditorValues, label: string, options: { hint?: string; readOnly?: boolean } = {}) => (
     <label className="block text-sm">
@@ -165,7 +157,7 @@ export function CodexModelProviderEditor({ provider, saving, onSave, onCancel }:
   return (
     <form className="mt-3 space-y-3 rounded-md border border-border/60 p-3" data-testid="codex-model-provider-editor" onSubmit={submit}>
       <div className="text-sm font-medium text-gray-900 dark:text-gray-100">
-        {provider ? t('agents.modelProvider.editTitle', { name: provider.name }) : t('agents.modelProvider.createTitle')}
+        {t('agents.modelProvider.editTitle', { name: provider.name })}
       </div>
 
       {kind === 'customGateway' && field('name', t('agents.modelProvider.name'))}
@@ -176,7 +168,7 @@ export function CodexModelProviderEditor({ provider, saving, onSave, onCancel }:
         readOnly: isCredentialHint,
         hint: isCredentialHint
           ? t('agents.modelProvider.envKeyExternallyConfigured')
-          : provider === null ? t('agents.modelProvider.envKeyOptional') : undefined,
+          : undefined,
       })}
 
       {kind === 'bedrock' && field('profile', t('agents.modelProvider.profile'))}

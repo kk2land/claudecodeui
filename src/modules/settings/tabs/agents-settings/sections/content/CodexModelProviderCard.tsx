@@ -16,9 +16,6 @@ type CardError =
   /** The default-service write was stored but another config layer still decides it. */
   | { kind: 'overridden'; message: string };
 
-/** An open form: create a custom gateway, or edit the service it carries. */
-type EditorState = { provider: CodexModelProviderSummary | null };
-
 /** Body of a model-provider write: the saved service, or the native failure reason. */
 type WriteBody = {
   success: boolean;
@@ -66,8 +63,8 @@ export function CodexModelProviderCard() {
   const [loading, setLoading] = useState(true);
   // Disables the controls while a default or service write is in flight so stale choices cannot race.
   const [saving, setSaving] = useState(false);
-  // The open create/edit form; kept open after a failed write so its values survive.
-  const [editor, setEditor] = useState<EditorState | null>(null);
+  // The service whose edit form is open; kept open after a failed write so its values survive.
+  const [editor, setEditor] = useState<CodexModelProviderSummary | null>(null);
   // A load, write or overridden-write failure shown as an alert; the previous confirmed value stays.
   const [error, setError] = useState<CardError | null>(null);
 
@@ -124,10 +121,7 @@ export function CodexModelProviderCard() {
     setSaving(true);
     setError(null);
     try {
-      const response = editor.provider
-        ? await api.providers.updateCodexModelProvider(editor.provider.id, patch)
-        : await api.providers.createCodexModelProvider(patch);
-      await readWriteBody(response);
+      await readWriteBody(await api.providers.updateCodexModelProvider(editor.id, patch));
       setEditor(null);
       // Mounted chat hooks re-read the directory and the edited service's models.
       window.dispatchEvent(new Event(CODEX_MODEL_PROVIDERS_CHANGED_EVENT));
@@ -244,7 +238,7 @@ export function CodexModelProviderCard() {
                     {editable && (
                       <Button
                         disabled={saving}
-                        onClick={() => { setError(null); setEditor({ provider }); }}
+                        onClick={() => { setError(null); setEditor(provider); }}
                         size="sm"
                         variant="outline"
                       >
@@ -256,22 +250,13 @@ export function CodexModelProviderCard() {
               );
             })}
           </ul>
-          <Button
-            className="mt-2"
-            disabled={saving}
-            onClick={() => { setError(null); setEditor({ provider: null }); }}
-            size="sm"
-            variant="outline"
-          >
-            {t('agents.modelProvider.addCustomGateway')}
-          </Button>
         </div>
       )}
 
       {editor && (
         <CodexModelProviderEditor
-          key={editor.provider?.id ?? 'create'}
-          provider={editor.provider}
+          key={editor.id}
+          provider={editor}
           saving={saving}
           onCancel={() => { setEditor(null); }}
           onSave={(patch) => { void saveProvider(patch); }}

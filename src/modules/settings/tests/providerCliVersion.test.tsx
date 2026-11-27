@@ -72,8 +72,8 @@ const updateResult = (overrides: Partial<ProviderCliUpdateResult> = {}): Provide
   ...overrides,
 });
 
-const renderRow = (installedVersion: string | null = '2.1.200') => render(
-  <ProviderCliVersion agent="claude" installedVersion={installedVersion} textClass="" subtextClass="" />,
+const renderRow = (installedVersion: string | null = '2.1.200', agent: 'claude' | 'codex' = 'claude') => render(
+  <ProviderCliVersion agent={agent} installedVersion={installedVersion} textClass="" subtextClass="" />,
 );
 
 // What nginx answers after its 60 s read timeout while the updater keeps running.
@@ -387,6 +387,46 @@ describe('ProviderCliVersion', () => {
     expect(screen.getByText(/ENOENT: no such file or directory/)).toBeTruthy();
     // The server refuses to update a CLI it cannot start.
     expect(screen.queryByRole('button')).toBeNull();
+  });
+});
+
+describe('Codex CLI version row', () => {
+  beforeEach(() => {
+    responses.status = [];
+    calls.length = 0;
+  });
+
+  // Codex's row reports versions only; no update action is offered.
+  it('shows a newer release without offering an update action', async () => {
+    responses.status = [claudeStatus({
+      provider: 'codex',
+      installedVersion: '0.48.0',
+      latestVersion: '0.49.0',
+      updateAvailable: true,
+      updateCommand: 'npm install -g @openai/codex',
+    })];
+    renderRow('0.48.0', 'codex');
+
+    expect(await screen.findByText('Update available: v0.49.0')).toBeTruthy();
+    expect(screen.getByText('Installed: v0.48.0')).toBeTruthy();
+    expect(screen.queryByRole('button')).toBeNull();
+    expect(calls).toEqual(['status:codex']);
+  });
+
+  it('shows that it is up to date without the updater button other agents have', async () => {
+    responses.status = [claudeStatus({
+      provider: 'codex',
+      installedVersion: '0.49.0',
+      latestVersion: '0.49.0',
+      updateAvailable: false,
+      updateCommand: 'npm install -g @openai/codex',
+    })];
+    renderRow('0.49.0', 'codex');
+
+    expect(await screen.findByText('Up to date')).toBeTruthy();
+    expect(screen.getByText('Installed: v0.49.0')).toBeTruthy();
+    expect(screen.queryByRole('button', { name: 'Run updater' })).toBeNull();
+    expect(calls).toEqual(['status:codex']);
   });
 });
 

@@ -70,9 +70,9 @@ function UpdateResult({ result, latestVersion }: UpdateResultProps) {
 
 /**
  * Rendered by AccountContent under the connection status: the provider CLI's
- * installed version, whether npm has a newer release, and a button that runs
- * the CLI's own updater on the server. Keyed by agent there, so each agent's
- * row has its own request state.
+ * installed version, whether npm has a newer release, and — except for Codex —
+ * a button that runs the CLI's own updater on the server. Keyed by agent there,
+ * so each agent's row has its own request state.
  */
 export default function ProviderCliVersion({ agent, installedVersion, textClass, subtextClass }: ProviderCliVersionProps) {
   const { t } = useTranslation('settings');
@@ -140,8 +140,8 @@ export default function ProviderCliVersion({ agent, installedVersion, textClass,
             ) : null}
           </div>
         </div>
-        {/* The server refuses to update a CLI it cannot start. */}
-        {updateCommand && !missing && (
+        {/* The server refuses to update a CLI it cannot start. Codex has no update action here. */}
+        {agent !== 'codex' && updateCommand && !missing && (
           <Button
             type="button"
             size="sm"

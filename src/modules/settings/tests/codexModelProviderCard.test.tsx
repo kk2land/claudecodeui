@@ -17,17 +17,15 @@ import type { CodexModelProviders, ProviderAuthStatus } from '@/shared/types';
 const mocks = vi.hoisted(() => ({
   read: vi.fn(),
   save: vi.fn(),
-  create: vi.fn(),
   update: vi.fn(),
 }));
-const { read, save, create, update } = mocks;
+const { read, save, update } = mocks;
 
 vi.mock('@/shared/api', async (importOriginal) => ({
   ...(await importOriginal<typeof SharedApi>()),
   api: { providers: {
     codexModelProviders: mocks.read,
     setCodexDefaultModelProvider: mocks.save,
-    createCodexModelProvider: mocks.create,
     updateCodexModelProvider: mocks.update,
   } },
 }));
@@ -78,7 +76,6 @@ beforeEach(() => {
   read.mockReset();
   read.mockImplementation(() => respond(directory));
   save.mockReset();
-  create.mockReset();
   update.mockReset();
 });
 
@@ -204,23 +201,26 @@ describe('Codex model service editing', () => {
     window.removeEventListener(CODEX_MODEL_PROVIDERS_CHANGED_EVENT, changed);
   });
 
-  it('creates a custom gateway with the name, endpoint and optional environment variable it was given', async () => {
-    create.mockImplementation(() => respond({ provider: {
-      id: 'gateway-2', name: 'Team gateway', baseUrl: 'https://team.example.com/v1', canEdit: true,
-      settings: { type: 'customGateway', auth: { mode: 'environmentVariable', envKey: 'TEAM_KEY' } },
-    } }));
+  it('offers no custom gateway create action', async () => {
     renderAccount();
     await select();
-    fireEvent.click(await screen.findByRole('button', { name: 'Add custom gateway' }));
-    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), { target: { value: 'Team gateway' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Base URL' }), { target: { value: 'https://team.example.com/v1' } });
-    fireEvent.change(screen.getByRole('textbox', { name: 'Environment variable' }), { target: { value: 'TEAM_KEY' } });
+    // The services list is there, with its per-service edit actions, but no create form.
+    expect(await screen.findAllByRole('button', { name: 'Edit' })).toHaveLength(2);
+    expect(screen.queryByRole('button', { name: 'Add custom gateway' })).toBeNull();
+    expect(screen.queryByTestId('codex-model-provider-editor')).toBeNull();
+  });
+
+  it('refuses to save a custom gateway whose name was cleared instead of dropping the edit', async () => {
+    renderAccount();
+    await select();
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Edit' }))[0]);
+    fireEvent.change(screen.getByRole('textbox', { name: 'Name' }), { target: { value: '   ' } });
+    fireEvent.change(screen.getByRole('textbox', { name: 'Base URL' }), { target: { value: 'https://alpha2.example.com/v1' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => expect(create).toHaveBeenCalledWith({
-      type: 'customGateway', name: 'Team gateway', baseUrl: 'https://team.example.com/v1', envKey: 'TEAM_KEY',
-    }));
+    expect(await screen.findByText('Enter a name for this service.')).toBeTruthy();
     expect(update).not.toHaveBeenCalled();
+    expect(screen.getByTestId('codex-model-provider-editor')).toBeTruthy();
   });
 
   it('keeps a failed write open and shows the native reason', async () => {
