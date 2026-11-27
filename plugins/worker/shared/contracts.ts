@@ -773,6 +773,37 @@ export type AgyModelCatalog = {
   models: AgyModelOption[];
 };
 
+/** One remaining-quota window (for example weekly or 5-hour) inside an AGY model group. */
+export type AgyQuotaBucket = {
+  id: string;
+  window: string;
+  label: string;
+  /** Remaining quota percentage clamped to whole numbers 0..100. */
+  remainingPercent: number;
+  /** ISO-8601 reset timestamp when counting down, or null when full / not scheduled. */
+  resetAt: string | null;
+};
+
+/** One AGY model group's remaining quota summary. */
+export type AgyQuotaGroup = {
+  name: string;
+  buckets: AgyQuotaBucket[];
+};
+
+/**
+ * Latest cached AGY account remaining quota served by `GET /quota/agy` and
+ * `POST /quota/agy/refresh`. Contains only display-needed quota fields, never raw CLI output
+ * or account identifiers.
+ */
+export type AgyQuotaSnapshot = {
+  status: "loading" | "ready" | "error";
+  groups: AgyQuotaGroup[];
+  /** ISO-8601 timestamp of the latest successful quota fetch, or null before any success. */
+  updatedAt: string | null;
+  /** Safe user-facing failure summary from the latest failed fetch, or null when healthy. */
+  error: string | null;
+};
+
 /**
  * Optional authenticated host catalog capabilities. The Worker client adds these as optional
  * `models` / `codexModelProviders` / `codexModelProviderModels` members of `WorkerHost` in

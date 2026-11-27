@@ -11,7 +11,28 @@ type Reply = { ok: boolean; value?: unknown; error?: { code: string } };
 test("entry registers owners over IPC and keeps UI/MCP credentials separate", async (t) => {
   const root = temporaryRoot("worker-entry-");
   const project = path.join(root, "project");
+  const bin = path.join(root, "bin");
   fs.mkdirSync(project, { recursive: true });
+  fs.mkdirSync(bin, { recursive: true });
+  fs.symlinkSync(process.execPath, path.join(bin, "node"));
+  fs.writeFileSync(
+    path.join(bin, "agy"),
+    `#!/usr/bin/env node
+process.stdout.write(JSON.stringify({
+  status: "SUCCESS",
+  command: {
+    name: "usage",
+    data: {
+      groups: [{
+        name: "Gemini Models",
+        buckets: [{ id: "gemini-5h", name: "Five Hour Limit Remaining", window: "5h", remaining_fraction: 0.88, reset_time: "2026-11-27T14:39:22Z" }]
+      }]
+    }
+  }
+}));
+`,
+    { mode: 0o755 },
+  );
   const projectsFile = path.join(root, "projects.json");
   fs.writeFileSync(
     projectsFile,
@@ -25,7 +46,7 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
     ["--import", tsxLoader, path.join(pluginRoot, "server/entry.ts")],
     {
       env: {
-        PATH: process.env.PATH,
+        PATH: bin,
         TMPDIR: process.env.TMPDIR,
         LANG: process.env.LANG,
         HOME: path.join(root, "home"),
@@ -135,6 +156,30 @@ test("entry registers owners over IPC and keeps UI/MCP credentials separate", as
   assert.deepEqual(await projects.json(), {
     projects: [{ id: "entry-project", name: "Entry project", path: project }],
   });
+  const unauthenticatedQuota = await fetch(base + "/quota/agy");
+  assert.equal(unauthenticatedQuota.status, 401);
+  const wrongQuotaRefresh = await fetch(base + "/quota/agy/refresh", {
+    method: "POST",
+    headers: { authorization: "Bearer owner-token" },
+  });
+  assert.equal(wrongQuotaRefresh.status, 401);
+  const quota = await fetch(base + "/quota/agy", {
+    headers: { authorization: "Bearer ui-token" },
+  });
+  assert.equal(quota.status, 200);
+  const quotaBody = (await quota.json()) as {
+    status: string;
+    groups: Array<{ name: string; buckets: Array<{ remainingPercent: number }> }>;
+  };
+  assert.equal(quotaBody.status, "ready");
+  assert.equal(quotaBody.groups[0]?.buckets[0]?.remainingPercent, 88);
+  const quotaRefresh = await fetch(base + "/quota/agy/refresh", {
+    method: "POST",
+    headers: { authorization: "Bearer ui-token" },
+  });
+  assert.equal(quotaRefresh.status, 200);
+  const refreshBody = (await quotaRefresh.json()) as { status: string };
+  assert.equal(refreshBody.status, "ready");
   const unauthenticatedInput = await fetch(
     base + "/workers/missing/input?runId=run-1",
   );

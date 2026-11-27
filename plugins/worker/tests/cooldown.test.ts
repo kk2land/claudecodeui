@@ -8,6 +8,7 @@ import {
   agyAcpFixture,
   createService,
   environment,
+  piFixture,
   startInput,
   temporaryRoot,
   waitStatus,
@@ -190,7 +191,7 @@ test("the stored deadline and queued agy run survive a real close and reopen", a
 
   const reopened = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { "agy-acp": agyAcpFixture },
   });
   t.after(() => reopened.close());
@@ -264,4 +265,208 @@ test("an ordinary agy reply that mentions the quota warning still succeeds", asy
   const done = await waitStatus(service, started.worker.id, ["completed"]);
   assert.equal(done.latestRun?.status, "completed");
   assert.match(done.latestRun?.finalText ?? "", /^The warning says:/);
+});
+
+/** Writes an `agy` fixture executable that reads its `/usage` JSON response from `payloadFile`. */
+function quotaAgyExecutable(root: string, payloadFile: string): string {
+  const executable = path.join(root, "fake-agy-quota.mjs");
+  fs.writeFileSync(
+    executable,
+    "#!/usr/bin/env node\n" +
+      "import fs from 'node:fs';\n" +
+      "process.stdout.write(fs.readFileSync(" +
+      JSON.stringify(payloadFile) +
+      ", 'utf8'));\n",
+    { mode: 0o755 },
+  );
+  return executable;
+}
+
+function quotaBucket(
+  window: string,
+  remaining_fraction: number,
+  reset_time = "1970-01-01T00:00:00Z",
+) {
+  return { window, remaining_fraction, reset_time };
+}
+
+function writeUsage(
+  file: string,
+  groups: Array<{ name: string; buckets: ReturnType<typeof quotaBucket>[] }>,
+): void {
+  fs.writeFileSync(
+    file,
+    JSON.stringify({ status: "SUCCESS", command: { name: "usage", data: { groups } } }),
+  );
+}
+
+test("exhausted Gemini Models quota activates shared AGY cooldown for auto and manual polls without blocking Pi", async (t) => {
+  const root = temporaryRoot("worker-agy-quota-cooldown-");
+  const payloadFile = path.join(root, "usage.json");
+  const now = Date.parse("2026-11-27T10:00:00Z");
+  const reset5h = new Date(now + 2 * 3600 * 1000).toISOString();
+  const resetWeekly = new Date(now + 5 * 86_400_000).toISOString();
+  writeUsage(payloadFile, [
+    {
+      name: "Gemini Models",
+      buckets: [
+        quotaBucket("5h", 0, reset5h),
+        quotaBucket("weekly", 0, resetWeekly),
+      ],
+    },
+    { name: "Claude and GPT models", buckets: [quotaBucket("weekly", 1)] },
+  ]);
+
+  const { service } = createService(
+    t,
+    root,
+    {},
+    {
+      now: () => now,
+      executablePaths: {
+        pi: piFixture,
+        agy: quotaAgyExecutable(root, payloadFile),
+        "agy-acp": agyAcpFixture,
+      },
+      agyQuotaPollIntervalMs: 60_000,
+    },
+  );
+  configure(service, [
+    config("pi"),
+    modelConfig("agy-a", "model-a"),
+    modelConfig("agy-b", "model-b"),
+  ]);
+
+  // Automatic startup poll (`recoverFromDisk` -> `refreshAgyQuota`) picks the later exhausted reset.
+  service.recoverFromDisk();
+  await service.agyQuota();
+  assert.equal(service.overview().agyCooldownUntil, resetWeekly);
+
+  // Every AGY config queues while Pi still executes and completes.
+  const agyA = await service.start(
+    "owner-1",
+    startInput({ type: "agy", configId: "agy-a", requestId: "quota-agy-a" }),
+  );
+  const agyB = await service.start(
+    "owner-1",
+    startInput({ type: "agy", configId: "agy-b", requestId: "quota-agy-b" }),
+  );
+  assert.equal(agyA.run.status, "queued");
+  assert.equal(agyB.run.status, "queued");
+  const pi = await service.start(
+    "owner-1",
+    startInput({ type: "pi", requestId: "quota-pi-ok" }),
+  );
+  assert.equal(
+    (await waitStatus(service, pi.worker.id, ["completed"])).latestRun?.status,
+    "completed",
+  );
+
+  // Manual refresh with an even later monthly reset (>25 days) extends cooldown without overflowing timer.
+  const resetMonthly = new Date(now + 35 * 86_400_000).toISOString();
+  writeUsage(payloadFile, [
+    { name: "Gemini Models", buckets: [quotaBucket("monthly", 0, resetMonthly)] },
+  ]);
+  const warnings: Error[] = [];
+  const onWarning = (warning: Error) => warnings.push(warning);
+  process.on("warning", onWarning);
+  try {
+    await service.refreshAgyQuota();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  } finally {
+    process.off("warning", onWarning);
+  }
+  assert.equal(service.overview().agyCooldownUntil, resetMonthly);
+  assert.equal(
+    warnings.some((warning) => warning.name === "TimeoutOverflowWarning"),
+    false,
+  );
+  // Queued AGY runs stay queued rather than waking prematurely in 1 ms.
+  assert.equal(service.get(agyA.worker.id).worker.latestRun?.status, "queued");
+});
+
+test("quota checks keep existing runtime cooldown, fall back to 60s without future reset, and ignore sub-0.5% or non-Gemini exhaustion", async (t) => {
+  const root = temporaryRoot("worker-agy-quota-preserve-");
+  const payloadFile = path.join(root, "usage.json");
+  const now = Date.parse("2026-11-27T10:00:00Z");
+
+  // 1. Sub-0.5% positive Gemini quota (displays 0%) and exhausted Claude/GPT must not trigger cooldown.
+  writeUsage(payloadFile, [
+    {
+      name: "Gemini Models",
+      buckets: [quotaBucket("5h", 0.004, new Date(now + 3600 * 1000).toISOString())],
+    },
+    {
+      name: "Claude and GPT models",
+      buckets: [quotaBucket("weekly", 0, new Date(now + 86_400_000).toISOString())],
+    },
+  ]);
+  const { service } = createService(
+    t,
+    root,
+    { TEST_SCENARIO: "rate-limit", TEST_AGY_RESET_TEXT: "Resets in 2h" },
+    {
+      now: () => now,
+      executablePaths: {
+        pi: piFixture,
+        agy: quotaAgyExecutable(root, payloadFile),
+        "agy-acp": agyAcpFixture,
+      },
+    },
+  );
+  configure(service);
+  const tiny = await service.refreshAgyQuota();
+  assert.equal(tiny.groups[0]?.buckets[0]?.remainingPercent, 0);
+  assert.equal(service.overview().agyCooldownUntil, null);
+
+  // 2. Runtime AGY 429 cooldown (2h) is neither cleared by positive quota nor shortened by a 10m reset.
+  const failedRun = await service.start(
+    "owner-1",
+    startInput({ type: "agy", configId: "agy-default", requestId: "runtime-2h" }),
+  );
+  await waitStatus(service, failedRun.worker.id, ["failed"]);
+  const twoHoursDeadline = new Date(now + 2 * 3600 * 1000).toISOString();
+  assert.equal(service.overview().agyCooldownUntil, twoHoursDeadline);
+
+  writeUsage(payloadFile, [
+    {
+      name: "Gemini Models",
+      buckets: [quotaBucket("5h", 0.8, new Date(now + 3600 * 1000).toISOString())],
+    },
+  ]);
+  await service.refreshAgyQuota();
+  assert.equal(service.overview().agyCooldownUntil, twoHoursDeadline);
+
+  writeUsage(payloadFile, [
+    {
+      name: "Gemini Models",
+      buckets: [quotaBucket("5h", 0, new Date(now + 10 * 60 * 1000).toISOString())],
+    },
+  ]);
+  await service.refreshAgyQuota();
+  assert.equal(service.overview().agyCooldownUntil, twoHoursDeadline);
+
+  // 3. Exhausted Gemini Models without a valid future reset_time falls back to 60s on a clean service.
+  const fallbackRoot = temporaryRoot("worker-agy-quota-fallback-");
+  const fallbackPayload = path.join(fallbackRoot, "usage.json");
+  writeUsage(fallbackPayload, [
+    { name: "Gemini Models", buckets: [quotaBucket("5h", 0)] },
+  ]);
+  const second = createService(
+    t,
+    fallbackRoot,
+    {},
+    {
+      now: () => now,
+      executablePaths: {
+        agy: quotaAgyExecutable(fallbackRoot, fallbackPayload),
+        "agy-acp": agyAcpFixture,
+      },
+    },
+  );
+  await second.service.refreshAgyQuota();
+  assert.equal(
+    Date.parse(second.service.overview().agyCooldownUntil!) - now,
+    60_000,
+  );
 });

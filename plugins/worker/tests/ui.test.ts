@@ -369,6 +369,8 @@ type Mode = {
   codexProviderModels?: (modelProvider: string) => Promise<unknown>;
   piCatalog?: () => Promise<unknown>;
   agyCatalog?: () => Promise<unknown>;
+  agyQuota?: () => Promise<unknown> | unknown;
+  refreshAgyQuota?: () => Promise<unknown> | unknown;
 };
 
 type ConversationViewRecord = {
@@ -416,6 +418,44 @@ const AGY_CATALOG = {
     { id: "gemini-3.8-flash-high", label: "Gemini 3.8 Flash (High)" },
     { id: "gemini-pro-orchestrator-neon", label: "Orchestrator (Neon)" },
   ],
+};
+const AGY_QUOTA = {
+  status: "ready",
+  groups: [
+    {
+      name: "Gemini Models",
+      buckets: [
+        {
+          id: "gemini-weekly",
+          window: "weekly",
+          label: "Weekly Limit Remaining",
+          remainingPercent: 92,
+          resetAt: "2026-12-04T09:39:22Z",
+        },
+        {
+          id: "gemini-5h",
+          window: "5h",
+          label: "Five Hour Limit Remaining",
+          remainingPercent: 72,
+          resetAt: "2026-11-27T14:39:22Z",
+        },
+      ],
+    },
+    {
+      name: "Claude and GPT models",
+      buckets: [
+        {
+          id: "3p-weekly",
+          window: "weekly",
+          label: "Weekly Limit Remaining",
+          remainingPercent: 100,
+          resetAt: null,
+        },
+      ],
+    },
+  ],
+  updatedAt: "2026-11-27T10:00:00Z",
+  error: null,
 };
 
 async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
@@ -482,6 +522,14 @@ async function mountPlugin(mode: Mode = {}): Promise<Mounted> {
       if (pathAndQuery === "/catalog/agy") {
         if (mode.agyCatalog) return mode.agyCatalog();
         return AGY_CATALOG;
+      }
+      if (pathAndQuery === "/quota/agy") {
+        if (mode.agyQuota) return mode.agyQuota();
+        return AGY_QUOTA;
+      }
+      if (pathAndQuery === "/quota/agy/refresh") {
+        if (mode.refreshAgyQuota) return mode.refreshAgyQuota();
+        return AGY_QUOTA;
       }
       if (pathAndQuery === "/projects") {
         return {
@@ -5356,6 +5404,219 @@ test("DOM: project blacklist saves the selected ids and echoes them after reopen
       false,
     );
   } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: AGY quota sits next to ACP idle timeout, refreshes independently of saving, and recovers from errors", async () => {
+  let refreshCount = 0;
+  const mounted = await mountPlugin({
+    agyQuota: async () => ({
+      status: "error",
+      groups: [],
+      updatedAt: null,
+      error: "agy 额度查询失败",
+    }),
+    refreshAgyQuota: async () => {
+      refreshCount += 1;
+      return {
+        status: "ready",
+        groups: [
+          {
+            name: "Gemini Models",
+            buckets: [
+              {
+                id: "gemini-weekly",
+                window: "weekly",
+                label: "Weekly Limit Remaining",
+                remainingPercent: 85,
+                resetAt: "2026-12-04T09:39:22Z",
+              },
+              {
+                id: "gemini-5h",
+                window: "5h",
+                label: "Five Hour Limit Remaining",
+                remainingPercent: 64,
+                resetAt: "2026-11-27T14:39:22Z",
+              },
+            ],
+          },
+        ],
+        updatedAt: "2026-11-27T10:05:00Z",
+        error: null,
+      };
+    },
+  });
+  try {
+    await openSettings(mounted);
+    const acpIdleInput = byLabel(
+      mounted.container,
+      "ACP 空闲关闭时间（秒）",
+    ) as HTMLInputElement;
+    const splitRow = acpIdleInput.closest(".worker-settings-split");
+    assert.ok(splitRow, "ACP 空闲关闭时间与 AGY 额度应位于同一行分栏容器内");
+    const quotaBox = splitRow.querySelector(".worker-agy-quota");
+    assert.ok(quotaBox, "AGY 额度卡片应渲染在 ACP 空闲关闭时间右侧");
+
+    await waitFor(
+      () => textOf(quotaBox).includes("获取失败：agy 额度查询失败"),
+      "失败状态显示",
+    );
+
+    // Even when settings form has an invalid draft value, refreshing quota works independently.
+    await typeInto(acpIdleInput, "0");
+    assert.equal(button(mounted.container, "保存设置").disabled, true);
+    const refreshButton = byLabel(
+      mounted.container,
+      "刷新 AGY 账号剩余额度",
+    ) as HTMLButtonElement;
+    assert.equal(refreshButton.disabled, false);
+    refreshButton.click();
+
+    await waitFor(
+      () =>
+        textOf(quotaBox).includes("Gemini Models") &&
+        textOf(quotaBox).includes("85%") &&
+        textOf(quotaBox).includes("64%"),
+      "手动刷新恢复显示额度",
+    );
+    assert.equal(refreshCount, 1);
+    assert.equal(callsTo(mounted, "/quota/agy/refresh").length, 1);
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+  } finally {
+    mounted.unmount();
+  }
+});
+
+test("DOM: AGY quota manual refresh stays ahead of overlapping 5-minute polls and always re-enables the button", async () => {
+  type QuotaReply = {
+    status: "ready" | "error";
+    groups: Array<{
+      name: string;
+      buckets: Array<{
+        id: string;
+        window: string;
+        label: string;
+        remainingPercent: number;
+        resetAt: string | null;
+      }>;
+    }>;
+    updatedAt: string | null;
+    error: string | null;
+  };
+  const makeQuota = (percent: number): QuotaReply => ({
+    status: "ready",
+    groups: [
+      {
+        name: "Gemini Models",
+        buckets: [
+          {
+            id: "gemini-5h",
+            window: "5h",
+            label: "Five Hour Limit Remaining",
+            remainingPercent: percent,
+            resetAt: "2026-11-27T14:39:22Z",
+          },
+        ],
+      },
+    ],
+    updatedAt: "2026-11-27T10:05:00Z",
+    error: null,
+  });
+
+  let getCount = 0;
+  let resolveSlowGet: ((value: QuotaReply) => void) | null = null;
+  let resolveManualPost: ((value: QuotaReply) => void) | null = null;
+  let rejectManualPost: ((error: Error) => void) | null = null;
+  let postMode: "resolve" | "reject" = "resolve";
+
+  const mounted = await mountPlugin({
+    agyQuota: () => {
+      getCount += 1;
+      if (getCount === 1) return Promise.resolve(makeQuota(92));
+      return new Promise<QuotaReply>((resolve) => {
+        resolveSlowGet = resolve;
+      });
+    },
+    refreshAgyQuota: () =>
+      new Promise<QuotaReply>((resolve, reject) => {
+        if (postMode === "reject") rejectManualPost = reject;
+        else resolveManualPost = resolve;
+      }),
+  });
+
+  const originalSetInterval = mounted.dom.window.setInterval;
+  const pollTicks: Array<() => void> = [];
+  mounted.dom.window.setInterval = ((
+    handler: TimerHandler,
+    timeout?: number,
+    ...args: unknown[]
+  ) => {
+    if (timeout === 5 * 60 * 1000 && typeof handler === "function") {
+      pollTicks.push(handler as () => void);
+    }
+    return (originalSetInterval as (...params: unknown[]) => unknown).apply(
+      mounted.dom.window,
+      [handler, timeout, ...args],
+    );
+  }) as unknown as typeof mounted.dom.window.setInterval;
+
+  try {
+    await openSettings(mounted);
+    const quotaBox = mounted.container.querySelector(".worker-agy-quota")!;
+    await waitFor(() => textOf(quotaBox).includes("92%"), "初始额度加载");
+    const quotaPollTick = pollTicks[0];
+    assert.ok(quotaPollTick, "设置页应注册 5 分钟额度轮询定时器");
+    const refreshButton = byLabel(
+      mounted.container,
+      "刷新 AGY 账号剩余额度",
+    ) as HTMLButtonElement;
+
+    // 1. Trigger manual POST and fire the 5-minute poll while POST is still in-flight.
+    refreshButton.click();
+    await waitFor(() => refreshButton.disabled, "手动刷新进入进行中状态");
+    const getsBeforeOverlap = callsTo(mounted, "/quota/agy").length;
+    quotaPollTick();
+    await delay(20);
+    // Periodic poll must not send a competing GET while manual refresh is in-flight.
+    assert.equal(callsTo(mounted, "/quota/agy").length, getsBeforeOverlap);
+
+    resolveManualPost!(makeQuota(84));
+    await waitFor(
+      () => textOf(quotaBox).includes("84%") && !refreshButton.disabled,
+      "重叠轮询后手动刷新结果仍落盘且按钮恢复可用",
+    );
+
+    // 2. Reverse overlap: an older slow GET is in-flight when user clicks manual refresh.
+    quotaPollTick();
+    await waitFor(() => Boolean(resolveSlowGet), "较早定时 GET 已发出");
+    refreshButton.click();
+    await waitFor(() => refreshButton.disabled, "第二次手动刷新进入进行中状态");
+    resolveManualPost!(makeQuota(77));
+    await waitFor(
+      () => textOf(quotaBox).includes("77%") && !refreshButton.disabled,
+      "手动刷新优先显示最新结果",
+    );
+    // Completing the older slow GET afterward must never overwrite the manual update.
+    resolveSlowGet!(makeQuota(61));
+    await delay(30);
+    assert.equal(textOf(quotaBox).includes("77%"), true);
+    assert.equal(textOf(quotaBox).includes("61%"), false);
+
+    // 3. Even when manual refresh rejects, the button re-enables and error shows for retry.
+    postMode = "reject";
+    refreshButton.click();
+    await waitFor(() => Boolean(rejectManualPost), "失败场景手动刷新已发出");
+    rejectManualPost!(new Error("network down"));
+    await waitFor(
+      () =>
+        textOf(quotaBox).includes("获取失败：AGY 额度刷新失败") &&
+        !refreshButton.disabled,
+      "手动刷新异常后按钮复位且可重试",
+    );
+    assert.equal(callsTo(mounted, "/settings").length, 0);
+  } finally {
+    mounted.dom.window.setInterval = originalSetInterval;
     mounted.unmount();
   }
 });

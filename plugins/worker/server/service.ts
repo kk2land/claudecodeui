@@ -36,6 +36,7 @@ import type { AcpEvent, AcpSessionHandle } from "./acp.js";
 import { appendLog, readEventLines, readLogPage } from "./logs.js";
 import { parseHistoricalPiAcp } from "./pi-history.js";
 import { readAgyCatalog } from "./agy-catalog.js";
+import { AGY_QUOTA_POLL_INTERVAL_MS, readAgyQuota } from "./agy-quota.js";
 import {
   AGY_QUOTA_REACHED,
   parseAgyAcpRun,
@@ -60,6 +61,7 @@ import type { WorkerHistoryCursor } from "./store.js";
 import type {
   AcpSessionEvidence,
   AgyModelCatalog,
+  AgyQuotaSnapshot,
   LegacyWorkerType,
   RunEvidence,
   WorkerCancelInput,
@@ -159,6 +161,9 @@ const TERMINAL: WorkerStatus[] = [
   "interrupted",
 ];
 const MAX_WAIT_MS = 25_000;
+const AGY_COOLDOWN_FALLBACK_MS = 60_000;
+/** Node's `setTimeout` clamps delays above 2^31 - 1 ms (~24.85 days) to 1 ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
 
 type RegisteredOwner = { owner: WorkerOwner; token: string };
 /** One guarded shared ACP process generation, identified without any host/database schema. */
@@ -200,6 +205,8 @@ export type WorkerServiceOptions = {
   now?: () => number;
   /** Test/diagnostic hook mirroring IPC events; never exposes tokens. */
   onEvent?: (event: unknown) => void;
+  /** Optional override for background AGY quota polling interval (defaults to 5 minutes). */
+  agyQuotaPollIntervalMs?: number;
 };
 
 /** Typed execution service shared by MCP, protected UI REST, and host IPC. */
@@ -226,6 +233,15 @@ export class WorkerService {
   private cooldownTimer: NodeJS.Timeout | null = null;
   private nativeRetentionTimer: NodeJS.Timeout | null = null;
   private nativeRetentionSweep: Promise<void> | null = null;
+  private agyQuotaTimer: NodeJS.Timeout | null = null;
+  private agyQuotaAbort: AbortController | null = null;
+  private agyQuotaFetch: Promise<AgyQuotaSnapshot> | null = null;
+  private agyQuotaState: AgyQuotaSnapshot = {
+    status: "loading",
+    groups: [],
+    updatedAt: null,
+    error: null,
+  };
   private dispatching = false;
   private closing = false;
   private recovering = false;
@@ -323,6 +339,70 @@ export class WorkerService {
   async agyCatalog(): Promise<AgyModelCatalog> {
     const environment = this.guardianEnvironment(this.environment);
     return readAgyCatalog(this.executable("agy", environment), environment);
+  }
+
+  /**
+   * Returns the latest AGY account remaining quota. If a refresh is already in flight, awaits
+   * that same result even when an older cache exists so overlapping polls never serve stale data.
+   */
+  async agyQuota(): Promise<AgyQuotaSnapshot> {
+    if (this.agyQuotaFetch) return this.agyQuotaFetch;
+    if (this.agyQuotaState.status === "loading") return this.refreshAgyQuota();
+    return this.agyQuotaState;
+  }
+
+  /**
+   * Immediately executes `agy -p /usage --output-format json` (joining any already in-flight run),
+   * replaces the cached snapshot wholesale, and returns only display-needed quota fields or a safe error.
+   */
+  refreshAgyQuota(): Promise<AgyQuotaSnapshot> {
+    if (this.closing || this.storeClosed) {
+      return Promise.resolve(this.agyQuotaState);
+    }
+    if (this.agyQuotaFetch) return this.agyQuotaFetch;
+    const abort = new AbortController();
+    this.agyQuotaAbort = abort;
+    const task: Promise<AgyQuotaSnapshot> = (async (): Promise<AgyQuotaSnapshot> => {
+      try {
+        const environment = this.guardianEnvironment(this.environment);
+        const { groups, geminiExhausted } = await readAgyQuota(
+          this.executable("agy", environment),
+          environment,
+          { signal: abort.signal },
+        );
+        const now = this.now();
+        this.agyQuotaState = {
+          status: "ready",
+          groups,
+          updatedAt: new Date(now).toISOString(),
+          error: null,
+        };
+        if (geminiExhausted && !this.closing && !this.storeClosed) {
+          const until =
+            geminiExhausted.latestResetAtMs !== null &&
+            geminiExhausted.latestResetAtMs > now
+              ? geminiExhausted.latestResetAtMs
+              : now + AGY_COOLDOWN_FALLBACK_MS;
+          this.applyAgyCooldown(until);
+        }
+      } catch (error) {
+        this.agyQuotaState = {
+          status: "error",
+          groups: this.agyQuotaState.groups,
+          updatedAt: this.agyQuotaState.updatedAt,
+          error:
+            error instanceof WorkerFailure
+              ? error.message
+              : "agy 额度查询失败",
+        };
+      }
+      return this.agyQuotaState;
+    })().finally(() => {
+      this.agyQuotaAbort = null;
+      this.agyQuotaFetch = null;
+    });
+    this.agyQuotaFetch = task;
+    return task;
   }
 
   updateSettings(input: WorkerSettingsInput): WorkerSettings {
@@ -2585,7 +2665,7 @@ export class WorkerService {
     return this.agyCooldownUntil() !== null;
   }
 
-  /** Wakes dispatch exactly when the stored deadline expires so queued agy runs resume. */
+  /** Wakes dispatch when the stored deadline expires, re-arming across Node's 32-bit timer ceiling. */
   private scheduleAgyWake(): void {
     if (this.closing || this.storeClosed) return;
     if (this.cooldownTimer) {
@@ -2593,13 +2673,26 @@ export class WorkerService {
       this.cooldownTimer = null;
     }
     const until = this.store.cooldown("agy");
-    if (until === null || until <= this.now()) return;
+    if (until === null) return;
+    const remaining = until - this.now();
+    if (remaining <= 0) return;
     const timer = setTimeout(() => {
       this.cooldownTimer = null;
-      if (!this.closing && !this.storeClosed) void this.dispatch();
-    }, until - this.now());
+      if (this.closing || this.storeClosed) return;
+      if (this.agyCooldownActive()) {
+        this.scheduleAgyWake();
+        return;
+      }
+      void this.dispatch();
+    }, Math.min(remaining, MAX_TIMEOUT_MS));
     timer.unref?.();
     this.cooldownTimer = timer;
+  }
+
+  /** Persists a global agy cooldown without shortening any longer active deadline and schedules wake. */
+  private applyAgyCooldown(until: number): void {
+    this.store.setCooldown("agy", until);
+    this.scheduleAgyWake();
   }
 
   /**
@@ -2614,9 +2707,8 @@ export class WorkerService {
   ): void {
     const text = classifiedQuotaText ?? this.agyFailureText(worker, run);
     if (classifiedQuotaText === null && !agyRateLimited(text)) return;
-    const delay = agyResetDelay(text) ?? 60_000;
-    this.store.setCooldown("agy", this.now() + delay);
-    this.scheduleAgyWake();
+    const delay = agyResetDelay(text) ?? AGY_COOLDOWN_FALLBACK_MS;
+    this.applyAgyCooldown(this.now() + delay);
     this.emitChanged(worker.id);
   }
 
@@ -3289,8 +3381,19 @@ export class WorkerService {
     }
     this.pruneHistory();
     this.startNativeSessionCleanup();
+    this.startAgyQuotaPolling();
     // A persisted agy queue may become runnable immediately when its deadline already passed.
     void this.dispatch();
+  }
+
+  /** Starts one immediate AGY quota check and a 5-minute polling timer, once per service. */
+  private startAgyQuotaPolling(): void {
+    if (this.closing || this.storeClosed || this.agyQuotaTimer) return;
+    const interval =
+      this.options.agyQuotaPollIntervalMs ?? AGY_QUOTA_POLL_INTERVAL_MS;
+    this.agyQuotaTimer = setInterval(() => void this.refreshAgyQuota(), interval);
+    this.agyQuotaTimer.unref?.();
+    void this.refreshAgyQuota();
   }
 
   /** Starts one immediate sweep and a per-instance 24-hour timer, once per service. */
@@ -3419,6 +3522,12 @@ export class WorkerService {
       clearInterval(this.nativeRetentionTimer);
       this.nativeRetentionTimer = null;
     }
+    if (this.agyQuotaTimer) {
+      clearInterval(this.agyQuotaTimer);
+      this.agyQuotaTimer = null;
+    }
+    this.agyQuotaAbort?.abort();
+    this.agyQuotaAbort = null;
     let failure: unknown;
     try {
       await this.nativeRetentionSweep;

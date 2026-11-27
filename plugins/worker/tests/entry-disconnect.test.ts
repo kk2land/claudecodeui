@@ -14,6 +14,7 @@ function ensureBuiltEntry(): void {
   const sources = [
     "server/entry.ts",
     "server/service.ts",
+    "server/agy-quota.ts",
     "server/guardian.ts",
     "server/acp.ts",
     "server/pi-history.ts",
@@ -57,18 +58,13 @@ test("losing the host IPC channel stops the active Pi tree and its TERM-resistan
     `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-pi.mjs")}" "$@"\n`,
     { mode: 0o755 },
   );
-  fs.writeFileSync(
-    path.join(bin, "pi"),
-    `#!/bin/sh\nexec "${process.execPath}" "${path.join(pluginRoot, "tests/fixtures/fake-pi.mjs")}" "$@"\n`,
-    { mode: 0o755 },
-  );
   const initialStore = new WorkerStore(data);
   initialStore.saveSettings({});
   initialStore.close();
 
   const child = spawn(process.execPath, [builtEntry], {
     env: {
-      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ""}`,
+      PATH: bin,
       HOME: path.join(root, "home"),
       PI_CODING_AGENT_DIR: path.join(root, "pi-home"),
       TMPDIR: process.env.TMPDIR,

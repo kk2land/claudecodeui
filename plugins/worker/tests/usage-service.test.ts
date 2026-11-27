@@ -263,7 +263,7 @@ test("recovery saves parsed rollout usage for unknown runs even with a known ses
   const data = path.join(root, "data");
   const project = path.join(root, "project");
   fs.mkdirSync(project, { recursive: true });
-  const env = environment(root);
+  const env = environment(root, { PATH: "" });
   const workerId = "worker-unknown";
   const worker: WorkerRecord = {
     id: workerId,

@@ -1,5 +1,6 @@
 import type {
   AgyModelCatalog,
+  AgyQuotaSnapshot,
   PiModelCatalog,
   WorkerConversationMessage,
   WorkerHostCatalogCapabilities,
@@ -157,6 +158,11 @@ export function workerApi(host: WorkerHost) {
     piCatalog: () => request<PiModelCatalog>("GET", "/catalog/pi"),
     /** Real `agy models` directory from the Worker environment, read on demand. */
     agyCatalog: () => request<AgyModelCatalog>("GET", "/catalog/agy"),
+    /** Latest cached AGY account remaining quota from the Worker service. */
+    agyQuota: () => request<AgyQuotaSnapshot>("GET", "/quota/agy"),
+    /** Immediately triggers `agy -p /usage --output-format json` and returns updated quota. */
+    refreshAgyQuota: () =>
+      request<AgyQuotaSnapshot>("POST", "/quota/agy/refresh"),
     /** Host-published project catalog for the Worker project blacklist. */
     projects: () => request<WorkerProjectCatalog>("GET", "/projects"),
     saveSettings: (input: WorkerSettingsInput) =>

@@ -106,6 +106,18 @@ app.get(
 );
 
 app.get(
+  "/quota/agy",
+  uiOnly,
+  route(() => service.agyQuota()),
+);
+
+app.post(
+  "/quota/agy/refresh",
+  uiOnly,
+  route(() => service.refreshAgyQuota()),
+);
+
+app.get(
   "/catalog/pi",
   uiOnly,
   route(() => service.piCatalog()),

@@ -41,6 +41,7 @@ function ensureBuiltEntry(): void {
     'server/guardian.ts',
     'server/worktree.ts',
     'server/logs.ts',
+    'server/agy-quota.ts',
     'shared/contracts.ts',
   ];
   const newest = Math.max(
@@ -134,7 +135,9 @@ test('worker entry, host IPC and MCP proxy deliver and hold real results for Cod
 
   const child = spawn(process.execPath, [builtEntry], {
     env: {
-      PATH: `${bin}${path.delimiter}${process.env.PATH ?? ''}`,
+      // Only the fixture wrapper is visible: the entry queries `agy /usage` on startup
+      // and must never reach the caller's real CLI on its PATH.
+      PATH: bin,
       HOME: path.join(root, 'home'),
       TMPDIR: process.env.TMPDIR,
       LANG: process.env.LANG,

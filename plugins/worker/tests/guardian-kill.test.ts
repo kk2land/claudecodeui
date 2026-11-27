@@ -97,6 +97,7 @@ test("parent SIGKILL: Pi CLI recovery settles from its guardian evidence and rel
     environment: environment(root),
     executablePaths: {
       pi: path.join(pluginRoot, "tests/fixtures/fake-pi.mjs"),
+      agy: path.join(root, "missing-agy"),
     },
     guardianCommand: [
       process.execPath,

@@ -544,7 +544,7 @@ test("restored unknown rejects pause as STOP_UNCONFIRMED and keeps the slot", as
   const { project, data } = seed(root, false);
   const service = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
@@ -573,7 +573,7 @@ test("guardian final evidence with groupExited=false stays unknown and unconfirm
   const { project, data } = seed(root, "unconfirmed");
   const service = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
@@ -789,7 +789,7 @@ test("restart keeps an unconfirmed run unknown and recover releases it", async (
   const { project, data } = seed(root, false);
   const service = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
@@ -814,7 +814,7 @@ test("restart finalizes from guardian evidence without re-running", async (t) =>
   const { project, data } = seed(root, true);
   const service = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
@@ -879,7 +879,7 @@ test("restart settles a shared ACP run only from its exact confirmed generation"
 
   const service = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });
@@ -941,7 +941,7 @@ test("restart keeps an unconfirmed shared timeout unknown, then the same generat
 
   const service = new WorkerService({
     dataDirectory: data,
-    environment: environment(root),
+    environment: environment(root, { PATH: "" }),
     executablePaths: { pi: "" },
     guardianCommand: [process.execPath, "--import", "x", "y"],
   });

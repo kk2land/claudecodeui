@@ -12,6 +12,8 @@ import {
 } from "lucide-react";
 import type {
   AgyModelCatalog,
+  AgyQuotaBucket,
+  AgyQuotaSnapshot,
   CodexModelsDirectory,
   PiModelCatalog,
   WorkerConfig,
@@ -42,6 +44,29 @@ import {
 import { TASK_ROLE_LABELS, TYPE_LABELS } from "./format.js";
 
 const WORKER_TYPES: SupportedWorkerType[] = ["pi", "codex", "agy"];
+const AGY_QUOTA_REFRESH_POLL_MS = 5 * 60 * 1000;
+
+function quotaWindowLabel(bucket: AgyQuotaBucket): string {
+  if (bucket.window === "5h") return "5 小时";
+  if (bucket.window === "weekly") return "每周";
+  return bucket.label || bucket.window || "剩余额度";
+}
+
+function formatQuotaTime(iso: string | null, includeDate: boolean): string | null {
+  if (!iso) return null;
+  const date = new Date(iso);
+  if (!Number.isFinite(date.getTime())) return null;
+  const pad = (value: number) => String(value).padStart(2, "0");
+  const hm = pad(date.getHours()) + ":" + pad(date.getMinutes());
+  if (!includeDate) return hm;
+  return pad(date.getMonth() + 1) + "/" + pad(date.getDate()) + " " + hm;
+}
+
+function quotaPercentClass(percent: number): string {
+  if (percent <= 10) return "worker-danger";
+  if (percent <= 30) return "worker-soft";
+  return "";
+}
 
 /** Result of one optional host catalog read; a stale value stays visible while retrying. */
 type Loadable<T> = {
@@ -303,6 +328,16 @@ export function SettingsView({
   const [dragState, setDragState] = useState<{ id: string; overId: string | null } | null>(null);
 
   const [agyCatalog, setAgyCatalog] = useState<Loadable<AgyModelCatalog>>(loading());
+  const [agyQuota, setAgyQuota] = useState<AgyQuotaSnapshot>({
+    status: "loading",
+    groups: [],
+    updatedAt: null,
+    error: null,
+  });
+  const [agyQuotaRefreshing, setAgyQuotaRefreshing] = useState(false);
+  const agyQuotaMounted = useRef(true);
+  const agyQuotaSeq = useRef(0);
+  const agyQuotaManualInFlight = useRef(false);
   const [projectCatalog, setProjectCatalog] = useState<Loadable<WorkerProjectCatalog>>(loading());
   const [codexCatalog, setCodexCatalog] = useState<Loadable<WorkerModelCatalog>>(loading());
   const [piCatalog, setPiCatalog] = useState<Loadable<PiModelCatalog>>(loading());
@@ -343,6 +378,50 @@ export function SettingsView({
       live = false;
     };
   }, [api, needsAgyCatalog, agyAttempt]);
+
+  const loadAgyQuota = (mode: "read" | "refresh") => {
+    if (agyQuotaManualInFlight.current) return;
+    const isManual = mode === "refresh";
+    if (isManual) {
+      agyQuotaManualInFlight.current = true;
+      setAgyQuotaRefreshing(true);
+    }
+    const seq = ++agyQuotaSeq.current;
+    const request = isManual ? api.refreshAgyQuota() : api.agyQuota();
+    void request
+      .then((value) => {
+        if (!agyQuotaMounted.current || agyQuotaSeq.current !== seq) return;
+        setAgyQuota(value);
+      })
+      .catch(() => {
+        if (!agyQuotaMounted.current || agyQuotaSeq.current !== seq) return;
+        setAgyQuota((current) => ({
+          status: "error",
+          groups: current.groups,
+          updatedAt: current.updatedAt,
+          error: isManual ? "AGY 额度刷新失败" : "AGY 额度获取失败",
+        }));
+      })
+      .finally(() => {
+        if (!isManual) return;
+        agyQuotaManualInFlight.current = false;
+        if (agyQuotaMounted.current) setAgyQuotaRefreshing(false);
+      });
+  };
+
+  useEffect(() => {
+    agyQuotaMounted.current = true;
+    loadAgyQuota("read");
+    const timer = window.setInterval(
+      () => loadAgyQuota("read"),
+      AGY_QUOTA_REFRESH_POLL_MS,
+    );
+    return () => {
+      agyQuotaMounted.current = false;
+      window.clearInterval(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [api]);
 
   useEffect(() => {
     let live = true;
@@ -1323,43 +1402,119 @@ export function SettingsView({
               运行中或状态未知的任务、原生会话和工作目录保留。
             </small>
           </label>
-          <label>
-            ACP 空闲关闭时间（秒）
-            {acpIdleSupported ? (
-              <>
-                <input
-                  type="number"
-                  min="1"
-                  max={ACP_IDLE_TIMEOUT_MAX_SECONDS}
-                  step="1"
-                  aria-label="ACP 空闲关闭时间（秒）"
-                  value={acpIdleTimeoutSeconds}
-                  onChange={(event) => {
-                    setAcpIdleTimeoutSeconds(event.target.value);
-                    setAcpIdleTimeoutDirty(true);
-                  }}
-                />
+          <div className="worker-settings-split">
+            <label>
+              ACP 空闲关闭时间（秒）
+              {acpIdleSupported ? (
+                <>
+                  <input
+                    type="number"
+                    min="1"
+                    max={ACP_IDLE_TIMEOUT_MAX_SECONDS}
+                    step="1"
+                    aria-label="ACP 空闲关闭时间（秒）"
+                    value={acpIdleTimeoutSeconds}
+                    onChange={(event) => {
+                      setAcpIdleTimeoutSeconds(event.target.value);
+                      setAcpIdleTimeoutDirty(true);
+                    }}
+                  />
+                  <small>
+                    默认 {ACP_IDLE_TIMEOUT_DEFAULT_SECONDS} 秒（5 分钟）。AGY
+                    在最后一个任务结束后开始计时。
+                  </small>
+                </>
+              ) : (
+                <>
+                  <input
+                    type="text"
+                    aria-label="ACP 空闲关闭时间（秒）"
+                    value=""
+                    placeholder="当前后端版本暂不支持"
+                    disabled
+                  />
+                  <small>
+                    当前 Worker 插件服务版本较旧，暂不支持配置 ACP 空闲关闭时间；重启当前
+                    CloudCLI 服务后即可修改，其他设置仍可正常保存。
+                  </small>
+                </>
+              )}
+            </label>
+            <div className="worker-agy-quota" aria-label="AGY 账号剩余额度">
+              <div className="worker-agy-quota-head">
+                <strong>AGY 账号剩余额度</strong>
+                <button
+                  type="button"
+                  className="worker-agy-quota-refresh"
+                  aria-label="刷新 AGY 账号剩余额度"
+                  disabled={agyQuotaRefreshing || agyQuota.status === "loading"}
+                  onClick={() => loadAgyQuota("refresh")}
+                >
+                  <RefreshCw
+                    size={12}
+                    className={
+                      agyQuotaRefreshing || agyQuota.status === "loading"
+                        ? "worker-spin"
+                        : undefined
+                    }
+                  />
+                  {agyQuotaRefreshing ? "刷新中…" : "刷新"}
+                </button>
+              </div>
+              {agyQuota.status === "loading" && !agyQuota.groups.length ? (
+                <small>正在获取 AGY 账号剩余额度…</small>
+              ) : null}
+              {agyQuota.status === "error" ? (
+                <div className="worker-error" role="alert">
+                  获取失败：{agyQuota.error || "AGY 额度查询失败"}
+                </div>
+              ) : null}
+              {agyQuota.groups.length ? (
+                <div className="worker-agy-quota-groups">
+                  {agyQuota.groups.map((group) => (
+                    <div className="worker-agy-quota-group" key={group.name}>
+                      <small>{group.name}</small>
+                      <div className="worker-agy-quota-buckets">
+                        {group.buckets.map((bucket) => {
+                          const resetLabel = formatQuotaTime(bucket.resetAt, true);
+                          return (
+                            <span
+                              className="worker-agy-quota-bucket"
+                              key={bucket.id}
+                            >
+                              <span className="worker-muted">
+                                {quotaWindowLabel(bucket)}
+                              </span>
+                              <strong
+                                className={
+                                  "worker-agy-quota-percent " +
+                                  quotaPercentClass(bucket.remainingPercent)
+                                }
+                              >
+                                {bucket.remainingPercent}%
+                              </strong>
+                              {resetLabel ? (
+                                <span className="worker-muted">
+                                  ({resetLabel} 重置)
+                                </span>
+                              ) : null}
+                            </span>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              ) : agyQuota.status === "ready" ? (
+                <small>暂无可用额度数据。</small>
+              ) : null}
+              {agyQuota.updatedAt ? (
                 <small>
-                  默认 {ACP_IDLE_TIMEOUT_DEFAULT_SECONDS} 秒（5 分钟）。AGY
-                  在最后一个任务结束后开始计时。
+                  更新于 {formatQuotaTime(agyQuota.updatedAt, false)} · 每 5 分钟自动更新
                 </small>
-              </>
-            ) : (
-              <>
-                <input
-                  type="text"
-                  aria-label="ACP 空闲关闭时间（秒）"
-                  value=""
-                  placeholder="当前后端版本暂不支持"
-                  disabled
-                />
-                <small>
-                  当前 Worker 插件服务版本较旧，暂不支持配置 ACP 空闲关闭时间；重启当前
-                  CloudCLI 服务后即可修改，其他设置仍可正常保存。
-                </small>
-              </>
-            )}
-          </label>
+              ) : null}
+            </div>
+          </div>
         </section>
         <footer className="worker-settings-footer">
           <p>
