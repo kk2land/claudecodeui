@@ -779,10 +779,10 @@
     max-width: 80%;
   }
 
-  /* Phones need the transcript, composer, and banners to use nearly the full pane width; the 80% cap leaves visible empty gutters next to the existing px padding, while the 1.5rem reserve keeps the collapsed floating quick-settings handle from covering text. */
+  /* Phones restore the historical fixed 54.25rem cap, which exceeds the viewport and therefore lets the existing px padding define the readable width, matching the pre-b1d5fb29 layout. Desktop keeps the pane-relative 80% cap above. */
   @media (max-width: 768px) {
     .chat-content-width {
-      max-width: calc(100% - 1.5rem);
+      max-width: 54.25rem;
     }
   }
 
