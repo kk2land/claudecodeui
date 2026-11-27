@@ -227,7 +227,7 @@ export function CodexControlPanel({ controls, modelProviders, onExecutePlan, set
   );
   if (settingsContainer === undefined) {
     return (
-      <div className="mx-auto mb-2 flex min-h-0 w-full min-w-0 max-w-[54.25rem] flex-col gap-2 text-sm">
+      <div className="mx-auto mb-2 flex min-h-0 w-full min-w-0 chat-content-width flex-col gap-2 text-sm">
         {settings}
         {hasNotices && notices}
       </div>
