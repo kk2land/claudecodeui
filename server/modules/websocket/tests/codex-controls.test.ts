@@ -424,6 +424,26 @@ test('a turn ending after ifEmpty append hands the opted-in steer ticket to the 
   });
 });
 
+test('a steer takes the voice flag only from its claimed queue entry', async () => {
+  await harness(async (h) => {
+    const { queuedMessage: spoken } = sessionDraftsDb.appendQueuedMessage(h.userId, h.sessionId, {
+      content: 'spoken follow-up', options: { inputSource: 'voice' }, attachments: [],
+    }, true);
+    h.send({ action: 'steer', messageId: spoken.id, expectedTurnId: 't1' });
+    await settle();
+    assert.equal(h.calls.at(-1)?.action.inputSource, 'voice');
+    assert.equal(h.frames.at(-1)?.delivery, 'accepted');
+
+    // A voice flag on the external control body is not trusted or forwarded.
+    const { queuedMessage: typed } = sessionDraftsDb.appendQueuedMessage(h.userId, h.sessionId, {
+      content: 'typed follow-up', options: {}, attachments: [],
+    }, true);
+    h.send({ action: 'steer', messageId: typed.id, expectedTurnId: 't1', inputSource: 'voice' }, 'request-2');
+    await settle();
+    assert.equal('inputSource' in (h.calls.at(-1)?.action ?? {}), false);
+  });
+});
+
 test('a user Stop keeps an opted-in stale steer held after the runtime returns to idle', async () => {
   await harness(async (h) => {
     sessionDraftsDb.saveDraft(h.userId, h.sessionId, { queuedMessage: queued });

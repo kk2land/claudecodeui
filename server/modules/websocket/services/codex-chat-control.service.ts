@@ -119,7 +119,10 @@ export async function executeCodexChatControl(input: ControlInput, dependencies:
           ? [...new Set(claimedOptions.todoIds.filter((id): id is string => typeof id === 'string' && Boolean(id.trim())))]
           : [];
         action = { action: 'steer', expectedTurnId: raw.expectedTurnId, requestId, content: typeof message.content === 'string' ? message.content : '',
-          attachments: filterAttachments(message.attachments ?? message.images) };
+          attachments: filterAttachments(message.attachments ?? message.images),
+          // Only the claimed queue entry's own options may mark a spoken steer;
+          // the external control body never carries this flag.
+          ...(claimedOptions.inputSource === 'voice' ? { inputSource: 'voice' as const } : {}) };
       } else {
         action = parseControl(raw);
       }

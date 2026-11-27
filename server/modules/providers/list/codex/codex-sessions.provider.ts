@@ -5,7 +5,7 @@ import readline from 'node:readline';
 
 import { sessionRuntimeDb, sessionsDb } from '@/modules/database/index.js';
 import { codexAppServer } from '@/modules/providers/list/codex/codex-app-server.client.js';
-import { stripVoiceInputCue } from '@/modules/providers/list/codex/codex-app-server.events.js';
+import { normalizeVoiceInput } from '@/modules/providers/list/codex/codex-app-server.events.js';
 import { codexAppServerTransport } from '@/modules/providers/list/codex/codex-app-server.transport.js';
 import { parseFilesInputTag, toImageAttachments } from '@/shared/image-attachments.js';
 import type {
@@ -2081,8 +2081,10 @@ export class CodexSessionsProvider implements IProviderSessions {
             .join('\n')
           : String(raw.message.content || '');
       // Codex may store a spoken turn's original text and its server-added
-      // voice cue as one newline-joined string; CloudCLI shows only the words.
-      const parsedFiles = parseFilesInputTag(stripVoiceInputCue(content));
+      // voice cue as one newline-joined string; a current cue reads back as the
+      // literal `<voice>` tag in front of the words, while an older cue reads
+      // back as plain words.
+      const parsedFiles = parseFilesInputTag(normalizeVoiceInput(content));
       const rawImages = Array.isArray(raw.images) && raw.images.length > 0 ? raw.images : undefined;
       const files = parsedFiles.attachments.length > 0 ? parsedFiles.attachments : undefined;
       if (!parsedFiles.text.trim() && !rawImages && !files) {

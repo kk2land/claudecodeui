@@ -1158,7 +1158,7 @@ export type CodexControlAction =
   | { action: 'runtime'; runtime: CodexRuntimeMode }
   | { action: 'model-provider'; modelProvider: string; model: string | null }
   | { action: 'goal'; operation: 'get' | 'set' | 'pause' | 'resume' | 'clear'; objective?: string; tokenBudget?: number }
-  | { action: 'steer'; expectedTurnId: string; requestId: string; content: string; attachments: unknown[] }
+  | { action: 'steer'; expectedTurnId: string; requestId: string; content: string; attachments: unknown[]; inputSource?: 'voice' }
   | { action: 'answer'; requestId: string; answers: Record<string, { answers: string[] }> };
 
 /** Application session settings, stored separately from the native goal's source of truth. */

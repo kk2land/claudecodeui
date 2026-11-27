@@ -707,14 +707,17 @@ test('voice transcription adds a per-turn companion Text and the next turn reset
   assert.deepEqual(start.input.map((part: AnyRecord) => part.type), ['text', 'text']);
   assert.equal(start.input[0].text, 'spoken request');
   assert.equal(start.input[1].text, VOICE_INPUT_CUE);
+  assert.equal(VOICE_INPUT_CUE, "Voice input. Brief spoken answer first in user's language. Details if needed.");
+  assert.equal(start.input.filter((part: AnyRecord) => part.text === VOICE_INPUT_CUE).length, 1);
   assert.equal(VOICE_INPUT_CUE.includes('spoken request'), false);
-  // The native echo still binds by ID, while CloudCLI only displays the words.
+  // The native echo still binds by ID; CloudCLI restores the voice tag from the
+  // cue rather than assuming the provider repeats any marker.
   h.event('item/completed', { turnId: 'turn-1', item: {
     type: 'userMessage', id: 'u1', clientId: 'voice-1', content: start.input,
   } });
   const echo = h.events.filter((event) => event.role === 'user').at(-1);
   assert.equal(echo?.id, 'voice-1');
-  assert.equal(echo?.content, 'spoken request');
+  assert.equal(echo?.content, '<voice>spoken request');
   h.finish('turn-1');
   await first;
 
@@ -751,13 +754,33 @@ test('steer binds the active turn and user echo confirms delivery', async () => 
   const h = harness(); const running = h.run();
   await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
   await h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'receipt-1', content: 'also test it', attachments: [] });
-  assert.equal(h.calls.find((call) => call.method === 'turn/steer')?.params.clientUserMessageId, 'receipt-1');
+  const steer = h.calls.find((call) => call.method === 'turn/steer')?.params;
+  assert.equal(steer?.clientUserMessageId, 'receipt-1');
+  assert.deepEqual(steer?.input.map((part: AnyRecord) => part.type), ['text']);
+  assert.equal(steer?.input[0].text, 'also test it');
+  assert.equal(h.events.filter((event) => event.role === 'user').at(-1)?.content, 'also test it');
   h.event('item/completed', { turnId: 'turn-1', item: { type: 'userMessage', id: 'u1', clientId: 'receipt-1', content: [{ type: 'text', text: 'also test it' }] } });
   assert.deepEqual(h.accepted, ['receipt-1']);
   assert.equal(h.events.find((event) => event.role === 'user')?.id, 'receipt-1');
   h.finish(); await running;
   await assert.rejects(h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'receipt-2', content: 'late', attachments: [] }), /ended or is stopping/);
   assert.equal(h.calls.filter((call) => call.method === 'turn/steer').length, 1);
+});
+
+test('a voice steer sends one cue part and its immediate echo carries the voice tag', async () => {
+  const h = harness(); const running = h.run();
+  await eventually(() => Boolean(h.runtime.getState('app-session').turnId));
+  await h.control({ action: 'steer', expectedTurnId: 'turn-1', requestId: 'voice-steer-1', content: 'spoken steer',
+    attachments: [], inputSource: 'voice' });
+  const steer = h.calls.find((call) => call.method === 'turn/steer')?.params;
+  assert.deepEqual(steer?.input.map((part: AnyRecord) => part.type), ['text', 'text']);
+  assert.equal(steer?.input[0].text, 'spoken steer');
+  assert.equal(steer?.input[1].text, VOICE_INPUT_CUE);
+  assert.equal(steer?.input.filter((part: AnyRecord) => part.text === VOICE_INPUT_CUE).length, 1);
+  const echo = h.events.filter((event) => event.role === 'user').at(-1);
+  assert.equal(echo?.id, 'voice-steer-1');
+  assert.equal(echo?.content, '<voice>spoken steer');
+  h.finish(); await running;
 });
 
 test('stop pauses the goal, holds queue, then waits for native terminal confirmation', async () => {

@@ -16,7 +16,7 @@ test('native user echoes restore attachment metadata without exposing the transp
   assert.equal(message.images?.[0]?.path, '/tmp/picture.png');
 });
 
-test('spoken user echoes keep the original words, identity and attachments', () => {
+test('spoken user echoes restore the voice tag, words, identity and attachments', () => {
   const [separate] = normalizeAppServerItem({ type: 'userMessage', id: 'item', clientId: 'voice-1',
     content: [
       { type: 'text', text: 'Spoken words' },
@@ -24,7 +24,8 @@ test('spoken user echoes keep the original words, identity and attachments', () 
       { type: 'localImage', path: '/tmp/voice.png' },
     ] }, 'app', 'turn');
   assert.equal(separate.id, 'voice-1');
-  assert.equal(separate.content, 'Spoken words');
+  assert.equal(separate.content, '<voice>Spoken words');
+  assert.equal(separate.content.includes(VOICE_INPUT_CUE), false);
   assert.ok(Array.isArray(separate.images));
   assert.equal(separate.images[0]?.path, '/tmp/voice.png');
 
@@ -32,7 +33,17 @@ test('spoken user echoes keep the original words, identity and attachments', () 
   const [joined] = normalizeAppServerItem({ type: 'userMessage', id: 'item', clientId: 'voice-2',
     content: [{ type: 'text', text: `Spoken words\n${VOICE_INPUT_CUE}` }] }, 'app', 'turn');
   assert.equal(joined.id, 'voice-2');
-  assert.equal(joined.content, 'Spoken words');
+  assert.equal(joined.content, '<voice>Spoken words');
+});
+
+test('older spoken cues are still stripped without adding the new voice tag', () => {
+  const legacy = 'This turn is the user speaking and the reply will be read aloud: start with a short, natural conclusion in the user\'s language, then add technical detail only as needed.';
+  const [separate] = normalizeAppServerItem({ type: 'userMessage', id: 'item', clientId: 'legacy-1',
+    content: [{ type: 'text', text: 'Older words' }, { type: 'text', text: legacy }] }, 'app', 'turn');
+  assert.equal(separate.content, 'Older words');
+  const [blankLine] = normalizeAppServerItem({ type: 'userMessage', id: 'item', clientId: 'legacy-2',
+    content: [{ type: 'text', text: `Older words\n\n${legacy}` }] }, 'app', 'turn');
+  assert.equal(blankLine.content, 'Older words');
 });
 
 test('completed plans and file diffs close their tool cards using stable history identities', () => {

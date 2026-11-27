@@ -148,13 +148,22 @@ type NativeRequest = {
   resolve(result: unknown): void;
 };
 
-function buildInput(command: string, attachments: unknown): AnyRecord[] {
+/**
+ * Builds the native input parts shared by `turn/start` and `turn/steer`.
+ *
+ * A spoken turn receives {@link VOICE_INPUT_CUE} as its own trailing Text part,
+ * exactly once. Start and steer both call this so `submittedInput`, the native
+ * payload and the immediate normalized echo always agree.
+ */
+function buildInput(command: string, attachments: unknown, voiceInput = false): AnyRecord[] {
   const files = normalizeAttachmentDescriptors(attachments);
   const text = appendFilesInputTag(command, files.filter((file) => !isImageAttachmentDescriptor(file)));
-  return [
+  const input = [
     { type: 'text', text: text.trim() ? text : 'Please analyze the attached file(s).', text_elements: [] },
     ...files.filter(isImageAttachmentDescriptor).map((file) => ({ type: 'localImage', path: file.path })),
   ];
+  if (voiceInput) input.push({ type: 'text', text: VOICE_INPUT_CUE, text_elements: [] });
+  return input;
 }
 
 /**
@@ -847,14 +856,8 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       // The prepared plan prompt is both what the native turn receives and what
       // `submittedInput` records, so the native user echo correlates even when it
       // carries no client id.
-      const input = buildInput(turnCommand, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])]);
-      // A speech-derived turn gets a fixed server-owned companion Text part for
-      // this turn only, in both Default and Plan mode. Keeping the user's words
-      // as the first part and the cue as a separate part avoids touching the
-      // native mode preset; history normalization strips the cue again.
-      if (options.inputSource === 'voice' && !approvedPlan) {
-        input.push({ type: 'text', text: VOICE_INPUT_CUE, text_elements: [] });
-      }
+      const input = buildInput(turnCommand, options.attachments ?? [...(options.images ?? []), ...(options.files ?? [])],
+        options.inputSource === 'voice' && !approvedPlan);
       turn.submittedInput = { clientId: clientUserMessageId, input };
       // Queue dispatch keeps its receipt reserved until input can actually be
       // delivered. A failed provider resume must leave that message queued.
@@ -1651,10 +1654,11 @@ export class CodexAppServerRuntime implements IProviderRuntime {
       if (!session || session.stopRequested || !session.turn || session.turn.terminal || session.turn.id !== action.expectedTurnId) {
         throw new AppError('The target turn ended or is stopping. Your message is still queued.', { code: 'STALE_TURN', statusCode: 409 });
       }
+      const input = buildInput(action.content, action.attachments, action.inputSource === 'voice');
       await this.client.request('turn/steer', { threadId: session.threadId, expectedTurnId: action.expectedTurnId,
-        clientUserMessageId: action.requestId, input: buildInput(action.content, action.attachments) });
+        clientUserMessageId: action.requestId, input });
       // Steer acceptance can precede its native userMessage item by an entire model call.
-      for (const message of normalizeAppServerItem({ type: 'userMessage', id: action.requestId, clientId: action.requestId, content: buildInput(action.content, action.attachments) }, sessionId, action.expectedTurnId)) session.writer.send(message);
+      for (const message of normalizeAppServerItem({ type: 'userMessage', id: action.requestId, clientId: action.requestId, content: input }, sessionId, action.expectedTurnId)) session.writer.send(message);
       return this.getState(sessionId);
     }
     if (action.action === 'answer') {

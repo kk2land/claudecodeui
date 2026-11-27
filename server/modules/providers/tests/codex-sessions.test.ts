@@ -714,6 +714,8 @@ test('Codex history hides the spoken-turn cue but keeps the original prompt and 
     await mkdir(path.dirname(transcriptPath), { recursive: true });
     const spoken = 'Spoken prompt that must read back unchanged';
     const legacySpoken = 'Legacy spoken prompt';
+    const joinedSpoken = 'Joined current spoken prompt';
+    const legacyCue = 'This turn is the user speaking and the reply will be read aloud: start with a short, natural conclusion in the user\'s language, then add technical detail only as needed.';
     const lines = [
       { type: 'session_meta', payload: { id: providerSessionId, cwd: workspacePath } },
       { type: 'event_msg', payload: { type: 'task_started', turn_id: 'voice-turn-1' } },
@@ -734,9 +736,16 @@ test('Codex history hides the spoken-turn cue but keeps the original prompt and 
       // Older files carry the joined prompt and cue in a single string.
       { type: 'event_msg', payload: {
         type: 'user_message', client_id: 'client-voice-2',
-        message: `${legacySpoken}\n${VOICE_INPUT_CUE}`,
+        message: `${legacySpoken}\n${legacyCue}`,
       } },
       { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'voice-turn-2' } },
+      { type: 'event_msg', payload: { type: 'task_started', turn_id: 'voice-turn-3' } },
+      // Current builds may still join the short cue and the prompt into one string.
+      { type: 'event_msg', payload: {
+        type: 'user_message', client_id: 'client-voice-3',
+        message: `${joinedSpoken}\n${VOICE_INPUT_CUE}`,
+      } },
+      { type: 'event_msg', payload: { type: 'task_complete', turn_id: 'voice-turn-3' } },
     ].map((entry) => JSON.stringify(entry));
     await writeFile(transcriptPath, `${lines.join('\n')}\n`, 'utf8');
 
@@ -747,12 +756,14 @@ test('Codex history hides the spoken-turn cue but keeps the original prompt and 
 
       const history = await new CodexSessionsProvider().fetchHistory('app-voice-1');
       const users = history.messages.filter((message) => message.role === 'user');
-      assert.equal(users.length, 2);
+      assert.equal(users.length, 3);
       assert.equal(users[0]?.id, 'client-voice-1');
-      assert.equal(users[0]?.content, spoken);
+      assert.equal(users[0]?.content, `<voice>${spoken}`);
       assert.equal((users[0]?.images as Array<{ path?: string }> | undefined)?.[0]?.path, '/tmp/voice-history.png');
       assert.equal(users[1]?.id, 'client-voice-2');
       assert.equal(users[1]?.content, legacySpoken);
+      assert.equal(users[2]?.id, 'client-voice-3');
+      assert.equal(users[2]?.content, `<voice>${joinedSpoken}`);
     });
   } finally {
     restoreHomeDir();

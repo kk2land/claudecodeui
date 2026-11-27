@@ -12,24 +12,42 @@ import { createNormalizedMessage, unifiedDiffToTexts, parseFilesInputTag } from 
  * which `settings.developer_instructions` would replace.
  */
 export const VOICE_INPUT_CUE =
+  'Voice input. Brief spoken answer first in user\'s language. Details if needed.';
+
+/**
+ * Older builds appended a longer spoken-turn cue. Its transcripts stay in
+ * Codex rollouts, so history normalization still recognizes it, but its bubble
+ * keeps the plain words it always showed.
+ */
+const LEGACY_VOICE_INPUT_CUE =
   'This turn is the user speaking and the reply will be read aloud: start with a short, natural conclusion in the user\'s language, then add technical detail only as needed.';
 
 /**
- * Strips the trailing {@link VOICE_INPUT_CUE} from a prompt assembled by
- * joining Text parts with newlines.
+ * Normalizes a prompt assembled by joining Text parts with newlines.
  *
  * The runtime, {@link normalizeAppServerItem} and Codex history normalization
- * share it. A cue that is not a trailing separate line is left alone, and the
- * raw rollout is never rewritten.
+ * share it. Only the last whole line may be the fixed current or legacy cue.
+ * The current cue is replaced by the literal `<voice>` tag so the client can
+ * tell the turn came from speech without trusting the native echo to keep a
+ * marker; the legacy cue is still removed without adding a tag. Any other
+ * content, and the raw rollout, is left alone. Both the blank-line and
+ * single-newline forms a Text-part join can produce are recognized.
  */
-export function stripVoiceInputCue(content: string): string {
-  const blankLineSuffix = `\n\n${VOICE_INPUT_CUE}`;
+export function normalizeVoiceInput(content: string): string {
+  const spoken = stripTrailingVoiceCue(content, VOICE_INPUT_CUE);
+  if (spoken !== null) return `<voice>${spoken}`;
+  return stripTrailingVoiceCue(content, LEGACY_VOICE_INPUT_CUE) ?? content;
+}
+
+/** Returns the prompt without a trailing cue line, or null when that cue is absent. */
+function stripTrailingVoiceCue(content: string, cue: string): string | null {
+  const blankLineSuffix = `\n\n${cue}`;
   if (content.endsWith(blankLineSuffix)) {
     return content.slice(0, -blankLineSuffix.length);
   }
 
-  const lineSuffix = `\n${VOICE_INPUT_CUE}`;
-  return content.endsWith(lineSuffix) ? content.slice(0, -lineSuffix.length) : content;
+  const lineSuffix = `\n${cue}`;
+  return content.endsWith(lineSuffix) ? content.slice(0, -lineSuffix.length) : null;
 }
 
 /** Codex runtime uses this adapter for both progressive items and final item snapshots. */
@@ -48,7 +66,7 @@ export function normalizeAppServerItem(item: AnyRecord, sessionId: string, turnI
       return [make({ role: 'assistant', content: item.text ?? '', model: item.model, isStreaming: !item.completed })];
     case 'userMessage': {
       const text = (item.content ?? []).filter((part: AnyRecord) => part.type === 'text').map((part: AnyRecord) => part.text).join('\n');
-      const parsed = parseFilesInputTag(stripVoiceInputCue(text));
+      const parsed = parseFilesInputTag(normalizeVoiceInput(text));
       return [make({
         id: item.clientId || id,
         clientMessageId: item.clientId,
