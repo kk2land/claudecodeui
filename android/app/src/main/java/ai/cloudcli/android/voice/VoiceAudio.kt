@@ -154,9 +154,9 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
                     featConfig = FeatureConfig(sampleRate = INPUT_RATE, featureDim = 80),
                     modelConfig = OnlineModelConfig(
                         transducer = OnlineTransducerModelConfig(
-                            encoder = "$ZIPFORMER/encoder-epoch-99-avg-1.int8.onnx",
-                            decoder = "$ZIPFORMER/decoder-epoch-99-avg-1.int8.onnx",
-                            joiner = "$ZIPFORMER/joiner-epoch-99-avg-1.int8.onnx",
+                            encoder = "$ZIPFORMER/encoder.int8.onnx",
+                            decoder = "$ZIPFORMER/decoder.onnx",
+                            joiner = "$ZIPFORMER/joiner.int8.onnx",
                         ),
                         tokens = "$ZIPFORMER/tokens.txt",
                     ),
@@ -313,9 +313,10 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
     }
 
     /**
-     * Both utterance endings (VAD/max-duration segment and the stop flush) must give Zipformer the
-     * tail silence the sherpa-onnx v2.0.2 streaming example appends before InputFinished
-     * (c-api-examples/streaming-zipformer-c-api.c#L99-L108 uses 0.3 s).
+     * Both utterance endings (VAD/max-duration segment and the stop flush) must flush the model's
+     * final 480 ms chunk. With the X-ASR 480 ms model, 0.5 s of tail silence still dropped the last
+     * character on 11 of 51 AISHELL test clips, while 0.7 s matched 1.0 s; the VAD segment already
+     * contributes 0.65 s of silence.
      */
     private fun finishStream(stream: OnlineStream, asr: OnlineRecognizer) {
         stream.acceptWaveform(FloatArray(TAIL_PADDING) { 0f }, INPUT_RATE)
@@ -537,7 +538,7 @@ class VoiceAudio(context: Context, private val listener: Listener) : AutoCloseab
         const val INPUT_RATE = 16_000
         const val VAD_WINDOW = 512
         const val PRE_ROLL_WINDOWS = 6 // 192 ms at 16 kHz.
-        const val TAIL_PADDING = (INPUT_RATE * 0.3f).toInt() // Matches sherpa-onnx's 0.3 s example.
+        const val TAIL_PADDING = (INPUT_RATE * 0.7f).toInt()
         const val MAX_SPEECH_WINDOWS = 60 * INPUT_RATE / VAD_WINDOW // Matches VAD maxSpeechDuration.
         const val SYNTHESIS_CHARS = 400
         const val ZIPFORMER = "voice/zipformer"

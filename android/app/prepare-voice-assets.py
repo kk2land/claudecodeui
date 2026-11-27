@@ -11,9 +11,11 @@ from urllib.request import urlopen
 
 RELEASES = "https://github.com/k2-fsa/sherpa-onnx/releases/download"
 SHERPA_AAR = "sherpa-onnx-2.0.2.aar"
-ZIPFORMER = "sherpa-onnx-streaming-zipformer-small-bilingual-zh-en-2023-02-16"
+X_ASR = "sherpa-onnx-x-asr-480ms-streaming-zipformer-transducer-zh-en-punct-int8-2026-06-05"
 KOKORO = "kokoro-int8-multi-lang-v1_1"
-ZIPFORMER_CARD = "https://huggingface.co/csukuangfj/k2fsa-zipformer-bilingual-zh-en-t"
+X_ASR_SOURCE = "https://github.com/Gilgamesh-J/X-ASR"
+X_ASR_CARD = "https://huggingface.co/GilgameshWind/X-ASR-zh-en"
+X_ASR_PIN = "838297cd47fed858e6cf72eaf5a52f948a3edd73"
 BUF_SIZE = 1024 * 1024
 
 
@@ -60,8 +62,8 @@ def extract(archive, source_dir, destination, files):
 
 
 def prepare_models(cache, voice):
-    asr = fetch(cache, f"{RELEASES}/asr-models/{ZIPFORMER}.tar.bz2",
-                "2b7c63322b32e5e0f2526043a1103366119ca58dd615cd7105a37c01db9553d7")
+    asr = fetch(cache, f"{RELEASES}/asr-models/{X_ASR}.tar.bz2",
+                "fa5f63d618e5a01526e275a358bb7772e403f84808a4769fba52cffd8160bf74")
     vad = fetch(cache, f"{RELEASES}/asr-models/silero_vad_v5.onnx",
                 "6b99cbfd39246b6706f98ec13c7c50c6b299181f2474fa05cbc8046acc274396")
     tts = fetch(cache, f"{RELEASES}/tts-models/{KOKORO}.tar.bz2",
@@ -70,27 +72,28 @@ def prepare_models(cache, voice):
                            "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30")
     silero_license = fetch(cache, "https://raw.githubusercontent.com/snakers4/silero-vad/v5.0/LICENSE",
                            "2e63e9a38b6e8fc0c7bc37ce174caca1862870856c6daf5697cfb785e925520b")
-    zipformer_readme = fetch(cache, f"{ZIPFORMER_CARD}/raw/e2382758de9a0219b4efe682b95af30b399db3b8/README.md",
-                             "037edf8e561cff512493746532af04f5c40cb6fbc55d3e360a399215b6b0b915")
+    x_asr_readme = fetch(cache, f"https://raw.githubusercontent.com/Gilgamesh-J/X-ASR/{X_ASR_PIN}/README.md",
+                         "7f0696b142da714d0dff5441cbcdf17a92a404fb7300bc05f867cf0056972154")
+    x_asr_license = fetch(cache, f"https://raw.githubusercontent.com/Gilgamesh-J/X-ASR/{X_ASR_PIN}/LICENSE",
+                          "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4")
 
-    extract(asr, ZIPFORMER, voice / "zipformer", [
-        "encoder-epoch-99-avg-1.int8.onnx", "decoder-epoch-99-avg-1.int8.onnx",
-        "joiner-epoch-99-avg-1.int8.onnx", "tokens.txt",
+    extract(asr, X_ASR, voice / "zipformer", [
+        "encoder.int8.onnx", "decoder.onnx", "joiner.int8.onnx", "tokens.txt",
     ])
     # The v2.0.2 asset frontend uses lexicons and FSTs for Kokoro.
     extract(tts, KOKORO, voice / "kokoro", [
         "model.int8.onnx", "voices.bin", "tokens.txt", "lexicon-us-en.txt", "lexicon-zh.txt",
         "date-zh.fst", "number-zh.fst", "phone-zh.fst", "LICENSE", "README.md",
     ])
-    shutil.copyfile(zipformer_readme, voice / "zipformer" / "README.md")
-    shutil.copyfile(sherpa_license, voice / "zipformer" / "LICENSE")
+    shutil.copyfile(x_asr_readme, voice / "zipformer" / "README.md")
+    shutil.copyfile(x_asr_license, voice / "zipformer" / "LICENSE")
     shutil.copyfile(sherpa_license, voice / "sherpa-onnx-LICENSE")
     shutil.copyfile(silero_license, voice / "silero-LICENSE")
     shutil.copyfile(vad, voice / vad.name)
     (voice / "ATTRIBUTION.txt").write_text(
         "sherpa-onnx v2.0.2 (Apache-2.0)\nhttps://github.com/k2-fsa/sherpa-onnx/releases/tag/v2.0.2\n\n"
-        f"Zipformer Small zh-en, 2023-02-16 (Apache-2.0)\n{ZIPFORMER_CARD}\n"
-        f"{RELEASES}/asr-models/{ZIPFORMER}.tar.bz2\n\n"
+        f"X-ASR zh-en 480 ms, Gilgamesh-J (Apache-2.0)\n{X_ASR_SOURCE}\n{X_ASR_CARD}\n"
+        f"{RELEASES}/asr-models/{X_ASR}.tar.bz2\n\n"
         "Silero VAD v5, Silero Team (MIT)\nhttps://github.com/snakers4/silero-vad/releases/tag/v5.0\n\n"
         "Kokoro v1.1-zh by Hexgrad (Apache-2.0)\nhttps://huggingface.co/hexgrad/Kokoro-82M-v1.1-zh\n"
         f"{RELEASES}/tts-models/{KOKORO}.tar.bz2\n",
