@@ -190,6 +190,7 @@ test("overview reports active workers, settings, usage, cooldown and both histor
   const snapshot = service.overview();
   assert.deepEqual(Object.keys(snapshot).sort(), [
     "agyCooldownUntil",
+    "agyCooldowns",
     "configUsage",
     "finished",
     "notifications",
@@ -199,6 +200,7 @@ test("overview reports active workers, settings, usage, cooldown and both histor
   assert.deepEqual(snapshot.workers.map((item) => item.id), [active.id]);
   assert.equal(snapshot.workers[0]!.type, "pi");
   assert.equal(snapshot.agyCooldownUntil, null);
+  assert.deepEqual(snapshot.agyCooldowns, []);
   assert.deepEqual(snapshot.finished.items.map((item) => item.id), [done.id]);
   assert.deepEqual(snapshot.notifications, { items: [], nextCursor: null });
   assert.deepEqual(service.activity().workers, [

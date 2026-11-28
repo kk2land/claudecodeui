@@ -119,6 +119,145 @@ test("canonical settings persist only canonical fields and project per-engine de
   assert.equal(reopened.settings().retentionDays, 4);
 });
 
+function agy(overrides: Partial<WorkerConfig> = {}): WorkerConfig {
+  return {
+    id: "agy-default",
+    name: "AGY default",
+    type: "agy",
+    enabled: true,
+    roles: [],
+    concurrency: 2,
+    hardTimeoutSeconds: 300,
+    model: null,
+    effort: null,
+    ...overrides,
+  };
+}
+
+test("an AGY config keeps its Gemini model plus an optional Claude fallback", async (t) => {
+  const root = temporaryRoot("worker-configs-agy-pools-");
+  const { service, data } = createService(t, root);
+  const configs = [
+    agy({
+      name: "AGY dual",
+      model: "gemini-4-neon-high",
+      agy: { fallbackModel: "claude-opus-4-1-high" },
+    }),
+    agy({ id: "agy-single", name: "AGY single", model: "gemini-3.8-flash-low" }),
+    agy({ id: "agy-claude-only", name: "AGY claude", model: "claude-sonnet-4-5" }),
+  ];
+  service.updateSettings({ configs, defaultConfigId: "agy-default" });
+
+  // A stored fallback round-trips; a config without one keeps the old single-model shape.
+  const reopened = new WorkerStore(data);
+  t.after(() => reopened.close());
+  assert.deepEqual(reopened.settings().configs, configs);
+
+  // A config saved without a fallback keeps the behaviour of every existing AGY config.
+  const single = reopened.settings().configs.find((config) => config.id === "agy-single");
+  assert.equal(single?.agy, undefined);
+  // The old Claude/GPT-only config stays a single model as well.
+  const claudeOnly = reopened.settings().configs.find(
+    (config) => config.id === "agy-claude-only",
+  );
+  assert.equal(claudeOnly?.agy, undefined);
+  assert.equal(claudeOnly?.model, "claude-sonnet-4-5");
+});
+
+test("the AGY fallback is a Claude model behind a concrete Gemini model", async (t) => {
+  const root = temporaryRoot("worker-configs-agy-fallback-");
+  const { service } = createService(t, root);
+  const invalid = (agyConfig: unknown, pattern: RegExp) =>
+    assert.throws(
+      () =>
+        service.updateSettings({
+          configs: [
+            agy({
+              model: "gemini-4-neon-high",
+              agy: agyConfig as WorkerConfig["agy"],
+            }),
+          ],
+          defaultConfigId: "agy-default",
+        }),
+      (error: Error & { code?: string }) => {
+        assert.equal(error.code, "INVALID_SETTINGS");
+        assert.match(error.message, pattern);
+        return true;
+      },
+    );
+  // Gemini and GPT draw from their own pools, so neither can be the Claude stand-in.
+  invalid({ fallbackModel: "gemini-3.8-flash-low" }, /只能是 Claude 模型/);
+  invalid({ fallbackModel: "gpt-oss-120b-medium" }, /只能是 Claude 模型/);
+  invalid({ fallbackModel: "gemini-4-neon-high" }, /只能是 Claude 模型/);
+  invalid({ fallbackModel: 42 }, /必须是字符串或 null/);
+  invalid("claude-sonnet-4-5", /必须是配置对象/);
+  // A rejected save keeps the previous settings instead of storing a partial config.
+  assert.equal(
+    service.settings().configs.some((config) => config.agy !== undefined),
+    false,
+  );
+  // The two rows are different model families, so a Claude fallback needs a concrete Gemini
+  // preferred model: the runner default or another Claude id is rejected instead of stored.
+  assert.throws(
+    () =>
+      service.updateSettings({
+        configs: [
+          agy({ model: null, agy: { fallbackModel: "claude-opus-4-1-high" } }),
+        ],
+        defaultConfigId: "agy-default",
+      }),
+    /必须先选择一个具体的 Gemini 模型/,
+  );
+  assert.throws(
+    () =>
+      service.updateSettings({
+        configs: [
+          agy({
+            model: "claude-sonnet-4-5",
+            agy: { fallbackModel: "claude-opus-4-1-high" },
+          }),
+        ],
+        defaultConfigId: "agy-default",
+      }),
+    /必须先选择一个具体的 Gemini 模型/,
+  );
+  // A Claude fallback with a fixed effort suffix is accepted as the native id it is.
+  const saved = service.updateSettings({
+    configs: [
+      agy({
+        model: "gemini-3.8-flash-low",
+        agy: { fallbackModel: "claude-opus-4-1-high" },
+      }),
+    ],
+    defaultConfigId: "agy-default",
+  });
+  assert.deepEqual(saved.configs[0]?.agy, { fallbackModel: "claude-opus-4-1-high" });
+  assert.equal(saved.configs[0]?.model, "gemini-3.8-flash-low");
+});
+
+test("the AGY config's single effort must fit both models' fixed reasoning levels", async (t) => {
+  const root = temporaryRoot("worker-configs-agy-effort-");
+  const { service } = createService(t, root);
+  const save = (model: string, effort: string | null, fallbackModel: string) =>
+    service.updateSettings({
+      configs: [agy({ model, effort, agy: { fallbackModel } })],
+      defaultConfigId: "agy-default",
+    });
+  // Both ids fix "high", so the shared effort agrees with either row and either pool can run.
+  const saved = save("gemini-4-neon-high", "high", "claude-opus-4-1-high");
+  assert.equal(saved.configs[0]?.effort, "high");
+  assert.deepEqual(saved.configs[0]?.agy, { fallbackModel: "claude-opus-4-1-high" });
+  // A conflict with either row is known at save time, so neither is dispatched as if usable.
+  assert.throws(
+    () => save("gemini-4-neon-high", "low", "claude-opus-4-1-high"),
+    /固定使用 .*high.* reasoning/,
+  );
+  assert.throws(
+    () => save("gemini-3.8-flash-low", "high", "claude-opus-4-1-high"),
+    /固定使用 .*low.* reasoning/,
+  );
+});
+
 test("ACP idle settings default, use the env fallback, persist explicit saves, and keep omissions", async (t) => {
   const root = temporaryRoot("worker-configs-acp-idle-");
   const { service, data } = createService(t, root, {

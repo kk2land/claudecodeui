@@ -332,6 +332,7 @@ function snapshot(overrides: Record<string, unknown> = {}) {
     },
     configUsage: {},
     agyCooldownUntil: null,
+    agyCooldowns: [],
     notifications: { items: [], nextCursor: null },
     ...overrides,
   };
@@ -5050,6 +5051,33 @@ test("DOM: the agy cooldown is one global deadline countdown", async () => {
   }
 });
 
+test("DOM: each cooled quota pool shows its own countdown", async () => {
+  const gemini = new Date(Date.now() + 65_000).toISOString();
+  const claude = new Date(Date.now() + 125_000).toISOString();
+  const mounted = await mountPlugin({
+    state: () =>
+      snapshot({
+        agyCooldownUntil: gemini,
+        agyCooldowns: [
+          { group: "gemini", until: gemini },
+          { group: "claude-gpt", until: claude },
+        ],
+      }),
+  });
+  try {
+    await waitFor(
+      () => textOf(mounted.container).includes("Gemini Models 冷却中"),
+      "Gemini 冷却提示",
+    );
+    const text = textOf(mounted.container);
+    assert.ok(text.includes("Claude and GPT models 冷却中"), text);
+    // Group lines replace the legacy generic line instead of doubling the banner.
+    assert.equal(text.includes("Antigravity 冷却中"), false, text);
+  } finally {
+    mounted.unmount();
+  }
+});
+
 test("DOM: multiple live cards load initial and subsequent pages independently without blocking or cross-talk", async () => {
   let runBId = "run-b-1";
   let releaseWorkerAFirst: ((value: unknown) => void) | null = null;
@@ -5617,6 +5645,79 @@ test("DOM: AGY quota manual refresh stays ahead of overlapping 5-minute polls an
     assert.equal(callsTo(mounted, "/settings").length, 0);
   } finally {
     mounted.dom.window.setInterval = originalSetInterval;
+    mounted.unmount();
+  }
+});
+
+test("DOM: an agy config keeps one model per pool and copies both", async () => {
+  const catalog = {
+    models: [
+      { id: "gemini-4-neon-high", label: "Gemini 4 Neon (High)" },
+      { id: "claude-opus-4-1-high", label: "Claude Opus 4.1 (High)" },
+      { id: "gpt-oss-120b-medium", label: "GPT OSS 120B (Medium)" },
+      { id: "google/qwen3-coder-480b", label: "Qwen3 Coder 480B" },
+    ],
+  };
+  const settings = agySettings();
+  const mounted = await mountPlugin({
+    state: () => snapshot({ settings }),
+    agyCatalog: async () => catalog,
+  });
+  try {
+    await openSettings(mounted);
+    const model = byLabel(mounted.container, "配置 4 模型") as HTMLSelectElement;
+    const fallback = byLabel(
+      mounted.container,
+      "配置 4 Claude 备用",
+    ) as HTMLSelectElement;
+    // The preferred row offers real Gemini models plus the stored id; GPT and Qwen stay out
+    // even though Qwen draws from the same quota pool.
+    assert.deepEqual(optionValues(model), [
+      "",
+      "gemini-4-neon-high",
+      "gemini-3.8-flash-low",
+    ]);
+    // The fallback offers Claude only and starts unset for an existing single-model config.
+    assert.deepEqual(optionValues(fallback), ["", "claude-opus-4-1-high"]);
+    assert.equal(optionValues(fallback).includes("google/qwen3-coder-480b"), false);
+    assert.equal(optionLabels(fallback)[0], "不设置（只用 Gemini 额度）");
+    assert.equal(fallback.value, "");
+    // Other engines have no second model.
+    // Config 1 is the AGY default; the other engines have no second model.
+    assert.equal(Boolean(byLabel(mounted.container, "配置 2 Claude 备用")), false);
+    assert.equal(Boolean(byLabel(mounted.container, "配置 3 Claude 备用")), false);
+
+    await typeInto(fallback, "claude-opus-4-1-high");
+    await waitFor(() => fallback.value === "claude-opus-4-1-high", "选择 Claude 备用");
+    await waitFor(() => !button(mounted.container, "保存设置").disabled, "agy 可保存");
+    button(mounted.container, "保存设置").click();
+    await waitFor(() => callsTo(mounted, "/settings").length === 1, "保存 Claude 备用");
+    const body = callsTo(mounted, "/settings")[0]!.body as {
+      configs: Array<Record<string, any>>;
+    };
+    assert.deepEqual(body.configs[3]!.agy, { fallbackModel: "claude-opus-4-1-high" });
+    assert.equal(body.configs[3]!.model, "gemini-3.8-flash-low");
+    // The saved snapshot now carries the pair, so the copy keeps both.
+    (byLabel(mounted.container, "配置 4 复制") as HTMLButtonElement).click();
+    await waitFor(() => Boolean(byLabel(mounted.container, "配置 5 Claude 备用")), "复制 agy 配置");
+    assert.equal(
+      (byLabel(mounted.container, "配置 5 Claude 备用") as HTMLSelectElement).value,
+      "claude-opus-4-1-high",
+    );
+    assert.equal(
+      (byLabel(mounted.container, "配置 5 模型") as HTMLSelectElement).value,
+      "gemini-3.8-flash-low",
+    );
+    // Switching the copy to Pi drops the AGY-only row instead of carrying it over.
+    await typeInto(
+      byLabel(mounted.container, "配置 5 执行引擎") as HTMLSelectElement,
+      "pi",
+    );
+    await waitFor(
+      () => !mounted.container.querySelector('[aria-label="配置 5 Claude 备用"]'),
+      "切换引擎后移除 Claude 备用",
+    );
+  } finally {
     mounted.unmount();
   }
 });

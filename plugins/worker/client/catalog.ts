@@ -7,6 +7,8 @@ import type {
   WorkerModelOption,
   SupportedWorkerType,
 } from "../shared/contracts.js";
+import { agyIsClaudeModel, agyIsGeminiModel } from "../shared/agy.js";
+import type { AgyQuotaGroupKind } from "../shared/agy.js";
 import type { WorkerHost } from "./api.js";
 
 /**
@@ -134,23 +136,39 @@ export function piModelOptions(
   return withSavedModel(options, model, effort);
 }
 
+/** Empty row for the optional second model: an unset fallback keeps the single-model config. */
+export const AGY_NO_FALLBACK_LABEL = "不设置（只用 Gemini 额度）";
+
 /**
- * Antigravity rows from the real `agy models` directory. The persisted value is the native CLI id
- * and the label is the CLI's display name. Each model carries its own effort, so no row exposes a
- * selectable reasoning level; a saved id missing from the directory stays selectable, as does the
- * empty row that follows the runner's own default.
+ * Antigravity rows from the real `agy models` directory, limited to one model family. The
+ * persisted value is the native CLI id and the label is the CLI's display name. Each model
+ * carries its own effort, so no row exposes a selectable reasoning level; a saved id missing from
+ * the directory stays selectable, as does the empty row that follows the runner's own default.
+ *
+ * The preferred row is the Gemini family and the fallback row is the Claude family, so neither
+ * row can offer a model from the other pool: GPT models share the Claude/GPT quota pool but are
+ * not offered as a second model, and Qwen or the runner default belong to the Gemini pool without
+ * being Gemini models.
  */
 export function agyModelOptions(
   catalog: AgyModelCatalog | null,
   model: string | null,
+  pool: AgyQuotaGroupKind = "gemini",
+  emptyLabel: string = AGY_DEFAULT_MODEL_LABEL,
 ): ModelSelectOption[] {
   const options: ModelSelectOption[] = [
-    { value: "", label: AGY_DEFAULT_MODEL_LABEL, effort: [] },
-    ...(catalog?.models ?? []).map((option) => ({
-      value: option.id,
-      label: option.label,
-      effort: [],
-    })),
+    { value: "", label: emptyLabel, effort: [] },
+    ...(catalog?.models ?? [])
+      .filter((option) =>
+        pool === "claude-gpt"
+          ? agyIsClaudeModel(option.id)
+          : agyIsGeminiModel(option.id),
+      )
+      .map((option) => ({
+        value: option.id,
+        label: option.label,
+        effort: [],
+      })),
   ];
   if (model && !options.some((option) => option.value === model))
     options.push({
@@ -159,6 +177,14 @@ export function agyModelOptions(
       effort: [],
     });
   return options;
+}
+
+/** Rows for the optional Claude model that keeps an AGY config usable when Gemini is spent. */
+export function agyFallbackModelOptions(
+  catalog: AgyModelCatalog | null,
+  model: string | null,
+): ModelSelectOption[] {
+  return agyModelOptions(catalog, model, "claude-gpt", AGY_NO_FALLBACK_LABEL);
 }
 
 /** Model rows for a draft config of any engine; unavailable catalogs yield only the default. */

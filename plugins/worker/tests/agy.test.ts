@@ -461,7 +461,7 @@ test("cancelling one AGY ACP session leaves a sibling session running to complet
   assert.equal(fs.readFileSync(spawnLog, "utf8").trim().split("\n").length, 1);
 });
 
-test("agy ACP raw JSON-RPC 429 keeps the global cooldown", async (t) => {
+test("agy ACP raw JSON-RPC 429 cools the run's pool", async (t) => {
   const root = temporaryRoot("worker-agy-429-");
   const { service } = createService(t, root, { TEST_AGY_SESSION_ID: "agy-429" });
   service.updateSettings({
@@ -480,11 +480,21 @@ test("agy ACP raw JSON-RPC 429 keeps the global cooldown", async (t) => {
   const failed = await waitStatus(service, started.worker.id, ["failed"]);
   assert.equal(failed.latestRun?.status, "failed");
   assert.ok(service.agyCooldownUntil());
-  const queued = await service.start(
-    "owner-1",
-    startInput({ type: "agy", configId: "agy-default", requestId: "agy-429-next" }),
+  assert.deepEqual(
+    service.overview().agyCooldowns?.map((cooldown) => cooldown.group),
+    ["gemini"],
   );
-  assert.equal(queued.run.status, "queued");
+  // A cooled pool refuses the next start before it allocates a worker or a run.
+  await assert.rejects(
+    service.start(
+      "owner-1",
+      startInput({ type: "agy", configId: "agy-default", requestId: "agy-429-next" }),
+    ),
+    (error: Error & { code?: string }) => {
+      assert.equal(error.code, "AGY_QUOTA_REACHED");
+      return true;
+    },
+  );
 });
 
 test("Pi CLI and AGY ACP can run at the same time", async (t) => {

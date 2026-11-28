@@ -59,3 +59,73 @@ export function agyEffortConflict(
     effort
   );
 }
+
+/**
+ * The AGY account's two remaining-quota pools. `agy -p /usage` reports both as model groups;
+ * every Claude or GPT model shares one pool, and every other valid model id (including the
+ * default selection, whose id may not contain "Gemini") shares the Gemini pool.
+ */
+export const AGY_QUOTA_GROUPS = ["gemini", "claude-gpt"] as const;
+
+export type AgyQuotaGroupKind = (typeof AGY_QUOTA_GROUPS)[number];
+
+/** The quota group names exactly as `agy -p /usage` reports them. */
+export const AGY_QUOTA_GROUP_LABELS: Record<AgyQuotaGroupKind, string> = {
+  gemini: "Gemini Models",
+  "claude-gpt": "Claude and GPT models",
+};
+
+/**
+ * The model families AGY ships. Only the first segment of the trailing path segment counts, so a
+ * vendor prefix (`google/qwen3-coder-480b`) does not decide the family.
+ */
+export type AgyModelFamily = "gemini" | "claude" | "gpt" | "other";
+
+const AGY_MODEL_FAMILY_PREFIXES = ["gemini", "claude", "gpt"] as const;
+
+/** The family a native AGY model id belongs to; an unset or unknown id is "other". */
+export function agyModelFamily(
+  model: string | null | undefined,
+): AgyModelFamily {
+  const value = typeof model === "string" ? model.trim().toLowerCase() : "";
+  const id = value.split("/").pop() ?? "";
+  for (const family of AGY_MODEL_FAMILY_PREFIXES)
+    if (id.startsWith(family)) return family;
+  return "other";
+}
+
+/**
+ * Maps a configured AGY model id to the quota pool it draws from. Only the Claude/GPT families
+ * are recognized positively: every other valid id (Qwen, the default selection, an id without
+ * "gemini") joins the Gemini pool, matching what `agy -p /usage` reports.
+ */
+export function agyQuotaGroupForModel(
+  model: string | null | undefined,
+): AgyQuotaGroupKind {
+  const family = agyModelFamily(model);
+  return family === "claude" || family === "gpt" ? "claude-gpt" : "gemini";
+}
+
+/** Whether an id is a real Gemini-family model, the config's preferred model row. */
+export function agyIsGeminiModel(model: string | null | undefined): boolean {
+  return agyModelFamily(model) === "gemini";
+}
+
+/**
+ * Whether an id is a Claude model, the only family a config may keep as its second model:
+ * GPT models share that quota pool but are not offered as the fallback option.
+ */
+export function agyIsClaudeModel(model: string | null | undefined): boolean {
+  return agyModelFamily(model) === "claude";
+}
+
+/**
+ * Maps a `/usage` group name to its quota pool; an unrecognized name yields null so the caller
+ * never guesses exhaustion for a group whose name it cannot attribute.
+ */
+export function agyQuotaGroupFromName(name: string): AgyQuotaGroupKind | null {
+  const value = name.trim().toLowerCase();
+  if (value.includes("claude") || value.includes("gpt")) return "claude-gpt";
+  if (value.includes("gemini")) return "gemini";
+  return null;
+}

@@ -8,6 +8,7 @@
  */
 
 import type { WorkerTaskRole } from "./task-roles.js";
+import type { AgyQuotaGroupKind } from "./agy.js";
 
 export type { WorkerTaskRole };
 
@@ -398,6 +399,12 @@ export type WorkerRun = {
    */
   nativeProtocol?: "acp";
   /**
+   * AGY-only: the config's other pool's model this run may switch to while it waits, so a queued
+   * run can be picked up by the pool that still has quota. Absent for explicit model requests,
+   * historical runs, and configs without a second model.
+   */
+  agyFallbackModel?: string | null;
+  /**
    * Transcript offset used to recover a historical Pi ACP turn's status and usage.
    */
   piTranscriptOffset?: number;
@@ -509,6 +516,16 @@ export type WorkerConfig = {
   model: string | null;
   effort: string | null;
   codex?: WorkerCodexConfig;
+  agy?: WorkerAgyConfig;
+};
+
+/**
+ * AGY-only part of a `WorkerConfig`. `model` stays the preferred Gemini model; this optional
+ * second model draws from the Claude pool and is only used when the Gemini pool is exhausted.
+ * A config without it keeps the single-model behaviour.
+ */
+export type WorkerAgyConfig = {
+  fallbackModel: string | null;
 };
 
 /** Codex-only part of a `WorkerConfig`; see `WorkerConfig.codex`. */
@@ -870,16 +887,26 @@ export type WorkerHistoryKind = "finished" | "notifications";
  */
 export type WorkerHistoryNotification = WorkerNotification & { taskName: string };
 
+/** Active cooldown of one AGY quota pool, reported to the UI as an ISO deadline. */
+export type AgyQuotaCooldown = {
+  group: AgyQuotaGroupKind;
+  /** ISO-8601 deadline before which new runs of this pool must wait. */
+  until: string;
+};
+
 /**
  * `GET /state?view=overview` payload. `workers` are the occupied and queued workers; terminal
- * history is paged separately. `agyCooldownUntil` is the global ISO deadline for new agy starts,
- * or null when no cooldown is active.
+ * history is paged separately. `agyCooldownUntil` is the earliest active ISO deadline for new
+ * agy starts, or null when no cooldown is active; `agyCooldowns` lists each active pool deadline
+ * so the UI can report the Gemini and Claude/GPT pools separately. A host that predates
+ * `agyCooldowns` leaves it absent, and the legacy single deadline still applies to every pool.
  */
 export type WorkerOverviewSnapshot = {
   workers: WorkerRecord[];
   settings: WorkerSettings;
   configUsage: Record<string, WorkerConfigUsage>;
   agyCooldownUntil: string | null;
+  agyCooldowns?: AgyQuotaCooldown[];
   finished: WorkerHistoryPage<WorkerRecord>;
   notifications: WorkerHistoryPage<WorkerHistoryNotification>;
 };

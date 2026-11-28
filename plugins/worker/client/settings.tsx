@@ -34,6 +34,7 @@ import type { WorkerHost } from "./api.js";
 import type { workerApi } from "./api.js";
 import {
   DEFAULT_EFFORT_LABEL,
+  agyFallbackModelOptions,
   effortOptionsFor,
   modelOptionsFor,
   readCodexProviderModels,
@@ -160,7 +161,7 @@ function cloneConfig(
   name: string,
   id: string,
 ): WorkerConfig {
-  const { codex, ...rest } = config;
+  const { codex, agy, ...rest } = config;
   return {
     ...rest,
     id,
@@ -175,6 +176,7 @@ function cloneConfig(
           },
         }
       : {}),
+    ...(agy ? { agy: { fallbackModel: agy.fallbackModel } } : {}),
   };
 }
 
@@ -735,6 +737,13 @@ export function SettingsView({
     });
   };
 
+  const setFallbackModel = (config: WorkerConfig, value: string) => {
+    // The Claude fallback is optional: an empty row returns the config to a single model.
+    update(config.id, {
+      agy: value ? { fallbackModel: value } : undefined,
+    });
+  };
+
   const setProvider = (config: WorkerConfig, value: string) => {
     if (!config.codex) return;
     // Switching Codex inference service always clears model and effort.
@@ -1068,6 +1077,7 @@ export function SettingsView({
                               },
                             }
                           : { codex: undefined }),
+                        agy: undefined,
                       });
                       if (type === "codex")
                         setEnvDraft((current) => ({ ...current, [config.id]: "" }));
@@ -1169,10 +1179,35 @@ export function SettingsView({
                   </select>
                   {config.type === "agy" ? (
                     <small>
-                      模型列表来自本机 agy models；留空沿用执行器自身默认。
+                      首选 Gemini 模型，列表来自本机 agy models；留空沿用执行器自身默认。
                     </small>
                   ) : null}
                 </label>
+                {config.type === "agy" ? (
+                  <label>
+                    Claude 备用
+                    <select
+                      aria-label={"配置 " + position + " Claude 备用"}
+                      value={config.agy?.fallbackModel ?? ""}
+                      onChange={(event) =>
+                        setFallbackModel(config, event.target.value)
+                      }
+                    >
+                      {agyFallbackModelOptions(
+                        catalogView.agy,
+                        config.agy?.fallbackModel ?? null,
+                      ).map((option) => (
+                        <option key={option.value} value={option.value}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <small>
+                      Gemini 额度用尽时改用该模型；两个额度组各自独立。必须已选一个具体的
+                      Gemini 模型，GPT 与 Qwen 不在备用范围，留空表示只用 Gemini。
+                    </small>
+                  </label>
+                ) : null}
                 <label>
                   Reasoning
                   {config.type === "agy" ? (

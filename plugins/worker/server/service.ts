@@ -36,7 +36,28 @@ import type { AcpEvent, AcpSessionHandle } from "./acp.js";
 import { appendLog, readEventLines, readLogPage } from "./logs.js";
 import { parseHistoricalPiAcp } from "./pi-history.js";
 import { readAgyCatalog } from "./agy-catalog.js";
-import { AGY_QUOTA_POLL_INTERVAL_MS, readAgyQuota } from "./agy-quota.js";
+import {
+  AGY_QUOTA_POLL_INTERVAL_MS,
+  agyEarliestDeadline,
+  agyFallbackForRun,
+  agyPoolCooldowns,
+  agyPoolStatuses,
+  agyQuotaFailure,
+  agyResumeCandidates,
+  agyStartCandidates,
+  applyAgyQuota,
+  planAgyDispatch,
+  planAgyStart,
+  readAgyFailureText,
+  readAgyQuota,
+  registerAgyFailure,
+} from "./agy-quota.js";
+import type {
+  AgyBlockedPool,
+  AgyLimitContext,
+  AgyPoolStatus,
+  AgyStartPlan,
+} from "./agy-quota.js";
 import {
   AGY_QUOTA_REACHED,
   parseAgyAcpRun,
@@ -67,6 +88,7 @@ import type {
   WorkerCancelInput,
   WorkerCleanupInput,
   WorkerCodexConfig,
+  WorkerAgyConfig,
   WorkerConfig,
   WorkerDefaults,
   WorkerLegacySettingsInput,
@@ -102,6 +124,12 @@ import type {
 import { WorkerFailure } from "./shared/index.js";
 import { WORKER_TASK_ROLES } from "../shared/task-roles.js";
 import type { WorkerTaskRole } from "../shared/task-roles.js";
+import {
+  agyEffortConflict,
+  agyIsClaudeModel,
+  agyIsGeminiModel,
+} from "../shared/agy.js";
+import type { AgyQuotaGroupKind } from "../shared/agy.js";
 
 const STATUSES: WorkerStatus[] = [
   "queued",
@@ -161,7 +189,6 @@ const TERMINAL: WorkerStatus[] = [
   "interrupted",
 ];
 const MAX_WAIT_MS = 25_000;
-const AGY_COOLDOWN_FALLBACK_MS = 60_000;
 /** Node's `setTimeout` clamps delays above 2^31 - 1 ms (~24.85 days) to 1 ms. */
 const MAX_TIMEOUT_MS = 2_147_483_647;
 
@@ -241,6 +268,11 @@ export class WorkerService {
     groups: [],
     updatedAt: null,
     error: null,
+  };
+  /** What the latest `/usage` read knows about each pool; unknown until it reports the group. */
+  private agyPoolStatuses: Record<AgyQuotaGroupKind, AgyPoolStatus> = {
+    gemini: "unknown",
+    "claude-gpt": "unknown",
   };
   private dispatching = false;
   private closing = false;
@@ -365,7 +397,7 @@ export class WorkerService {
     const task: Promise<AgyQuotaSnapshot> = (async (): Promise<AgyQuotaSnapshot> => {
       try {
         const environment = this.guardianEnvironment(this.environment);
-        const { groups, geminiExhausted } = await readAgyQuota(
+        const parsed = await readAgyQuota(
           this.executable("agy", environment),
           environment,
           { signal: abort.signal },
@@ -373,18 +405,14 @@ export class WorkerService {
         const now = this.now();
         this.agyQuotaState = {
           status: "ready",
-          groups,
+          groups: parsed.groups,
           updatedAt: new Date(now).toISOString(),
           error: null,
         };
-        if (geminiExhausted && !this.closing && !this.storeClosed) {
-          const until =
-            geminiExhausted.latestResetAtMs !== null &&
-            geminiExhausted.latestResetAtMs > now
-              ? geminiExhausted.latestResetAtMs
-              : now + AGY_COOLDOWN_FALLBACK_MS;
-          this.applyAgyCooldown(until);
-        }
+        this.agyPoolStatuses = agyPoolStatuses(parsed);
+        // Each pool cools down independently; a pool with no exhausted window keeps starting.
+        if (!this.closing && !this.storeClosed && applyAgyQuota(this.store, parsed, now))
+          this.scheduleAgyWake();
       } catch (error) {
         this.agyQuotaState = {
           status: "error",
@@ -734,7 +762,62 @@ export class WorkerService {
         throw new WorkerFailure("INVALID_SETTINGS", "Codex 配置必须包含 codex 对象");
       config.codex = this.normalizeCodexConfig(entry.codex as Record<string, unknown>);
     }
+    if (type === "agy") {
+      const agy = this.normalizeAgyConfig(entry.agy);
+      if (agy.fallbackModel) {
+        // The two rows are different model families on purpose: a Claude fallback only makes
+        // sense behind a concrete Gemini choice, never behind another Claude or the runner
+        // default, and both rows share the config's single effort.
+        if (!agyIsGeminiModel(model))
+          throw new WorkerFailure(
+            "INVALID_SETTINGS",
+            "agy 配置使用 Claude 备用时必须先选择一个具体的 Gemini 模型",
+          );
+        for (const id of [model, agy.fallbackModel]) {
+          const conflict = agyEffortConflict(id, effort);
+          if (conflict) throw new WorkerFailure("INVALID_SETTINGS", conflict);
+        }
+        config.agy = agy;
+      }
+    }
     return config;
+  }
+
+  /**
+   * Reads the optional AGY fallback model. It must be a Claude id the ACP selection accepts, so
+   * an unusable fallback is rejected at save time instead of silently narrowing the config to one
+   * pool; an absent value keeps the single-model behaviour.
+   */
+  private normalizeAgyConfig(value: unknown): WorkerAgyConfig {
+    if (value === undefined || value === null) return { fallbackModel: null };
+    if (typeof value !== "object" || Array.isArray(value))
+      throw new WorkerFailure("INVALID_SETTINGS", "agy 必须是配置对象");
+    const record = value as Record<string, unknown>;
+    if (
+      record.fallbackModel !== undefined &&
+      record.fallbackModel !== null &&
+      typeof record.fallbackModel !== "string"
+    )
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "agy.fallbackModel 必须是字符串或 null",
+      );
+    const fallbackModel = clean(record.fallbackModel as string | null | undefined);
+    if (!fallbackModel) return { fallbackModel: null };
+    if (!agyIsClaudeModel(fallbackModel))
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        "agy 备用模型只能是 Claude 模型，Gemini 与 GPT 不在备用范围",
+      );
+    try {
+      planAgyAcpConfig({ model: fallbackModel, effort: null });
+    } catch (error) {
+      throw new WorkerFailure(
+        "INVALID_SETTINGS",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+    return { fallbackModel };
   }
 
   private normalizeCodexConfig(value: Record<string, unknown>): WorkerCodexConfig {
@@ -880,11 +963,20 @@ export class WorkerService {
     // resolves config so an accepted request keeps its retry receipt after a later blacklist save.
     const settings = this.store.settings();
     this.assertProjectWorkersAllowed(owner, settings);
-    const config = this.resolveStartConfig(input, settings);
+    const { config, plan } = this.resolveStartConfig(input, settings);
     const type = config.type;
     this.rejectNonCodexProvider(type, input.provider);
-    const selection = this.startSelection(type, input, config);
+    const selection = this.startSelection(type, input, config, plan?.model ?? null);
     this.validateSelection(type, selection);
+    const agyFallbackModel =
+      plan === null
+        ? null
+        : agyFallbackForRun(
+            agyStartCandidates(config),
+            plan.model,
+            clean(input.model),
+            selection.effort,
+          );
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
     const id = randomUUID();
     const runId = randomUUID();
@@ -911,6 +1003,7 @@ export class WorkerService {
       nativeSessionId: null,
       nativeSessionFile: null,
       ...(type === "agy" ? { nativeProtocol: "acp" as const } : {}),
+      ...(agyFallbackModel ? { agyFallbackModel } : {}),
       exitCode: null,
       finalText: null,
       error: null,
@@ -1023,6 +1116,26 @@ export class WorkerService {
         "上一次运行没有可核实的原生会话身份，不能续接",
       );
     const selection = this.resumeSelection(worker.type, input, previous);
+    // A resume stays on this worker's engine and its effective model pool. Its recorded model is
+    // preferred, and only when it is one of this config's models may the other pool stand in;
+    // when every usable pool is cooling down, reject before creating the run.
+    let agyFallbackModel: string | null = null;
+    if (worker.type === "agy") {
+      const candidates = agyResumeCandidates(config, previous.model);
+      const plan = planAgyStart(this.agyContext(), {
+        candidates,
+        requestedModel: clean(input.model),
+        effort: selection.effort,
+      });
+      if (plan.blockedUntil !== null) throw agyQuotaFailure(plan.blocked);
+      selection.model = plan.model;
+      agyFallbackModel = agyFallbackForRun(
+        candidates,
+        plan.model,
+        clean(input.model),
+        selection.effort,
+      );
+    }
     this.validateSelection(worker.type, selection);
     const runId = randomUUID();
     const timeoutSeconds = this.timeoutFor(input.timeoutSeconds, config);
@@ -1046,6 +1159,7 @@ export class WorkerService {
       nativeSessionId: previous.nativeSessionId,
       nativeSessionFile: previous.nativeSessionFile,
       ...(worker.type === "agy" ? { nativeProtocol: "acp" as const } : {}),
+      ...(agyFallbackModel ? { agyFallbackModel } : {}),
       legacyCodexProvider:
         worker.type === "codex" &&
         previous.legacyCodexProvider === true &&
@@ -1233,11 +1347,18 @@ export class WorkerService {
    * match takes the first matching config in persisted list order (the list order the settings UI
    * maintains); no role match, or no `taskRole`, falls back to the default config when it is in
    * the candidate set, otherwise to the first candidate.
+   *
+   * Each candidate's own engine reports the model it would launch with and whether a known quota
+   * cooldown blocks it; a blocked AGY candidate is skipped in that order, so routing continues
+   * with the other AGY pool or a later Pi/Codex config. Only cached/persisted state decides this:
+   * no quota command runs per dispatch, and missing quota data never blocks a candidate. An
+   * explicit native selection (model/provider/effort) keeps its meaning by limiting any fallback
+   * to the first candidate's engine.
    */
   private resolveStartConfig(
     input: WorkerStartInput,
     settings: WorkerSettings,
-  ): WorkerConfig {
+  ): { config: WorkerConfig; plan: AgyStartPlan | null } {
     const configs = settings.configs;
     if (input.configId !== undefined) {
       const configId = input.configId.trim();
@@ -1248,7 +1369,14 @@ export class WorkerService {
         throw new WorkerFailure("INVALID_INPUT", "configId 与 type 不一致");
       if (!config.enabled)
         throw new WorkerFailure("WORKER_TYPE_DISABLED", "该 worker 配置已停用");
-      return config;
+      const plan = this.agyStartPlan(
+        config,
+        clean(input.model),
+        clean(input.effort) ?? clean(config.effort),
+      );
+      if (plan && plan.blockedUntil !== null)
+        throw agyQuotaFailure(plan.blocked);
+      return { config, plan };
     }
     let candidates = configs.filter((config) => config.enabled);
     if (input.type !== undefined) {
@@ -1258,18 +1386,64 @@ export class WorkerService {
     }
     if (!candidates.length)
       throw new WorkerFailure("WORKER_TYPE_DISABLED", "没有可用的 worker 配置");
+    const ordered = this.orderedStartCandidates(input, settings, candidates);
+    const lockedType = this.explicitSelection(input) ? ordered[0]!.type : null;
+    const eligible =
+      lockedType === null
+        ? ordered
+        : ordered.filter((config) => config.type === lockedType);
+    const blocked: AgyBlockedPool[] = [];
+    for (const config of eligible) {
+      const plan = this.agyStartPlan(
+        config,
+        clean(input.model),
+        clean(input.effort) ?? clean(config.effort),
+      );
+      if (!plan || plan.blockedUntil === null) return { config, plan };
+      blocked.push(...plan.blocked);
+    }
+    throw agyQuotaFailure(blocked);
+  }
+
+  /**
+   * Candidate order for automatic routing: the existing role-match/default preference first, then
+   * the remaining enabled configs in persisted list order so a skipped pool can fall through.
+   */
+  private orderedStartCandidates(
+    input: WorkerStartInput,
+    settings: WorkerSettings,
+    candidates: WorkerConfig[],
+  ): WorkerConfig[] {
     const preferred = candidates.find(
       (config) => config.id === settings.defaultConfigId,
     );
-    if (input.taskRole !== undefined) {
-      const matches = candidates.filter((config) =>
-        config.roles.includes(input.taskRole!),
-      );
-      // The persisted configs order is the routing priority, so the default config does not
-      // override an earlier role match.
-      if (matches.length) return matches[0]!;
-    }
-    return preferred ?? candidates[0]!;
+    const defaultFirst = (list: WorkerConfig[]): WorkerConfig[] =>
+      preferred && list.includes(preferred)
+        ? [preferred, ...list.filter((config) => config !== preferred)]
+        : list;
+    if (input.taskRole === undefined) return defaultFirst(candidates);
+    const role = input.taskRole;
+    const matches = candidates.filter((config) => config.roles.includes(role));
+    if (!matches.length) return defaultFirst(candidates);
+    // The persisted configs order is the routing priority, so the default config does not
+    // override an earlier role match; the default still leads the remaining fallbacks.
+    return [
+      ...matches,
+      ...defaultFirst(candidates.filter((config) => !config.roles.includes(role))),
+    ];
+  }
+
+  /** True when an explicit native selection must not fall back to a different engine. */
+  private explicitSelection(input: {
+    model?: string;
+    provider?: string;
+    effort?: string;
+  }): boolean {
+    return (
+      clean(input.model) !== null ||
+      clean(input.provider) !== null ||
+      clean(input.effort) !== null
+    );
   }
 
   /** New runs snapshot the explicit request first, then the selected config's defaults. */
@@ -1281,9 +1455,10 @@ export class WorkerService {
       effort?: string;
     },
     config: WorkerConfig,
+    plannedModel: string | null = null,
   ): NativeSelection {
     return {
-      model: clean(input.model) ?? clean(config.model),
+      model: clean(input.model) ?? plannedModel ?? clean(config.model),
       // Only Codex has an independent service; Pi receives its full model id and DSH routes from
       // the model patch.
       provider: type === "codex" ? clean(input.provider) ?? config.codex?.modelProvider ?? null : null,
@@ -1397,7 +1572,6 @@ export class WorkerService {
           const key = [worker.parentSessionId, worker.projectId, worker.configId].join("\u0000");
           counts.set(key, (counts.get(key) ?? 0) + 1);
         }
-        const agyBlocked = this.agyCooldownActive();
         let selected: WorkerRun | null = null;
         for (const run of queued) {
           // Worktree admission is still resolving; never spawn from a placeholder cwd.
@@ -1412,10 +1586,16 @@ export class WorkerService {
             skipped.add(run.id);
             continue;
           }
-          // A global agy cooldown blocks every agy config; other engines keep their own queues.
-          if (worker.type === "agy" && agyBlocked) {
-            skipped.add(run.id);
-            continue;
+          // A cool-down pool blocks only runs that can draw from it; the other pool and every
+          // other engine keep their own queues. Re-planning here lets a queued automatic run be
+          // taken by this config's other pool instead of waiting for the closed one.
+          if (worker.type === "agy") {
+            const decision = planAgyDispatch(this.agyContext(), run);
+            if (decision.blockedUntil !== null) {
+              skipped.add(run.id);
+              continue;
+            }
+            run.model = decision.model;
           }
           const registered = this.owners.get(worker.ownerId);
           if (!registered || registered.owner.paused) {
@@ -2566,6 +2746,7 @@ export class WorkerService {
       settings: this.store.settings(),
       configUsage: this.store.configUsage(),
       agyCooldownUntil: this.agyCooldownUntil(),
+      agyCooldowns: this.agyCooldowns(),
       finished: this.finishedHistory(query),
       notifications: this.notificationHistory(query),
     };
@@ -2653,33 +2834,43 @@ export class WorkerService {
 
   //------------------ AGY COOLDOWN ----------------
 
-  /** Active global agy cooldown as an ISO deadline, or null when new agy starts may proceed. */
+  /** The AGY pool rules own every grouping, deadline, and model choice; this only feeds them. */
+  private agyContext(): AgyLimitContext {
+    return {
+      store: this.store,
+      now: this.now(),
+      statuses: this.agyPoolStatuses,
+    };
+  }
+
+  /** Active pool cooldowns as ISO deadlines, earliest first; a legacy row counts per pool. */
+  agyCooldowns(): Array<{ group: AgyQuotaGroupKind; until: string }> {
+    return agyPoolCooldowns(this.agyContext());
+  }
+
+  /**
+   * Earliest active agy deadline across every pool as an ISO string, or null when new agy starts
+   * may proceed in at least their own pool.
+   */
   agyCooldownUntil(): string | null {
-    const until = this.store.cooldown("agy");
-    return until !== null && until > this.now()
-      ? new Date(until).toISOString()
-      : null;
+    const until = agyEarliestDeadline(this.agyContext());
+    return until === null ? null : new Date(until).toISOString();
   }
 
-  private agyCooldownActive(): boolean {
-    return this.agyCooldownUntil() !== null;
-  }
-
-  /** Wakes dispatch when the stored deadline expires, re-arming across Node's 32-bit timer ceiling. */
+  /** Wakes dispatch when the earliest stored deadline expires, re-arming across Node's timer ceiling. */
   private scheduleAgyWake(): void {
     if (this.closing || this.storeClosed) return;
     if (this.cooldownTimer) {
       clearTimeout(this.cooldownTimer);
       this.cooldownTimer = null;
     }
-    const until = this.store.cooldown("agy");
+    const until = agyEarliestDeadline(this.agyContext());
     if (until === null) return;
     const remaining = until - this.now();
-    if (remaining <= 0) return;
     const timer = setTimeout(() => {
       this.cooldownTimer = null;
       if (this.closing || this.storeClosed) return;
-      if (this.agyCooldownActive()) {
+      if (agyEarliestDeadline(this.agyContext()) !== null) {
         this.scheduleAgyWake();
         return;
       }
@@ -2689,40 +2880,42 @@ export class WorkerService {
     this.cooldownTimer = timer;
   }
 
-  /** Persists a global agy cooldown without shortening any longer active deadline and schedules wake. */
-  private applyAgyCooldown(until: number): void {
-    this.store.setCooldown("agy", until);
-    this.scheduleAgyWake();
-  }
-
   /**
-   * Detects the two agy rate-limit shapes in the failed run's own logs and extends the global
-   * SQLite deadline. The run itself stays failed and resumable; the stored maximum survives
-   * restarts and is shared by every CloudCLI instance using this data directory.
+   * Reads the failed run's own evidence (or its classified quota message) into its pool's SQLite
+   * deadline. The run itself stays failed and resumable; the stored maximum survives restarts and
+   * is shared by every CloudCLI instance using this data directory.
    */
   private registerAgyCooldown(
     worker: WorkerRecord,
     run: WorkerRun,
     classifiedQuotaText: string | null = null,
   ): void {
-    const text = classifiedQuotaText ?? this.agyFailureText(worker, run);
-    if (classifiedQuotaText === null && !agyRateLimited(text)) return;
-    const delay = agyResetDelay(text) ?? AGY_COOLDOWN_FALLBACK_MS;
-    this.applyAgyCooldown(this.now() + delay);
+    const applied = registerAgyFailure({
+      store: this.store,
+      now: this.now(),
+      model: run.model,
+      text:
+        classifiedQuotaText ??
+        readAgyFailureText(this.runDirectory(worker.id, run.id)),
+      classified: classifiedQuotaText !== null,
+    });
+    if (!applied) return;
+    this.scheduleAgyWake();
     this.emitChanged(worker.id);
   }
 
-  private agyFailureText(worker: WorkerRecord, run: WorkerRun): string {
-    const directory = this.runDirectory(worker.id, run.id);
-    let text = "";
-    for (const name of ["stderr.log", "events.log", "final.json"]) {
-      try {
-        text += "\n" + fs.readFileSync(path.join(directory, name), "utf8").slice(-200_000);
-      } catch {
-        /* a missing stream is not rate-limit evidence */
-      }
-    }
-    return text;
+  /** Pool judgement for a fresh start of this config; null keeps other engines untouched. */
+  private agyStartPlan(
+    config: WorkerConfig,
+    requestedModel: string | null,
+    effort: string | null,
+  ): AgyStartPlan | null {
+    if (config.type !== "agy") return null;
+    return planAgyStart(this.agyContext(), {
+      candidates: agyStartCandidates(config),
+      requestedModel,
+      effort,
+    });
   }
 
   get(workerId: string, ownerId?: string): { worker: WorkerRecord; runs: WorkerRun[] } {
@@ -3804,52 +3997,4 @@ function acpErrorText(error: unknown): string {
   if (data && typeof data === "object" && Object.keys(data).length === 0)
     return message;
   return message + " " + JSON.stringify(data);
-}
-
-/**
- * agy reports rate limiting either as a stderr `AGY_ERROR` object with `error_code: 429` or as a
- * structured failure result whose status is `RESOURCE_EXHAUSTED` with `code: 429`.
- */
-function agyRateLimited(text: string): boolean {
-  if (
-    text
-      .split("\n")
-      .some(
-        (line) =>
-          line.includes("AGY_ERROR") &&
-          /"error_code"\s*:\s*"?429"?(?!\d)/.test(line),
-      )
-  )
-    return true;
-  return (
-    text.includes("RESOURCE_EXHAUSTED") &&
-    /\bcode"?\s*[:=]?\s*\(?\s*"?429"?(?!\d)/i.test(text)
-  );
-}
-
-/** Reads `Resets in 2h2m18s` (or a colon duration) into milliseconds. */
-function agyResetDelay(text: string): number | null {
-  const match = /resets?\s+in\s+([^\n,;]+)/i.exec(text);
-  if (!match) return null;
-  // Evidence may repeat the same error message (event + final evidence) on one JSON line;
-  // only the first reset phrase describes this failure.
-  const value = match[1]!.split(/resets?\s+in/i)[0]!;
-  const colon = /(\d+):(\d+):(\d+)/.exec(value);
-  if (colon)
-    return (
-      (Number(colon[1]) * 3600 + Number(colon[2]) * 60 + Number(colon[3])) *
-      1000
-    );
-  let seconds = 0;
-  let found = false;
-  const unit = /(\d+)\s*(h|hr|hrs|hour|hours|m|min|mins|minute|minutes|s|sec|secs|second|seconds)/gi;
-  for (let part = unit.exec(value); part; part = unit.exec(value)) {
-    found = true;
-    const amount = Number(part[1]);
-    const scale = part[2]!.toLowerCase();
-    if (scale.startsWith("h")) seconds += amount * 3600;
-    else if (scale.startsWith("m")) seconds += amount * 60;
-    else seconds += amount;
-  }
-  return found && seconds > 0 ? seconds * 1000 : null;
 }

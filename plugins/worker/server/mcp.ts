@@ -27,11 +27,11 @@ const taskRoleValues = WORKER_TASK_ROLES.map((role) => role.value) as [
 const startShape = {
   taskName: z.string().describe("本轮的简短任务标题，用于列表与运行卡片"),
   // Omitted routes among enabled configs: a role takes the first match in list order, otherwise
-  // the default config wins.
+  // the default config wins; a candidate whose AGY quota pool is known to be exhausted is skipped.
   configId: z
     .string()
     .optional()
-    .describe("指定配置 id，须存在且启用；省略时按已启用配置路由"),
+    .describe("指定配置 id，须存在且启用；省略时按已启用配置路由（AGY 配置在 Gemini 额度耗尽时按其 Claude 备用模型派发，两个额度组都耗尽时跳过该配置，无可选配置时返回 AGY_QUOTA_REACHED）"),
   type: z.enum(["pi", "codex", "agy"]).optional(),
   taskRole: z
     .enum(taskRoleValues)

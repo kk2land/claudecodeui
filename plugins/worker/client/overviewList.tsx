@@ -38,6 +38,7 @@ import type {
   WorkerStatus,
   WorkerType,
 } from "../shared/contracts.js";
+import { AGY_QUOTA_GROUP_LABELS } from "../shared/agy.js";
 
 const STATUS_TONE: Record<WorkerStatus, string> = {
   queued: "queued",
@@ -413,14 +414,30 @@ export function WorkerLive({
     });
   };
 
-  const remaining = cooldownRemaining(snapshot.agyCooldownUntil, now);
+  // Each active quota pool gets its own countdown; a host that only reports the legacy global
+  // deadline keeps the single generic line.
+  const cooldowns = (snapshot.agyCooldowns ?? []).flatMap((item) => {
+    const remaining = cooldownRemaining(item.until, now);
+    return remaining === null ? [] : [{ group: item.group, remaining }];
+  });
+  const legacy = cooldowns.length
+    ? null
+    : cooldownRemaining(snapshot.agyCooldownUntil, now);
 
   return (
     <>
-      {remaining !== null ? (
+      {cooldowns.length ? (
+        cooldowns.map((item) => (
+          <p className="worker-cooldown" role="status" key={item.group}>
+            <Clock3 size={13} /> {AGY_QUOTA_GROUP_LABELS[item.group]} 冷却中：
+            <strong>{formatCooldown(item.remaining)}</strong>{" "}
+            后可启动该组 Antigravity 任务
+          </p>
+        ))
+      ) : legacy !== null ? (
         <p className="worker-cooldown" role="status">
           <Clock3 size={13} /> Antigravity 冷却中：
-          <strong>{formatCooldown(remaining)}</strong> 后可启动新的 Antigravity 任务
+          <strong>{formatCooldown(legacy)}</strong> 后可启动新的 Antigravity 任务
         </p>
       ) : null}
       <section className="worker-live">

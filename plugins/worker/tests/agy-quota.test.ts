@@ -5,10 +5,17 @@ import test from "node:test";
 import {
   AGY_QUOTA_ARGS,
   AGY_QUOTA_POLL_INTERVAL_MS,
+  agyQuotaFailure,
   parseAgyQuota,
   readAgyQuota,
 } from "../server/agy-quota.js";
 import { createService, temporaryRoot, waitFor } from "./helpers.js";
+import {
+  agyIsClaudeModel,
+  agyIsGeminiModel,
+  agyQuotaGroupForModel,
+  agyQuotaGroupFromName,
+} from "../shared/agy.js";
 
 /** Real `agy -p /usage --output-format json` payload (plus an extra account field to prove stripping). */
 const REAL_USAGE_OUTPUT = JSON.stringify({
@@ -93,8 +100,8 @@ function fakeAgy(
 
 test("parseAgyQuota keeps only display quota fields and normalizes epoch-0 resets", () => {
   assert.equal(AGY_QUOTA_POLL_INTERVAL_MS, 5 * 60 * 1000);
-  const { groups, geminiExhausted } = parseAgyQuota(REAL_USAGE_OUTPUT);
-  assert.equal(geminiExhausted, null);
+  const { groups, exhausted } = parseAgyQuota(REAL_USAGE_OUTPUT);
+  assert.deepEqual(exhausted, {});
   assert.deepEqual(groups, [
     {
       name: "Gemini Models",
@@ -140,11 +147,12 @@ test("parseAgyQuota keeps only display quota fields and normalizes epoch-0 reset
   assert.equal(serialized.includes("internal"), false);
 });
 
-test("parseAgyQuota evaluates Gemini Models exhaustion from raw remaining_fraction only", () => {
+test("parseAgyQuota evaluates each quota pool from raw remaining_fraction only", () => {
   const usageJson = (groups: unknown[]) =>
     JSON.stringify({ status: "SUCCESS", command: { name: "usage", data: { groups } } });
 
-  // Sub-0.5% positive quota displays as 0% but must not be marked exhausted.
+  // Sub-0.5% positive Gemini quota displays as 0% but is not exhausted; the exhausted
+  // Claude/GPT pool keeps its own deadline without marking Gemini exhausted.
   const tinyPositive = parseAgyQuota(
     usageJson([
       {
@@ -162,7 +170,9 @@ test("parseAgyQuota evaluates Gemini Models exhaustion from raw remaining_fracti
     ]),
   );
   assert.equal(tinyPositive.groups[0]?.buckets[0]?.remainingPercent, 0);
-  assert.equal(tinyPositive.geminiExhausted, null);
+  assert.deepEqual(tinyPositive.exhausted, {
+    "claude-gpt": { latestResetAtMs: Date.parse("2026-12-04T09:39:22Z") },
+  });
 
   // When two Gemini Models windows are exhausted, pick the latest valid reset_time.
   const dualExhausted = parseAgyQuota(
@@ -177,9 +187,45 @@ test("parseAgyQuota evaluates Gemini Models exhaustion from raw remaining_fracti
       },
     ]),
   );
-  assert.deepEqual(dualExhausted.geminiExhausted, {
-    latestResetAtMs: Date.parse("2026-12-04T09:39:22Z"),
+  assert.deepEqual(dualExhausted.exhausted, {
+    gemini: { latestResetAtMs: Date.parse("2026-12-04T09:39:22Z") },
   });
+
+  // Both pools exhausted at once keep independent deadlines.
+  const bothExhausted = parseAgyQuota(
+    usageJson([
+      {
+        name: "Gemini Models",
+        buckets: [
+          { window: "5h", remaining_fraction: 0, reset_time: "2026-11-27T14:39:22Z" },
+        ],
+      },
+      {
+        name: "Claude and GPT models",
+        buckets: [
+          { window: "weekly", remaining_fraction: 0, reset_time: "2026-12-04T09:39:22Z" },
+        ],
+      },
+    ]),
+  );
+  assert.deepEqual(bothExhausted.exhausted, {
+    gemini: { latestResetAtMs: Date.parse("2026-11-27T14:39:22Z") },
+    "claude-gpt": { latestResetAtMs: Date.parse("2026-12-04T09:39:22Z") },
+  });
+
+  // An exhausted window in an unknown group name stays display-only: no pool is guessed.
+  const unknownGroup = parseAgyQuota(
+    usageJson([
+      {
+        name: "Orchestrator Models",
+        buckets: [
+          { window: "weekly", remaining_fraction: 0, reset_time: "2026-12-04T09:39:22Z" },
+        ],
+      },
+    ]),
+  );
+  assert.equal(unknownGroup.groups.length, 1);
+  assert.deepEqual(unknownGroup.exhausted, {});
 
   // Exhausted window with epoch-0 reset yields null so service falls back to default delay.
   const noReset = parseAgyQuota(
@@ -192,7 +238,37 @@ test("parseAgyQuota evaluates Gemini Models exhaustion from raw remaining_fracti
       },
     ]),
   );
-  assert.deepEqual(noReset.geminiExhausted, { latestResetAtMs: null });
+  assert.deepEqual(noReset.exhausted, { gemini: { latestResetAtMs: null } });
+});
+
+test("agy quota pools group Claude and GPT together and every other valid model id with Gemini", () => {
+  // The default selection (no model) draws from the account's Gemini pool.
+  assert.equal(agyQuotaGroupForModel(null), "gemini");
+  assert.equal(agyQuotaGroupForModel("  "), "gemini");
+  assert.equal(agyQuotaGroupForModel("gemini-4-neon-high"), "gemini");
+  // A valid id that is neither Claude/GPT nor named after Gemini stays in the Gemini pool.
+  assert.equal(agyQuotaGroupForModel("qwen3-coder-480b"), "gemini");
+  assert.equal(agyQuotaGroupForModel("google/qwen3-coder-480b"), "gemini");
+  // Claude and GPT share one pool, including literal catalog ids and namespaced ids.
+  assert.equal(agyQuotaGroupForModel("claude-sonnet-4-5"), "claude-gpt");
+  assert.equal(agyQuotaGroupForModel("claude-opus-4-1-high"), "claude-gpt");
+  assert.equal(agyQuotaGroupForModel("gpt-oss-120b-medium"), "claude-gpt");
+  assert.equal(agyQuotaGroupForModel("openai/gpt-oss-120b-medium"), "claude-gpt");
+
+  assert.equal(agyQuotaGroupFromName("Gemini Models"), "gemini");
+  assert.equal(agyQuotaGroupFromName("Claude and GPT models"), "claude-gpt");
+  assert.equal(agyQuotaGroupFromName("Claude Models"), "claude-gpt");
+  assert.equal(agyQuotaGroupFromName("Orchestrator Models"), null);
+
+  // Sharing the Gemini pool is not the same as being a Gemini model: the config editor offers
+  // only real Gemini ids as the preferred row, so a Qwen id draws Gemini quota but is not one.
+  assert.equal(agyIsGeminiModel("gemini-4-neon-high"), true);
+  assert.equal(agyIsGeminiModel("google/gemini-pro-orchestrator-neon"), true);
+  assert.equal(agyIsGeminiModel("qwen3-coder-480b"), false);
+  assert.equal(agyIsGeminiModel("google/qwen3-coder-480b"), false);
+  assert.equal(agyIsGeminiModel(null), false);
+  assert.equal(agyIsClaudeModel("claude-opus-4-1-high"), true);
+  assert.equal(agyIsClaudeModel("gpt-oss-120b-medium"), false);
 });
 
 test("parseAgyQuota rejects malformed, non-success, or unexpected CLI JSON", () => {
@@ -428,4 +504,21 @@ test("readAgyQuota aborts promptly when signalled on shutdown", async () => {
   await assert.rejects(() => promise, /超时/);
   assert.ok(Date.now() - started < 5000);
   fs.rmSync(root, { recursive: true, force: true });
+});
+
+test("a quota rejection names each blocked pool once and keeps its earliest deadline", () => {
+  const earlier = Date.parse("2026-11-27T12:00:00Z");
+  const later = Date.parse("2026-11-27T18:00:00Z");
+  const failure = agyQuotaFailure([
+    { group: "gemini", until: later },
+    { group: "claude-gpt", until: null },
+    { group: "gemini", until: earlier },
+  ]);
+  assert.equal(failure.code, "AGY_QUOTA_REACHED");
+  assert.equal(
+    failure.message,
+    "AGY 额度已用尽：Gemini Models（2026-11-27T12:00:00.000Z 后恢复）、" +
+      "Claude and GPT models；额度恢复后可重试",
+  );
+  assert.equal(failure.message.split("Gemini Models").length - 1, 1);
 });
