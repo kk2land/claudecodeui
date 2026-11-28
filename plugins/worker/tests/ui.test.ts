@@ -3610,7 +3610,7 @@ test("DOM: a tail of folded tool rows preloads older history until the card scro
     assert.deepEqual(
       messages.slice(1).map((row) => [row.role, row.toolName, row.streaming]),
       [
-        ["tool", "bash", false],
+        ["tool", "Bash", false],
         ["tool", "read", false],
       ],
     );
